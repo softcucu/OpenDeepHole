@@ -91,9 +91,9 @@ Each checker independently chooses its AI invocation mode via `checker.yaml`:
 - `mode: api` — uses LLM API direct call + `prompt.txt` as system prompt (requires `llm_api.enabled: true` in `config.yaml`)
 
 To add a new checker: create a directory with `checker.yaml` + `SKILL.md` (or `prompt.txt`). No code changes needed.  
-Backend auto-discovers checkers on startup via `backend/registry.py`. Frontend fetches available checkers from `GET /api/checkers`.
+Backend refreshes checker discovery via `backend/registry.py` when listing checkers and when creating scans. Frontend fetches available checkers from `GET /api/checkers`.
 
-**Checker changes require a backend restart** — `checkers/` is not watched by `--reload`.
+**Checker changes do not require a backend restart** — scan creation refreshes `checkers/` and sends the selected checker package to the Agent.
 
 ### analyzer.py conventions
 
@@ -117,6 +117,10 @@ uvicorn backend.main:app --reload --host 0.0.0.0          # Start backend (hot r
 pip install -r requirements-agent.txt
 python3 -m agent.main --server http://localhost:8000      # Connect to backend
 
+# Local checker development without backend
+PYTHONPATH=. python3 tools/checker_test.py memleak /path/to/source --min-candidates 1
+PYTHONPATH=. python3 tools/checker_test.py memleak /path/to/source --audit --audit-limit 1
+
 # Frontend
 cd frontend && npm install
 npm run dev                   # Dev server with API proxy to localhost:8000
@@ -127,9 +131,6 @@ npm run build                 # Build to ../backend/static/
 
 # Docker
 docker-compose up --build
-
-# Restart backend (needed after adding/modifying checkers/)
-pkill -f uvicorn && uvicorn backend.main:app --reload --host 0.0.0.0 --port 8000
 
 # Logs
 tail -f logs/opendeephole.log

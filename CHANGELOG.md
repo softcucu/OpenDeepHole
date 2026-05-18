@@ -2,6 +2,7 @@
 
 ## 2026-05-18
 
+- **新增** 本地 checker 测试命令 `tools/checker_test.py`，可在不启动后端的情况下校验 checker 元数据、Analyzer、代码索引和候选点输出，并支持可选 AI 审计
 - **修复** Agent WebSocket 增加应用层 heartbeat/watchdog 主动重连，并放宽服务端和 Agent 的 keepalive 超时，降低长任务高负载时误判断联的概率
 - **修复** Agent 代码索引改为完整构建后原子替换，避免索引阶段终止留下的半成品 `code_index.db` 被后续扫描复用
 - **修复** LLM API 审计提示词在函数名匹配失败时改用代码索引中的文件和行号范围定位函数源码，减少误显示空上下文的问题

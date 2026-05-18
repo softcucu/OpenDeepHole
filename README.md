@@ -264,11 +264,27 @@ class Analyzer(BaseAnalyzer):
 - `find_candidates()` 接收项目根目录路径，返回 `Iterable[Candidate]`（列表或 generator 均可）
 - 可以 `from backend.analyzers.base import BaseAnalyzer, Candidate` 一次性导入所需类
 
-**第 4 步：重启服务端**
+**第 4 步：本地测试 Checker（无需后端）**
 
 ```bash
-./start.sh
+# 只运行静态分析自测：校验 checker.yaml、Analyzer 加载、代码索引和候选点输出
+PYTHONPATH=. python3 tools/checker_test.py mycheck /path/to/source --min-candidates 1
+
+# 输出 JSON，便于在脚本或 CI 中断言
+PYTHONPATH=. python3 tools/checker_test.py mycheck /path/to/source --json
+
+# 精确断言候选点数量
+PYTHONPATH=. python3 tools/checker_test.py mycheck /path/to/source --expect-candidates 3
+
+# 可选：对前 1 个候选点运行真实 AI 审计（会使用 agent.yaml 中的 LLM/opencode 配置）
+PYTHONPATH=. python3 tools/checker_test.py mycheck /path/to/source --audit --audit-limit 1 --config agent.yaml
 ```
+
+本地测试命令不依赖后端、Web UI 或在线 Agent。默认会在被测项目目录下重建 `code_index.db`，与 Agent 扫描时的索引位置一致；如只想把索引写到临时位置，可加 `--index-db /tmp/mycheck-code_index.db`。
+
+开发阶段即使 `checker.yaml` 中设置了 `enabled: false`，本地测试命令也会临时启用该 checker 进行自测，并输出提示；线上扫描入口仍会遵循 `enabled` 和 `visibility` 配置。`--audit` 会实际调用模型或 opencode，请先确认 `agent.yaml` 配置可用，并用 `--audit-limit` 控制成本。
+
+新增或修改 `checkers/` 下的 checker 后无需重启后端；后端会在列表刷新和点击开始扫描时重新扫描目录，创建扫描时也会把选中的 checker 同步到 Agent。
 
 **CodeDatabase API 参考（`code_parser/code_database.py`）：**
 
