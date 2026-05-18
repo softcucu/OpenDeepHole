@@ -1,0 +1,463 @@
+rules:
+  ###########################################################################
+  # Template A:
+  #   struct pointer cast -> field read/write
+  #   but no obvious minimum header length check before dereference.
+  ###########################################################################
+  - id: ccpp.struct-cast-field-access-without-min-size-check
+    languages: [c, cpp]
+    severity: WARNING
+    message: >
+      函数 $FUNC 中：$BUF 被强转为 $TYPE* 并通过 $P->$FIELD 访问结构体字段，
+      但在该访问前没有看到明显的 sizeof(*$P)/sizeof($TYPE) 最小长度校验。
+      审计重点：确认输入缓冲区剩余长度是否至少覆盖结构体头，否则短包/畸形输入可导致越界读写。
+    metadata:
+      category: security
+      cwe:
+        - "CWE-125: Out-of-bounds Read"
+        - "CWE-787: Out-of-bounds Write"
+      audit-template: "A: cast buffer to struct and dereference without minimum size check"
+    patterns:
+      - pattern-inside: |
+          $RET $FUNC(...) {
+            ...
+          }
+
+      - pattern-either:
+          # C style: declaration + cast + later field access
+          - pattern: |
+              $TYPE *$P = ($TYPE *)$BUF;
+              ...
+              $P->$FIELD
+
+          # C style: declaration first, assignment later
+          - pattern: |
+              $TYPE *$P;
+              ...
+              $P = ($TYPE *)$BUF;
+              ...
+              $P->$FIELD
+
+          # C++ style: reinterpret_cast declaration
+          - pattern: |
+              $TYPE *$P = reinterpret_cast<$TYPE *>($BUF);
+              ...
+              $P->$FIELD
+
+          # C++ style: auto pointer from reinterpret_cast
+          - pattern: |
+              auto *$P = reinterpret_cast<$TYPE *>($BUF);
+              ...
+              $P->$FIELD
+
+      # 常见安全写法：字段访问前已经有最小结构体长度判断。
+      # 这里不绑定具体长度变量名，避免依赖 len/size/remain 等字符串。
+      - pattern-not-inside: |
+          if (... < sizeof(*$P)) {
+            ...
+          }
+          ...
+          $P->$FIELD
+
+      - pattern-not-inside: |
+          if (sizeof(*$P) > ...) {
+            ...
+          }
+          ...
+          $P->$FIELD
+
+      - pattern-not-inside: |
+          if (... < sizeof($TYPE)) {
+            ...
+          }
+          ...
+          $P->$FIELD
+
+      - pattern-not-inside: |
+          if (sizeof($TYPE) > ...) {
+            ...
+          }
+          ...
+          $P->$FIELD
+
+      - pattern-not-inside: |
+          if (... < sizeof(*$P))
+            return ...;
+          ...
+          $P->$FIELD
+
+      - pattern-not-inside: |
+          if (sizeof(*$P) > ...)
+            return ...;
+          ...
+          $P->$FIELD
+
+
+  ###########################################################################
+  # Template A variant:
+  #   inline cast dereference:
+  #      ((struct foo *)buf)->field
+  #      reinterpret_cast<foo *>(buf)->field
+  #
+  # 这种写法通常更危险，因为很容易完全绕过长度校验。
+  ###########################################################################
+  - id: ccpp.inline-struct-cast-field-access
+    languages: [c, cpp]
+    severity: WARNING
+    message: >
+      函数 $FUNC 中出现内联结构体强转并立即访问字段：$BUF 被当作 $TYPE* 使用。
+      审计重点：确认该表达式之前是否已经校验缓冲区剩余长度 >= sizeof($TYPE)。
+      这种内联 cast->field 访问很容易遗漏结构体头部长度校验。
+    metadata:
+      category: security
+      cwe:
+        - "CWE-125: Out-of-bounds Read"
+        - "CWE-787: Out-of-bounds Write"
+      audit-template: "A-inline: inline cast and immediate field dereference"
+    patterns:
+      - pattern-inside: |
+          $RET $FUNC(...) {
+            ...
+          }
+
+      - pattern-either:
+          - pattern: |
+              (($TYPE *)$BUF)->$FIELD
+
+          - pattern: |
+              reinterpret_cast<$TYPE *>($BUF)->$FIELD
+
+
+  ###########################################################################
+  # Template B:
+  #   struct pointer cast -> read length field -> only then check total length
+  #
+  # 漏洞点：
+  #   $N = $P->$LENFIELD; 这一步本身已经要求 remaining >= sizeof(*$P)。
+  ###########################################################################
+  - id: ccpp.struct-length-field-read-before-header-check
+    languages: [c, cpp]
+    severity: WARNING
+    message: >
+      函数 $FUNC 中：$P 来自 $BUF 的结构体强转，随后先读取 $P->$LENFIELD 到 $N，
+      再使用 $N 做边界/总长度校验。审计重点：读取长度字段之前是否已经确认
+      缓冲区至少包含完整结构体头 sizeof(*$P)；否则读取长度字段本身可能越界。
+    metadata:
+      category: security
+      cwe:
+        - "CWE-125: Out-of-bounds Read"
+      audit-template: "B: read length field before validating header availability"
+    patterns:
+      - pattern-inside: |
+          $RET $FUNC(...) {
+            ...
+          }
+
+      - pattern-either:
+          # 先读取结构体字段作为长度，然后才进入 total length check
+          - pattern: |
+              $TYPE *$P = ($TYPE *)$BUF;
+              ...
+              $N = $P->$LENFIELD;
+              ...
+              if (... < sizeof(*$P) + $N) {
+                ...
+              }
+
+          - pattern: |
+              $TYPE *$P = ($TYPE *)$BUF;
+              ...
+              $N = $P->$LENFIELD;
+              ...
+              if (sizeof(*$P) + $N > ...) {
+                ...
+              }
+
+          # 直接在 if 条件里读取长度字段，也属于“校验前读字段”
+          - pattern: |
+              $TYPE *$P = ($TYPE *)$BUF;
+              ...
+              if (... < sizeof(*$P) + $P->$LENFIELD) {
+                ...
+              }
+
+          - pattern: |
+              $TYPE *$P = ($TYPE *)$BUF;
+              ...
+              if (sizeof(*$P) + $P->$LENFIELD > ...) {
+                ...
+              }
+
+          # C++ reinterpret_cast 版本
+          - pattern: |
+              $TYPE *$P = reinterpret_cast<$TYPE *>($BUF);
+              ...
+              $N = $P->$LENFIELD;
+              ...
+              if (... < sizeof(*$P) + $N) {
+                ...
+              }
+
+      # 排除：在读取长度字段前已经有 header 最小长度检查
+      - pattern-not-inside: |
+          if (... < sizeof(*$P)) {
+            ...
+          }
+          ...
+          $N = $P->$LENFIELD
+
+      - pattern-not-inside: |
+          if (sizeof(*$P) > ...) {
+            ...
+          }
+          ...
+          $N = $P->$LENFIELD
+
+      - pattern-not-inside: |
+          if (... < sizeof(*$P))
+            return ...;
+          ...
+          $N = $P->$LENFIELD
+
+      - pattern-not-inside: |
+          if (sizeof(*$P) > ...)
+            return ...;
+          ...
+          $N = $P->$LENFIELD
+
+
+  ###########################################################################
+  # Template C-1:
+  #   header checked, but flexible/member array is indexed without full payload check
+  #
+  # 典型：
+  #   if (remain < sizeof(*h)) return;
+  #   h = (struct hdr *)buf;
+  #   x = h->payload[i];       // 还需要校验 i / payload_len / total_len
+  ###########################################################################
+  - id: ccpp.variable-tail-member-index-without-full-bound-check
+    languages: [c, cpp]
+    severity: WARNING
+    message: >
+      函数 $FUNC 中：$P 来自结构体强转，并访问 $P->$PAYLOAD[$IDX]。
+      即使已经校验 sizeof(*$P)，仍需确认 $IDX 或 payload_len 没有超过
+      当前缓冲区的变长尾部范围。审计重点：是否存在 sizeof(header)+payload_len <= remaining
+      或 $IDX < remaining-sizeof(header) 级别的完整校验。
+    metadata:
+      category: security
+      cwe:
+        - "CWE-125: Out-of-bounds Read"
+        - "CWE-787: Out-of-bounds Write"
+      audit-template: "C: flexible/tail member indexed without full payload length check"
+    patterns:
+      - pattern-inside: |
+          $RET $FUNC(...) {
+            ...
+          }
+
+      - pattern-either:
+          - pattern: |
+              $TYPE *$P = ($TYPE *)$BUF;
+              ...
+              $P->$PAYLOAD[$IDX]
+
+          - pattern: |
+              $TYPE *$P = reinterpret_cast<$TYPE *>($BUF);
+              ...
+              $P->$PAYLOAD[$IDX]
+
+      # 排除一些明显的“索引没有超过剩余尾部”的保护。
+      # 不依赖变量名，只依赖表达式形态。
+      - pattern-not-inside: |
+          if ($IDX >= ... - sizeof(*$P)) {
+            ...
+          }
+          ...
+          $P->$PAYLOAD[$IDX]
+
+      - pattern-not-inside: |
+          if (... - sizeof(*$P) <= $IDX) {
+            ...
+          }
+          ...
+          $P->$PAYLOAD[$IDX]
+
+      - pattern-not-inside: |
+          if ($IDX >= ... - sizeof(*$P))
+            return ...;
+          ...
+          $P->$PAYLOAD[$IDX]
+
+      - pattern-not-inside: |
+          if (... - sizeof(*$P) <= $IDX)
+            return ...;
+          ...
+          $P->$PAYLOAD[$IDX]
+
+
+  ###########################################################################
+  # Template C-2:
+  #   length field controls access/copy of tail member,
+  #   but no full check: length <= remaining - sizeof(header)
+  #
+  # 不具体匹配 memcpy/memmove/copy_from_user 等函数名，而是匹配：
+  #   任意函数调用中同时使用 $P->$PAYLOAD 和 $N
+  #
+  # 典型：
+  #   n = h->len;
+  #   if (remain < sizeof(*h)) return;
+  #   some_copy(dst, h->data, n);
+  ###########################################################################
+  - id: ccpp.variable-tail-member-passed-with-length-without-full-check
+    languages: [c, cpp]
+    severity: WARNING
+    message: >
+      函数 $FUNC 中：$P 来自结构体强转，$N 来自 $P->$LENFIELD，
+      随后任意调用 $CALL(...) 同时使用 $P->$PAYLOAD 和 $N。
+      审计重点：调用前是否校验 $N <= remaining - sizeof(*$P)，否则只校验结构体头部
+      仍可能导致变长尾部越界读/写。
+    metadata:
+      category: security
+      cwe:
+        - "CWE-125: Out-of-bounds Read"
+        - "CWE-787: Out-of-bounds Write"
+      audit-template: "C: tail member used with length field without full variable-length check"
+    patterns:
+      - pattern-inside: |
+          $RET $FUNC(...) {
+            ...
+          }
+
+      - pattern-either:
+          - pattern: |
+              $TYPE *$P = ($TYPE *)$BUF;
+              ...
+              $N = $P->$LENFIELD;
+              ...
+              $CALL(..., $P->$PAYLOAD, $N, ...);
+
+          - pattern: |
+              $TYPE *$P = ($TYPE *)$BUF;
+              ...
+              $N = $P->$LENFIELD;
+              ...
+              $CALL(..., $P->$PAYLOAD + ..., $N, ...);
+
+          - pattern: |
+              $TYPE *$P = reinterpret_cast<$TYPE *>($BUF);
+              ...
+              $N = $P->$LENFIELD;
+              ...
+              $CALL(..., $P->$PAYLOAD, $N, ...);
+
+          - pattern: |
+              $TYPE *$P = reinterpret_cast<$TYPE *>($BUF);
+              ...
+              $N = $P->$LENFIELD;
+              ...
+              $CALL(..., $P->$PAYLOAD + ..., $N, ...);
+
+      # 排除：调用前已经出现完整变长长度校验
+      - pattern-not-inside: |
+          if ($N > ... - sizeof(*$P)) {
+            ...
+          }
+          ...
+          $CALL(..., $P->$PAYLOAD, $N, ...);
+
+      - pattern-not-inside: |
+          if (... - sizeof(*$P) < $N) {
+            ...
+          }
+          ...
+          $CALL(..., $P->$PAYLOAD, $N, ...);
+
+      - pattern-not-inside: |
+          if ($N > ... - sizeof(*$P))
+            return ...;
+          ...
+          $CALL(..., $P->$PAYLOAD, $N, ...);
+
+      - pattern-not-inside: |
+          if (... - sizeof(*$P) < $N)
+            return ...;
+          ...
+          $CALL(..., $P->$PAYLOAD, $N, ...);
+
+
+  ###########################################################################
+  # Template C-3:
+  #   length field is used in pointer arithmetic on tail member
+  #
+  # 典型：
+  #   p = h->data + h->len;
+  #   next = (struct next *)(h->data + len);
+  #
+  # 如果没有校验 len <= remaining - sizeof(*h)，容易越界形成后续 OOB。
+  ###########################################################################
+  - id: ccpp.variable-tail-pointer-arithmetic-without-full-check
+    languages: [c, cpp]
+    severity: WARNING
+    message: >
+      函数 $FUNC 中：$P 来自结构体强转，$N 来自 $P->$LENFIELD，
+      随后用 $N 对 $P->$PAYLOAD 做指针/偏移计算。审计重点：是否校验
+      $N <= remaining - sizeof(*$P)，否则可能构造出越界指针，后续读写越界。
+    metadata:
+      category: security
+      cwe:
+        - "CWE-125: Out-of-bounds Read"
+        - "CWE-787: Out-of-bounds Write"
+      audit-template: "C: tail pointer arithmetic with unchecked length field"
+    patterns:
+      - pattern-inside: |
+          $RET $FUNC(...) {
+            ...
+          }
+
+      - pattern-either:
+          - pattern: |
+              $TYPE *$P = ($TYPE *)$BUF;
+              ...
+              $N = $P->$LENFIELD;
+              ...
+              $Q = $P->$PAYLOAD + $N;
+
+          - pattern: |
+              $TYPE *$P = ($TYPE *)$BUF;
+              ...
+              $N = $P->$LENFIELD;
+              ...
+              $Q = ($OTHER *)($P->$PAYLOAD + $N);
+
+          - pattern: |
+              $TYPE *$P = reinterpret_cast<$TYPE *>($BUF);
+              ...
+              $N = $P->$LENFIELD;
+              ...
+              $Q = $P->$PAYLOAD + $N;
+
+      - pattern-not-inside: |
+          if ($N > ... - sizeof(*$P)) {
+            ...
+          }
+          ...
+          $Q = $P->$PAYLOAD + $N;
+
+      - pattern-not-inside: |
+          if (... - sizeof(*$P) < $N) {
+            ...
+          }
+          ...
+          $Q = $P->$PAYLOAD + $N;
+
+      - pattern-not-inside: |
+          if ($N > ... - sizeof(*$P))
+            return ...;
+          ...
+          $Q = $P->$PAYLOAD + $N;
+
+      - pattern-not-inside: |
+          if (... - sizeof(*$P) < $N)
+            return ...;
+          ...
+          $Q = $P->$PAYLOAD + $N;

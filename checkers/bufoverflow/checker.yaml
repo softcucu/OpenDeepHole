@@ -1,0 +1,9 @@
+name: bufoverflow
+label: Buffer Overflow / 缓冲区越界
+description: >
+  检测 C/C++ 中由结构体强转 + 长度校验缺失导致的缓冲区越界读写
+  （CWE-125 / CWE-787）。覆盖：结构体头部未校验最小长度、读取长度字段在头部校验之前、
+  变长尾部成员索引/拷贝/指针运算未做完整边界校验等模式。
+enabled: true
+mode: opencode
+visibility: admin

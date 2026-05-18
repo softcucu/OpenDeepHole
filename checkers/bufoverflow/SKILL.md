@@ -1,0 +1,118 @@
+---
+name: bufoverflow-analysis
+description: 验证缓冲区越界候选漏洞（CWE-125 / CWE-787），判断结构体强转 + 长度校验缺失是否导致真实可触发的越界读写
+---
+
+# 缓冲区越界漏洞验证
+
+你正在验证一个由 semgrep 静态分析发现的候选缓冲区越界漏洞（CWE-125 越界读 / CWE-787 越界写）。你的任务是判断这是真实的 bug 还是误报。
+
+## 背景
+
+静态分析器已经完成了以下工作：
+
+- 使用 semgrep 扫描了 6 类 "结构体强转 + 长度校验缺失" 模式（A 类：cast → 字段解引用；B 类：cast → 读长度字段 → 才校验头部；C 类：变长尾部成员索引/拷贝/指针运算未做完整边界校验）
+- 在候选位置发现了"在没有看到完整长度校验的情况下访问 / 使用 cast 出的结构体字段"的模式
+- candidate 描述中的**规则类型**指明了具体是哪类模式，**结构体类型 / 指针变量 / 长度字段 / 尾部成员** 等元信息已尽量提取
+
+semgrep 是纯语法模式匹配，无法感知：跨函数的长度校验、宏内联校验、调用方在传入前已经做的边界检查、源缓冲区的实际容量来源。你需要做语义层面的验证。
+
+## 可用工具
+
+- `view_function_code(project_id, function_name)` — 查看函数完整源码
+- `view_struct_code(project_id, struct_name)` — 查看结构体/类定义（确认 `sizeof($TYPE)` 实际大小，是否存在 flexible array、padding 等）
+- `find_function_references(project_id, function_name)` — 查找函数的所有调用位置
+- `submit_result(result_id, confirmed, severity, description, ai_analysis)` — 提交分析结论（必须调用）
+
+## 分析步骤
+
+### Step 1 — 读取完整函数体
+
+用 `view_function_code` 获取 candidate 所在函数的完整源码。注意：candidate 描述中只有 semgrep 匹配的几行，不足以判断，必须看整个函数才能确认 cast 之前/之后是否存在长度校验、payload 边界校验。
+
+### Step 2 — 查看结构体定义
+
+用 `view_struct_code` 查看被强转的结构体（candidate 描述中的"结构体类型"）。重点关注：
+
+- `sizeof($TYPE)` 的实际大小，是否带 padding
+- 是否存在 flexible array (`uint8_t data[];` / `uint8_t data[0];` / `uint8_t data[1];`) 作为变长尾部
+- 长度字段（如 `$P->$LENFIELD`）的类型与可表示范围（`uint16_t` vs `uint32_t`，是否可为负的有符号类型）
+
+### Step 3 — 理解规则类型，明确验证目标
+
+根据 candidate 描述中的**规则类型**，确定本次要验证的核心问题：
+
+| 规则类型 | 核心验证问题 |
+|---------|------------|
+| `struct-cast-field-access-without-min-size-check` | cast 后访问 `$P->$FIELD` 之前，是否存在 `remaining >= sizeof(*$P)` 类的最小头部校验？ |
+| `inline-struct-cast-field-access` | `((TYPE*)buf)->field` 内联表达式之前，是否已经校验 buf 长度 >= sizeof(TYPE)？ |
+| `struct-length-field-read-before-header-check` | 读取 `$P->$LENFIELD` 这一步本身就要求 `remaining >= sizeof(*$P)`；这一步是否在头部长度校验**之前**发生？ |
+| `variable-tail-member-index-without-full-bound-check` | `$P->$PAYLOAD[$IDX]` 中 `$IDX` 是否被校验 `< remaining - sizeof(*$P)`（或等价形式）？仅校验 sizeof(header) 是不够的 |
+| `variable-tail-member-passed-with-length-without-full-check` | `$CALL(..., $P->$PAYLOAD, $N, ...)` 中 `$N`（来自 `$P->$LENFIELD`）是否被校验 `<= remaining - sizeof(*$P)`？ |
+| `variable-tail-pointer-arithmetic-without-full-check` | `$P->$PAYLOAD + $N` 形成的指针是否会越过缓冲区尾部？`$N` 是否被完整校验？ |
+
+### Step 4 — 验证可能存在的"看不见的"校验
+
+检查 semgrep 可能遗漏的校验机制：
+
+- **宏内的校验**：函数内是否调用了类似 `CHECK_LEN(buf, len, sizeof(*p))` 之类的宏？查看宏定义确认其是否真正能阻止越界。
+- **辅助函数中的校验**：cast 之前是否调用了 `validate_header(buf, len)` / `is_valid_packet(...)` 类似函数？用 `view_function_code` 查看其内部是否真的能保证后续访问不越界。
+- **调用方契约**：当前函数是否已经在某个 "入口校验函数" 之后被调用？追溯调用链。
+- **指针来源约束**：`$BUF` 是否来自一个明确具有最小容量保证的容器（如固定大小缓冲区、上游已经分配 `sizeof(*P) + N` 的内存）？
+- **长度字段宽度**：`$P->$LENFIELD` 是否是 `uint8_t` / `uint16_t`，最大值小到不可能越过预分配的缓冲区？
+- **整数溢出**：`sizeof(*$P) + $N` 这种计算本身是否可能整数溢出？溢出后再做 `< remaining` 比较反而会通过校验。
+
+### Step 5 — 向上追溯调用链
+
+用 `find_function_references` 查找候选函数的调用位置，然后用 `view_function_code` 查看关键调用方，重点确认：
+
+- **`$BUF` 的来源**：是函数参数还是局部变量？若是参数，调用方传入的是否带了真实长度参数？该长度是否被攻击者控制？
+- **`remaining` / `len` 参数的可信度**：是来自网络包头部、来自外部输入，还是来自可信内部计算？
+- **调用前是否有上层校验**：在数据进入当前解析函数之前，是否有"网关式"的长度检查（如 `if (total_len < MIN_PACKET) return -1`）？
+- **是否真的可达**：触发该 cast 的代码分支，是否在所有合理输入下都可达？
+
+如果调用方数量很多或调用链较深，优先看 1-2 个最典型的入口路径（如网络包接收路径、文件解析入口）。
+
+### Step 6 — 判断攻击者可控性
+
+- 源缓冲区 `$BUF` 是否最终来自网络 / 文件 / IPC / 用户输入？
+- 长度字段 `$P->$LENFIELD` 是否在 cast 之后才被读取，从而其值由攻击者写入的字节决定？
+- 攻击者能否同时构造 "短包" + "篡改长度字段" 来触发越界？
+
+## 判定标准
+
+### 判为误报（confirmed=false）的情形
+
+1. **校验存在但 semgrep 未识别**：cast 前已有 `if (remaining < sizeof(*p)) return …`，或等价宏 / 辅助函数完成了同等校验
+2. **完整变长校验存在**：访问尾部成员前已有 `len <= remaining - sizeof(*p)` 类校验
+3. **`$BUF` 容量来自上下文保证**：buf 来自一个固定/编译期确定大小且 >= sizeof(*p) 的数组，不可能越界
+4. **`$P->$LENFIELD` 被合理范围约束**：长度字段类型本身限制了最大值，且预分配的缓冲区足以容纳最大可能值
+5. **路径不可达**：触发分支需要的前提条件在所有合法调用中无法成立
+6. **测试 / mock / 模拟数据**：文件路径包含 `test/` `stub/` `mock/` 等，或源数据为常量字面量
+
+### 判为真实漏洞（confirmed=true）的条件
+
+- cast 后存在对结构体字段或尾部成员的访问，且**没有任何**等价的最小长度 / 完整长度校验
+- `$BUF` 或长度字段 `$P->$LENFIELD` 可追溯至外部可控输入
+- 越界访问路径在实际调用链中可被触发
+
+## 严重程度（severity）
+
+- **high**：`$BUF` 来自外部可控输入（网络 / 文件 / IPC），可构造短包或畸形长度字段触发越界读/写；越界写或可控偏移读
+- **medium**：越界访问范围有限（如读取相邻几个字节），或触发条件需特定内部状态；越界读但攻击者无法直接观测
+- **low**：触发条件极为苛刻，或越界范围极小，或源缓冲区受到强约束
+
+## 提交结果
+
+分析完成后**必须**调用 `submit_result` 提交结论：
+
+- `result_id`：由分析提示中提供，原样传入
+- `confirmed`：true 表示确认漏洞，false 表示误报
+- `severity`：`"high"` / `"medium"` / `"low"`
+- `description`：一句话摘要，例如 "解析 X 包时未校验 sizeof(header) 即读取长度字段，构造短包可造成越界读"
+- `ai_analysis`：详细推理，需包含：
+  1. cast 上下文与访问路径的具体代码
+  2. 结构体大小 / 长度字段类型 / 尾部成员形态
+  3. 是否存在等价校验（含宏、辅助函数）以及为什么足够 / 不足够
+  4. 调用链中 `$BUF` 与长度字段的可控性结论
+  5. 最终判定理由
