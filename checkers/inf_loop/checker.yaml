@@ -6,3 +6,4 @@ description: >
   容器遍历中修改容器、zero-step 步进等。
 enabled: true
 mode: opencode
+visibility: admin
