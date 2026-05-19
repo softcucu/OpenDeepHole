@@ -842,6 +842,71 @@ class SqliteScanStore(ScanStoreBase):
             self._conn.commit()
             return cur.rowcount
 
+    def mark_agent_scans_cancelled(self, agent_id: str, error_message: str) -> list[str]:
+        if not agent_id:
+            return []
+        running_statuses = ("pending", "analyzing", "auditing")
+        with self._lock:
+            cur = self._conn.execute(
+                """\
+                SELECT scan_id
+                FROM scans
+                WHERE agent_id = ?
+                  AND status IN (?, ?, ?)
+                """,
+                (agent_id, *running_statuses),
+            )
+            scan_ids = [row[0] for row in cur.fetchall()]
+            if not scan_ids:
+                return []
+            placeholders = ", ".join("?" for _ in scan_ids)
+            self._conn.execute(
+                f"""\
+                UPDATE scans
+                SET status = 'cancelled',
+                    error_message = ?,
+                    current_candidate = NULL
+                WHERE scan_id IN ({placeholders})
+                """,
+                (error_message, *scan_ids),
+            )
+            self._conn.commit()
+            return scan_ids
+
+    def mark_fp_reviews_for_agent_error(self, agent_id: str, error_message: str) -> int:
+        if not agent_id:
+            return 0
+        with self._lock:
+            cur = self._conn.execute(
+                """\
+                UPDATE fp_review_jobs
+                SET status = 'error',
+                    error_message = ?
+                WHERE status IN ('pending', 'running')
+                  AND scan_id IN (
+                      SELECT scan_id FROM scans WHERE agent_id = ?
+                  )
+                """,
+                (error_message, agent_id),
+            )
+            self._conn.commit()
+            return cur.rowcount
+
+    def mark_fp_reviews_for_scan_error(self, scan_id: str, error_message: str) -> int:
+        with self._lock:
+            cur = self._conn.execute(
+                """\
+                UPDATE fp_review_jobs
+                SET status = 'error',
+                    error_message = ?
+                WHERE scan_id = ?
+                  AND status IN ('pending', 'running')
+                """,
+                (error_message, scan_id),
+            )
+            self._conn.commit()
+            return cur.rowcount
+
     # -- FP Review jobs --
 
     def create_fp_review_job(self, review_id: str, scan_id: str, total: int, created_at: str) -> None:

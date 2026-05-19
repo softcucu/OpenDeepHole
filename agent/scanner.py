@@ -288,11 +288,20 @@ async def run_scan(
                     loop,
                 )
 
+            def _on_index_stage_progress(stage: str, current: int, total: int) -> None:
+                pct = round(current / total * 100) if total else 0
+                print(f"\r  [index] {stage}: {current}/{total} ({pct}%)", end="", flush=True)
+                asyncio.run_coroutine_threadsafe(
+                    reporter.send_index_status(scan_id, stage, current, total),
+                    loop,
+                )
+
             def _do_index() -> None:
                 analyzer.analyze_directory(
                     project_path,
                     on_progress=_on_index_progress,
                     cancel_check=cancel_event.is_set,
+                    on_stage_progress=_on_index_stage_progress,
                 )
                 print()  # newline after progress
 

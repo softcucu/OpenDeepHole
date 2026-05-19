@@ -7,7 +7,16 @@ from unittest.mock import AsyncMock, patch
 
 from backend.api import agent as agent_api
 from backend.api import scan as scan_api
-from backend.models import AgentInfo, AgentScanFinish, ScanEvent, ScanItemStatus, ScanMeta, ScanStatus, User
+from backend.models import (
+    AgentInfo,
+    AgentScanFinish,
+    FpReviewStatus,
+    ScanEvent,
+    ScanItemStatus,
+    ScanMeta,
+    ScanStatus,
+    User,
+)
 from backend.store.sqlite import SqliteScanStore
 
 
@@ -142,6 +151,51 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
             server_scan = store.load_scan("server-scan")[0]
             self.assertEqual(server_scan.status, ScanItemStatus.ERROR)
             self.assertEqual(server_scan.error_message, "Process terminated unexpectedly")
+
+    def test_agent_disconnect_cancels_persisted_agent_scan_and_fp_review(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = SqliteScanStore(Path(tmp) / "scans.db")
+            store.save_scan(_scan("scan-1", ScanItemStatus.AUDITING, total=5, processed=2), _meta())
+            store.create_fp_review_job("review-1", "scan-1", 2, "2026-01-01T00:00:00+00:00")
+            store.update_fp_review_job("review-1", status="running")
+
+            with patch("backend.api.agent.get_scan_store", return_value=store):
+                agent_api._mark_agent_scans_cancelled("agent-old")
+
+            scan = store.load_scan("scan-1")[0]
+            self.assertEqual(scan.status, ScanItemStatus.CANCELLED)
+            self.assertEqual(scan.error_message, "Agent 断开连接")
+            review = store.get_fp_review_job("review-1")
+            self.assertIsNotNone(review)
+            self.assertEqual(review.status, FpReviewStatus.ERROR)
+            self.assertEqual(review.error_message, "Agent 断开连接")
+
+    def test_offline_agent_status_query_cancels_stale_running_scan(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = SqliteScanStore(Path(tmp) / "scans.db")
+            store.save_scan(_scan("scan-1", ScanItemStatus.AUDITING, total=5, processed=2), _meta())
+            store.create_fp_review_job("review-1", "scan-1", 2, "2026-01-01T00:00:00+00:00")
+            store.update_fp_review_job("review-1", status="running")
+            user = User(user_id="user-1", username="alice", role="user")
+            started_at = (
+                datetime.now(timezone.utc)
+                - timedelta(seconds=agent_api._AGENT_DISCONNECT_GRACE_SECONDS + 1)
+            )
+
+            with (
+                patch("backend.api.scan.get_scan_store", return_value=store),
+                patch("backend.api.agent.get_scan_store", return_value=store),
+                patch("backend.api.agent._SERVER_STARTED_AT", started_at),
+            ):
+                scan = asyncio.run(scan_api.get_scan_status("scan-1", current_user=user))
+
+            self.assertEqual(scan.status, ScanItemStatus.CANCELLED)
+            self.assertFalse(scan.agent_online)
+            stored = store.load_scan("scan-1")[0]
+            self.assertEqual(stored.status, ScanItemStatus.CANCELLED)
+            review = store.get_fp_review_job("review-1")
+            self.assertIsNotNone(review)
+            self.assertEqual(review.status, FpReviewStatus.ERROR)
 
     def test_active_scan_hello_reattaches_disconnect_cancelled_scan(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

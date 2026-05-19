@@ -153,6 +153,21 @@ class ScanStoreBase(ABC):
         Returns the number of scans affected.
         """
 
+    @abstractmethod
+    def mark_agent_scans_cancelled(self, agent_id: str, error_message: str) -> list[str]:
+        """Mark running scans owned by *agent_id* as cancelled.
+
+        Returns the affected scan IDs.
+        """
+
+    @abstractmethod
+    def mark_fp_reviews_for_agent_error(self, agent_id: str, error_message: str) -> int:
+        """Mark pending/running FP review jobs for scans owned by *agent_id* as error."""
+
+    @abstractmethod
+    def mark_fp_reviews_for_scan_error(self, scan_id: str, error_message: str) -> int:
+        """Mark pending/running FP review jobs for a scan as error."""
+
     # -- FP Review jobs --
 
     @abstractmethod

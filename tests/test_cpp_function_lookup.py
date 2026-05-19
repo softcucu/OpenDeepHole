@@ -380,3 +380,62 @@ int caller(void) {
         assert rows[0]["line"] == 7
     finally:
         db.close()
+
+
+def test_code_index_reports_ctags_and_cscope_stage_progress(tmp_path: Path) -> None:
+    (tmp_path / "sample.cpp").write_text(
+        """
+int cleanup(void) {
+    return 0;
+}
+
+int caller(void) {
+    return cleanup();
+}
+""",
+        encoding="utf-8",
+    )
+    entries = [
+        {
+            "_type": "tag",
+            "name": "cleanup",
+            "path": "sample.cpp",
+            "line": 2,
+            "end": 4,
+            "kind": "function",
+            "signature": "(void)",
+        },
+        {
+            "_type": "tag",
+            "name": "caller",
+            "path": "sample.cpp",
+            "line": 6,
+            "end": 8,
+            "kind": "function",
+            "signature": "(void)",
+        },
+    ]
+    progress: list[tuple[str, int, int]] = []
+    db = CodeDatabase(tmp_path / "code_index.db")
+    analyzer = CppAnalyzer(db)
+    analyzer._ensure_tools_available = lambda: None
+    analyzer._run_ctags_json = lambda _root, _files, _work_dir: entries
+    analyzer._build_cscope_database = lambda _root, _files, temp_dir: temp_dir / "cscope.out"
+    analyzer._query_cscope_callers = lambda _db_path, _symbol, _root: []
+
+    try:
+        analyzer.analyze_directory(
+            tmp_path,
+            on_stage_progress=lambda stage, current, total: progress.append(
+                (stage, current, total)
+            ),
+        )
+    finally:
+        db.close()
+
+    assert ("ctags scan", 0, 1) in progress
+    assert ("ctags scan", 1, 1) in progress
+    assert ("ctags entries", 2, 2) in progress
+    assert ("cscope database", 0, 1) in progress
+    assert ("cscope database", 1, 1) in progress
+    assert ("cscope symbols", 2, 2) in progress

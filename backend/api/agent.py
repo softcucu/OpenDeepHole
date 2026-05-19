@@ -75,6 +75,13 @@ _AGENT_DISCONNECT_ERROR = "Agent 断开连接"
 _SERVER_RESTART_ERROR = "Process terminated unexpectedly"
 _WEBSOCKET_AGENT_STALE_SECONDS = 120
 _AGENT_DISCONNECT_GRACE_SECONDS = 120
+_SERVER_STARTED_AT = datetime.now(timezone.utc)
+
+_RUNNING_SCAN_STATUSES = (
+    ScanItemStatus.PENDING,
+    ScanItemStatus.ANALYZING,
+    ScanItemStatus.AUDITING,
+)
 
 
 def _touch_agent(agent_id: str) -> None:
@@ -139,6 +146,41 @@ def _best_running_status(scan_total_candidates: int, static_done: bool) -> ScanI
     return ScanItemStatus.ANALYZING
 
 
+def _agent_disconnect_grace_elapsed() -> bool:
+    return (
+        datetime.now(timezone.utc) - _SERVER_STARTED_AT
+    ).total_seconds() >= _AGENT_DISCONNECT_GRACE_SECONDS
+
+
+def reconcile_offline_agent_scan_state(scan_id: str, scan: ScanStatus) -> ScanStatus:
+    """Cancel a running scan once its owning agent is offline past the grace period."""
+    if not scan.agent_name:
+        return scan
+
+    agent_online = is_agent_name_online(scan.agent_name)
+    scan.agent_online = agent_online
+    if agent_online or scan.status not in _RUNNING_SCAN_STATUSES:
+        return scan
+    if not _agent_disconnect_grace_elapsed():
+        return scan
+
+    store = get_scan_store()
+    store.update_scan_progress(
+        scan_id,
+        status=ScanItemStatus.CANCELLED,
+        error_message=_AGENT_DISCONNECT_ERROR,
+        clear_current_candidate=True,
+    )
+    store.mark_fp_reviews_for_scan_error(scan_id, _AGENT_DISCONNECT_ERROR)
+    scan.status = ScanItemStatus.CANCELLED
+    scan.error_message = _AGENT_DISCONNECT_ERROR
+    scan.current_candidate = None
+    _running_scans.pop(scan_id, None)
+    _scan_owners.pop(scan_id, None)
+    logger.info("Scan %s cancelled because agent %s is offline", scan_id, scan.agent_name)
+    return scan
+
+
 def _reattach_active_agent_scans(agent_id: str, agent: AgentInfo, active_scans: list) -> None:
     """Restore server-side running state for scans still running in this agent."""
     if not active_scans:
@@ -183,11 +225,7 @@ def _reattach_active_agent_scans(agent_id: str, agent: AgentInfo, active_scans: 
             )
             continue
 
-        if scan.status not in (
-            ScanItemStatus.PENDING,
-            ScanItemStatus.ANALYZING,
-            ScanItemStatus.AUDITING,
-        ):
+        if scan.status not in _RUNNING_SCAN_STATUSES:
             scan.status = _best_running_status(scan.total_candidates, scan.static_analysis_done)
         scan.error_message = None
         scan.current_candidate = None
@@ -221,11 +259,7 @@ def _ensure_running_scan(scan_id: str) -> ScanStatus | None:
     if not _is_infrastructure_interruption(scan.status, scan.error_message):
         return None
 
-    if scan.status not in (
-        ScanItemStatus.PENDING,
-        ScanItemStatus.ANALYZING,
-        ScanItemStatus.AUDITING,
-    ):
+    if scan.status not in _RUNNING_SCAN_STATUSES:
         scan.status = _best_running_status(scan.total_candidates, scan.static_analysis_done)
         get_scan_store().update_scan_progress(
             scan_id,
@@ -256,7 +290,14 @@ def _mark_agent_scans_cancelled(agent_id: str) -> None:
     Called when an agent disconnects so the frontend shows the correct state.
     """
     store = get_scan_store()
-    scan_ids_to_remove: list[str] = []
+    cancelled_scan_ids = set(
+        store.mark_agent_scans_cancelled(agent_id, _AGENT_DISCONNECT_ERROR)
+    )
+    fp_review_count = store.mark_fp_reviews_for_agent_error(
+        agent_id,
+        _AGENT_DISCONNECT_ERROR,
+    )
+
     for scan_id in list(_running_scans):
         result = store.load_scan(scan_id)
         if result is None:
@@ -264,22 +305,24 @@ def _mark_agent_scans_cancelled(agent_id: str) -> None:
         _, meta = result
         if meta.agent_id != agent_id:
             continue
-        store.update_scan_progress(
-            scan_id,
-            status=ScanItemStatus.CANCELLED,
-            error_message=_AGENT_DISCONNECT_ERROR,
-            clear_current_candidate=True,
-        )
         scan = _running_scans.get(scan_id)
         if scan is not None:
             scan.status = ScanItemStatus.CANCELLED
             scan.error_message = _AGENT_DISCONNECT_ERROR
-        scan_ids_to_remove.append(scan_id)
-        logger.info("Scan %s cancelled due to agent %s disconnect", scan_id, agent_id)
+            scan.current_candidate = None
+        cancelled_scan_ids.add(scan_id)
 
-    for scan_id in scan_ids_to_remove:
+    for scan_id in cancelled_scan_ids:
         _running_scans.pop(scan_id, None)
         _scan_owners.pop(scan_id, None)
+
+    if cancelled_scan_ids or fp_review_count:
+        logger.info(
+            "Agent %s disconnect cancelled %d scan(s) and %d FP review job(s)",
+            agent_id,
+            len(cancelled_scan_ids),
+            fp_review_count,
+        )
 
 
 @router.websocket("/ws")
@@ -424,8 +467,13 @@ async def agent_heartbeat(agent_id: str) -> dict:
 @router.delete("/{agent_id}")
 async def agent_unregister(agent_id: str) -> dict:
     """Agent calls this on graceful shutdown."""
+    old_task = _agent_disconnect_tasks.pop(agent_id, None)
+    if old_task is not None:
+        old_task.cancel()
+    _mark_agent_scans_cancelled(agent_id)
     _registered_agents.pop(agent_id, None)
     _agent_ws.pop(agent_id, None)
+    _agent_ws_locks.pop(agent_id, None)
     logger.info("Agent unregistered: %s", agent_id)
     return {"ok": True}
 

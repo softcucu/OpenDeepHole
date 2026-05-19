@@ -263,7 +263,7 @@ async def create_scan(
 @router.get("/api/scans", response_model=list[ScanSummary])
 async def list_scans(current_user: User = Depends(get_current_user)) -> list[ScanSummary]:
     """List scans visible to the current user (admin sees all)."""
-    from backend.api.agent import is_agent_name_online
+    from backend.api.agent import reconcile_offline_agent_scan_state
 
     store = get_scan_store()
     if current_user.role == "admin":
@@ -271,16 +271,31 @@ async def list_scans(current_user: User = Depends(get_current_user)) -> list[Sca
     else:
         summaries = store.list_scans_by_user(current_user.user_id)
     for s in summaries:
+        scan_for_status = None
         if s.scan_id in _running_scans:
             live = _running_scans[s.scan_id]
-            s.status = live.status
-            s.progress = live.progress
-            s.total_candidates = live.total_candidates
-            s.processed_candidates = live.processed_candidates
+            live.agent_name = s.agent_name or live.agent_name
+            scan_for_status = live
             vulnerabilities = live.vulnerabilities
         else:
             loaded = store.load_scan(s.scan_id)
-            vulnerabilities = loaded[0].vulnerabilities if loaded is not None else []
+            if loaded is not None:
+                scan_for_status = loaded[0]
+                scan_for_status.agent_name = loaded[1].agent_name
+                vulnerabilities = scan_for_status.vulnerabilities
+            else:
+                vulnerabilities = []
+
+        if scan_for_status is not None:
+            scan_for_status = reconcile_offline_agent_scan_state(
+                s.scan_id,
+                scan_for_status,
+            )
+            s.status = scan_for_status.status
+            s.progress = scan_for_status.progress
+            s.total_candidates = scan_for_status.total_candidates
+            s.processed_candidates = scan_for_status.processed_candidates
+            s.agent_online = scan_for_status.agent_online
 
         metrics = calculate_issue_metrics(
             vulnerabilities,
@@ -288,9 +303,6 @@ async def list_scans(current_user: User = Depends(get_current_user)) -> list[Sca
         )
         s.vulnerability_count = metrics.effective_issue_count
         s.human_confirmed_count = metrics.human_confirmed_count
-        # Populate agent online status
-        if s.agent_name:
-            s.agent_online = is_agent_name_online(s.agent_name)
     return summaries
 
 
@@ -300,7 +312,7 @@ async def get_scan_status(
     current_user: User = Depends(get_current_user),
 ) -> ScanStatus:
     """Get the current status and results of a scan."""
-    from backend.api.agent import is_agent_name_online
+    from backend.api.agent import reconcile_offline_agent_scan_state
 
     _check_scan_owner(scan_id, current_user)
     if scan_id in _running_scans:
@@ -312,10 +324,7 @@ async def get_scan_status(
             raise HTTPException(status_code=404, detail="Scan not found")
         scan = result[0]
         scan.agent_name = result[1].agent_name
-    # Populate agent online status
-    if scan.agent_name:
-        scan.agent_online = is_agent_name_online(scan.agent_name)
-    return scan
+    return reconcile_offline_agent_scan_state(scan_id, scan)
 
 
 @router.post("/api/scan/{scan_id}/stop")

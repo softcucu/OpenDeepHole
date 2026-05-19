@@ -40,6 +40,9 @@ _STRUCT_KINDS = {"struct", "class", "union", "s", "c", "u"}
 _TYPEDEF_KINDS = {"typedef", "t"}
 _GLOBAL_VAR_KINDS = {"variable", "externvar", "var", "v", "x"}
 
+IndexProgressCallback = Callable[[int, int], None]
+IndexStageProgressCallback = Callable[[str, int, int], None]
+
 
 class CodeIndexToolError(RuntimeError):
     """Raised when ctags/cscope are missing or unusable."""
@@ -77,8 +80,9 @@ class CppAnalyzer:
     def analyze_directory(
         self,
         directory: Path,
-        on_progress: Callable[[int, int], None] | None = None,
+        on_progress: IndexProgressCallback | None = None,
         cancel_check: Callable[[], bool] | None = None,
+        on_stage_progress: IndexStageProgressCallback | None = None,
     ) -> None:
         """Index all C/C++ files under *directory* using ctags and cscope."""
         project_root = Path(directory).resolve()
@@ -108,11 +112,21 @@ class CppAnalyzer:
 
         with self._project_temp_dir(project_root) as tmp:
             work_dir = Path(tmp)
+            if on_stage_progress:
+                on_stage_progress("ctags scan", 0, 1)
             ctags_entries = self._run_ctags_json(project_root, files, work_dir)
+            if on_stage_progress:
+                on_stage_progress("ctags scan", 1, 1)
             if cancel_check and cancel_check():
                 return
 
-            self._index_ctags_entries(project_root, source_cache, ctags_entries)
+            self._index_ctags_entries(
+                project_root,
+                source_cache,
+                ctags_entries,
+                cancel_check=cancel_check,
+                on_stage_progress=on_stage_progress,
+            )
             self.db.commit()
 
             if cancel_check and cancel_check():
@@ -122,8 +136,13 @@ class CppAnalyzer:
                 files,
                 work_dir,
                 cancel_check=cancel_check,
+                on_stage_progress=on_stage_progress,
             )
-        self._index_global_variable_references(source_cache)
+        self._index_global_variable_references(
+            source_cache,
+            cancel_check=cancel_check,
+            on_stage_progress=on_stage_progress,
+        )
 
         self.db.set_metadata("indexer", INDEXER_VERSION)
         self.db.commit()
@@ -243,17 +262,25 @@ class CppAnalyzer:
         work_dir: Path,
         *,
         cancel_check: Callable[[], bool] | None = None,
+        on_stage_progress: IndexStageProgressCallback | None = None,
     ) -> None:
         if not self._functions:
             return
 
+        if on_stage_progress:
+            on_stage_progress("cscope database", 0, 1)
         cscope_db = self._build_cscope_database(project_root, files, work_dir)
+        if on_stage_progress:
+            on_stage_progress("cscope database", 1, 1)
         symbols = sorted(
             {func.short_name for func in self._functions if func.short_name}
             | {func.name for func in self._functions if "::" in func.name}
         )
+        total_symbols = len(symbols)
+        if on_stage_progress:
+            on_stage_progress("cscope symbols", 0, total_symbols)
         seen: set[tuple[str, str, int, int | None]] = set()
-        for symbol in symbols:
+        for idx, symbol in enumerate(symbols, start=1):
             if cancel_check and cancel_check():
                 return
             for call in self._query_cscope_callers(cscope_db, symbol, project_root):
@@ -274,6 +301,8 @@ class CppAnalyzer:
                     column=col,
                     callee_function_id=callee_id,
                 )
+            if on_stage_progress and (idx % 25 == 0 or idx == total_symbols):
+                on_stage_progress("cscope symbols", idx, total_symbols)
 
     def _build_cscope_database(
         self,
@@ -364,11 +393,21 @@ class CppAnalyzer:
         project_root: Path,
         source_cache: dict[str, list[str]],
         entries: list[dict],
+        *,
+        cancel_check: Callable[[], bool] | None = None,
+        on_stage_progress: IndexStageProgressCallback | None = None,
     ) -> None:
-        for entry in entries:
+        total_entries = len(entries)
+        if on_stage_progress:
+            on_stage_progress("ctags entries", 0, total_entries)
+        for idx, entry in enumerate(entries, start=1):
+            if cancel_check and cancel_check():
+                return
             kind = self._kind(entry)
             rel_path = self._entry_path(project_root, entry)
             if not rel_path or rel_path not in source_cache:
+                if on_stage_progress and (idx % 500 == 0 or idx == total_entries):
+                    on_stage_progress("ctags entries", idx, total_entries)
                 continue
             lines = source_cache[rel_path]
 
@@ -380,6 +419,8 @@ class CppAnalyzer:
                 self._insert_struct_entry(entry, rel_path, lines)
             elif kind in _GLOBAL_VAR_KINDS:
                 self._insert_global_variable_entry(entry, rel_path, lines)
+            if on_stage_progress and (idx % 500 == 0 or idx == total_entries):
+                on_stage_progress("ctags entries", idx, total_entries)
 
     def _insert_function_entry(self, entry: dict, rel_path: str, lines: list[str]) -> None:
         name = self._qualified_name(entry)
@@ -466,9 +507,20 @@ class CppAnalyzer:
             definition=definition,
         )
 
-    def _index_global_variable_references(self, source_cache: dict[str, list[str]]) -> None:
+    def _index_global_variable_references(
+        self,
+        source_cache: dict[str, list[str]],
+        *,
+        cancel_check: Callable[[], bool] | None = None,
+        on_stage_progress: IndexStageProgressCallback | None = None,
+    ) -> None:
         rows = [row for row in self.db.get_all_global_variables() if row["name"].startswith("g_")]
-        for row in rows:
+        total_rows = len(rows)
+        if on_stage_progress:
+            on_stage_progress("global refs", 0, total_rows)
+        for idx, row in enumerate(rows, start=1):
+            if cancel_check and cancel_check():
+                return
             name = row["name"]
             pattern = re.compile(r"\b" + re.escape(name) + r"\b")
             for rel_path, lines in source_cache.items():
@@ -487,6 +539,8 @@ class CppAnalyzer:
                         context=line_text.strip(),
                         access_type=self._global_access_type(name, line_text),
                     )
+            if on_stage_progress and (idx % 10 == 0 or idx == total_rows):
+                on_stage_progress("global refs", idx, total_rows)
 
     # ------------------------------------------------------------------
     # Selection helpers
