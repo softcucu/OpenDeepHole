@@ -248,6 +248,11 @@ class Analyzer(BaseAnalyzer):
             "--no-git-ignore",
             str(project_path),
         ]
+        # Force UTF-8 to avoid GBK codec errors on Windows Chinese locale
+        import os
+        env = os.environ.copy()
+        env["PYTHONUTF8"] = "1"
+        env["PYTHONIOENCODING"] = "utf-8"
         try:
             proc = subprocess.run(
                 cmd,
@@ -255,6 +260,7 @@ class Analyzer(BaseAnalyzer):
                 text=True,
                 encoding="utf-8",
                 errors="replace",
+                env=env,
                 timeout=600,
             )
         except subprocess.TimeoutExpired:
@@ -264,12 +270,13 @@ class Analyzer(BaseAnalyzer):
             _log.warning(f"semgrep failed to run: {exc}")
             return
 
-        # semgrep: rc=0 无发现，rc=1 有发现，rc>1 工具报错
+        # semgrep: rc=0 无发现，rc=1 有发现，rc>1 工具报错（但可能仍有部分结果）
         if proc.returncode > 1:
             _log.warning(
                 f"semgrep exited with rc={proc.returncode}: {proc.stderr[:300]}"
             )
-            return
+            if not proc.stdout or not proc.stdout.strip():
+                return
 
         try:
             data = json.loads(proc.stdout)

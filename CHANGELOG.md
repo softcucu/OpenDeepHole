@@ -2,6 +2,7 @@
 
 ## 2026-05-19
 
+- **修复** Windows 中文系统（GBK/CP936）下所有 semgrep checker 静态分析因编码不兼容崩溃的问题，为 semgrep 子进程强制设置 UTF-8 环境变量，并在 semgrep 返回错误码但仍有部分扫描结果时继续解析而非直接丢弃
 - **新增** Agent 扫描前自更新运行时代码：服务端 Agent 代码变更后，在线 Agent 会在启动扫描前下载最新 runtime 并重启继续执行，无需用户重新下载；`run_agent` 脚本变更仍需重新下载 Agent
 - **修复** Agent runtime 更新包改为按创建扫描时的同一份内容快照生成 hash 并下载，避免新建扫描时报 `Agent runtime update content hash mismatch`
 - **新增** Agent 配置页支持校验当前表单中的 LLM API 配置，校验请求在 Agent 所在机器上执行，便于确认 API 地址、Key 和模型是否可用

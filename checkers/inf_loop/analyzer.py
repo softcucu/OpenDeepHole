@@ -228,6 +228,8 @@ def _read_semgrep_json(output_path: Path, fallback: object) -> str:
 
 
 def _run_semgrep(project_path: Path) -> tuple[int | None, str, str] | None:
+    import os
+
     with tempfile.TemporaryDirectory(prefix="opendeephole-inf-loop-semgrep-") as tmp:
         output_path = Path(tmp) / "semgrep.json"
         cmd = [
@@ -238,6 +240,10 @@ def _run_semgrep(project_path: Path) -> tuple[int | None, str, str] | None:
             "--no-git-ignore",
             str(project_path),
         ]
+        # Force UTF-8 to avoid GBK codec errors on Windows Chinese locale
+        env = os.environ.copy()
+        env["PYTHONUTF8"] = "1"
+        env["PYTHONIOENCODING"] = "utf-8"
         try:
             proc = subprocess.run(
                 cmd,
@@ -245,6 +251,7 @@ def _run_semgrep(project_path: Path) -> tuple[int | None, str, str] | None:
                 text=True,
                 encoding="utf-8",
                 errors="replace",
+                env=env,
                 timeout=_SEMGREP_TIMEOUT_SECONDS,
             )
         except subprocess.TimeoutExpired as exc:
@@ -297,12 +304,13 @@ class Analyzer(BaseAnalyzer):
             return
         returncode, stdout, stderr = result
 
-        # semgrep: rc=0 无发现，rc=1 有发现，rc>1 工具报错
+        # semgrep: rc=0 无发现，rc=1 有发现，rc>1 工具报错（但可能仍有部分结果）
         if returncode is not None and returncode > 1:
             _log.warning(
                 f"semgrep exited with rc={returncode}: {stderr[:300]}"
             )
-            return
+            if not stdout or not stdout.strip():
+                return
 
         try:
             data = json.loads(stdout)
