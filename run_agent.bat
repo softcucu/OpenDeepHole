@@ -64,7 +64,7 @@ echo Required source indexing tools are missing.
 echo This script can install MSYS2 automatically when winget is available:
 echo    winget install -i MSYS2.MSYS2
 echo Then it installs the source indexing tools with MSYS2 pacman:
-echo    pacman -S --needed --noconfirm mingw-w64-x86_64-ctags cscope
+echo    pacman -S --needed --noconfirm mingw-w64-x86_64-ctags
 echo If automatic install fails, install MSYS2 from https://www.msys2.org/
 echo and add these directories to PATH, with mingw64 before usr:
 echo    C:\msys64\mingw64\bin
@@ -91,8 +91,8 @@ if not exist "C:\msys64\usr\bin\bash.exe" (
     exit /b 1
 )
 
-echo Installing Universal Ctags and cscope with MSYS2 pacman...
-"C:\msys64\usr\bin\bash.exe" -lc "pacman -S --needed --noconfirm mingw-w64-x86_64-ctags cscope" || exit /b 1
+echo Installing Universal Ctags with MSYS2 pacman...
+"C:\msys64\usr\bin\bash.exe" -lc "pacman -S --needed --noconfirm mingw-w64-x86_64-ctags" || exit /b 1
 call :ADD_DEFAULT_MSYS2_PATHS
 exit /b 0
 
@@ -101,16 +101,11 @@ set "SOURCE_TOOL_MISSING="
 where ctags >nul 2>nul
 if errorlevel 1 set "SOURCE_TOOL_MISSING=1"
 
-where cscope >nul 2>nul
-if errorlevel 1 set "SOURCE_TOOL_MISSING=1"
-
 if defined SOURCE_TOOL_MISSING (
     call :INSTALL_MSYS2_SOURCE_TOOLS
     if errorlevel 1 exit /b 1
     set "SOURCE_TOOL_MISSING="
     where ctags >nul 2>nul
-    if errorlevel 1 set "SOURCE_TOOL_MISSING=1"
-    where cscope >nul 2>nul
     if errorlevel 1 set "SOURCE_TOOL_MISSING=1"
     if defined SOURCE_TOOL_MISSING (
         call :PRINT_MSYS2_SOURCE_TOOL_HELP

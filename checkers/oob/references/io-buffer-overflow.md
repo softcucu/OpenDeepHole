@@ -93,7 +93,7 @@ puts(username);         // username 无 \0 终止时越界读
 - 栈数组 → 声明可见
 - 结构体成员 → `view_struct_code`
 - 全局变量 → `view_global_variable_definition`
-- 参数传入 → `find_function_references`（最多 2 层）
+- 参数传入 → 根据 candidate 描述中的调用链线索查看关键调用方（最多 2 层）
 - 动态分配 → 追踪分配参数
 
 ### 3. 分析长度参数

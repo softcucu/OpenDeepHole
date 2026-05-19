@@ -1,41 +1,22 @@
-import io
 import subprocess
 from pathlib import Path
 
+import code_parser.cpp_analyzer as cpp_analyzer
 from code_parser import CodeDatabase
 from code_parser.cpp_analyzer import CppAnalyzer
 from code_parser.cpp_analyzer import CodeIndexToolError
-from code_parser.cpp_analyzer import _CscopeCall
-
-
-class _FakeCscopeSession:
-    def __init__(self, calls: dict[str, list[_CscopeCall]]) -> None:
-        self.calls = calls
-        self.symbols: list[str] = []
-        self.closed = False
-
-    def query_callers(self, symbol: str) -> list[_CscopeCall]:
-        self.symbols.append(symbol)
-        return self.calls.get(symbol, [])
-
-    def close(self) -> None:
-        self.closed = True
 
 
 def _index_source(
     tmp_path: Path,
     source: str,
     entries: list[dict],
-    cscope_calls: dict[str, list[_CscopeCall]] | None = None,
 ) -> CodeDatabase:
     (tmp_path / "sample.cpp").write_text(source, encoding="utf-8")
     db = CodeDatabase(tmp_path / "code_index.db")
     analyzer = CppAnalyzer(db)
     analyzer._ensure_tools_available = lambda: None
     analyzer._run_ctags_json = lambda _root, _files, _work_dir: entries
-    analyzer._build_cscope_database = lambda _root, _files, temp_dir: temp_dir / "cscope.out"
-    session = _FakeCscopeSession(cscope_calls or {})
-    analyzer._open_cscope_query_session = lambda _db_path, _root: session
     analyzer.analyze_directory(tmp_path)
     return db
 
@@ -298,7 +279,6 @@ def test_ctags_file_list_uses_project_work_dir_relative_path(
     db = CodeDatabase(tmp_path / "code_index.db")
     analyzer = CppAnalyzer(db)
     analyzer._ensure_tools_available = lambda: None
-    analyzer._index_cscope_calls = lambda *_args, **_kwargs: None
     try:
         analyzer.analyze_directory(tmp_path)
     finally:
@@ -309,6 +289,28 @@ def test_ctags_file_list_uses_project_work_dir_relative_path(
         path.name.startswith(".opendeephole-index-")
         for path in tmp_path.iterdir()
     )
+
+
+def test_tool_check_requires_ctags_but_not_cscope(monkeypatch) -> None:
+    checked_tools: list[str] = []
+
+    def fake_which(tool: str):
+        checked_tools.append(tool)
+        return "/usr/bin/ctags" if tool == "ctags" else None
+
+    def fake_run(cmd, **_kwargs):
+        if cmd == ["ctags", "--version"]:
+            return subprocess.CompletedProcess(cmd, 0, stdout=b"Universal Ctags\n", stderr=b"")
+        if cmd == ["ctags", "--list-output-formats"]:
+            return subprocess.CompletedProcess(cmd, 0, stdout=b"json\n", stderr=b"")
+        raise AssertionError(f"unexpected command: {cmd}")
+
+    monkeypatch.setattr(cpp_analyzer.shutil, "which", fake_which)
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    CppAnalyzer._ensure_tools_available()
+
+    assert checked_tools == ["ctags"]
 
 
 def test_ctags_empty_stdout_reports_index_error(
@@ -327,7 +329,6 @@ def test_ctags_empty_stdout_reports_index_error(
     db = CodeDatabase(tmp_path / "code_index.db")
     analyzer = CppAnalyzer(db)
     analyzer._ensure_tools_available = lambda: None
-    analyzer._index_cscope_calls = lambda *_args, **_kwargs: None
     try:
         try:
             analyzer.analyze_directory(tmp_path)
@@ -358,7 +359,6 @@ def test_ctags_output_is_decoded_after_binary_capture(
     db = CodeDatabase(tmp_path / "code_index.db")
     analyzer = CppAnalyzer(db)
     analyzer._ensure_tools_available = lambda: None
-    analyzer._index_cscope_calls = lambda *_args, **_kwargs: None
     try:
         analyzer.analyze_directory(tmp_path)
         assert db.get_functions_by_name("main")
@@ -404,7 +404,7 @@ def test_cscope_uses_project_work_dir_relative_paths(
     assert (work_dir / "cscope.files").read_text(encoding="utf-8") == "sample.cpp\n"
 
 
-def test_function_reference_index_uses_cscope_callers(tmp_path: Path) -> None:
+def test_function_reference_index_uses_tree_sitter_calls(tmp_path: Path) -> None:
     db = _index_source(
         tmp_path,
         """
@@ -436,16 +436,6 @@ int caller(void) {
                 "signature": "(void)",
             },
         ],
-        {
-            "cleanup": [
-                _CscopeCall(
-                    file_path="sample.cpp",
-                    caller_name="caller",
-                    line=7,
-                    text="return cleanup();",
-                )
-            ]
-        },
     )
     try:
         rows = db.get_call_sites_by_name("cleanup")
@@ -454,6 +444,98 @@ int caller(void) {
         assert rows[0]["caller_name"] == "caller"
         assert rows[0]["file_path"] == "sample.cpp"
         assert rows[0]["line"] == 7
+    finally:
+        db.close()
+
+
+def test_tree_sitter_calls_resolve_unique_short_name_to_qualified_callee(tmp_path: Path) -> None:
+    db = _index_source(
+        tmp_path,
+        """
+namespace ns {
+int cleanup(void) {
+    return 0;
+}
+
+int caller(void) {
+    return cleanup();
+}
+}
+""",
+        [
+            {
+                "_type": "tag",
+                "name": "cleanup",
+                "path": "sample.cpp",
+                "line": 3,
+                "end": 5,
+                "kind": "function",
+                "scope": "ns",
+                "signature": "(void)",
+            },
+            {
+                "_type": "tag",
+                "name": "caller",
+                "path": "sample.cpp",
+                "line": 7,
+                "end": 9,
+                "kind": "function",
+                "scope": "ns",
+                "signature": "(void)",
+            },
+        ],
+    )
+    try:
+        rows = db.get_call_sites_by_name("ns::cleanup")
+
+        assert len(rows) == 1
+        assert rows[0]["caller_name"] == "ns::caller"
+        assert rows[0]["line"] == 8
+    finally:
+        db.close()
+
+
+def test_tree_sitter_global_references_ignore_comments_and_strings(tmp_path: Path) -> None:
+    db = _index_source(
+        tmp_path,
+        """
+int g_count = 0;
+
+int caller(void) {
+    const char *s = "g_count";
+    // g_count in a comment
+    g_count = read_value();
+    return g_count;
+}
+""",
+        [
+            {
+                "_type": "tag",
+                "name": "g_count",
+                "path": "sample.cpp",
+                "line": 2,
+                "end": 2,
+                "kind": "variable",
+            },
+            {
+                "_type": "tag",
+                "name": "caller",
+                "path": "sample.cpp",
+                "line": 4,
+                "end": 9,
+                "kind": "function",
+                "signature": "(void)",
+            },
+        ],
+    )
+    try:
+        rows = db.get_global_variable_reference_by_name("g_count")
+
+        assert [(row["line"], row["access_type"]) for row in rows] == [
+            (7, "write"),
+            (8, "read"),
+        ]
+        assert all(row["function_name"] == "caller" for row in rows)
     finally:
         db.close()
 
@@ -490,16 +572,6 @@ int caller(void) {
                 "signature": "(void)",
             },
         ],
-        {
-            "cleanup": [
-                _CscopeCall(
-                    file_path="sample.cpp",
-                    caller_name="caller",
-                    line=7,
-                    text="return cleanup();",
-                )
-            ]
-        },
     )
     try:
         assert db.get_index_stats() == {
@@ -514,7 +586,7 @@ int caller(void) {
         db.close()
 
 
-def test_cscope_symbol_queries_reuse_line_oriented_process(
+def test_normal_index_path_does_not_start_cscope(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -550,50 +622,15 @@ int caller(void) {
             "signature": "(void)",
         },
     ]
-    popen_instances = []
+    def fail_popen(*_args, **_kwargs):
+        raise AssertionError("normal index path must not start cscope")
 
-    class FakeStdin(io.StringIO):
-        def close(self):
-            pass
-
-    class FakePopen:
-        def __init__(self, cmd, **kwargs):
-            self.cmd = cmd
-            self.kwargs = kwargs
-            self.stdin = FakeStdin()
-            self.stdout = io.StringIO(
-                ">> Unable to search database\n"
-                ">> cscope: 1 lines\n"
-                "sample.cpp caller 7 return cleanup();\n"
-            )
-            self.stderr = io.StringIO("")
-            self.returncode = None
-            self.terminated = False
-            self.killed = False
-            popen_instances.append(self)
-
-        def poll(self):
-            return self.returncode
-
-        def wait(self, timeout=None):
-            self.returncode = 0
-            return 0
-
-        def terminate(self):
-            self.terminated = True
-            self.returncode = -15
-
-        def kill(self):
-            self.killed = True
-            self.returncode = -9
-
-    monkeypatch.setattr(subprocess, "Popen", FakePopen)
+    monkeypatch.setattr(subprocess, "Popen", fail_popen)
 
     db = CodeDatabase(tmp_path / "code_index.db")
     analyzer = CppAnalyzer(db)
     analyzer._ensure_tools_available = lambda: None
     analyzer._run_ctags_json = lambda _root, _files, _work_dir: entries
-    analyzer._build_cscope_database = lambda _root, _files, temp_dir: temp_dir / "cscope.out"
 
     try:
         analyzer.analyze_directory(tmp_path)
@@ -601,26 +638,12 @@ int caller(void) {
     finally:
         db.close()
 
-    assert len(popen_instances) == 1
-    proc = popen_instances[0]
-    assert proc.kwargs["cwd"] == tmp_path
-    assert proc.kwargs["encoding"] == "utf-8"
-    assert proc.kwargs["errors"] == "replace"
-    assert proc.cmd == [
-        "cscope",
-        "-d",
-        "-l",
-        "-f",
-        ".opendeephole-index-" + proc.cmd[-1].split(".opendeephole-index-", 1)[1],
-    ]
-    assert proc.cmd[-1].endswith("/cscope.out")
-    assert proc.stdin.getvalue() == "3caller\n3cleanup\n"
     assert len(rows) == 1
     assert rows[0]["caller_name"] == "caller"
     assert rows[0]["line"] == 7
 
 
-def test_code_index_reports_ctags_and_cscope_stage_progress(tmp_path: Path) -> None:
+def test_code_index_reports_ctags_and_tree_sitter_stage_progress(tmp_path: Path) -> None:
     (tmp_path / "sample.cpp").write_text(
         """
 int cleanup(void) {
@@ -658,8 +681,6 @@ int caller(void) {
     analyzer = CppAnalyzer(db)
     analyzer._ensure_tools_available = lambda: None
     analyzer._run_ctags_json = lambda _root, _files, _work_dir: entries
-    analyzer._build_cscope_database = lambda _root, _files, temp_dir: temp_dir / "cscope.out"
-    analyzer._open_cscope_query_session = lambda _db_path, _root: _FakeCscopeSession({})
 
     try:
         analyzer.analyze_directory(
@@ -674,6 +695,5 @@ int caller(void) {
     assert ("ctags scan", 0, 1) in progress
     assert ("ctags scan", 1, 1) in progress
     assert ("ctags entries", 2, 2) in progress
-    assert ("cscope database", 0, 1) in progress
-    assert ("cscope database", 1, 1) in progress
-    assert ("cscope symbols", 2, 2) in progress
+    assert ("tree-sitter refs", 0, 2) in progress
+    assert ("tree-sitter refs", 2, 2) in progress

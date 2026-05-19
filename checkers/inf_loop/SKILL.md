@@ -20,7 +20,6 @@ semgrep 是纯语法模式匹配，无法感知：跨函数的状态更新、指
 
 - `view_function_code(project_id, function_name)` — 查看函数完整源码
 - `view_struct_code(project_id, struct_name)` — 查看结构体/类定义
-- `find_function_references(project_id, function_name)` — 查找函数的所有调用位置
 - `submit_result(result_id, confirmed, severity, description, ai_analysis)` — 提交分析结论（必须调用）
 
 ## 分析步骤
@@ -58,7 +57,7 @@ semgrep 是纯语法模式匹配，无法感知：跨函数的状态更新、指
 
 ### Step 4 — 向上追溯调用链
 
-用 `find_function_references` 查找候选函数的调用位置，然后用 `view_function_code` 查看关键调用方，重点确认：
+根据 candidate 描述中的调用链线索，用 `view_function_code` 查看关键调用方，重点确认：
 
 - **循环控制变量的来源**：若变量是函数参数（规则类型含 `param`），调用方传入的值是什么？是固定值、外部输入还是计算结果？
 - **触发问题路径的前提条件**：调用方在什么情况下会让代码走入 continue 分支？这个条件是否现实可达？

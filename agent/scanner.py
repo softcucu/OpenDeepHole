@@ -290,7 +290,7 @@ async def run_scan(
                 await emit("init", "已有代码索引不完整（需重建），重新索引...")
 
         if do_index:
-            await emit("init", "Indexing source code (ctags/cscope)...")
+            await emit("init", "Indexing source code (ctags/tree-sitter)...")
             await reporter.send_index_status(scan_id, "parsing", 0, 0)
             from code_parser import CodeDatabase, CppAnalyzer
             temp_db_path = db_path.with_name(f"{db_path.name}.{scan_id}.tmp")

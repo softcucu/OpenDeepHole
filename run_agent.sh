@@ -47,21 +47,21 @@ print_source_tool_install_help() {
         MINGW*|MSYS*|CYGWIN*)
             echo "Windows recommended method: install MSYS2 with winget, then use pacman." >&2
             echo "   winget install -i MSYS2.MSYS2" >&2
-            echo "   pacman -S --needed --noconfirm mingw-w64-x86_64-ctags cscope" >&2
+            echo "   pacman -S --needed --noconfirm mingw-w64-x86_64-ctags" >&2
             echo "If needed, add C:\\msys64\\mingw64\\bin before C:\\msys64\\usr\\bin in PATH." >&2
             ;;
         Darwin)
             echo "Install with Homebrew:" >&2
-            echo "   brew install universal-ctags cscope" >&2
+            echo "   brew install universal-ctags" >&2
             ;;
         Linux*)
-            echo "Install Universal Ctags and cscope with your system package manager, for example:" >&2
-            echo "   sudo apt-get install universal-ctags cscope" >&2
-            echo "   sudo dnf install ctags cscope" >&2
-            echo "   sudo pacman -S ctags cscope" >&2
+            echo "Install Universal Ctags with your system package manager, for example:" >&2
+            echo "   sudo apt-get install universal-ctags" >&2
+            echo "   sudo dnf install ctags" >&2
+            echo "   sudo pacman -S ctags" >&2
             ;;
         *)
-            echo "Install Universal Ctags and cscope, then make ctags and cscope available on PATH." >&2
+            echo "Install Universal Ctags, then make ctags available on PATH." >&2
             ;;
     esac
 }
@@ -83,8 +83,8 @@ install_msys2_source_tools() {
                 return 1
             fi
 
-            echo "Installing Universal Ctags and cscope with MSYS2 pacman..." >&2
-            pacman -S --needed --noconfirm mingw-w64-x86_64-ctags cscope
+            echo "Installing Universal Ctags with MSYS2 pacman..." >&2
+            pacman -S --needed --noconfirm mingw-w64-x86_64-ctags
             add_default_msys2_paths
             ;;
         *)
@@ -95,11 +95,11 @@ install_msys2_source_tools() {
 }
 
 check_source_index_tools() {
-    if ! command -v ctags >/dev/null 2>&1 || ! command -v cscope >/dev/null 2>&1; then
+    if ! command -v ctags >/dev/null 2>&1; then
         install_msys2_source_tools || return 1
     fi
 
-    if ! command -v ctags >/dev/null 2>&1 || ! command -v cscope >/dev/null 2>&1; then
+    if ! command -v ctags >/dev/null 2>&1; then
         print_source_tool_install_help
         return 1
     fi

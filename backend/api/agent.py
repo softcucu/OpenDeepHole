@@ -865,13 +865,13 @@ Setup
 3. Install system code-index tools:
 
    Linux:
-     apt install universal-ctags cscope
+     apt install universal-ctags
 
    macOS:
-     brew install universal-ctags cscope
+     brew install universal-ctags
 
    Windows:
-     Install Universal Ctags and cscope, then add both commands to PATH.
+     Install Universal Ctags, then add ctags to PATH.
 
 4. Run the agent daemon:
 

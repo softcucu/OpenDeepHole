@@ -1,9 +1,10 @@
-"""C/C++ source code analyzer backed by Universal Ctags and cscope.
+"""C/C++ source code analyzer backed by Universal Ctags and tree-sitter.
 
 Universal Ctags provides source definitions for functions, structs/classes,
-typedef structs, and global variables.  cscope provides function reference
-locations.  The public ``CppAnalyzer`` name is kept so existing scan, upload,
-MCP, and checker-test paths can use the same entry point.
+typedef structs, and global variables.  tree-sitter walks the ctags-discovered
+function bodies for call and global-variable reference locations.  Dormant
+cscope helpers are kept for possible future reuse, but the normal index path no
+longer invokes cscope.
 """
 
 from __future__ import annotations
@@ -18,6 +19,9 @@ from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
+
+import tree_sitter_cpp
+from tree_sitter import Language, Node, Parser
 
 from .code_database import CodeDatabase
 
@@ -40,13 +44,14 @@ _STRUCT_KINDS = {"struct", "class", "union", "s", "c", "u"}
 _TYPEDEF_KINDS = {"typedef", "t"}
 _GLOBAL_VAR_KINDS = {"variable", "externvar", "var", "v", "x"}
 _TOOL_POPEN_TEXT_KWARGS = {"text": True, "encoding": "utf-8", "errors": "replace"}
+_CPP_LANGUAGE = Language(tree_sitter_cpp.language())
 
 IndexProgressCallback = Callable[[int, int], None]
 IndexStageProgressCallback = Callable[[str, int, int], None]
 
 
 class CodeIndexToolError(RuntimeError):
-    """Raised when ctags/cscope are missing or unusable."""
+    """Raised when indexing tools are missing or unusable."""
 
 
 def _decode_tool_output(value: object) -> str:
@@ -65,6 +70,17 @@ class _IndexedFunction:
     file_path: str
     start_line: int
     end_line: int
+    body: str
+
+
+@dataclass(frozen=True)
+class _IndexedGlobalVariable:
+    global_var_id: int
+    name: str
+    file_path: str
+    start_line: int
+    end_line: int
+    is_static: bool
 
 
 @dataclass(frozen=True)
@@ -186,6 +202,9 @@ class CppAnalyzer:
         self._functions: list[_IndexedFunction] = []
         self._functions_by_name: dict[str, list[_IndexedFunction]] = defaultdict(list)
         self._functions_by_short: dict[str, list[_IndexedFunction]] = defaultdict(list)
+        self._global_variables: list[_IndexedGlobalVariable] = []
+        self._global_variables_by_name: dict[str, list[_IndexedGlobalVariable]] = defaultdict(list)
+        self._parser = Parser(_CPP_LANGUAGE)
 
     # ------------------------------------------------------------------
     # Public API
@@ -198,7 +217,7 @@ class CppAnalyzer:
         cancel_check: Callable[[], bool] | None = None,
         on_stage_progress: IndexStageProgressCallback | None = None,
     ) -> None:
-        """Index all C/C++ files under *directory* using ctags and cscope."""
+        """Index all C/C++ files under *directory* using ctags and tree-sitter."""
         project_root = Path(directory).resolve()
         files = self._collect_source_files(project_root)
         total = len(files)
@@ -243,16 +262,9 @@ class CppAnalyzer:
             )
             self.db.commit()
 
-            if cancel_check and cancel_check():
-                return
-            self._index_cscope_calls(
-                project_root,
-                files,
-                work_dir,
-                cancel_check=cancel_check,
-                on_stage_progress=on_stage_progress,
-            )
-        self._index_global_variable_references(
+        if cancel_check and cancel_check():
+            return
+        self._index_tree_sitter_references(
             source_cache,
             cancel_check=cancel_check,
             on_stage_progress=on_stage_progress,
@@ -264,7 +276,7 @@ class CppAnalyzer:
     def analyze_file(self, rel_path: str, source: bytes) -> None:
         """Index a single in-memory file.
 
-        This compatibility path still uses ctags/cscope.  Callers that need
+        This compatibility path still uses ctags/tree-sitter.  Callers that need
         deterministic unit tests should monkeypatch the runner methods instead
         of depending on tree-sitter behavior.
         """
@@ -281,12 +293,9 @@ class CppAnalyzer:
 
     @staticmethod
     def _ensure_tools_available() -> None:
-        missing = [tool for tool in ("ctags", "cscope") if shutil.which(tool) is None]
-        if missing:
+        if shutil.which("ctags") is None:
             raise CodeIndexToolError(
-                "代码索引依赖缺失: "
-                + ", ".join(missing)
-                + "。请安装 Universal Ctags 和 cscope 后重新扫描。"
+                "代码索引依赖缺失: ctags。请安装 Universal Ctags 后重新扫描。"
             )
 
         version = subprocess.run(
@@ -299,13 +308,15 @@ class CppAnalyzer:
                 "ctags 必须是 Universal Ctags，当前 ctags 不支持所需的 JSON 输出。"
             )
 
-        cscope_version = subprocess.run(
-            ["cscope", "-V"],
+        formats = subprocess.run(
+            ["ctags", "--list-output-formats"],
             capture_output=True,
             check=False,
         )
-        if cscope_version.returncode != 0:
-            raise CodeIndexToolError("cscope 不可用，请安装 cscope 后重新扫描。")
+        if formats.returncode != 0 or "json" not in _decode_tool_output(formats.stdout).lower():
+            raise CodeIndexToolError(
+                "ctags 必须支持 JSON 输出。请安装带 JSON 输出支持的 Universal Ctags。"
+            )
 
     @staticmethod
     def _project_temp_dir(project_root: Path) -> tempfile.TemporaryDirectory:
@@ -553,6 +564,7 @@ class CppAnalyzer:
             file_path=rel_path,
             start_line=start_line,
             end_line=end_line,
+            body=body,
         )
         self._functions.append(record)
         self._functions_by_name[name].append(record)
@@ -593,7 +605,7 @@ class CppAnalyzer:
             return
         file_id = self.db.get_or_create_file(rel_path)
         is_static = self._is_file_scope(entry, definition)
-        self.db.insert_global_variable(
+        global_var_id = self.db.insert_global_variable(
             name=name,
             file_id=file_id,
             start_line=start_line,
@@ -601,6 +613,154 @@ class CppAnalyzer:
             is_extern=self._first_line(definition).lstrip().startswith("extern "),
             is_static=is_static,
             definition=definition,
+        )
+        record = _IndexedGlobalVariable(
+            global_var_id=global_var_id,
+            name=name,
+            file_path=rel_path,
+            start_line=start_line,
+            end_line=end_line,
+            is_static=is_static,
+        )
+        self._global_variables.append(record)
+        self._global_variables_by_name[name].append(record)
+
+    def _index_tree_sitter_references(
+        self,
+        source_cache: dict[str, list[str]],
+        *,
+        cancel_check: Callable[[], bool] | None = None,
+        on_stage_progress: IndexStageProgressCallback | None = None,
+    ) -> None:
+        total_functions = len(self._functions)
+        if on_stage_progress:
+            on_stage_progress("tree-sitter refs", 0, total_functions)
+        if not self._functions:
+            return
+
+        indexed_globals = {
+            global_var.name
+            for global_var in self._global_variables
+            if global_var.name.startswith("g_")
+        }
+        seen_calls: set[tuple[int, str, int, int]] = set()
+        seen_globals: set[tuple[int, str, int, int]] = set()
+
+        for idx, function in enumerate(self._functions, start=1):
+            if cancel_check and cancel_check():
+                return
+            if function.body:
+                tree = self._parser.parse(function.body.encode("utf-8", errors="replace"))
+                self._index_tree_sitter_function_references(
+                    function,
+                    tree.root_node,
+                    source_cache,
+                    indexed_globals,
+                    seen_calls,
+                    seen_globals,
+                )
+            if on_stage_progress and (idx % 100 == 0 or idx == total_functions):
+                on_stage_progress("tree-sitter refs", idx, total_functions)
+
+    def _index_tree_sitter_function_references(
+        self,
+        function: _IndexedFunction,
+        root: Node,
+        source_cache: dict[str, list[str]],
+        indexed_globals: set[str],
+        seen_calls: set[tuple[int, str, int, int]],
+        seen_globals: set[tuple[int, str, int, int]],
+    ) -> None:
+        file_id = self.db.get_or_create_file(function.file_path)
+        local_declarations = self._collect_local_declarations(root)
+        for node in self._walk_tree(root):
+            if node.type == "call_expression":
+                self._insert_tree_sitter_call(function, file_id, node, seen_calls)
+            elif node.type == "identifier":
+                self._insert_tree_sitter_global_reference(
+                    function,
+                    file_id,
+                    node,
+                    source_cache,
+                    indexed_globals,
+                    seen_globals,
+                    local_declarations,
+                )
+
+    def _insert_tree_sitter_call(
+        self,
+        caller: _IndexedFunction,
+        file_id: int,
+        node: Node,
+        seen_calls: set[tuple[int, str, int, int]],
+    ) -> None:
+        function_node = node.child_by_field_name("function")
+        if function_node is None:
+            return
+        callee_name = self._callee_name_from_node(function_node)
+        if not callee_name:
+            return
+        callee = self._select_callee(callee_name)
+        stored_callee_name = callee.name if callee else callee_name
+
+        line = caller.start_line + node.start_point[0]
+        column = node.start_point[1]
+        key = (caller.function_id, stored_callee_name, line, column)
+        if key in seen_calls:
+            return
+        seen_calls.add(key)
+
+        self.db.insert_function_call(
+            caller_function_id=caller.function_id,
+            callee_name=stored_callee_name,
+            file_id=file_id,
+            line=line,
+            column=column,
+            callee_function_id=callee.function_id if callee else None,
+        )
+
+    def _insert_tree_sitter_global_reference(
+        self,
+        function: _IndexedFunction,
+        file_id: int,
+        node: Node,
+        source_cache: dict[str, list[str]],
+        indexed_globals: set[str],
+        seen_globals: set[tuple[int, str, int, int]],
+        local_declarations: dict[str, list[int]],
+    ) -> None:
+        name = self._node_text(node)
+        if name not in indexed_globals:
+            return
+        if self._identifier_is_declarator(node):
+            return
+        if any(line <= node.start_point[0] for line in local_declarations.get(name, [])):
+            return
+        candidates = self._global_variables_by_name.get(name, [])
+        if not candidates:
+            return
+
+        line = function.start_line + node.start_point[0]
+        column = node.start_point[1]
+        global_var = self._select_global_variable(name, function.file_path)
+        if global_var is None:
+            return
+        key = (function.function_id, name, line, column)
+        if key in seen_globals:
+            return
+        seen_globals.add(key)
+
+        lines = source_cache.get(function.file_path, [])
+        line_text = lines[line - 1] if 0 < line <= len(lines) else ""
+        self.db.insert_global_variable_reference(
+            global_var_id=global_var.global_var_id,
+            variable_name=name,
+            file_id=file_id,
+            function_id=function.function_id,
+            line=line,
+            column=column,
+            context=line_text.strip(),
+            access_type=self._global_access_type(name, line_text),
         )
 
     def _index_global_variable_references(
@@ -660,11 +820,108 @@ class CppAnalyzer:
         return None
 
     def _select_callee_id(self, callee_name: str) -> int | None:
+        candidate = self._select_callee(callee_name)
+        return candidate.function_id if candidate else None
+
+    def _select_callee(self, callee_name: str) -> _IndexedFunction | None:
         candidates = self._functions_by_name.get(callee_name)
         if not candidates:
             candidates = self._functions_by_short.get(self._short_name(callee_name))
         if candidates and len(candidates) == 1:
-            return candidates[0].function_id
+            return candidates[0]
+        return None
+
+    def _select_global_variable(
+        self,
+        name: str,
+        function_file_path: str,
+    ) -> _IndexedGlobalVariable | None:
+        candidates = self._global_variables_by_name.get(name, [])
+        if not candidates:
+            return None
+        file_scope = [
+            candidate
+            for candidate in candidates
+            if candidate.is_static and candidate.file_path == function_file_path
+        ]
+        if file_scope:
+            return file_scope[0]
+        external = [candidate for candidate in candidates if not candidate.is_static]
+        if external:
+            return external[0]
+        return candidates[0]
+
+    # ------------------------------------------------------------------
+    # tree-sitter helpers
+    # ------------------------------------------------------------------
+
+    @classmethod
+    def _walk_tree(cls, root: Node):
+        stack = [root]
+        while stack:
+            node = stack.pop()
+            yield node
+            stack.extend(reversed(node.children))
+
+    @classmethod
+    def _callee_name_from_node(cls, node: Node) -> str:
+        if node.type in {"identifier", "field_identifier"}:
+            return cls._node_text(node)
+        if node.type in {"qualified_identifier", "scoped_identifier"}:
+            return cls._node_text(node).replace("::template ", "::")
+        if node.type == "template_function":
+            name = node.child_by_field_name("name")
+            return cls._callee_name_from_node(name) if name is not None else cls._node_text(node)
+        if node.type == "field_expression":
+            field = node.child_by_field_name("field")
+            if field is not None:
+                return cls._callee_name_from_node(field)
+        if node.type == "parenthesized_expression" and node.named_child_count == 1:
+            return cls._callee_name_from_node(node.named_children[0])
+        return ""
+
+    @staticmethod
+    def _node_text(node: Node) -> str:
+        return node.text.decode("utf-8", errors="replace").strip()
+
+    @classmethod
+    def _collect_local_declarations(cls, root: Node) -> dict[str, list[int]]:
+        declarations: dict[str, list[int]] = defaultdict(list)
+        for node in cls._walk_tree(root):
+            if node.type not in {"parameter_declaration", "init_declarator"}:
+                continue
+            declarator = node.child_by_field_name("declarator")
+            identifier = cls._declarator_identifier(declarator)
+            if identifier is not None:
+                declarations[cls._node_text(identifier)].append(node.start_point[0])
+        return declarations
+
+    @classmethod
+    def _identifier_is_declarator(cls, node: Node) -> bool:
+        parent = node.parent
+        if parent is None:
+            return False
+        if parent.type == "function_declarator":
+            return parent.child_by_field_name("declarator") == node
+        if parent.type in {"parameter_declaration", "init_declarator"}:
+            return cls._declarator_identifier(parent.child_by_field_name("declarator")) == node
+        return False
+
+    @classmethod
+    def _declarator_identifier(cls, node: Node | None) -> Node | None:
+        if node is None:
+            return None
+        if node.type == "identifier":
+            return node
+        declarator = node.child_by_field_name("declarator")
+        if declarator is not None:
+            found = cls._declarator_identifier(declarator)
+            if found is not None:
+                return found
+        for child in node.children:
+            found = cls._declarator_identifier(child)
+            if found is not None:
+                return found
         return None
 
     # ------------------------------------------------------------------
@@ -811,6 +1068,9 @@ class CppAnalyzer:
     @staticmethod
     def _global_access_type(name: str, line_text: str) -> str:
         assignment = re.compile(
-            r"\b" + re.escape(name) + r"\s*(?:\[.*?\]\s*)?=(?!=)"
+            r"\b"
+            + re.escape(name)
+            + r"\s*(?:\[.*?\]\s*)?(?:[-+*/%&|^]?=|\+\+|--)"
         )
-        return "write" if assignment.search(line_text) else "read"
+        prefix_update = re.compile(r"(?:\+\+|--)\s*\b" + re.escape(name) + r"\b")
+        return "write" if assignment.search(line_text) or prefix_update.search(line_text) else "read"

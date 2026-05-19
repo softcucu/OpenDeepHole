@@ -37,7 +37,6 @@ description: 验证各类资源泄露候选漏洞（文件/套接字/锁/内存/
 - `view_function_code(project_id, function_name)` — 查看函数完整源码（**第一步必调**）
 - `view_struct_code(project_id, struct_name)` — 查看结构体/类定义
 - `view_global_variable_definition(project_id, var_name)` — 查看全局变量定义
-- `find_function_references(project_id, function_name)` — 查找函数调用位置（追踪所有权语义）
 - `submit_result(result_id, confirmed, severity, description, ai_analysis)` — 提交分析结论（**必须调用**）
 
 ## 分析步骤
