@@ -1,0 +1,411 @@
+rules:
+  ###########################################################################
+  # 多层指针使用前未完整判空
+  #
+  # 目标场景：
+  #   ctx->session->buf
+  #   req->msg->hdr->len
+  #   obj->child->node->value
+  #   (*pp)->node->data
+  #   (ctx->session)->buf
+  #
+  # 风险点：
+  #   只检查 ctx != NULL，但没有检查 ctx->session != NULL，
+  #   随后使用 ctx->session->buf，可能触发空指针解引用。
+  ###########################################################################
+
+  - id: ccpp.multi-layer-pointer-use-before-null-check
+    languages: [c, cpp]
+    severity: WARNING
+    message: >
+      多层指针 `$ROOT->$F1->$F2` 在使用前疑似未完整判空。
+      该访问至少依赖 `$ROOT != NULL` 和 `$ROOT->$F1 != NULL`。
+      请检查当前路径上是否已经同时校验根指针和中间层指针。
+    metadata:
+      cwe: ["CWE-476"]
+      category: security
+      technology: [c, cpp]
+      confidence: medium
+    patterns:
+      - pattern-either:
+          # 二层以上成员访问
+          - pattern: $ROOT->$F1->$F2
+          - pattern: $ROOT->$F1->$F2->$F3
+          - pattern: $ROOT->$F1->$F2->$F3->$F4
+
+          # 带括号的多层成员访问
+          - pattern: ($ROOT->$F1)->$F2
+          - pattern: (($ROOT->$F1)->$F2)->$F3
+
+          # root 是二级指针的情况
+          - pattern: (*$ROOT)->$F1->$F2
+          - pattern: ((*$ROOT)->$F1)->$F2
+
+      #######################################################################
+      # 排除：if 块中已经完整判空
+      #######################################################################
+
+      - pattern-not-inside: |
+          if ($ROOT && $ROOT->$F1) {
+            ...
+          }
+
+      - pattern-not-inside: |
+          if (($ROOT) && ($ROOT->$F1)) {
+            ...
+          }
+
+      - pattern-not-inside: |
+          if ($ROOT != NULL && $ROOT->$F1 != NULL) {
+            ...
+          }
+
+      - pattern-not-inside: |
+          if (($ROOT != NULL) && ($ROOT->$F1 != NULL)) {
+            ...
+          }
+
+      - pattern-not-inside: |
+          if (NULL != $ROOT && NULL != $ROOT->$F1) {
+            ...
+          }
+
+      - pattern-not-inside: |
+          if ((NULL != $ROOT) && (NULL != $ROOT->$F1)) {
+            ...
+          }
+
+      - pattern-not-inside: |
+          if ($ROOT != nullptr && $ROOT->$F1 != nullptr) {
+            ...
+          }
+
+      - pattern-not-inside: |
+          if (nullptr != $ROOT && nullptr != $ROOT->$F1) {
+            ...
+          }
+
+      #######################################################################
+      # 排除：嵌套 if 已经完整判空
+      #######################################################################
+
+      - pattern-not-inside: |
+          if ($ROOT) {
+            ...
+            if ($ROOT->$F1) {
+              ...
+            }
+          }
+
+      - pattern-not-inside: |
+          if ($ROOT != NULL) {
+            ...
+            if ($ROOT->$F1 != NULL) {
+              ...
+            }
+          }
+
+      - pattern-not-inside: |
+          if (NULL != $ROOT) {
+            ...
+            if (NULL != $ROOT->$F1) {
+              ...
+            }
+          }
+
+      - pattern-not-inside: |
+          if ($ROOT != nullptr) {
+            ...
+            if ($ROOT->$F1 != nullptr) {
+              ...
+            }
+          }
+
+      #######################################################################
+      # 排除：前置失败返回保护
+      #
+      # 例如：
+      #   if (!ctx || !ctx->session) return -1;
+      #   ctx->session->buf;
+      #######################################################################
+
+      - pattern-not-inside: |
+          if (!$ROOT || !$ROOT->$F1) {
+            ...
+            return ...;
+          }
+          ...
+
+      - pattern-not-inside: |
+          if ($ROOT == NULL || $ROOT->$F1 == NULL) {
+            ...
+            return ...;
+          }
+          ...
+
+      - pattern-not-inside: |
+          if (NULL == $ROOT || NULL == $ROOT->$F1) {
+            ...
+            return ...;
+          }
+          ...
+
+      - pattern-not-inside: |
+          if ($ROOT == nullptr || $ROOT->$F1 == nullptr) {
+            ...
+            return ...;
+          }
+          ...
+
+      - pattern-not-inside: |
+          if (nullptr == $ROOT || nullptr == $ROOT->$F1) {
+            ...
+            return ...;
+          }
+          ...
+
+      - pattern-not-inside: |
+          if (!$ROOT || !$ROOT->$F1)
+            return ...;
+          ...
+
+      - pattern-not-inside: |
+          if ($ROOT == NULL || $ROOT->$F1 == NULL)
+            return ...;
+          ...
+
+      - pattern-not-inside: |
+          if (NULL == $ROOT || NULL == $ROOT->$F1)
+            return ...;
+          ...
+
+      - pattern-not-inside: |
+          if ($ROOT == nullptr || $ROOT->$F1 == nullptr)
+            return ...;
+          ...
+
+      #######################################################################
+      # 排除：goto cleanup / goto out 风格保护
+      #######################################################################
+
+      - pattern-not-inside: |
+          if (!$ROOT || !$ROOT->$F1) {
+            ...
+            goto $LABEL;
+          }
+          ...
+
+      - pattern-not-inside: |
+          if ($ROOT == NULL || $ROOT->$F1 == NULL) {
+            ...
+            goto $LABEL;
+          }
+          ...
+
+      - pattern-not-inside: |
+          if (NULL == $ROOT || NULL == $ROOT->$F1) {
+            ...
+            goto $LABEL;
+          }
+          ...
+
+      - pattern-not-inside: |
+          if (!$ROOT || !$ROOT->$F1)
+            goto $LABEL;
+          ...
+
+      #######################################################################
+      # 排除：assert / BUG_ON / WARN_ON 等防御式检查
+      #######################################################################
+
+      - pattern-not-inside: |
+          assert($ROOT && $ROOT->$F1);
+          ...
+
+      - pattern-not-inside: |
+          ASSERT($ROOT && $ROOT->$F1);
+          ...
+
+      - pattern-not-inside: |
+          assert($ROOT != NULL && $ROOT->$F1 != NULL);
+          ...
+
+      - pattern-not-inside: |
+          ASSERT($ROOT != NULL && $ROOT->$F1 != NULL);
+          ...
+
+      - pattern-not-inside: |
+          BUG_ON(!$ROOT || !$ROOT->$F1);
+          ...
+
+      - pattern-not-inside: |
+          WARN_ON(!$ROOT || !$ROOT->$F1);
+          ...
+
+      #######################################################################
+      # 排除：当前访问本身就在判空条件中
+      #
+      # 例如：
+      #   if (ctx && ctx->session && ctx->session->buf) { ... }
+      #######################################################################
+
+      - pattern-not-inside: |
+          if ($ROOT && $ROOT->$F1 && $ROOT->$F1->$F2) {
+            ...
+          }
+
+      - pattern-not-inside: |
+          if ($ROOT != NULL && $ROOT->$F1 != NULL && $ROOT->$F1->$F2 != NULL) {
+            ...
+          }
+
+      - pattern-not-inside: |
+          if (NULL != $ROOT && NULL != $ROOT->$F1 && NULL != $ROOT->$F1->$F2) {
+            ...
+          }
+
+
+  ###########################################################################
+  # 已经检查 root，但没有检查中间层指针
+  #
+  # 这个规则更精准，专门抓：
+  #   if (ctx) {
+  #       ctx->session->buf;
+  #   }
+  #
+  # root 已经判空，但 ctx->session 没有判空。
+  ###########################################################################
+
+  - id: ccpp.multi-layer-pointer-root-checked-child-unchecked
+    languages: [c, cpp]
+    severity: WARNING
+    message: >
+      `$ROOT` 已经判空，但多层指针 `$ROOT->$F1->$F2`
+      的中间层 `$ROOT->$F1` 疑似未判空，存在空指针解引用风险。
+    metadata:
+      cwe: ["CWE-476"]
+      category: security
+      technology: [c, cpp]
+      confidence: high
+    patterns:
+      - pattern-either:
+          - patterns:
+              - pattern-inside: |
+                  if ($ROOT) {
+                    ...
+                  }
+              - pattern: $ROOT->$F1->$F2
+
+          - patterns:
+              - pattern-inside: |
+                  if ($ROOT != NULL) {
+                    ...
+                  }
+              - pattern: $ROOT->$F1->$F2
+
+          - patterns:
+              - pattern-inside: |
+                  if (NULL != $ROOT) {
+                    ...
+                  }
+              - pattern: $ROOT->$F1->$F2
+
+          - patterns:
+              - pattern-inside: |
+                  if ($ROOT != nullptr) {
+                    ...
+                  }
+              - pattern: $ROOT->$F1->$F2
+
+      - pattern-not-inside: |
+          if ($ROOT->$F1) {
+            ...
+          }
+
+      - pattern-not-inside: |
+          if ($ROOT->$F1 != NULL) {
+            ...
+          }
+
+      - pattern-not-inside: |
+          if (NULL != $ROOT->$F1) {
+            ...
+          }
+
+      - pattern-not-inside: |
+          if ($ROOT->$F1 != nullptr) {
+            ...
+          }
+
+      - pattern-not-inside: |
+          if ($ROOT && $ROOT->$F1) {
+            ...
+          }
+
+      - pattern-not-inside: |
+          if ($ROOT != NULL && $ROOT->$F1 != NULL) {
+            ...
+          }
+
+
+  ###########################################################################
+  # 多层指针作为函数参数使用前未完整判空
+  #
+  # 例：
+  #   parse(ctx->session->buf);
+  #   memcpy(dst, req->msg->data, len);
+  #
+  # 这类场景在协议解析、资源释放、回调派发中比较常见。
+  ###########################################################################
+
+  - id: ccpp.multi-layer-pointer-used-as-argument-before-null-check
+    languages: [c, cpp]
+    severity: WARNING
+    message: >
+      多层指针 `$ROOT->$F1->$F2` 作为函数参数传入 `$CALL(...)`，
+      使用前疑似未完整判空。请确认 `$ROOT` 和 `$ROOT->$F1` 均已校验。
+    metadata:
+      cwe: ["CWE-476"]
+      category: security
+      technology: [c, cpp]
+      confidence: medium
+    patterns:
+      - pattern-either:
+          - pattern: $CALL($ROOT->$F1->$F2, ...)
+          - pattern: $CALL(..., $ROOT->$F1->$F2, ...)
+          - pattern: $CALL($ROOT->$F1->$F2->$F3, ...)
+          - pattern: $CALL(..., $ROOT->$F1->$F2->$F3, ...)
+
+      - pattern-not-inside: |
+          if ($ROOT && $ROOT->$F1) {
+            ...
+          }
+
+      - pattern-not-inside: |
+          if ($ROOT != NULL && $ROOT->$F1 != NULL) {
+            ...
+          }
+
+      - pattern-not-inside: |
+          if (NULL != $ROOT && NULL != $ROOT->$F1) {
+            ...
+          }
+
+      - pattern-not-inside: |
+          if (!$ROOT || !$ROOT->$F1) {
+            ...
+            return ...;
+          }
+          ...
+
+      - pattern-not-inside: |
+          if ($ROOT == NULL || $ROOT->$F1 == NULL) {
+            ...
+            return ...;
+          }
+          ...
+
+      - pattern-not-inside: |
+          if (!$ROOT || !$ROOT->$F1)
+            return ...;
+          ...

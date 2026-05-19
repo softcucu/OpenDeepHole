@@ -1,0 +1,638 @@
+rules:
+  - id: c-cpp.double-free.A.release-before-goto-cleanup-same-resource
+    languages: [c, cpp]
+    severity: WARNING
+    message: >-
+      [Template A] Function $FUNC: resource '$P' is released before 'goto $LABEL'
+      and is released again in the '$LABEL' cleanup path. Verify that the first
+      release is not duplicated by the common cleanup block; if intentional, set
+      '$P = NULL' or split cleanup labels by acquisition stage.
+    metadata:
+      cwe: "CWE-415: Double Free"
+      template: "A: local error-path release + common cleanup release"
+      confidence: MEDIUM
+      audit_hint: "Check release wrappers matching free/destroy/release/unref/put/clear/reset/close-like names."
+    patterns:
+      - pattern-either:
+          - pattern: |
+              $RET $FUNC(...) {
+                ...
+                $REL1(..., $P, ...);
+                ...
+                goto $LABEL;
+                ...
+                $LABEL:
+                ...
+                $REL2(..., $P, ...);
+                ...
+              }
+          - pattern: |
+              $RET $FUNC(...) {
+                ...
+                if (...) {
+                  ...
+                  $REL1(..., $P, ...);
+                  ...
+                  goto $LABEL;
+                }
+                ...
+                $LABEL:
+                ...
+                $REL2(..., $P, ...);
+                ...
+              }
+      - metavariable-regex:
+          metavariable: $REL1
+          regex: '(?i)(^|.*::)(.*(free|kfree|vfree|kvfree|xfree|destroy|release|unref|put|drop|decref|dec_ref|dispose|cleanup|clear|reset|fini|finalize|close).*)$'
+      - metavariable-regex:
+          metavariable: $REL2
+          regex: '(?i)(^|.*::)(.*(free|kfree|vfree|kvfree|xfree|destroy|release|unref|put|drop|decref|dec_ref|dispose|cleanup|clear|reset|fini|finalize|close).*)$'
+      - pattern-not: |
+          $REL1(..., $P, ...);
+          ...
+          $P = NULL;
+          ...
+          goto $LABEL;
+
+  - id: c-cpp.double-free.A.delete-before-goto-cleanup-same-resource
+    languages: [cpp]
+    severity: WARNING
+    message: >-
+      [Template A/C++] Function $FUNC: pointer '$P' is deleted before 'goto $LABEL'
+      and deleted again in the cleanup path. Check for direct double delete; clear
+      '$P' or restructure cleanup labels.
+    metadata:
+      cwe: "CWE-415: Double Free"
+      template: "A: delete/delete[] before common cleanup"
+      confidence: HIGH
+    patterns:
+      - pattern-either:
+          - pattern: |
+              $RET $FUNC(...) {
+                ...
+                delete $P;
+                ...
+                goto $LABEL;
+                ...
+                $LABEL:
+                ...
+                delete $P;
+                ...
+              }
+          - pattern: |
+              $RET $FUNC(...) {
+                ...
+                delete[] $P;
+                ...
+                goto $LABEL;
+                ...
+                $LABEL:
+                ...
+                delete[] $P;
+                ...
+              }
+          - pattern: |
+              $RET $FUNC(...) {
+                ...
+                delete [] $P;
+                ...
+                goto $LABEL;
+                ...
+                $LABEL:
+                ...
+                delete [] $P;
+                ...
+              }
+      - pattern-not: |
+          delete $P;
+          ...
+          $P = nullptr;
+          ...
+          goto $LABEL;
+      - pattern-not: |
+          delete[] $P;
+          ...
+          $P = nullptr;
+          ...
+          goto $LABEL;
+
+  - id: c-cpp.double-free.C.member-release-before-owner-cleanup
+    languages: [c, cpp]
+    severity: WARNING
+    message: >-
+      [Template C] Function $FUNC: member '$FIELD' of owner '$OBJ' is released on
+      an error path before owner cleanup '$REL2($OBJ)'. If '$REL2' frees the same
+      member, this is a double free. Prefer single-owner cleanup or set the member
+      to NULL after the local release.
+    metadata:
+      cwe: "CWE-415: Double Free"
+      template: "C: partially initialized object; member cleanup overlaps owner destructor"
+      confidence: MEDIUM
+      audit_hint: "Prioritize parse/decode/load/import/new/init functions and free_obj/destroy_obj-style wrappers."
+    patterns:
+      - pattern-either:
+          - pattern: |
+              $RET $FUNC(...) {
+                ...
+                $REL1(..., $OBJ->$FIELD, ...);
+                ...
+                goto $LABEL;
+                ...
+                $LABEL:
+                ...
+                $REL2(..., $OBJ, ...);
+                ...
+              }
+          - pattern: |
+              $RET $FUNC(...) {
+                ...
+                $REL1(..., $OBJ.$FIELD, ...);
+                ...
+                goto $LABEL;
+                ...
+                $LABEL:
+                ...
+                $REL2(..., $OBJ, ...);
+                ...
+              }
+          - pattern: |
+              $RET $FUNC(...) {
+                ...
+                if (...) {
+                  ...
+                  $REL1(..., $OBJ->$FIELD, ...);
+                  ...
+                  goto $LABEL;
+                }
+                ...
+                $LABEL:
+                ...
+                $REL2(..., $OBJ, ...);
+                ...
+              }
+      - metavariable-regex:
+          metavariable: $REL1
+          regex: '(?i)(^|.*::)(.*(free|kfree|vfree|kvfree|xfree|destroy|release|unref|put|drop|decref|dec_ref|dispose|cleanup|clear|reset|fini|finalize|close).*)$'
+      - metavariable-regex:
+          metavariable: $REL2
+          regex: '(?i)(^|.*::)(.*(free_|_free|destroy|release|unref|put|drop|decref|dec_ref|dispose|cleanup|clear|reset|fini|finalize|close).*)$'
+      - pattern-not: |
+          $REL1(..., $OBJ->$FIELD, ...);
+          ...
+          $OBJ->$FIELD = NULL;
+          ...
+          goto $LABEL;
+      - pattern-not: |
+          $REL1(..., $OBJ.$FIELD, ...);
+          ...
+          $OBJ.$FIELD = NULL;
+          ...
+          goto $LABEL;
+
+  - id: cpp.double-free.C.member-delete-before-owner-cleanup
+    languages: [cpp]
+    severity: WARNING
+    message: >-
+      [Template C/C++] Function $FUNC: member '$FIELD' of '$OBJ' is deleted before
+      owner cleanup '$REL2($OBJ)'. If the owner cleanup/destructor deletes that
+      member too, this is a double free.
+    metadata:
+      cwe: "CWE-415: Double Free"
+      template: "C: C++ member delete overlaps owner cleanup"
+      confidence: MEDIUM
+    patterns:
+      - pattern-either:
+          - pattern: |
+              $RET $FUNC(...) {
+                ...
+                delete $OBJ->$FIELD;
+                ...
+                goto $LABEL;
+                ...
+                $LABEL:
+                ...
+                $REL2(..., $OBJ, ...);
+                ...
+              }
+          - pattern: |
+              $RET $FUNC(...) {
+                ...
+                delete[] $OBJ->$FIELD;
+                ...
+                goto $LABEL;
+                ...
+                $LABEL:
+                ...
+                $REL2(..., $OBJ, ...);
+                ...
+              }
+          - pattern: |
+              $RET $FUNC(...) {
+                ...
+                delete $OBJ.$FIELD;
+                ...
+                goto $LABEL;
+                ...
+                $LABEL:
+                ...
+                $REL2(..., $OBJ, ...);
+                ...
+              }
+      - metavariable-regex:
+          metavariable: $REL2
+          regex: '(?i)(^|.*::)(.*(free_|_free|destroy|release|unref|put|drop|decref|dec_ref|dispose|cleanup|clear|reset|fini|finalize|close).*)$'
+
+  - id: c-cpp.double-free.D.possible-ownership-transfer-then-caller-release
+    languages: [c, cpp]
+    severity: INFO
+    message: >-
+      [Template D] Function $FUNC: '$P' is passed to ownership/registration-like
+      API '$TAKE' and later released by the caller through '$REL'. Verify API
+      ownership semantics: if '$TAKE' takes/adopts/stores '$P' even on this path,
+      the later release can double free with container/object cleanup.
+    metadata:
+      cwe: "CWE-415: Double Free"
+      template: "D: callee and caller both may own the same pointer"
+      confidence: LOW
+      audit_hint: "Audit add/append/insert/set/attach/register/take/adopt/store/cache/link APIs."
+    patterns:
+      - pattern: |
+          $RET $FUNC(...) {
+            ...
+            $TAKE(..., $P, ...);
+            ...
+            $REL(..., $P, ...);
+            ...
+          }
+      - metavariable-regex:
+          metavariable: $TAKE
+          regex: '(?i)(^|.*::)(.*(add|append|insert|push|enqueue|queue|set|attach|register|link|store|take|adopt|own|assign|cache|remember|install).*)$'
+      - metavariable-regex:
+          metavariable: $REL
+          regex: '(?i)(^|.*::)(.*(free|kfree|vfree|kvfree|xfree|destroy|release|unref|put|drop|decref|dec_ref|dispose|cleanup|clear|reset|fini|finalize|close).*)$'
+      - pattern-not: |
+          $TAKE(..., $P, ...);
+          ...
+          $P = NULL;
+          ...
+          $REL(..., $P, ...);
+
+  - id: c-cpp.double-free.D.transfer-error-branch-release
+    languages: [c, cpp]
+    severity: INFO
+    message: >-
+      [Template D] Function $FUNC: return value '$RC' from ownership-like API
+      '$TAKE' controls an error branch that releases '$P'. Confirm whether '$TAKE'
+      keeps, frees, or never touches '$P' on failure. Ambiguous ownership transfer
+      APIs are common double-free roots.
+    metadata:
+      cwe: "CWE-415: Double Free"
+      template: "D: failure path after add/set/attach/register-like API"
+      confidence: LOW
+    patterns:
+      - pattern-either:
+          - pattern: |
+              $RET $FUNC(...) {
+                ...
+                $RC = $TAKE(..., $P, ...);
+                ...
+                if ($RC < 0) {
+                  ...
+                  $REL(..., $P, ...);
+                  ...
+                }
+                ...
+              }
+          - pattern: |
+              $RET $FUNC(...) {
+                ...
+                $RC = $TAKE(..., $P, ...);
+                ...
+                if (!$RC) {
+                  ...
+                  $REL(..., $P, ...);
+                  ...
+                }
+                ...
+              }
+      - metavariable-regex:
+          metavariable: $TAKE
+          regex: '(?i)(^|.*::)(.*(add|append|insert|push|enqueue|queue|set|attach|register|link|store|take|adopt|own|assign|cache|remember|install).*)$'
+      - metavariable-regex:
+          metavariable: $REL
+          regex: '(?i)(^|.*::)(.*(free|kfree|vfree|kvfree|xfree|destroy|release|unref|put|drop|decref|dec_ref|dispose|cleanup|clear|reset|fini|finalize|close).*)$'
+
+  - id: c-cpp.double-free.E.refcount-put-before-goto-cleanup-put
+    languages: [c, cpp]
+    severity: WARNING
+    message: >-
+      [Template E] Function $FUNC: reference-counted object '$P' is released by
+      '$PUT1' before 'goto $LABEL' and released again by '$PUT2' in cleanup. Check
+      get/ref/hold/grab acquisition count and split cleanup labels by acquisition
+      stage.
+    metadata:
+      cwe: "CWE-415: Double Free"
+      template: "E: reference-count get/put or hold/release imbalance"
+      confidence: MEDIUM
+      audit_hint: "Kernel-style fget/fput, get_task/put_task, kref_get/kref_put, obj_ref/obj_unref are high priority."
+    patterns:
+      - pattern-either:
+          - pattern: |
+              $RET $FUNC(...) {
+                ...
+                $P = $GET(...);
+                ...
+                if (...) {
+                  ...
+                  $PUT1(..., $P, ...);
+                  ...
+                  goto $LABEL;
+                }
+                ...
+                $LABEL:
+                ...
+                $PUT2(..., $P, ...);
+                ...
+              }
+          - pattern: |
+              $RET $FUNC(...) {
+                ...
+                $GET(..., $P, ...);
+                ...
+                if (...) {
+                  ...
+                  $PUT1(..., $P, ...);
+                  ...
+                  goto $LABEL;
+                }
+                ...
+                $LABEL:
+                ...
+                $PUT2(..., $P, ...);
+                ...
+              }
+      - metavariable-regex:
+          metavariable: $GET
+          regex: '(?i)(^|.*::)(.*(get|ref|hold|grab|acquire|lookup|find).*)$'
+      - metavariable-regex:
+          metavariable: $PUT1
+          regex: '(?i)(^|.*::)(.*(put|unref|release|drop|decref|dec_ref|kref_put|fput|iput|close).*)$'
+      - metavariable-regex:
+          metavariable: $PUT2
+          regex: '(?i)(^|.*::)(.*(put|unref|release|drop|decref|dec_ref|kref_put|fput|iput|close).*)$'
+      - pattern-not: |
+          $PUT1(..., $P, ...);
+          ...
+          $P = NULL;
+          ...
+          goto $LABEL;
+
+  - id: cpp.double-free.G.raw-pointer-owner-destructor-rule-of-five
+    languages: [cpp]
+    severity: WARNING
+    message: >-
+      [Template G] Class/struct '$CLASS' owns raw pointer field '$FIELD' and
+      releases it in the destructor. Audit copy/move constructors and assignment
+      operators: default shallow copy can make two objects delete/free the same
+      pointer. Prefer std::unique_ptr/std::vector or explicit Rule of Five.
+    metadata:
+      cwe: "CWE-415: Double Free"
+      template: "G: C++ shallow copy + destructor releases raw pointer"
+      confidence: MEDIUM
+    patterns:
+      - pattern-either:
+          - pattern: |
+              class $CLASS {
+                ...
+                $TYPE *$FIELD;
+                ...
+                ~$CLASS() {
+                  ...
+                  delete $FIELD;
+                  ...
+                }
+                ...
+              };
+          - pattern: |
+              class $CLASS {
+                ...
+                $TYPE *$FIELD;
+                ...
+                ~$CLASS() {
+                  ...
+                  delete[] $FIELD;
+                  ...
+                }
+                ...
+              };
+          - pattern: |
+              class $CLASS {
+                ...
+                $TYPE *$FIELD;
+                ...
+                ~$CLASS() {
+                  ...
+                  $REL($FIELD);
+                  ...
+                }
+                ...
+              };
+          - pattern: |
+              struct $CLASS {
+                ...
+                $TYPE *$FIELD;
+                ...
+                ~$CLASS() {
+                  ...
+                  delete $FIELD;
+                  ...
+                }
+                ...
+              };
+          - pattern: |
+              struct $CLASS {
+                ...
+                $TYPE *$FIELD;
+                ...
+                ~$CLASS() {
+                  ...
+                  $REL($FIELD);
+                  ...
+                }
+                ...
+              };
+      - metavariable-regex:
+          metavariable: $REL
+          regex: '(?i)(^|.*::)(.*(free|destroy|release|unref|put|drop|decref|dec_ref|dispose|cleanup|clear|reset|fini|finalize|close).*)$'
+
+  - id: cpp.double-free.H.smart-pointer-duplicate-raw-ownership
+    languages: [cpp]
+    severity: ERROR
+    message: >-
+      [Template H] Raw pointer '$P' is wrapped by two smart pointers ('$A' and
+      '$B'). For std::shared_ptr this can create two independent control blocks;
+      for std::unique_ptr it creates duplicate ownership. Use make_shared,
+      make_unique, or transfer/move a single owner.
+    metadata:
+      cwe: "CWE-415: Double Free"
+      template: "H: multiple smart pointers constructed from the same raw pointer"
+      confidence: HIGH
+    patterns:
+      - pattern-either:
+          - pattern: |
+              std::$SP1<$T1> $A($P);
+              ...
+              std::$SP2<$T2> $B($P);
+          - pattern: |
+              boost::$SP1<$T1> $A($P);
+              ...
+              boost::$SP2<$T2> $B($P);
+          - pattern: |
+              auto $A = std::$SP1<$T1>($P);
+              ...
+              auto $B = std::$SP2<$T2>($P);
+          - pattern: |
+              auto $A = boost::$SP1<$T1>($P);
+              ...
+              auto $B = boost::$SP2<$T2>($P);
+      - metavariable-regex:
+          metavariable: $SP1
+          regex: '(unique_ptr|shared_ptr|auto_ptr|scoped_ptr)'
+      - metavariable-regex:
+          metavariable: $SP2
+          regex: '(unique_ptr|shared_ptr|auto_ptr|scoped_ptr)'
+      - pattern-not: |
+          std::$SP1<$T1> $A(nullptr);
+          ...
+          std::$SP2<$T2> $B(nullptr);
+
+  - id: cpp.double-free.H.smart-pointer-get-manual-release
+    languages: [cpp]
+    severity: ERROR
+    message: >-
+      [Template H] Pointer '$P' obtained from '$OWNER.get()' is manually released.
+      The smart pointer still owns the object and will release it again. Use
+      release() only when intentionally transferring ownership, or do not manually
+      delete/free the result of get().
+    metadata:
+      cwe: "CWE-415: Double Free"
+      template: "H: manual free/delete of smart_ptr::get() result"
+      confidence: HIGH
+    patterns:
+      - pattern-either:
+          - pattern: |
+              $P = $OWNER.get();
+              ...
+              delete $P;
+          - pattern: |
+              $P = $OWNER.get();
+              ...
+              delete[] $P;
+          - pattern: |
+              $P = $OWNER.get();
+              ...
+              $REL(..., $P, ...);
+          - pattern: |
+              delete $OWNER.get();
+          - pattern: |
+              delete[] $OWNER.get();
+          - pattern: |
+              $REL(..., $OWNER.get(), ...);
+      - metavariable-regex:
+          metavariable: $REL
+          regex: '(?i)(^|.*::)(.*(free|destroy|release|unref|put|drop|decref|dec_ref|dispose|cleanup|clear|reset|fini|finalize|close).*)$'
+
+  - id: cpp.double-free.I.new-pointer-released-by-free-like-function
+    languages: [cpp]
+    severity: ERROR
+    message: >-
+      [Template I] Pointer '$P' allocated with 'new' is released by free-like
+      wrapper '$REL'. This mixes allocation/deallocation families and can corrupt
+      heap state or double free. Use delete/delete[] or the allocator's matching
+      deleter.
+    metadata:
+      cwe: "CWE-415: Double Free"
+      template: "I: allocator/deallocator family mismatch: new -> free-like"
+      confidence: HIGH
+    patterns:
+      - pattern-either:
+          - pattern: |
+              $P = new $TYPE(...);
+              ...
+              $REL(..., $P, ...);
+          - pattern: |
+              $P = new $TYPE;
+              ...
+              $REL(..., $P, ...);
+      - metavariable-regex:
+          metavariable: $REL
+          regex: '(?i)(^|.*::)(.*(free|kfree|vfree|kvfree|xfree|g_free|xmlFree|OPENSSL_free|av_free|destroy|release|unref|put|dispose|cleanup|clear|reset|fini|finalize|close).*)$'
+
+  - id: cpp.double-free.I.new-array-deleted-as-scalar
+    languages: [cpp]
+    severity: ERROR
+    message: >-
+      [Template I] Pointer '$P' allocated with 'new[]' is released with scalar
+      'delete'. Use 'delete[] $P'. This allocator/deallocator mismatch can corrupt
+      the heap and may appear as double free depending on runtime allocator.
+    metadata:
+      cwe: "CWE-415: Double Free"
+      template: "I: new[] -> delete mismatch"
+      confidence: HIGH
+    pattern-either:
+      - pattern: |
+          $P = new $TYPE[$N];
+          ...
+          delete $P;
+      - pattern: |
+          $P = new $TYPE[...];
+          ...
+          delete $P;
+
+  - id: cpp.double-free.I.new-scalar-deleted-as-array
+    languages: [cpp]
+    severity: ERROR
+    message: >-
+      [Template I] Pointer '$P' allocated with scalar 'new' is released with
+      'delete[]'. Use scalar 'delete $P'. This allocator/deallocator mismatch can
+      corrupt heap state and may manifest as double free.
+    metadata:
+      cwe: "CWE-415: Double Free"
+      template: "I: new -> delete[] mismatch"
+      confidence: HIGH
+    pattern-either:
+      - pattern: |
+          $P = new $TYPE(...);
+          ...
+          delete[] $P;
+      - pattern: |
+          $P = new $TYPE;
+          ...
+          delete[] $P;
+
+  - id: c-cpp.double-free.I.malloc-like-pointer-deleted
+    languages: [c, cpp]
+    severity: ERROR
+    message: >-
+      [Template I] Pointer '$P' is returned by malloc/alloc-like wrapper '$ALLOC'
+      and later released with C++ delete/delete[]. Verify allocator family. For
+      malloc/calloc/realloc/strdup/kmalloc/vmalloc/g_malloc/xmlMalloc/av_malloc,
+      use the matching free wrapper instead of delete.
+    metadata:
+      cwe: "CWE-415: Double Free"
+      template: "I: malloc/alloc-like -> delete mismatch"
+      confidence: HIGH
+      audit_hint: "The allocator regex is intentionally broad; tune it to project-specific xmalloc/new_* wrappers."
+    patterns:
+      - pattern-either:
+          - pattern: |
+              $P = $ALLOC(...);
+              ...
+              delete $P;
+          - pattern: |
+              $P = $ALLOC(...);
+              ...
+              delete[] $P;
+      - metavariable-regex:
+          metavariable: $ALLOC
+          regex: '(?i)(^|.*::)(.*(malloc|calloc|realloc|xalloc|xmalloc|xcalloc|xrealloc|strdup|strndup|memdup|kmalloc|kzalloc|vmalloc|vzalloc|g_malloc|g_new|xmlMalloc|OPENSSL_malloc|av_malloc|alloc).*)$'

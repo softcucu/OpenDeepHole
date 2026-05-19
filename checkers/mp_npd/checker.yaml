@@ -1,0 +1,9 @@
+name: mp_npd
+label: Multi-Pointer Null Pointer Dereference / 多层指针空指针解引用
+description: >
+  检测 C/C++ 中多层指针（如 ctx->session->buf）在使用前未完整判空导致的空指针解引用
+  （CWE-476）。覆盖：仅检查根指针未检查中间层、中间层指针未判空直接二级访问、
+  多层指针作为函数参数前未判空等 3 类典型场景。
+enabled: true
+mode: opencode
+visibility: admin
