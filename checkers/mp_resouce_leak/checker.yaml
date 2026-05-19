@@ -1,0 +1,10 @@
+name: mp_resouce_leak
+label: Multi-Pointer Member Resource Leak / 多层指针成员资源泄露
+description: >
+  检测 C/C++ 中多层指针成员（如 ctx->session->buf）持有资源后未释放、被覆盖、
+  被直接置 NULL 或接收 realloc 返回值丢失的资源泄露模式（CWE-401 / CWE-772）。
+  覆盖：获取后未释放、重复赋值覆盖、置空前未释放、realloc 返回值丢失、
+  临时变量转交多层成员后未释放等 5 类场景。
+enabled: true
+mode: opencode
+visibility: admin

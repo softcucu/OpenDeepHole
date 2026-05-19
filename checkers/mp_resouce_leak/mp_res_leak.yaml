@@ -1,0 +1,314 @@
+rules:
+  ###########################################################################
+  # 1. 多层指针成员接收资源，但当前函数内未看到任何释放/托管调用
+  #
+  # 例：
+  #   ctx->session->buf = VOS_Malloc(len);
+  #   obj->child->fd = VOS_Open(...);
+  #   req->msg->data->ptr = custom_alloc(...);
+  #
+  # 该规则不关注是否异常路径，而是关注：
+  #   多层指针成员 = 资源获取函数(...)
+  #   之后当前函数内没有看到该成员被传入任何函数做释放/托管。
+  ###########################################################################
+
+  - id: ccpp.multi-ptr-member-resource-acquire-no-release-in-function
+    languages: [c, cpp]
+    severity: WARNING
+    message: >
+      多层指针成员 `$FIELD` 接收了资源获取函数 `$ACQ(...)` 的返回值，
+      但当前函数内未看到 `$FIELD` 被传入释放/托管函数，疑似多层指针资源泄露。
+      请检查 `$FIELD` 的所有权是否转移到其他对象，或是否在 cleanup/destroy/free 路径中释放。
+    metadata:
+      cwe: ["CWE-401", "CWE-772"]
+      category: security
+      technology: [c, cpp]
+    patterns:
+      - pattern-inside: |
+          $RET $FUNC(...) {
+            ...
+          }
+
+      - pattern: |
+          $FIELD = $ACQ(...);
+
+      # 准确限定：左值必须是多层指针成员，至少两层 ->
+      - metavariable-pattern:
+          metavariable: $FIELD
+          patterns:
+            - pattern-either:
+                - pattern: $ROOT->$F1->$F2
+                - pattern: $ROOT->$F1->$F2->$F3
+                - pattern: $ROOT->$F1->$F2->$F3->$F4
+                - pattern: ($ROOT->$F1)->$F2
+                - pattern: (($ROOT->$F1)->$F2)->$F3
+                - pattern: (*$ROOT)->$F1->$F2
+                - pattern: ((*$ROOT)->$F1)->$F2
+
+      # 资源获取函数：宽匹配各种封装
+      - metavariable-regex:
+          metavariable: $ACQ
+          regex: (?i)^.*(alloc|malloc|calloc|realloc|zalloc|kzalloc|vmalloc|strdup|strndup|memdup|create|init|open|fopen|fdopen|socket|accept|connect|mmap|map|dup|clone|get|acquire|obtain|load|make|construct|new|reserve).*$
+
+      # 如果当前函数内曾把该多层成员传给某个函数，则认为可能释放/托管，避免过度误报。
+      # 这里不限定函数名，是为了兼容 VOS_Free、OSAL_FreeMem、FooDestroy、BarClose 等任意封装。
+      - pattern-not-inside: |
+          $RET $FUNC(...) {
+            ...
+            $ANY($FIELD, ...);
+            ...
+          }
+
+      - pattern-not-inside: |
+          $RET $FUNC(...) {
+            ...
+            $ANY(..., $FIELD, ...);
+            ...
+          }
+
+
+  ###########################################################################
+  # 2. 多层指针成员被重复赋值，旧资源未释放就被覆盖
+  #
+  # 例：
+  #   ctx->session->buf = VOS_Malloc(100);
+  #   ...
+  #   ctx->session->buf = VOS_Malloc(200);  // 旧 buf 丢失
+  ###########################################################################
+
+  - id: ccpp.multi-ptr-member-resource-overwrite-without-release
+    languages: [c, cpp]
+    severity: ERROR
+    message: >
+      多层指针成员 `$FIELD` 在两次资源赋值之间没有看到释放/托管调用，
+      第二次赋值可能覆盖旧资源，导致资源泄露。
+    metadata:
+      cwe: ["CWE-401", "CWE-772"]
+      category: security
+      technology: [c, cpp]
+    patterns:
+      - pattern-inside: |
+          $RET $FUNC(...) {
+            ...
+          }
+
+      - pattern: |
+          $FIELD = $ACQ1(...);
+          ...
+          $FIELD = $ACQ2(...);
+
+      - metavariable-pattern:
+          metavariable: $FIELD
+          patterns:
+            - pattern-either:
+                - pattern: $ROOT->$F1->$F2
+                - pattern: $ROOT->$F1->$F2->$F3
+                - pattern: $ROOT->$F1->$F2->$F3->$F4
+                - pattern: ($ROOT->$F1)->$F2
+                - pattern: (($ROOT->$F1)->$F2)->$F3
+                - pattern: (*$ROOT)->$F1->$F2
+                - pattern: ((*$ROOT)->$F1)->$F2
+
+      - metavariable-regex:
+          metavariable: $ACQ1
+          regex: (?i)^.*(alloc|malloc|calloc|realloc|zalloc|kzalloc|vmalloc|strdup|strndup|memdup|create|init|open|fopen|fdopen|socket|accept|connect|mmap|map|dup|clone|get|acquire|obtain|load|make|construct|new|reserve).*$
+
+      - metavariable-regex:
+          metavariable: $ACQ2
+          regex: (?i)^.*(alloc|malloc|calloc|realloc|zalloc|kzalloc|vmalloc|strdup|strndup|memdup|create|init|open|fopen|fdopen|socket|accept|connect|mmap|map|dup|clone|get|acquire|obtain|load|make|construct|new|reserve).*$
+
+      # 两次赋值之间如果存在把该字段传给函数，则认为可能已释放/托管
+      - pattern-not: |
+          $FIELD = $ACQ1(...);
+          ...
+          $ANY($FIELD, ...);
+          ...
+          $FIELD = $ACQ2(...);
+
+      - pattern-not: |
+          $FIELD = $ACQ1(...);
+          ...
+          $ANY(..., $FIELD, ...);
+          ...
+          $FIELD = $ACQ2(...);
+
+
+  ###########################################################################
+  # 3. 多层指针成员被置 NULL，但置空前未释放
+  #
+  # 例：
+  #   ctx->session->buf = NULL;     // 如果之前持有资源，直接丢失
+  #
+  # 这个规则适合抓 cleanup/reset 函数里的典型泄露。
+  ###########################################################################
+
+  - id: ccpp.multi-ptr-member-null-without-release
+    languages: [c, cpp]
+    severity: WARNING
+    message: >
+      多层指针成员 `$FIELD` 被直接置为 NULL，
+      但当前函数内在置空前未看到释放/托管调用，可能导致原资源泄露。
+    metadata:
+      cwe: ["CWE-401", "CWE-772"]
+      category: security
+      technology: [c, cpp]
+    patterns:
+      - pattern-inside: |
+          $RET $FUNC(...) {
+            ...
+          }
+
+      - pattern-either:
+          - pattern: |
+              $FIELD = NULL;
+          - pattern: |
+              $FIELD = nullptr;
+          - pattern: |
+              $FIELD = 0;
+
+      - metavariable-pattern:
+          metavariable: $FIELD
+          patterns:
+            - pattern-either:
+                - pattern: $ROOT->$F1->$F2
+                - pattern: $ROOT->$F1->$F2->$F3
+                - pattern: $ROOT->$F1->$F2->$F3->$F4
+                - pattern: ($ROOT->$F1)->$F2
+                - pattern: (($ROOT->$F1)->$F2)->$F3
+                - pattern: (*$ROOT)->$F1->$F2
+                - pattern: ((*$ROOT)->$F1)->$F2
+
+      - pattern-not: |
+          $ANY($FIELD, ...);
+          ...
+          $FIELD = NULL;
+
+      - pattern-not: |
+          $ANY(..., $FIELD, ...);
+          ...
+          $FIELD = NULL;
+
+      - pattern-not: |
+          $ANY($FIELD, ...);
+          ...
+          $FIELD = nullptr;
+
+      - pattern-not: |
+          $ANY(..., $FIELD, ...);
+          ...
+          $FIELD = nullptr;
+
+
+  ###########################################################################
+  # 4. 多层指针成员直接接收 realloc 类函数返回值
+  #
+  # 例：
+  #   ctx->session->buf = realloc(ctx->session->buf, new_size);
+  #
+  # 如果 realloc 失败返回 NULL，旧指针会丢失，造成泄露。
+  ###########################################################################
+
+  - id: ccpp.multi-ptr-member-direct-realloc-result-lost
+    languages: [c, cpp]
+    severity: ERROR
+    message: >
+      多层指针成员 `$FIELD` 直接接收 `$REALLOC(...)` 返回值。
+      如果 realloc 类函数失败返回 NULL，旧资源指针会丢失，导致资源泄露。
+      建议使用临时变量保存返回值，成功后再赋给 `$FIELD`。
+    metadata:
+      cwe: ["CWE-401"]
+      category: security
+      technology: [c, cpp]
+    patterns:
+      - pattern: |
+          $FIELD = $REALLOC($FIELD, ...);
+
+      - metavariable-pattern:
+          metavariable: $FIELD
+          patterns:
+            - pattern-either:
+                - pattern: $ROOT->$F1->$F2
+                - pattern: $ROOT->$F1->$F2->$F3
+                - pattern: $ROOT->$F1->$F2->$F3->$F4
+                - pattern: ($ROOT->$F1)->$F2
+                - pattern: (($ROOT->$F1)->$F2)->$F3
+                - pattern: (*$ROOT)->$F1->$F2
+                - pattern: ((*$ROOT)->$F1)->$F2
+
+      - metavariable-regex:
+          metavariable: $REALLOC
+          regex: (?i)^.*(realloc|resize|expand|grow|renew).*$
+
+
+  ###########################################################################
+  # 5. 临时资源变量赋给多层指针成员后，当前函数内没有释放/托管该多层成员
+  #
+  # 例：
+  #   buf = VOS_Malloc(len);
+  #   ...
+  #   ctx->session->buf = buf;
+  #
+  # 这种场景资源所有权转移到了多层成员，需要确认释放点。
+  ###########################################################################
+
+  - id: ccpp.temp-resource-stored-into-multi-ptr-member-no-release
+    languages: [c, cpp]
+    severity: WARNING
+    message: >
+      临时资源变量 `$TMP` 被保存到多层指针成员 `$FIELD`，
+      但当前函数内未看到 `$FIELD` 被释放/托管，疑似多层指针资源泄露或所有权不清晰。
+    metadata:
+      cwe: ["CWE-401", "CWE-772"]
+      category: security
+      technology: [c, cpp]
+    patterns:
+      - pattern-inside: |
+          $RET $FUNC(...) {
+            ...
+          }
+
+      - pattern-either:
+          - pattern: |
+              $TMP = $ACQ(...);
+              ...
+              $FIELD = $TMP;
+
+          - pattern: |
+              $T $TMP = $ACQ(...);
+              ...
+              $FIELD = $TMP;
+
+          - pattern: |
+              $T *$TMP = $ACQ(...);
+              ...
+              $FIELD = $TMP;
+
+      - metavariable-pattern:
+          metavariable: $FIELD
+          patterns:
+            - pattern-either:
+                - pattern: $ROOT->$F1->$F2
+                - pattern: $ROOT->$F1->$F2->$F3
+                - pattern: $ROOT->$F1->$F2->$F3->$F4
+                - pattern: ($ROOT->$F1)->$F2
+                - pattern: (($ROOT->$F1)->$F2)->$F3
+                - pattern: (*$ROOT)->$F1->$F2
+                - pattern: ((*$ROOT)->$F1)->$F2
+
+      - metavariable-regex:
+          metavariable: $ACQ
+          regex: (?i)^.*(alloc|malloc|calloc|realloc|zalloc|kzalloc|vmalloc|strdup|strndup|memdup|create|init|open|fopen|fdopen|socket|accept|connect|mmap|map|dup|clone|get|acquire|obtain|load|make|construct|new|reserve).*$
+
+      - pattern-not-inside: |
+          $RET $FUNC(...) {
+            ...
+            $ANY($FIELD, ...);
+            ...
+          }
+
+      - pattern-not-inside: |
+          $RET $FUNC(...) {
+            ...
+            $ANY(..., $FIELD, ...);
+            ...
+          }
