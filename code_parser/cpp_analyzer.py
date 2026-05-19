@@ -39,6 +39,7 @@ _FUNCTION_KINDS = {"function", "func", "f", "method"}
 _STRUCT_KINDS = {"struct", "class", "union", "s", "c", "u"}
 _TYPEDEF_KINDS = {"typedef", "t"}
 _GLOBAL_VAR_KINDS = {"variable", "externvar", "var", "v", "x"}
+_TOOL_POPEN_TEXT_KWARGS = {"text": True, "encoding": "utf-8", "errors": "replace"}
 
 IndexProgressCallback = Callable[[int, int], None]
 IndexStageProgressCallback = Callable[[str, int, int], None]
@@ -46,6 +47,14 @@ IndexStageProgressCallback = Callable[[str, int, int], None]
 
 class CodeIndexToolError(RuntimeError):
     """Raised when ctags/cscope are missing or unusable."""
+
+
+def _decode_tool_output(value: object) -> str:
+    if isinstance(value, bytes):
+        return value.decode("utf-8", "replace")
+    if isinstance(value, str):
+        return value
+    return ""
 
 
 @dataclass(frozen=True)
@@ -82,7 +91,7 @@ class _CscopeLineQuerySession:
                 CppAnalyzer._relative_path(project_root, cscope_db),
             ],
             cwd=project_root,
-            text=True,
+            **_TOOL_POPEN_TEXT_KWARGS,
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -282,18 +291,16 @@ class CppAnalyzer:
 
         version = subprocess.run(
             ["ctags", "--version"],
-            text=True,
             capture_output=True,
             check=False,
         )
-        if version.returncode != 0 or "Universal Ctags" not in version.stdout:
+        if version.returncode != 0 or "Universal Ctags" not in _decode_tool_output(version.stdout):
             raise CodeIndexToolError(
                 "ctags 必须是 Universal Ctags，当前 ctags 不支持所需的 JSON 输出。"
             )
 
         cscope_version = subprocess.run(
             ["cscope", "-V"],
-            text=True,
             capture_output=True,
             check=False,
         )
@@ -338,18 +345,24 @@ class CppAnalyzer:
         proc = subprocess.run(
             cmd,
             cwd=project_root,
-            text=True,
             capture_output=True,
             check=False,
         )
 
+        stdout = _decode_tool_output(proc.stdout)
+        stderr = _decode_tool_output(proc.stderr)
         if proc.returncode != 0:
             raise CodeIndexToolError(
-                "ctags 代码索引失败: " + (proc.stderr.strip() or proc.stdout.strip())
+                "ctags 代码索引失败: " + (stderr.strip() or stdout.strip())
+            )
+
+        if proc.stdout is None:
+            raise CodeIndexToolError(
+                "ctags 代码索引失败: 无法读取 ctags 输出，请检查 ctags 输出编码或安装是否正常。"
             )
 
         entries: list[dict] = []
-        for line in proc.stdout.splitlines():
+        for line in stdout.splitlines():
             if not line.strip():
                 continue
             try:
@@ -437,13 +450,14 @@ class CppAnalyzer:
                 self._relative_path(project_root, db_path),
             ],
             cwd=project_root,
-            text=True,
             capture_output=True,
             check=False,
         )
+        stdout = _decode_tool_output(proc.stdout)
+        stderr = _decode_tool_output(proc.stderr)
         if proc.returncode != 0:
             raise CodeIndexToolError(
-                "cscope 调用关系索引失败: " + (proc.stderr.strip() or proc.stdout.strip())
+                "cscope 调用关系索引失败: " + (stderr.strip() or stdout.strip())
             )
         return db_path
 

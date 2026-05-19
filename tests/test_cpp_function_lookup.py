@@ -4,6 +4,7 @@ from pathlib import Path
 
 from code_parser import CodeDatabase
 from code_parser.cpp_analyzer import CppAnalyzer
+from code_parser.cpp_analyzer import CodeIndexToolError
 from code_parser.cpp_analyzer import _CscopeCall
 
 
@@ -281,6 +282,9 @@ def test_ctags_file_list_uses_project_work_dir_relative_path(
     def fake_run(cmd, **kwargs):
         captured.append(cmd)
         assert kwargs["cwd"] == tmp_path
+        assert kwargs.get("text") is None
+        assert "encoding" not in kwargs
+        assert "errors" not in kwargs
         list_arg = cmd[cmd.index("-L") + 1]
         assert not Path(list_arg).is_absolute()
         assert ":" not in list_arg
@@ -307,6 +311,61 @@ def test_ctags_file_list_uses_project_work_dir_relative_path(
     )
 
 
+def test_ctags_empty_stdout_reports_index_error(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    (tmp_path / "sample.cpp").write_text("int main(void) { return 0; }\n", encoding="utf-8")
+
+    def fake_run(cmd, **kwargs):
+        assert kwargs.get("text") is None
+        assert "encoding" not in kwargs
+        assert "errors" not in kwargs
+        return subprocess.CompletedProcess(cmd, 0, stdout=None, stderr=None)
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    db = CodeDatabase(tmp_path / "code_index.db")
+    analyzer = CppAnalyzer(db)
+    analyzer._ensure_tools_available = lambda: None
+    analyzer._index_cscope_calls = lambda *_args, **_kwargs: None
+    try:
+        try:
+            analyzer.analyze_directory(tmp_path)
+        except CodeIndexToolError as exc:
+            assert "无法读取 ctags 输出" in str(exc)
+        else:
+            raise AssertionError("expected CodeIndexToolError")
+    finally:
+        db.close()
+
+
+def test_ctags_output_is_decoded_after_binary_capture(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    (tmp_path / "sample.cpp").write_text("int main(void) { return 0; }\n", encoding="utf-8")
+
+    def fake_run(cmd, **kwargs):
+        assert kwargs.get("text") is None
+        payload = (
+            b'{"_type":"tag","name":"main","path":"sample.cpp","line":1,'
+            b'"end":1,"kind":"function","signature":"(void)"}\n'
+            b"\xaf\n"
+        )
+        return subprocess.CompletedProcess(cmd, 0, stdout=payload, stderr=b"")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    db = CodeDatabase(tmp_path / "code_index.db")
+    analyzer = CppAnalyzer(db)
+    analyzer._ensure_tools_available = lambda: None
+    analyzer._index_cscope_calls = lambda *_args, **_kwargs: None
+    try:
+        analyzer.analyze_directory(tmp_path)
+        assert db.get_functions_by_name("main")
+    finally:
+        db.close()
+
+
 def test_cscope_uses_project_work_dir_relative_paths(
     tmp_path: Path,
     monkeypatch,
@@ -320,6 +379,9 @@ def test_cscope_uses_project_work_dir_relative_paths(
     def fake_run(cmd, **kwargs):
         captured.append(cmd)
         assert kwargs["cwd"] == tmp_path
+        assert kwargs.get("text") is None
+        assert "encoding" not in kwargs
+        assert "errors" not in kwargs
         return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
 
     monkeypatch.setattr(subprocess, "run", fake_run)
@@ -542,6 +604,8 @@ int caller(void) {
     assert len(popen_instances) == 1
     proc = popen_instances[0]
     assert proc.kwargs["cwd"] == tmp_path
+    assert proc.kwargs["encoding"] == "utf-8"
+    assert proc.kwargs["errors"] == "replace"
     assert proc.cmd == [
         "cscope",
         "-d",

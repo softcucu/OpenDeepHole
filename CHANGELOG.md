@@ -13,6 +13,7 @@
 - **修复** 旧版 tree-sitter `code_index.db` 不再被误判为可复用索引，缺少 `ctags` 或 `cscope` 时会明确失败并提示安装
 - **修复** Windows Agent 启动脚本改为安装带 JSON 输出支持的 MSYS2 MinGW64 `ctags`，并确保 mingw64 工具路径优先于 usr 路径，避免索引时报 `output format "json" is not available`
 - **修复** ctags/cscope 中间文件改为写入源码目录内并使用相对路径调用，避免 Windows 下 cscope 解析系统临时目录盘符路径失败
+- **修复** Windows Agent 代码索引读取 ctags/cscope 输出时统一使用 UTF-8 容错解码，避免默认 GBK 解码失败后触发 `NoneType.splitlines` 扫描失败
 - **修复** INF_LOOP semgrep 静态扫描超时调整为 15 分钟，并在超时后读取已写出的 JSON 结果继续进入 LLM 分析，避免扫描完成但进程未退出时丢失候选点
 
 ## 2026-05-18
