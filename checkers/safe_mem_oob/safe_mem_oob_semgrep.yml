@@ -1,0 +1,290 @@
+rules:
+  - id: c-cpp.safe-mem.member-non-member-size
+    languages: [c, cpp]
+    severity: ERROR
+    message: >
+      Function=`$FUNC`. Safe memory call `$CALL` writes to member target but dstsz is not the member itself.
+      The real writable region is likely the field, not the parent object or an unrelated size expression.
+    metadata:
+      category: security
+      cwe:
+        - "CWE-787: Out-of-bounds Write"
+      risk_class: "B: member target with non-member dstsz"
+    patterns:
+      - pattern-either:
+          - pattern-inside: |
+              $RET $FUNC(...) {
+                ...
+              }
+          - pattern-inside: |
+              $RET $QUAL::$FUNC(...) {
+                ...
+              }
+      - pattern-either:
+          - pattern: $CALL($OBJ.$FIELD, $DSTSZ, $ARG3, $COUNT)
+          - pattern: $CALL(&$OBJ.$FIELD, $DSTSZ, $ARG3, $COUNT)
+          - pattern: $CALL($P->$FIELD, $DSTSZ, $ARG3, $COUNT)
+          - pattern: $CALL(&$P->$FIELD, $DSTSZ, $ARG3, $COUNT)
+          - pattern: $CALL($OBJ.$FIELD, $DSTSZ, $ARG3)
+          - pattern: $CALL(&$OBJ.$FIELD, $DSTSZ, $ARG3)
+          - pattern: $CALL($P->$FIELD, $DSTSZ, $ARG3)
+          - pattern: $CALL(&$P->$FIELD, $DSTSZ, $ARG3)
+      - pattern-not: $CALL($OBJ.$FIELD, sizeof($OBJ.$FIELD), $ARG3, $COUNT)
+      - pattern-not: $CALL(&$OBJ.$FIELD, sizeof($OBJ.$FIELD), $ARG3, $COUNT)
+      - pattern-not: $CALL($P->$FIELD, sizeof($P->$FIELD), $ARG3, $COUNT)
+      - pattern-not: $CALL(&$P->$FIELD, sizeof($P->$FIELD), $ARG3, $COUNT)
+      - pattern-not: $CALL($OBJ.$FIELD, sizeof($OBJ.$FIELD), $ARG3)
+      - pattern-not: $CALL(&$OBJ.$FIELD, sizeof($OBJ.$FIELD), $ARG3)
+      - pattern-not: $CALL($P->$FIELD, sizeof($P->$FIELD), $ARG3)
+      - pattern-not: $CALL(&$P->$FIELD, sizeof($P->$FIELD), $ARG3)
+      - metavariable-regex:
+          metavariable: $CALL
+          regex: '^(memcpy_s|memmove_s|memset_s|memcpy_sp|memcpy_safe|VOS_memcpy_safe|VOS_MemCpy_S|VOS_Mem_Copy_Safe|VOS_MemCpy_Safe|strcpy_s|strcat_s|wcscpy_s|wcscat_s|strncpy_s|strncat_s|wcsncpy_s|wcsncat_s|strcpy_safe|strcat_safe|strncpy_safe|strncat_safe|VOS_StrCpy_S|VOS_StrCat_S|VOS_StrNCpy_S|VOS_StrNCat_S|VOS_StrCpy_Safe|VOS_StrCat_Safe|VOS_StrNCpy_Safe|VOS_StrNCat_Safe)$'
+
+  - id: c-cpp.safe-mem.offset-full-size
+    languages: [c, cpp]
+    severity: ERROR
+    message: >
+      Function=`$FUNC`. Safe memory call `$CALL` writes to an offset destination while dstsz still uses the full object size.
+      The real remaining space is reduced by the offset or index.
+    metadata:
+      category: security
+      cwe:
+        - "CWE-787: Out-of-bounds Write"
+      risk_class: "B: offset destination with full dstsz"
+    patterns:
+      - pattern-either:
+          - pattern-inside: |
+              $RET $FUNC(...) {
+                ...
+              }
+          - pattern-inside: |
+              $RET $QUAL::$FUNC(...) {
+                ...
+              }
+      - pattern-either:
+          - pattern: $CALL($BUF + $OFF, sizeof($BUF), $ARG3, $COUNT)
+          - pattern: $CALL($BUF - $OFF, sizeof($BUF), $ARG3, $COUNT)
+          - pattern: $CALL(&$BUF[$IDX], sizeof($BUF), $ARG3, $COUNT)
+          - pattern: $CALL(($CAST *)$BUF + $OFF, sizeof($TYPE), $ARG3, $COUNT)
+          - pattern: $CALL((char *)$BUF + $OFF, sizeof($TYPE), $ARG3, $COUNT)
+          - pattern: $CALL((unsigned char *)$BUF + $OFF, sizeof($TYPE), $ARG3, $COUNT)
+          - pattern: $CALL((uint8_t *)$BUF + $OFF, sizeof($TYPE), $ARG3, $COUNT)
+          - pattern: $CALL($BUF + $OFF, sizeof($BUF), $ARG3)
+          - pattern: $CALL($BUF - $OFF, sizeof($BUF), $ARG3)
+          - pattern: $CALL(&$BUF[$IDX], sizeof($BUF), $ARG3)
+          - pattern: $CALL(($CAST *)$BUF + $OFF, sizeof($TYPE), $ARG3)
+          - pattern: $CALL((char *)$BUF + $OFF, sizeof($TYPE), $ARG3)
+          - pattern: $CALL((unsigned char *)$BUF + $OFF, sizeof($TYPE), $ARG3)
+          - pattern: $CALL((uint8_t *)$BUF + $OFF, sizeof($TYPE), $ARG3)
+      - metavariable-regex:
+          metavariable: $CALL
+          regex: '^(memcpy_s|memmove_s|memset_s|memcpy_sp|memcpy_safe|VOS_memcpy_safe|VOS_MemCpy_S|VOS_Mem_Copy_Safe|VOS_MemCpy_Safe|strcpy_s|strcat_s|wcscpy_s|wcscat_s|strncpy_s|strncat_s|wcsncpy_s|wcsncat_s|strcpy_safe|strcat_safe|strncpy_safe|strncat_safe|VOS_StrCpy_S|VOS_StrCat_S|VOS_StrNCpy_S|VOS_StrNCat_S|VOS_StrCpy_Safe|VOS_StrCat_Safe|VOS_StrNCpy_Safe|VOS_StrNCat_Safe)$'
+
+  - id: c-cpp.safe-mem.member-offset-full-member-size
+    languages: [c, cpp]
+    severity: ERROR
+    message: >
+      Function=`$FUNC`. Safe memory call `$CALL` writes to an offset inside a member while dstsz still uses the full member size.
+      The real remaining space is sizeof(member) minus the offset.
+    metadata:
+      category: security
+      cwe:
+        - "CWE-787: Out-of-bounds Write"
+      risk_class: "B: member offset destination with full member dstsz"
+    patterns:
+      - pattern-either:
+          - pattern-inside: |
+              $RET $FUNC(...) {
+                ...
+              }
+          - pattern-inside: |
+              $RET $QUAL::$FUNC(...) {
+                ...
+              }
+      - pattern-either:
+          - pattern: $CALL($OBJ.$FIELD + $OFF, sizeof($OBJ.$FIELD), $ARG3, $COUNT)
+          - pattern: $CALL(&$OBJ.$FIELD[$IDX], sizeof($OBJ.$FIELD), $ARG3, $COUNT)
+          - pattern: $CALL($P->$FIELD + $OFF, sizeof($P->$FIELD), $ARG3, $COUNT)
+          - pattern: $CALL(&$P->$FIELD[$IDX], sizeof($P->$FIELD), $ARG3, $COUNT)
+          - pattern: $CALL($OBJ.$FIELD + $OFF, sizeof($OBJ.$FIELD), $ARG3)
+          - pattern: $CALL(&$OBJ.$FIELD[$IDX], sizeof($OBJ.$FIELD), $ARG3)
+          - pattern: $CALL($P->$FIELD + $OFF, sizeof($P->$FIELD), $ARG3)
+          - pattern: $CALL(&$P->$FIELD[$IDX], sizeof($P->$FIELD), $ARG3)
+      - metavariable-regex:
+          metavariable: $CALL
+          regex: '^(memcpy_s|memmove_s|memset_s|memcpy_sp|memcpy_safe|VOS_memcpy_safe|VOS_MemCpy_S|VOS_Mem_Copy_Safe|VOS_MemCpy_Safe|strcpy_s|strcat_s|wcscpy_s|wcscat_s|strncpy_s|strncat_s|wcsncpy_s|wcsncat_s|strcpy_safe|strcat_safe|strncpy_safe|strncat_safe|VOS_StrCpy_S|VOS_StrCat_S|VOS_StrNCpy_S|VOS_StrNCat_S|VOS_StrCpy_Safe|VOS_StrCat_Safe|VOS_StrNCpy_Safe|VOS_StrNCat_Safe)$'
+
+  - id: c-cpp.safe-mem.pointer-sizeof-dst
+    languages: [c, cpp]
+    severity: WARNING
+    message: >
+      Function=`$FUNC`. Safe memory call `$CALL` uses sizeof(pointer) as dstsz.
+      This usually gives the pointer width rather than the destination buffer capacity.
+    metadata:
+      category: security
+      cwe:
+        - "CWE-787: Out-of-bounds Write"
+      risk_class: "C: sizeof pointer used as dstsz"
+    patterns:
+      - pattern-either:
+          - pattern-inside: |
+              $RET $FUNC(...) {
+                ...
+              }
+          - pattern-inside: |
+              $RET $QUAL::$FUNC(...) {
+                ...
+              }
+      - pattern-either:
+          - pattern-inside: |
+              $TYPE *$PTR;
+              ...
+          - pattern-inside: |
+              $TYPE *$PTR = $INIT;
+              ...
+          - pattern-inside: |
+              $TYPE*$PTR;
+              ...
+          - pattern-inside: |
+              $TYPE*$PTR = $INIT;
+              ...
+      - pattern-either:
+          - pattern: $CALL($PTR, sizeof($PTR), $ARG3, $COUNT)
+          - pattern: $CALL($PTR, sizeof($PTR), $ARG3)
+      - metavariable-regex:
+          metavariable: $CALL
+          regex: '^(memcpy_s|memmove_s|memset_s|memcpy_sp|memcpy_safe|VOS_memcpy_safe|VOS_MemCpy_S|VOS_Mem_Copy_Safe|VOS_MemCpy_Safe|strcpy_s|strcat_s|wcscpy_s|wcscat_s|strncpy_s|strncat_s|wcsncpy_s|wcsncat_s|strcpy_safe|strcat_safe|strncpy_safe|strncat_safe|VOS_StrCpy_S|VOS_StrCat_S|VOS_StrNCpy_S|VOS_StrNCat_S|VOS_StrCpy_Safe|VOS_StrCat_Safe|VOS_StrNCpy_Safe|VOS_StrNCat_Safe)$'
+
+  - id: c-cpp.safe-mem.multidim-array-full-size
+    languages: [c, cpp]
+    severity: ERROR
+    message: >
+      Function=`$FUNC`. Safe memory call `$CALL` writes to an array row or subarray while dstsz uses the full outer array size.
+      The destination appears smaller than the dstsz expression.
+    metadata:
+      category: security
+      cwe:
+        - "CWE-787: Out-of-bounds Write"
+      risk_class: "B: subarray destination with full array dstsz"
+    patterns:
+      - pattern-either:
+          - pattern-inside: |
+              $RET $FUNC(...) {
+                ...
+              }
+          - pattern-inside: |
+              $RET $QUAL::$FUNC(...) {
+                ...
+              }
+      - pattern-either:
+          - pattern: $CALL($ARR[$IDX], sizeof($ARR), $ARG3, $COUNT)
+          - pattern: $CALL($ARR[$IDX], sizeof($ARR), $ARG3)
+      - metavariable-regex:
+          metavariable: $CALL
+          regex: '^(memcpy_s|memmove_s|memset_s|memcpy_sp|memcpy_safe|VOS_memcpy_safe|VOS_MemCpy_S|VOS_Mem_Copy_Safe|VOS_MemCpy_Safe|strcpy_s|strcat_s|wcscpy_s|wcscat_s|strncpy_s|strncat_s|wcsncpy_s|wcsncat_s|strcpy_safe|strcat_safe|strncpy_safe|strncat_safe|VOS_StrCpy_S|VOS_StrCat_S|VOS_StrNCpy_S|VOS_StrNCat_S|VOS_StrCpy_Safe|VOS_StrCat_Safe|VOS_StrNCpy_Safe|VOS_StrNCat_Safe)$'
+
+  - id: c-cpp.safe-mem.identical-size-array-dst
+    languages: [c, cpp]
+    severity: WARNING
+    message: >
+      Function=`$FUNC`. Safe memory call `$CALL` uses the same expression for dstsz and copy length when writing to a fixed array.
+      Check whether this expression is a source/input length rather than the destination array capacity.
+    metadata:
+      category: security
+      cwe:
+        - "CWE-787: Out-of-bounds Write"
+      risk_class: "D: identical dstsz and copy length for fixed array dst"
+    patterns:
+      - pattern-either:
+          - pattern-inside: |
+              $RET $FUNC(...) {
+                ...
+              }
+          - pattern-inside: |
+              $RET $QUAL::$FUNC(...) {
+                ...
+              }
+      - pattern-either:
+          - pattern-inside: |
+              $TYPE $DST[$N];
+              ...
+          - pattern-inside: |
+              $TYPE $DST[$N] = $INIT;
+              ...
+      - pattern: $CALL($DST, $SZ, $SRC, $SZ)
+      - pattern-not: $CALL($DST, sizeof($DST), $SRC, sizeof($DST))
+      - metavariable-regex:
+          metavariable: $CALL
+          regex: '^(memcpy_s|memmove_s|memcpy_sp|memcpy_safe|VOS_memcpy_safe|VOS_MemCpy_S|VOS_Mem_Copy_Safe|VOS_MemCpy_Safe|strncpy_s|strncat_s|wcsncpy_s|wcsncat_s|strncpy_safe|strncat_safe|VOS_StrNCpy_S|VOS_StrNCat_S|VOS_StrNCpy_Safe|VOS_StrNCat_Safe)$'
+      - metavariable-regex:
+          metavariable: $SZ
+          regex: '^(?!sizeof\s*\().+'
+
+  - id: c-cpp.safe-mem.identical-size-member-dst
+    languages: [c, cpp]
+    severity: WARNING
+    message: >
+      Function=`$FUNC`. Safe memory call `$CALL` uses the same expression for dstsz and copy length when writing to a member.
+      Check whether this expression is a source/input length rather than the member capacity.
+    metadata:
+      category: security
+      cwe:
+        - "CWE-787: Out-of-bounds Write"
+      risk_class: "D: identical dstsz and copy length for member dst"
+    patterns:
+      - pattern-either:
+          - pattern-inside: |
+              $RET $FUNC(...) {
+                ...
+              }
+          - pattern-inside: |
+              $RET $QUAL::$FUNC(...) {
+                ...
+              }
+      - pattern-either:
+          - pattern: $CALL($OBJ.$FIELD, $SZ, $SRC, $SZ)
+          - pattern: $CALL(&$OBJ.$FIELD, $SZ, $SRC, $SZ)
+          - pattern: $CALL($P->$FIELD, $SZ, $SRC, $SZ)
+          - pattern: $CALL(&$P->$FIELD, $SZ, $SRC, $SZ)
+      - pattern-not: $CALL($OBJ.$FIELD, sizeof($OBJ.$FIELD), $SRC, sizeof($OBJ.$FIELD))
+      - pattern-not: $CALL(&$OBJ.$FIELD, sizeof($OBJ.$FIELD), $SRC, sizeof($OBJ.$FIELD))
+      - pattern-not: $CALL($P->$FIELD, sizeof($P->$FIELD), $SRC, sizeof($P->$FIELD))
+      - pattern-not: $CALL(&$P->$FIELD, sizeof($P->$FIELD), $SRC, sizeof($P->$FIELD))
+      - metavariable-regex:
+          metavariable: $CALL
+          regex: '^(memcpy_s|memmove_s|memcpy_sp|memcpy_safe|VOS_memcpy_safe|VOS_MemCpy_S|VOS_Mem_Copy_Safe|VOS_MemCpy_Safe|strncpy_s|strncat_s|wcsncpy_s|wcsncat_s|strncpy_safe|strncat_safe|VOS_StrNCpy_S|VOS_StrNCat_S|VOS_StrNCpy_Safe|VOS_StrNCat_Safe)$'
+      - metavariable-regex:
+          metavariable: $SZ
+          regex: '^(?!sizeof\s*\().+'
+
+  - id: c-cpp.safe-mem.identical-size-source-named
+    languages: [c, cpp]
+    severity: WARNING
+    message: >
+      Function=`$FUNC`. Safe memory call `$CALL` uses the same source-like expression for dstsz and copy length.
+      This often means the destination capacity was confused with the source or packet length.
+    metadata:
+      category: security
+      cwe:
+        - "CWE-787: Out-of-bounds Write"
+      risk_class: "D: identical dstsz and source-like copy length"
+    patterns:
+      - pattern-either:
+          - pattern-inside: |
+              $RET $FUNC(...) {
+                ...
+              }
+          - pattern-inside: |
+              $RET $QUAL::$FUNC(...) {
+                ...
+              }
+      - pattern: $CALL($DST, $SZ, $SRC, $SZ)
+      - pattern-not: $CALL($DST, sizeof($DST), $SRC, sizeof($DST))
+      - pattern-not: $CALL($DST, sizeof(*$DST), $SRC, sizeof(*$DST))
+      - metavariable-regex:
+          metavariable: $CALL
+          regex: '^(memcpy_s|memmove_s|memcpy_sp|memcpy_safe|VOS_memcpy_safe|VOS_MemCpy_S|VOS_Mem_Copy_Safe|VOS_MemCpy_Safe|strncpy_s|strncat_s|wcsncpy_s|wcsncat_s|strncpy_safe|strncat_safe|VOS_StrNCpy_S|VOS_StrNCat_S|VOS_StrNCpy_Safe|VOS_StrNCat_Safe)$'
+      - metavariable-regex:
+          metavariable: $SZ
+          regex: '(?i).*(src|source|input|recv|pkt|packet|msg|body|payload|read).*'

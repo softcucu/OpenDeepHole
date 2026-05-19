@@ -194,7 +194,7 @@ agent/
   local_mcp.py    — LocalMCPServer: runs MCP server in-process on random port
   config.py       — AgentConfig, load_config(), apply_remote_config()
 
-checkers/         — Plugin directories (npd, oob, uaf, intoverflow, memleak)
+checkers/         — Plugin directories (npd, oob, safe_mem_oob, uaf, intoverflow, memleak)
 code_parser/      — Shared C/C++ indexer (tree-sitter + SQLite)
 mcp_server/       — MCP Server (tools.py, server.py)
 frontend/         — React + TypeScript + Vite + Tailwind CSS

@@ -1,0 +1,8 @@
+name: safe_mem_oob
+label: Safe Memory OOB / 安全内存函数越界
+description: >
+  检测 C/C++ 安全内存函数中 dst 与 dstsz 明显不匹配导致的潜在越界写风险，
+  包括成员目标使用父对象大小、偏移目标仍使用完整缓冲区大小、指针 sizeof 误用等高风险场景。
+enabled: true
+mode: opencode
+visibility: admin
