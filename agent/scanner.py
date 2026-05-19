@@ -256,6 +256,18 @@ async def run_scan(
                     except Exception:
                         pass
 
+        def _index_stats_message(index_db) -> str:
+            stats = index_db.get_index_stats()
+            return (
+                "代码索引统计: "
+                f"文件 {stats['files']} 个，"
+                f"函数 {stats['functions']} 个，"
+                f"结构体/类/联合体 {stats['structs']} 个，"
+                f"全局变量 {stats['global_variables']} 个，"
+                f"函数调用关系 {stats['function_calls']} 条，"
+                f"全局变量引用 {stats['global_variable_references']} 条"
+            )
+
         do_index = True  # set False when a valid existing DB is found
 
         if db_path.exists():
@@ -265,6 +277,14 @@ async def run_scan(
                 if need_db_open:
                     from code_parser import CodeDatabase
                     db = CodeDatabase(db_path)
+                    await emit("init", _index_stats_message(db))
+                else:
+                    from code_parser import CodeDatabase
+                    stats_db = CodeDatabase(db_path)
+                    try:
+                        await emit("init", _index_stats_message(stats_db))
+                    finally:
+                        stats_db.close()
                 do_index = False
             else:
                 await emit("init", "已有代码索引不完整（需重建），重新索引...")
@@ -319,13 +339,14 @@ async def run_scan(
                 await emit("init", "Code indexing stopped by user")
                 await reporter.finish_scan(scan_id, [], "cancelled", 0, 0)
                 return
-            await emit("init", "Code indexing complete")
             # Flush WAL so the DB file is self-contained
             index_db.mark_index_complete()
             index_db.checkpoint()
             index_db.close()
             _replace_sqlite_db(temp_db_path, db_path)
             db = CodeDatabase(db_path)
+            await emit("init", "Code indexing complete")
+            await emit("init", _index_stats_message(db))
             await emit("init", f"代码索引已保存（路径: {db_path}）")
             await reporter.send_index_status(scan_id, "done", 0, 0)
 

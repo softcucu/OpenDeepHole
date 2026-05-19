@@ -66,6 +66,111 @@ class _CscopeCall:
     text: str
 
 
+class _CscopeLineQuerySession:
+    """Reusable cscope line-mode process for caller lookups."""
+
+    _COUNT_RE = re.compile(r"cscope:\s*(\d+)\s+lines\b")
+
+    def __init__(self, project_root: Path, cscope_db: Path) -> None:
+        self.project_root = project_root
+        self._proc = subprocess.Popen(
+            [
+                "cscope",
+                "-d",
+                "-l",
+                "-f",
+                CppAnalyzer._relative_path(project_root, cscope_db),
+            ],
+            cwd=project_root,
+            text=True,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            bufsize=1,
+        )
+
+    def query_callers(self, symbol: str) -> list[_CscopeCall]:
+        if self._proc.stdin is None or self._proc.stdout is None:
+            raise CodeIndexToolError("cscope line-oriented 查询进程未正确启动。")
+        if self._proc.poll() is not None:
+            raise CodeIndexToolError("cscope line-oriented 查询进程已退出。")
+
+        self._proc.stdin.write(f"3{symbol}\n")
+        self._proc.stdin.flush()
+
+        count = self._read_result_count()
+        if count < 0:
+            return []
+        calls: list[_CscopeCall] = []
+        for _ in range(count):
+            call = self._parse_call_line(self._readline())
+            if call:
+                calls.append(call)
+        return calls
+
+    def close(self) -> None:
+        if self._proc.stdin is not None:
+            try:
+                self._proc.stdin.close()
+            except OSError:
+                pass
+        if self._proc.poll() is not None:
+            return
+        try:
+            self._proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            self._proc.terminate()
+            try:
+                self._proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                self._proc.kill()
+                self._proc.wait()
+
+    def _readline(self) -> str:
+        if self._proc.stdout is None:
+            raise CodeIndexToolError("cscope line-oriented 查询没有 stdout。")
+        line = self._proc.stdout.readline()
+        if line:
+            return line
+        message = "cscope line-oriented 查询提前结束。"
+        if self._proc.poll() is not None and self._proc.stderr is not None:
+            stderr = self._proc.stderr.read().strip()
+            if stderr:
+                message += " " + stderr
+        raise CodeIndexToolError(message)
+
+    def _read_result_count(self) -> int:
+        while True:
+            line = self._readline()
+            if "Unable to search database" in line:
+                return -1
+            match = self._COUNT_RE.search(line)
+            if match:
+                return int(match.group(1))
+            if line.strip().strip(">"):
+                raise CodeIndexToolError(
+                    "cscope line-oriented 查询返回了无法解析的计数行: "
+                    + line.strip()
+                )
+
+    @staticmethod
+    def _parse_call_line(line: str) -> _CscopeCall | None:
+        parts = line.split(maxsplit=3)
+        if len(parts) < 4:
+            return None
+        file_path, caller_name, line_no, text = parts
+        try:
+            line_int = int(line_no)
+        except ValueError:
+            return None
+        return _CscopeCall(
+            file_path=file_path.replace("\\", "/"),
+            caller_name=caller_name,
+            line=line_int,
+            text=text.rstrip("\n"),
+        )
+
+
 class CppAnalyzer:
     def __init__(self, db: CodeDatabase) -> None:
         self.db = db
@@ -280,29 +385,33 @@ class CppAnalyzer:
         if on_stage_progress:
             on_stage_progress("cscope symbols", 0, total_symbols)
         seen: set[tuple[str, str, int, int | None]] = set()
-        for idx, symbol in enumerate(symbols, start=1):
-            if cancel_check and cancel_check():
-                return
-            for call in self._query_cscope_callers(cscope_db, symbol, project_root):
-                callee_name = symbol
-                caller = self._select_caller_function(call)
-                file_id = self.db.get_or_create_file(call.file_path)
-                col = max(call.text.find(self._short_name(symbol)), 0)
-                key = (callee_name, call.file_path, call.line, caller.function_id if caller else None)
-                if key in seen:
-                    continue
-                seen.add(key)
-                callee_id = self._select_callee_id(callee_name)
-                self.db.insert_function_call(
-                    caller_function_id=caller.function_id if caller else None,
-                    callee_name=callee_name,
-                    file_id=file_id,
-                    line=call.line,
-                    column=col,
-                    callee_function_id=callee_id,
-                )
-            if on_stage_progress and (idx % 25 == 0 or idx == total_symbols):
-                on_stage_progress("cscope symbols", idx, total_symbols)
+        session = self._open_cscope_query_session(cscope_db, project_root)
+        try:
+            for idx, symbol in enumerate(symbols, start=1):
+                if cancel_check and cancel_check():
+                    return
+                for call in session.query_callers(symbol):
+                    callee_name = symbol
+                    caller = self._select_caller_function(call)
+                    file_id = self.db.get_or_create_file(call.file_path)
+                    col = max(call.text.find(self._short_name(symbol)), 0)
+                    key = (callee_name, call.file_path, call.line, caller.function_id if caller else None)
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    callee_id = self._select_callee_id(callee_name)
+                    self.db.insert_function_call(
+                        caller_function_id=caller.function_id if caller else None,
+                        callee_name=callee_name,
+                        file_id=file_id,
+                        line=call.line,
+                        column=col,
+                        callee_function_id=callee_id,
+                    )
+                if on_stage_progress and (idx % 25 == 0 or idx == total_symbols):
+                    on_stage_progress("cscope symbols", idx, total_symbols)
+        finally:
+            session.close()
 
     def _build_cscope_database(
         self,
@@ -344,45 +453,18 @@ class CppAnalyzer:
         symbol: str,
         project_root: Path,
     ) -> list[_CscopeCall]:
-        proc = subprocess.run(
-            [
-                "cscope",
-                "-d",
-                "-L",
-                "-3",
-                symbol,
-                "-f",
-                self._relative_path(project_root, cscope_db),
-            ],
-            cwd=project_root,
-            text=True,
-            capture_output=True,
-            check=False,
-        )
-        if proc.returncode not in (0, 1):
-            raise CodeIndexToolError(
-                "cscope 引用查询失败: " + (proc.stderr.strip() or proc.stdout.strip())
-            )
+        session = self._open_cscope_query_session(cscope_db, project_root)
+        try:
+            return session.query_callers(symbol)
+        finally:
+            session.close()
 
-        calls: list[_CscopeCall] = []
-        for line in proc.stdout.splitlines():
-            parts = line.split(maxsplit=3)
-            if len(parts) < 4:
-                continue
-            file_path, caller_name, line_no, text = parts
-            try:
-                line_int = int(line_no)
-            except ValueError:
-                continue
-            calls.append(
-                _CscopeCall(
-                    file_path=file_path.replace("\\", "/"),
-                    caller_name=caller_name,
-                    line=line_int,
-                    text=text,
-                )
-            )
-        return calls
+    def _open_cscope_query_session(
+        self,
+        cscope_db: Path,
+        project_root: Path,
+    ) -> _CscopeLineQuerySession:
+        return _CscopeLineQuerySession(project_root, cscope_db)
 
     # ------------------------------------------------------------------
     # Ctags indexing

@@ -1,9 +1,24 @@
+import io
 import subprocess
 from pathlib import Path
 
 from code_parser import CodeDatabase
 from code_parser.cpp_analyzer import CppAnalyzer
 from code_parser.cpp_analyzer import _CscopeCall
+
+
+class _FakeCscopeSession:
+    def __init__(self, calls: dict[str, list[_CscopeCall]]) -> None:
+        self.calls = calls
+        self.symbols: list[str] = []
+        self.closed = False
+
+    def query_callers(self, symbol: str) -> list[_CscopeCall]:
+        self.symbols.append(symbol)
+        return self.calls.get(symbol, [])
+
+    def close(self) -> None:
+        self.closed = True
 
 
 def _index_source(
@@ -18,9 +33,8 @@ def _index_source(
     analyzer._ensure_tools_available = lambda: None
     analyzer._run_ctags_json = lambda _root, _files, _work_dir: entries
     analyzer._build_cscope_database = lambda _root, _files, temp_dir: temp_dir / "cscope.out"
-    analyzer._query_cscope_callers = (
-        lambda _db_path, symbol, _root: (cscope_calls or {}).get(symbol, [])
-    )
+    session = _FakeCscopeSession(cscope_calls or {})
+    analyzer._open_cscope_query_session = lambda _db_path, _root: session
     analyzer.analyze_directory(tmp_path)
     return db
 
@@ -382,6 +396,166 @@ int caller(void) {
         db.close()
 
 
+def test_code_index_stats_count_functions_and_call_relations(tmp_path: Path) -> None:
+    db = _index_source(
+        tmp_path,
+        """
+int cleanup(void) {
+    return 0;
+}
+
+int caller(void) {
+    return cleanup();
+}
+""",
+        [
+            {
+                "_type": "tag",
+                "name": "cleanup",
+                "path": "sample.cpp",
+                "line": 2,
+                "end": 4,
+                "kind": "function",
+                "signature": "(void)",
+            },
+            {
+                "_type": "tag",
+                "name": "caller",
+                "path": "sample.cpp",
+                "line": 6,
+                "end": 8,
+                "kind": "function",
+                "signature": "(void)",
+            },
+        ],
+        {
+            "cleanup": [
+                _CscopeCall(
+                    file_path="sample.cpp",
+                    caller_name="caller",
+                    line=7,
+                    text="return cleanup();",
+                )
+            ]
+        },
+    )
+    try:
+        assert db.get_index_stats() == {
+            "files": 1,
+            "functions": 2,
+            "structs": 0,
+            "global_variables": 0,
+            "function_calls": 1,
+            "global_variable_references": 0,
+        }
+    finally:
+        db.close()
+
+
+def test_cscope_symbol_queries_reuse_line_oriented_process(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    (tmp_path / "sample.cpp").write_text(
+        """
+int cleanup(void) {
+    return 0;
+}
+
+int caller(void) {
+    return cleanup();
+}
+""",
+        encoding="utf-8",
+    )
+    entries = [
+        {
+            "_type": "tag",
+            "name": "cleanup",
+            "path": "sample.cpp",
+            "line": 2,
+            "end": 4,
+            "kind": "function",
+            "signature": "(void)",
+        },
+        {
+            "_type": "tag",
+            "name": "caller",
+            "path": "sample.cpp",
+            "line": 6,
+            "end": 8,
+            "kind": "function",
+            "signature": "(void)",
+        },
+    ]
+    popen_instances = []
+
+    class FakeStdin(io.StringIO):
+        def close(self):
+            pass
+
+    class FakePopen:
+        def __init__(self, cmd, **kwargs):
+            self.cmd = cmd
+            self.kwargs = kwargs
+            self.stdin = FakeStdin()
+            self.stdout = io.StringIO(
+                ">> Unable to search database\n"
+                ">> cscope: 1 lines\n"
+                "sample.cpp caller 7 return cleanup();\n"
+            )
+            self.stderr = io.StringIO("")
+            self.returncode = None
+            self.terminated = False
+            self.killed = False
+            popen_instances.append(self)
+
+        def poll(self):
+            return self.returncode
+
+        def wait(self, timeout=None):
+            self.returncode = 0
+            return 0
+
+        def terminate(self):
+            self.terminated = True
+            self.returncode = -15
+
+        def kill(self):
+            self.killed = True
+            self.returncode = -9
+
+    monkeypatch.setattr(subprocess, "Popen", FakePopen)
+
+    db = CodeDatabase(tmp_path / "code_index.db")
+    analyzer = CppAnalyzer(db)
+    analyzer._ensure_tools_available = lambda: None
+    analyzer._run_ctags_json = lambda _root, _files, _work_dir: entries
+    analyzer._build_cscope_database = lambda _root, _files, temp_dir: temp_dir / "cscope.out"
+
+    try:
+        analyzer.analyze_directory(tmp_path)
+        rows = db.get_call_sites_by_name("cleanup")
+    finally:
+        db.close()
+
+    assert len(popen_instances) == 1
+    proc = popen_instances[0]
+    assert proc.kwargs["cwd"] == tmp_path
+    assert proc.cmd == [
+        "cscope",
+        "-d",
+        "-l",
+        "-f",
+        ".opendeephole-index-" + proc.cmd[-1].split(".opendeephole-index-", 1)[1],
+    ]
+    assert proc.cmd[-1].endswith("/cscope.out")
+    assert proc.stdin.getvalue() == "3caller\n3cleanup\n"
+    assert len(rows) == 1
+    assert rows[0]["caller_name"] == "caller"
+    assert rows[0]["line"] == 7
+
+
 def test_code_index_reports_ctags_and_cscope_stage_progress(tmp_path: Path) -> None:
     (tmp_path / "sample.cpp").write_text(
         """
@@ -421,7 +595,7 @@ int caller(void) {
     analyzer._ensure_tools_available = lambda: None
     analyzer._run_ctags_json = lambda _root, _files, _work_dir: entries
     analyzer._build_cscope_database = lambda _root, _files, temp_dir: temp_dir / "cscope.out"
-    analyzer._query_cscope_callers = lambda _db_path, _symbol, _root: []
+    analyzer._open_cscope_query_session = lambda _db_path, _root: _FakeCscopeSession({})
 
     try:
         analyzer.analyze_directory(

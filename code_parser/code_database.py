@@ -383,6 +383,31 @@ class CodeDatabase:
                ORDER BY fi.path, f.start_line""",
         ).fetchall()
 
+    def get_index_stats(self) -> dict[str, int]:
+        """Return lightweight row counts for index health reporting."""
+        counts: dict[str, int] = {}
+        for key, table in (
+            ("files", "files"),
+            ("functions", "functions"),
+            ("structs", "structs"),
+            ("global_variables", "global_variables"),
+            ("function_calls", "function_calls"),
+            ("global_variable_references", "global_variable_references"),
+        ):
+            counts[key] = int(
+                self._conn.execute(
+                    f"SELECT COUNT(*) AS count FROM {table}"
+                ).fetchone()["count"]
+            )
+        return {
+            "files": counts["files"],
+            "functions": counts["functions"],
+            "structs": counts["structs"],
+            "global_variables": counts["global_variables"],
+            "function_calls": counts["function_calls"],
+            "global_variable_references": counts["global_variable_references"],
+        }
+
     def get_function_body(self, name: str) -> str | None:
         """Return the body of the first function matching name, or None."""
         row = self._conn.execute(
