@@ -864,6 +864,7 @@ async def agent_get_feedback(vuln_types: Optional[str] = None) -> list:
 # ---------------------------------------------------------------------------
 
 _AGENT_DIRS = ["agent", "checkers", "code_parser", "mcp_server", "backend"]
+_AGENT_TOOL_DIRS = ["ctags-p6.2.20260517.0-x64"]
 _AGENT_RUNTIME_ROOT_FILES = ["requirements-agent.txt"]
 _AGENT_ROOT_FILES = [
     "agent.yaml",
@@ -880,7 +881,7 @@ def _should_skip_agent_file(path: Path) -> bool:
 
 
 def _iter_agent_runtime_files():
-    for dir_name in _AGENT_DIRS:
+    for dir_name in [*_AGENT_DIRS, *_AGENT_TOOL_DIRS]:
         dir_path = _PROJECT_ROOT / dir_name
         if not dir_path.is_dir():
             continue
@@ -932,7 +933,7 @@ def _build_agent_zip(server_url: str = "", owner_token: str = "") -> bytes:
     """Build the agent zip in-memory from the project source."""
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as zf:
-        for dir_name in _AGENT_DIRS:
+        for dir_name in [*_AGENT_DIRS, *_AGENT_TOOL_DIRS]:
             dir_path = _PROJECT_ROOT / dir_name
             if not dir_path.is_dir():
                 continue
@@ -976,7 +977,7 @@ Setup
 
 2. Install Python 3.10+ if not already installed
 
-3. Install system code-index tools:
+3. Code-index tool:
 
    Linux:
      apt install universal-ctags
@@ -985,7 +986,8 @@ Setup
      brew install universal-ctags
 
    Windows:
-     Install Universal Ctags, then add ctags to PATH.
+     The Agent package includes Universal Ctags for Windows x64.
+     run_agent.bat uses the bundled ctags.exe automatically.
 
 4. Run the agent daemon:
 
@@ -1006,9 +1008,9 @@ Usage
 The agent daemon connects to the server via WebSocket and waits for scan tasks.
 Use the "新建扫描" button in the web UI to start a scan.
 Before each scan, the agent checks whether the server has newer runtime code.
-Runtime code updates are installed automatically and the scan continues after
-the agent restarts. If run_agent.sh or run_agent.bat changes, download a new
-agent package.
+Runtime code updates, including the bundled Windows ctags directory, are
+installed automatically and the scan continues after the agent restarts. If
+run_agent.sh or run_agent.bat changes, download a new agent package.
 
 Results appear at: <server_url> (the web interface)
 """

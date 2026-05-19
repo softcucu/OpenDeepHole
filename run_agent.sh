@@ -15,6 +15,7 @@
 set -e
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$SCRIPT_DIR"
+BUNDLED_CTAGS_DIR="$SCRIPT_DIR/ctags-p6.2.20260517.0-x64"
 
 PYTHON_CMD=python3
 PYTHON_SCRIPTS="$("$PYTHON_CMD" -c 'import sysconfig; print(sysconfig.get_path("scripts") or "")' 2>/dev/null || true)"
@@ -22,20 +23,11 @@ if [ -n "$PYTHON_SCRIPTS" ]; then
     export PATH="$PYTHON_SCRIPTS:$PATH"
 fi
 
-add_default_msys2_paths() {
+add_bundled_ctags_path() {
     case "$(uname -s 2>/dev/null || echo unknown)" in
         MINGW*|MSYS*|CYGWIN*)
-            if [ -d /usr/bin ]; then
-                export PATH="/usr/bin:$PATH"
-            fi
-            if [ -d /mingw64/bin ]; then
-                export PATH="/mingw64/bin:$PATH"
-            fi
-            if [ -d /c/msys64/usr/bin ]; then
-                export PATH="/c/msys64/usr/bin:$PATH"
-            fi
-            if [ -d /c/msys64/mingw64/bin ]; then
-                export PATH="/c/msys64/mingw64/bin:$PATH"
+            if [ -f "$BUNDLED_CTAGS_DIR/ctags.exe" ]; then
+                export PATH="$BUNDLED_CTAGS_DIR:$PATH"
             fi
             ;;
     esac
@@ -45,10 +37,8 @@ print_source_tool_install_help() {
     echo "Required source indexing tools are missing." >&2
     case "$(uname -s 2>/dev/null || echo unknown)" in
         MINGW*|MSYS*|CYGWIN*)
-            echo "Windows recommended method: install MSYS2 with winget, then use pacman." >&2
-            echo "   winget install -i MSYS2.MSYS2" >&2
-            echo "   pacman -S --needed --noconfirm mingw-w64-x86_64-ctags" >&2
-            echo "If needed, add C:\\msys64\\mingw64\\bin before C:\\msys64\\usr\\bin in PATH." >&2
+            echo "The Agent package should include ctags-p6.2.20260517.0-x64/ctags.exe." >&2
+            echo "Download a fresh Agent package or install Universal Ctags manually." >&2
             ;;
         Darwin)
             echo "Install with Homebrew:" >&2
@@ -66,64 +56,26 @@ print_source_tool_install_help() {
     esac
 }
 
-install_msys2_source_tools() {
-    case "$(uname -s 2>/dev/null || echo unknown)" in
-        MINGW*|MSYS*|CYGWIN*)
-            add_default_msys2_paths
-            if ! command -v pacman >/dev/null 2>&1; then
-                if command -v winget >/dev/null 2>&1; then
-                    echo "Installing MSYS2 with winget..." >&2
-                    winget install -i MSYS2.MSYS2
-                    add_default_msys2_paths
-                fi
-            fi
-
-            if ! command -v pacman >/dev/null 2>&1; then
-                print_source_tool_install_help
-                return 1
-            fi
-
-            echo "Installing Universal Ctags with MSYS2 pacman..." >&2
-            pacman -S --needed --noconfirm mingw-w64-x86_64-ctags
-            add_default_msys2_paths
-            ;;
-        *)
-            print_source_tool_install_help
-            return 1
-            ;;
-    esac
-}
-
 check_source_index_tools() {
-    if ! command -v ctags >/dev/null 2>&1; then
-        install_msys2_source_tools || return 1
-    fi
-
     if ! command -v ctags >/dev/null 2>&1; then
         print_source_tool_install_help
         return 1
     fi
 
     if ! ctags --version 2>/dev/null | grep -q "Universal Ctags"; then
-        install_msys2_source_tools || return 1
-        if ! ctags --version 2>/dev/null | grep -q "Universal Ctags"; then
-            echo "ctags must be Universal Ctags." >&2
-            print_source_tool_install_help
-            return 1
-        fi
+        echo "ctags must be Universal Ctags." >&2
+        print_source_tool_install_help
+        return 1
     fi
 
     if ! ctags --list-output-formats 2>/dev/null | grep -qi "json"; then
-        install_msys2_source_tools || return 1
-        if ! ctags --list-output-formats 2>/dev/null | grep -qi "json"; then
-            echo "ctags must support JSON output. Ensure the MSYS2 mingw64 bin path is before usr/bin in PATH." >&2
-            print_source_tool_install_help
-            return 1
-        fi
+        echo "ctags must support JSON output." >&2
+        print_source_tool_install_help
+        return 1
     fi
 }
 
-add_default_msys2_paths
+add_bundled_ctags_path
 
 # Install dependencies if needed (only on first run or after update)
 if ! "$PYTHON_CMD" -c "import httpx, websockets, yaml, pydantic, openai, tree_sitter, tree_sitter_cpp, uvicorn, fastapi; from mcp.server.fastmcp import FastMCP" 2>/dev/null || ! command -v semgrep >/dev/null 2>&1; then
@@ -135,7 +87,7 @@ if ! "$PYTHON_CMD" -c "import httpx, websockets, yaml, pydantic, openai, tree_si
     fi
 fi
 
-add_default_msys2_paths
+add_bundled_ctags_path
 
 if ! command -v semgrep >/dev/null 2>&1; then
     echo "semgrep command not found after installing dependencies." >&2

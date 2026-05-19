@@ -16,7 +16,8 @@
 - **重构** 代码索引迁移为 Universal Ctags + tree-sitter：函数、结构体/类和全局变量定义由 ctags 建索引，函数调用和全局变量引用由 tree-sitter 遍历函数体生成
 - **优化** C++ 源码查询继续优先使用完整限定名，并为结构体/类短名查询兼容命名空间或类作用域中的限定名
 - **修复** 旧版 `code_index.db` 不再被误判为可复用索引，缺少 Universal Ctags 或 JSON 输出支持时会明确失败并提示安装
-- **修复** Windows Agent 启动脚本改为安装带 JSON 输出支持的 MSYS2 MinGW64 `ctags`，并确保 mingw64 工具路径优先于 usr 路径，避免索引时报 `output format "json" is not available`
+- **优化** Agent 下载包和运行时更新包内置 Windows x64 Universal Ctags，`run_agent` 启动脚本优先使用包内 `ctags.exe`，不再通过 MSYS2/winget/pacman 自动安装 ctags
+- **修复** Windows Agent 启动脚本会校验当前使用的 `ctags` 支持 JSON 输出，避免索引时报 `output format "json" is not available`
 - **修复** ctags 中间文件改为写入源码目录内并使用相对路径调用，避免 Windows 下解析系统临时目录盘符路径失败
 - **修复** Windows Agent 代码索引读取 ctags 输出时统一使用 UTF-8 容错解码，避免默认 GBK 解码失败后触发 `NoneType.splitlines` 扫描失败
 - **修复** INF_LOOP semgrep 静态扫描超时调整为 15 分钟，并在超时后读取已写出的 JSON 结果继续进入 LLM 分析，避免扫描完成但进程未退出时丢失候选点

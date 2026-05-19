@@ -18,10 +18,36 @@ class AgentRuntimePackageTests(unittest.TestCase):
 
         self.assertIn("agent/main.py", names)
         self.assertIn("requirements-agent.txt", names)
+        self.assertIn("ctags-p6.2.20260517.0-x64/ctags.exe", names)
         self.assertNotIn("agent.yaml", names)
         self.assertNotIn("run_agent.sh", names)
         self.assertNotIn("run_agent.bat", names)
         self.assertFalse(any(name.startswith("backend/static/") for name in names))
+
+    def test_agent_download_zip_includes_launchers_config_and_bundled_ctags(self) -> None:
+        data = agent_api._build_agent_zip("http://server.example", "owner-token")
+        with zipfile.ZipFile(_bytes_path(data)) as zf:
+            names = set(zf.namelist())
+            agent_yaml = zf.read("agent.yaml").decode("utf-8")
+
+        self.assertIn("run_agent.sh", names)
+        self.assertIn("run_agent.bat", names)
+        self.assertIn("requirements-agent.txt", names)
+        self.assertIn("ctags-p6.2.20260517.0-x64/ctags.exe", names)
+        self.assertIn('server_url: "http://server.example"', agent_yaml)
+        self.assertIn('owner_token: "owner-token"', agent_yaml)
+
+    def test_launchers_do_not_auto_install_ctags_system_packages(self) -> None:
+        root = Path(__file__).resolve().parent.parent
+        script_text = (root / "run_agent.sh").read_text(encoding="utf-8")
+        batch_text = (root / "run_agent.bat").read_text(encoding="utf-8")
+
+        self.assertIn("ctags-p6.2.20260517.0-x64", script_text)
+        self.assertIn("ctags-p6.2.20260517.0-x64", batch_text)
+        for text in (script_text, batch_text):
+            self.assertNotIn("winget", text)
+            self.assertNotIn("pacman -S --needed", text)
+            self.assertNotIn("INSTALL_MSYS2", text)
 
     def test_runtime_hash_matches_archive_contents(self) -> None:
         data = agent_api._build_agent_runtime_zip()

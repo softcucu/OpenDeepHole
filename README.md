@@ -95,23 +95,11 @@ opencode:
 > 每个检查项的调用方式（`api` 或 `opencode`）在其 `checker.yaml` 中独立配置，无需全局 `mode` 选项。
 > Agent 启动并连接服务器后，也可以在 Web UI 的 Agent 配置面板中直接保存或校验 LLM API 配置；保存后的配置会写回 `agent.yaml`。
 
-**第 3 步：安装系统代码索引工具**
+**第 3 步：确认代码索引工具**
 
-代码索引依赖 Universal Ctags。缺少 `ctags` 或 `ctags` 不支持 JSON 输出时 Agent 会先尝试通过启动脚本自动安装；安装失败时会停止并提示处理方式，不会回退到旧索引方式。
+代码索引依赖 Universal Ctags。Windows Agent 下载包已内置 `ctags-p6.2.20260517.0-x64/ctags.exe`，`run_agent.bat` 会优先使用包内版本；在 Git Bash/MSYS/Cygwin 中运行 `run_agent.sh` 时也会优先使用包内版本。缺少可用 `ctags` 或 `ctags` 不支持 JSON 输出时 Agent 会停止并提示处理方式，不会回退到旧索引方式。
 
-Windows 推荐使用 MSYS2。`run_agent.bat` 会在缺少工具或 `ctags` 不支持 JSON 输出时优先执行 `winget install -i MSYS2.MSYS2`，然后通过 MSYS2 `pacman` 安装带 JSON 支持的 MinGW64 Universal Ctags，并把 `C:\msys64\mingw64\bin` 放在 `C:\msys64\usr\bin` 前面加入当前启动脚本的 `PATH`。如果需要手动提前安装，可执行：
-
-```powershell
-winget install -i MSYS2.MSYS2
-```
-
-然后打开 MSYS2 运行：
-
-```bash
-pacman -S --needed --noconfirm mingw-w64-x86_64-ctags
-```
-
-Linux / macOS 可用系统包管理器安装：
+Linux / macOS 仍需提前用系统包管理器安装 Universal Ctags：
 
 ```bash
 # Debian / Ubuntu
@@ -143,7 +131,7 @@ OpenDeepHole Agent
 ```
 
 Agent 通过 WebSocket 保持长连接，等待服务器推送任务。
-启动后的 Agent 支持扫描前自动更新运行时代码。服务端更新 `agent/`、`backend/`、`checkers/`、`code_parser/`、`mcp_server/` 或 `requirements-agent.txt` 后，旧 Agent 会在下次启动扫描前下载最新 runtime 并重启继续执行该扫描；如果更新了 `run_agent.sh` 或 `run_agent.bat`，需要重新下载 Agent 包。
+启动后的 Agent 支持扫描前自动更新运行时代码。服务端更新 `agent/`、`backend/`、`checkers/`、`code_parser/`、`mcp_server/`、包内 Windows ctags 目录或 `requirements-agent.txt` 后，旧 Agent 会在下次启动扫描前下载最新 runtime 并重启继续执行该扫描；如果更新了 `run_agent.sh` 或 `run_agent.bat`，需要重新下载 Agent 包。
 
 **第 4 步：在 Web UI 创建扫描任务**
 

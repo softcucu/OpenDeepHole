@@ -157,7 +157,7 @@ The `code_parser/` package is used by both the agent (for local scanning) and th
 - `code_utils.py` — tree-sitter node traversal helpers
 - `code_struct.py` — dataclasses for parsed structures
 
-Indexing requires `ctags` from Universal Ctags with JSON output support. The Agent launchers try to bootstrap missing tools where practical: on Windows, `run_agent.bat` can install MSYS2 with `winget install -i MSYS2.MSYS2`, install the MSYS2 MinGW64 `mingw-w64-x86_64-ctags` package with pacman, then add `C:\msys64\mingw64\bin` before `C:\msys64\usr\bin` in the current process PATH. Missing tools are still treated as hard indexing errors.
+Indexing requires `ctags` from Universal Ctags with JSON output support. The Windows Agent package includes `ctags-p6.2.20260517.0-x64/ctags.exe`; `run_agent.bat` and Git Bash/MSYS/Cygwin runs of `run_agent.sh` prepend that directory to `PATH`. Linux/macOS still require a system Universal Ctags install. Missing or incompatible tools are treated as hard indexing errors.
 
 The agent indexes on-demand (Phase 1 of the pipeline). The MCP Server loads `CodeDatabase` per-call using `project_id`.
 

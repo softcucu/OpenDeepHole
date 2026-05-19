@@ -18,6 +18,7 @@ import httpx
 
 
 RUNTIME_DIRS = ("agent", "checkers", "code_parser", "mcp_server", "backend")
+RUNTIME_TOOL_DIRS = ("ctags-p6.2.20260517.0-x64",)
 RUNTIME_ROOT_FILES = ("requirements-agent.txt",)
 SKIP_DIRS = {"__pycache__", ".git", ".mypy_cache", ".pytest_cache", "static"}
 SKIP_SUFFIXES = {".pyc", ".pyo"}
@@ -33,7 +34,7 @@ def _should_skip(path: Path) -> bool:
 
 
 def _iter_runtime_files(root: Path):
-    for dir_name in RUNTIME_DIRS:
+    for dir_name in (*RUNTIME_DIRS, *RUNTIME_TOOL_DIRS):
         dir_path = root / dir_name
         if not dir_path.is_dir():
             continue
@@ -161,7 +162,7 @@ def _install_update_archive(archive: bytes, expected_hash: str) -> None:
         if actual_hash != expected_hash:
             raise RuntimeError("Agent runtime update content hash mismatch")
 
-        for dir_name in RUNTIME_DIRS:
+        for dir_name in (*RUNTIME_DIRS, *RUNTIME_TOOL_DIRS):
             src = tmp_root / dir_name
             if not src.exists():
                 continue
@@ -189,4 +190,3 @@ def _install_requirements_if_needed() -> None:
 def _restart_process() -> None:
     args = [sys.executable, "-m", "agent.main", *sys.argv[1:]]
     os.execv(sys.executable, args)
-
