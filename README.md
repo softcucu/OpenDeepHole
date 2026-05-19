@@ -96,9 +96,9 @@ opencode:
 
 **第 3 步：安装系统代码索引工具**
 
-代码索引依赖 Universal Ctags 和 cscope。缺少任一命令时 Agent 会先尝试通过启动脚本自动安装；安装失败时会停止并提示处理方式，不会回退到旧索引方式。
+代码索引依赖 Universal Ctags。缺少 `ctags` 或 `ctags` 不支持 JSON 输出时 Agent 会先尝试通过启动脚本自动安装；安装失败时会停止并提示处理方式，不会回退到旧索引方式。
 
-Windows 推荐使用 MSYS2。`run_agent.bat` 会在缺少工具或 `ctags` 不支持 JSON 输出时优先执行 `winget install -i MSYS2.MSYS2`，然后通过 MSYS2 `pacman` 安装带 JSON 支持的 MinGW64 Universal Ctags 和 cscope，并把 `C:\msys64\mingw64\bin` 放在 `C:\msys64\usr\bin` 前面加入当前启动脚本的 `PATH`。如果需要手动提前安装，可执行：
+Windows 推荐使用 MSYS2。`run_agent.bat` 会在缺少工具或 `ctags` 不支持 JSON 输出时优先执行 `winget install -i MSYS2.MSYS2`，然后通过 MSYS2 `pacman` 安装带 JSON 支持的 MinGW64 Universal Ctags，并把 `C:\msys64\mingw64\bin` 放在 `C:\msys64\usr\bin` 前面加入当前启动脚本的 `PATH`。如果需要手动提前安装，可执行：
 
 ```powershell
 winget install -i MSYS2.MSYS2
@@ -107,17 +107,17 @@ winget install -i MSYS2.MSYS2
 然后打开 MSYS2 运行：
 
 ```bash
-pacman -S --needed --noconfirm mingw-w64-x86_64-ctags cscope
+pacman -S --needed --noconfirm mingw-w64-x86_64-ctags
 ```
 
 Linux / macOS 可用系统包管理器安装：
 
 ```bash
 # Debian / Ubuntu
-sudo apt install universal-ctags cscope
+sudo apt install universal-ctags
 
 # macOS
-brew install universal-ctags cscope
+brew install universal-ctags
 ```
 
 **第 4 步：启动 Agent 守护进程**
@@ -308,7 +308,7 @@ PYTHONPATH=. python3 tools/checker_test.py mycheck /path/to/source --expect-cand
 PYTHONPATH=. python3 tools/checker_test.py mycheck /path/to/source --audit --audit-limit 1 --config agent.yaml
 ```
 
-本地测试命令不依赖后端、Web UI 或在线 Agent。默认会在被测项目目录下重建 `code_index.db`，与 Agent 扫描时的索引位置一致；如只想把索引写到临时位置，可加 `--index-db /tmp/mycheck-code_index.db`。代码索引同样需要本机已安装 Universal Ctags 和 cscope。
+本地测试命令不依赖后端、Web UI 或在线 Agent。默认会在被测项目目录下重建 `code_index.db`，与 Agent 扫描时的索引位置一致；如只想把索引写到临时位置，可加 `--index-db /tmp/mycheck-code_index.db`。代码索引同样需要本机已安装 Universal Ctags。
 
 开发阶段即使 `checker.yaml` 中设置了 `enabled: false`，本地测试命令也会临时启用该 checker 进行自测，并输出提示；线上扫描入口仍会遵循 `enabled` 和 `visibility` 配置。`--audit` 会实际调用模型或 opencode，请先确认 `agent.yaml` 配置可用，并用 `--audit-limit` 控制成本。
 

@@ -4,16 +4,17 @@
 
 - **新增** 前端页面 favicon 图标，浏览器标签页可显示 OpenDeepHole 项目标识
 - **新增** `safe_mem_oob` checker，使用 semgrep 扫描安全内存/字符串函数中成员目标、偏移目标、指针 `sizeof`、`dstsz` 与拷贝长度复用等高风险 `dst/dstsz` 不匹配场景，并配套 SKILL 与场景文档
-- **新增** Agent 初始化完成后输出代码索引统计，包含文件、函数、结构体/类/联合体、全局变量、函数调用关系和全局变量引用数量，便于判断 ctags/cscope 建库是否异常
-- **优化** cscope 函数调用引用查询改为 line-oriented 常驻进程，避免大型项目按函数符号逐次启动 cscope 导致索引过慢
-- **优化** 代码索引在源码文件读取完成后继续显示 ctags、cscope 数据库构建、函数符号引用查询和全局变量引用索引进度，避免大型项目在 100% 后看起来卡住
+- **新增** Agent 初始化完成后输出代码索引统计，包含文件、函数、结构体/类/联合体、全局变量、函数调用关系和全局变量引用数量，便于判断 ctags/tree-sitter 建库是否异常
+- **优化** 函数调用关系和 `g_` 全局变量引用改为基于 tree-sitter 遍历 ctags 已提取函数体生成，不再启动 cscope，也不再按全局变量逐个正则扫描全项目源码
+- **优化** 代码索引在源码文件读取完成后继续显示 ctags 和 tree-sitter 引用索引进度，避免大型项目在 100% 后看起来卡住
+- **调整** 暂停注册函数引用和全局变量引用 MCP 查询工具，底层索引数据仍保留给规则内部使用
 - **修复** Agent 离线后后端会将该 Agent 名下仍处于静态分析/AI 审计中的扫描和去误报复核任务收敛为停止/错误状态，避免扫描历史长期显示“审计中”
-- **重构** 代码索引从 tree-sitter 迁移为 Universal Ctags + cscope：函数、结构体/类和全局变量定义由 ctags 建索引，函数调用引用由 cscope 查询
+- **重构** 代码索引迁移为 Universal Ctags + tree-sitter：函数、结构体/类和全局变量定义由 ctags 建索引，函数调用和全局变量引用由 tree-sitter 遍历函数体生成
 - **优化** C++ 源码查询继续优先使用完整限定名，并为结构体/类短名查询兼容命名空间或类作用域中的限定名
-- **修复** 旧版 tree-sitter `code_index.db` 不再被误判为可复用索引，缺少 `ctags` 或 `cscope` 时会明确失败并提示安装
+- **修复** 旧版 `code_index.db` 不再被误判为可复用索引，缺少 Universal Ctags 或 JSON 输出支持时会明确失败并提示安装
 - **修复** Windows Agent 启动脚本改为安装带 JSON 输出支持的 MSYS2 MinGW64 `ctags`，并确保 mingw64 工具路径优先于 usr 路径，避免索引时报 `output format "json" is not available`
-- **修复** ctags/cscope 中间文件改为写入源码目录内并使用相对路径调用，避免 Windows 下 cscope 解析系统临时目录盘符路径失败
-- **修复** Windows Agent 代码索引读取 ctags/cscope 输出时统一使用 UTF-8 容错解码，避免默认 GBK 解码失败后触发 `NoneType.splitlines` 扫描失败
+- **修复** ctags 中间文件改为写入源码目录内并使用相对路径调用，避免 Windows 下解析系统临时目录盘符路径失败
+- **修复** Windows Agent 代码索引读取 ctags 输出时统一使用 UTF-8 容错解码，避免默认 GBK 解码失败后触发 `NoneType.splitlines` 扫描失败
 - **修复** INF_LOOP semgrep 静态扫描超时调整为 15 分钟，并在超时后读取已写出的 JSON 结果继续进入 LLM 分析，避免扫描完成但进程未退出时丢失候选点
 
 ## 2026-05-18

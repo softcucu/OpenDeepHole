@@ -22,9 +22,8 @@
 使用可用的 MCP 工具彻底检查代码：
 
 1. **`view_function_code`** — 查看漏洞所在函数的完整代码
-2. **`find_function_references`** — 查找所有调用点，理解调用上下文
-3. **`view_struct_code`** — 如涉及结构体，检查其定义
-4. **`view_global_variable`** — 如涉及全局变量，检查类型和初始化
+2. **`view_struct_code`** — 如涉及结构体，检查其定义
+3. **`view_global_variable_definition`** — 如涉及全局变量，检查类型和初始化
 
 **重点关注：**
 - 在漏洞代码路径之前存在哪些保证？

@@ -97,7 +97,7 @@ VOS_StrChr / VOS_StrRChr / VOS_StrStr / VOS_memchr / VOS_strchr
 
 **C. 全局变量** — 调用 `view_global_variable_definition(project_id, 变量名)`。
 
-**D. 函数参数传入的指针** — 调用 `find_function_references(project_id, 当前函数名)` 追踪调用方：
+**D. 函数参数传入的指针** — 根据 candidate 描述中的调用链线索追踪调用方：
 - 有调用方：用 `view_function_code` 追踪实际 buffer。**最多向上 2 层。**
 - 无调用方：对外函数，进入"外部输入豁免规则"处理。
 

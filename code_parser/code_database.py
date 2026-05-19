@@ -12,7 +12,7 @@ from pathlib import Path
 
 class CodeDatabase:
     COMPLETE_STATUS = "complete"
-    INDEXER_VERSION = "ctags-cscope-v1"
+    INDEXER_VERSION = "ctags-tree-sitter-refs-v1"
 
     def __init__(self, db_path: str | Path) -> None:
         self.db_path = str(db_path)

@@ -137,7 +137,7 @@ if (b < 0) b = -b;             // b 仍为 -2147483648
 ### 3. 追踪操作数来源
 
 - 来自外部输入（网络报文、文件头、IO、对外函数参数）？
-- 函数参数 → `find_function_references` 追踪调用方（最多 2 层）
+- 函数参数 → 根据 candidate 描述中的调用链线索追踪调用方（最多 2 层）
 - 结构体成员 → `view_struct_code`
 - 全局变量 → `view_global_variable_definition`
 

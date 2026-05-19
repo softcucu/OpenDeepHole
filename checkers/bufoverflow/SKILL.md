@@ -21,7 +21,6 @@ semgrep 是纯语法模式匹配，无法感知：跨函数的长度校验、宏
 
 - `view_function_code(project_id, function_name)` — 查看函数完整源码
 - `view_struct_code(project_id, struct_name)` — 查看结构体/类定义（确认 `sizeof($TYPE)` 实际大小，是否存在 flexible array、padding 等）
-- `find_function_references(project_id, function_name)` — 查找函数的所有调用位置
 - `submit_result(result_id, confirmed, severity, description, ai_analysis)` — 提交分析结论（必须调用）
 
 ## 分析步骤
@@ -64,7 +63,7 @@ semgrep 是纯语法模式匹配，无法感知：跨函数的长度校验、宏
 
 ### Step 5 — 向上追溯调用链
 
-用 `find_function_references` 查找候选函数的调用位置，然后用 `view_function_code` 查看关键调用方，重点确认：
+根据 candidate 描述中的调用链线索，用 `view_function_code` 查看关键调用方，重点确认：
 
 - **`$BUF` 的来源**：是函数参数还是局部变量？若是参数，调用方传入的是否带了真实长度参数？该长度是否被攻击者控制？
 - **`remaining` / `len` 参数的可信度**：是来自网络包头部、来自外部输入，还是来自可信内部计算？

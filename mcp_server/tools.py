@@ -169,7 +169,7 @@ def register_tools(mcp: FastMCP) -> None:
         _mcp_log("◀", "view_global_variable_definition", f"{len(rows)} match(es), {len(result)} chars")
         return result
 
-    @mcp.tool()
+    # Kept for future reuse, but intentionally not registered as an MCP tool.
     def find_function_references(project_id: str, function_name: str) -> str:
         """
         查找某个函数在整个项目中所有被调用的位置。
@@ -210,7 +210,7 @@ def register_tools(mcp: FastMCP) -> None:
         _mcp_log("◀", "find_function_references", f"{len(rows)} reference(s)")
         return result
 
-    @mcp.tool()
+    # Kept for future reuse, but intentionally not registered as an MCP tool.
     def find_global_variable_references(project_id: str, global_variable_name: str) -> str:
         """
         查找某个全局变量在整个项目中所有被引用的位置。

@@ -235,7 +235,7 @@ void on_packet(const uint8_t *buf, size_t len) {
 // 当前函数已经在 dispatch 之后被调用，进入时 len 已被保证
 ```
 
-**LLM 分析**：用 `find_function_references` 追溯到唯一入口，确认上层已做最小长度过滤，判定为误报。
+**LLM 分析**：根据 candidate 描述中的调用链线索追溯到唯一入口，确认上层已做最小长度过滤，判定为误报。
 
 ### 反例 6：cast 目标是常量字面量 / 测试数据
 

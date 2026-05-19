@@ -60,8 +60,6 @@ description: >
 | `view_function_code(project_id, function_name)` | **每次对话第一步必调**，获取函数体 |
 | `view_struct_code(project_id, struct_name)` | dest / src / 数组是结构体成员时 |
 | `view_global_variable_definition(project_id, global_variable_name)` | 变量是 `g_` 开头或明显是全局变量时 |
-| `find_function_references(project_id, function_name)` | 缓冲区或长度来自函数参数，需要追踪调用方时 |
-| `find_global_variable_references(project_id, global_variable_name)` | 需要查看哪些位置修改了某个全局变量时 |
 | `submit_result(result_id, confirmed, severity, description, ai_analysis)` | **审计完成后必须调用一次** |
 
 **调用链追踪上限：向上 2 层。** 超过则在分析中标记信息不足。

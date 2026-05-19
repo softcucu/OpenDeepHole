@@ -153,11 +153,11 @@ The `code_parser/` package is used by both the agent (for local scanning) and th
 
 **`code_parser/` package:**
 - `CodeDatabase` — SQLite wrapper; tables: files, functions, structs, function_calls, global_variables, global_variable_references
-- `CppAnalyzer` — Universal Ctags + cscope C/C++ indexer; call `analyze_directory(path)` to populate a DB
+- `CppAnalyzer` — Universal Ctags + tree-sitter C/C++ indexer; call `analyze_directory(path)` to populate a DB
 - `code_utils.py` — tree-sitter node traversal helpers
 - `code_struct.py` — dataclasses for parsed structures
 
-Indexing requires `ctags` from Universal Ctags with JSON output support and `cscope` on PATH. The Agent launchers try to bootstrap missing tools where practical: on Windows, `run_agent.bat` can install MSYS2 with `winget install -i MSYS2.MSYS2`, install the MSYS2 MinGW64 `mingw-w64-x86_64-ctags` package and `cscope` with pacman, then add `C:\msys64\mingw64\bin` before `C:\msys64\usr\bin` in the current process PATH. Missing tools are still treated as hard indexing errors, not as a fallback to tree-sitter.
+Indexing requires `ctags` from Universal Ctags with JSON output support. The Agent launchers try to bootstrap missing tools where practical: on Windows, `run_agent.bat` can install MSYS2 with `winget install -i MSYS2.MSYS2`, install the MSYS2 MinGW64 `mingw-w64-x86_64-ctags` package with pacman, then add `C:\msys64\mingw64\bin` before `C:\msys64\usr\bin` in the current process PATH. Missing tools are still treated as hard indexing errors.
 
 The agent indexes on-demand (Phase 1 of the pipeline). The MCP Server loads `CodeDatabase` per-call using `project_id`.
 
@@ -195,7 +195,7 @@ agent/
   config.py       — AgentConfig, load_config(), apply_remote_config()
 
 checkers/         — Plugin directories (npd, oob, safe_mem_oob, uaf, intoverflow, memleak)
-code_parser/      — Shared C/C++ indexer (tree-sitter + SQLite)
+code_parser/      — Shared C/C++ indexer (ctags + tree-sitter + SQLite)
 mcp_server/       — MCP Server (tools.py, server.py)
 frontend/         — React + TypeScript + Vite + Tailwind CSS
 config.yaml       — Server-side settings (ports, storage, logging, llm_api, opencode)

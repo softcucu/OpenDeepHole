@@ -20,8 +20,6 @@ description: 验证整数翻转/溢出候选漏洞，通过数据流分析降低
 
 - `view_function_code(project_id, function_name)` — 查看函数完整代码
 - `view_struct_code(project_id, struct_name)` — 查看结构体定义
-- `find_function_references(project_id, function_name)` — 查找函数的所有调用位置
-- `find_global_variable_references(project_id, global_variable_name)` — 查找全局变量引用
 - `submit_result(result_id, confirmed, severity, description, ai_analysis)` — 提交结论（必须调用）
 
 ## 分析方法

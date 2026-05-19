@@ -21,7 +21,6 @@ description: 验证异常分支内存泄漏候选漏洞
 - `view_function_code(project_id, function_name)` — 查看函数的完整源码
 - `view_struct_code(project_id, struct_name)` — 查看结构体/类的定义
 - `view_global_variable_definition(project_id, var_name)` — 查看全局变量定义
-- `find_function_references(project_id, function_name)` — 查找函数的调用位置
 - `submit_result(result_id, confirmed, severity, description, ai_analysis)` — 提交分析结论
 
 ## 分析步骤
