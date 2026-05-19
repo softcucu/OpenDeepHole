@@ -1,0 +1,10 @@
+name: double_free
+label: Double Free / 双重释放
+description: >
+  检测 C/C++ 中的双重释放漏洞（CWE-415）。覆盖：错误路径释放后跳到公共 cleanup 再次释放、
+  局部成员释放与 owner 析构重叠、所有权转移 API（add/insert/register）后 caller 再释放、
+  引用计数 get/put 失衡、C++ 浅拷贝 + 析构释放裸指针、智能指针重复包装裸指针、
+  new/delete/malloc/free 配对错位等模式。
+enabled: true
+mode: opencode
+visibility: admin
