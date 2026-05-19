@@ -55,9 +55,8 @@ if errorlevel 1 exit /b 1
 exit /b %ERRORLEVEL%
 
 :ADD_DEFAULT_MSYS2_PATHS
-if exist "C:\msys64\mingw64\bin\ctags.exe" set "PATH=C:\msys64\mingw64\bin;%PATH%"
-if exist "C:\msys64\ucrt64\bin\ctags.exe" set "PATH=C:\msys64\ucrt64\bin;%PATH%"
 if exist "C:\msys64\usr\bin\bash.exe" set "PATH=C:\msys64\usr\bin;%PATH%"
+if exist "C:\msys64\mingw64\bin\ctags.exe" set "PATH=C:\msys64\mingw64\bin;%PATH%"
 exit /b 0
 
 :PRINT_MSYS2_SOURCE_TOOL_HELP
@@ -65,9 +64,10 @@ echo Required source indexing tools are missing.
 echo This script can install MSYS2 automatically when winget is available:
 echo    winget install -i MSYS2.MSYS2
 echo Then it installs the source indexing tools with MSYS2 pacman:
-echo    pacman -S --needed --noconfirm ctags cscope
+echo    pacman -S --needed --noconfirm mingw-w64-x86_64-ctags cscope
 echo If automatic install fails, install MSYS2 from https://www.msys2.org/
-echo and add this directory to PATH:
+echo and add these directories to PATH, with mingw64 before usr:
+echo    C:\msys64\mingw64\bin
 echo    C:\msys64\usr\bin
 exit /b 0
 
@@ -92,7 +92,7 @@ if not exist "C:\msys64\usr\bin\bash.exe" (
 )
 
 echo Installing Universal Ctags and cscope with MSYS2 pacman...
-"C:\msys64\usr\bin\bash.exe" -lc "pacman -S --needed --noconfirm ctags cscope" || exit /b 1
+"C:\msys64\usr\bin\bash.exe" -lc "pacman -S --needed --noconfirm mingw-w64-x86_64-ctags cscope" || exit /b 1
 call :ADD_DEFAULT_MSYS2_PATHS
 exit /b 0
 
@@ -125,6 +125,18 @@ if errorlevel 1 (
     ctags --version 2>nul | findstr /C:"Universal Ctags" >nul
     if errorlevel 1 (
         echo ctags must be Universal Ctags.
+        call :PRINT_MSYS2_SOURCE_TOOL_HELP
+        exit /b 1
+    )
+)
+
+ctags --list-output-formats 2>nul | findstr /I /C:"json" >nul
+if errorlevel 1 (
+    call :INSTALL_MSYS2_SOURCE_TOOLS
+    if errorlevel 1 exit /b 1
+    ctags --list-output-formats 2>nul | findstr /I /C:"json" >nul
+    if errorlevel 1 (
+        echo ctags must support JSON output. Ensure C:\msys64\mingw64\bin appears before C:\msys64\usr\bin in PATH.
         call :PRINT_MSYS2_SOURCE_TOOL_HELP
         exit /b 1
     )

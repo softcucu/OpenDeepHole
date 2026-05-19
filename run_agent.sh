@@ -25,23 +25,17 @@ fi
 add_default_msys2_paths() {
     case "$(uname -s 2>/dev/null || echo unknown)" in
         MINGW*|MSYS*|CYGWIN*)
-            if [ -d /ucrt64/bin ]; then
-                export PATH="/ucrt64/bin:$PATH"
+            if [ -d /usr/bin ]; then
+                export PATH="/usr/bin:$PATH"
             fi
             if [ -d /mingw64/bin ]; then
                 export PATH="/mingw64/bin:$PATH"
             fi
-            if [ -d /usr/bin ]; then
-                export PATH="/usr/bin:$PATH"
-            fi
-            if [ -d /c/msys64/ucrt64/bin ]; then
-                export PATH="/c/msys64/ucrt64/bin:$PATH"
+            if [ -d /c/msys64/usr/bin ]; then
+                export PATH="/c/msys64/usr/bin:$PATH"
             fi
             if [ -d /c/msys64/mingw64/bin ]; then
                 export PATH="/c/msys64/mingw64/bin:$PATH"
-            fi
-            if [ -d /c/msys64/usr/bin ]; then
-                export PATH="/c/msys64/usr/bin:$PATH"
             fi
             ;;
     esac
@@ -53,8 +47,8 @@ print_source_tool_install_help() {
         MINGW*|MSYS*|CYGWIN*)
             echo "Windows recommended method: install MSYS2 with winget, then use pacman." >&2
             echo "   winget install -i MSYS2.MSYS2" >&2
-            echo "   pacman -S --needed --noconfirm ctags cscope" >&2
-            echo "If needed, add C:\\msys64\\usr\\bin to PATH." >&2
+            echo "   pacman -S --needed --noconfirm mingw-w64-x86_64-ctags cscope" >&2
+            echo "If needed, add C:\\msys64\\mingw64\\bin before C:\\msys64\\usr\\bin in PATH." >&2
             ;;
         Darwin)
             echo "Install with Homebrew:" >&2
@@ -90,7 +84,7 @@ install_msys2_source_tools() {
             fi
 
             echo "Installing Universal Ctags and cscope with MSYS2 pacman..." >&2
-            pacman -S --needed --noconfirm ctags cscope
+            pacman -S --needed --noconfirm mingw-w64-x86_64-ctags cscope
             add_default_msys2_paths
             ;;
         *)
@@ -114,6 +108,15 @@ check_source_index_tools() {
         install_msys2_source_tools || return 1
         if ! ctags --version 2>/dev/null | grep -q "Universal Ctags"; then
             echo "ctags must be Universal Ctags." >&2
+            print_source_tool_install_help
+            return 1
+        fi
+    fi
+
+    if ! ctags --list-output-formats 2>/dev/null | grep -qi "json"; then
+        install_msys2_source_tools || return 1
+        if ! ctags --list-output-formats 2>/dev/null | grep -qi "json"; then
+            echo "ctags must support JSON output. Ensure the MSYS2 mingw64 bin path is before usr/bin in PATH." >&2
             print_source_tool_install_help
             return 1
         fi
