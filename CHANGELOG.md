@@ -2,6 +2,7 @@
 
 ## 2026-05-19
 
+- **新增** 前端页面 favicon 图标，浏览器标签页可显示 OpenDeepHole 项目标识
 - **新增** `safe_mem_oob` checker，使用 semgrep 扫描安全内存/字符串函数中成员目标、偏移目标、指针 `sizeof`、`dstsz` 与拷贝长度复用等高风险 `dst/dstsz` 不匹配场景，并配套 SKILL 与场景文档
 - **新增** Agent 初始化完成后输出代码索引统计，包含文件、函数、结构体/类/联合体、全局变量、函数调用关系和全局变量引用数量，便于判断 ctags/cscope 建库是否异常
 - **优化** cscope 函数调用引用查询改为 line-oriented 常驻进程，避免大型项目按函数符号逐次启动 cscope 导致索引过慢
