@@ -281,6 +281,7 @@ class CreateScanRequest(BaseModel):
     """Request to create a new scan via a registered agent."""
     agent_id: str
     project_path: str
+    code_scan_path: str = ""
     scan_name: str = ""
     checkers: list[str]
     feedback_ids: list[str] = []
@@ -294,6 +295,7 @@ class ScanMeta(BaseModel):
     agent_id: str = ""
     agent_name: str = ""
     project_path: str = ""
+    code_scan_path: str = ""
     scan_name: str = ""
     user_id: str = ""
 

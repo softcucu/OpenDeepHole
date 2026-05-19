@@ -3,6 +3,7 @@ import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 from backend.api import agent as agent_api
@@ -325,7 +326,8 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
                 patch.dict("backend.api.agent._registered_agents", {"agent-old": agent}, clear=True),
                 patch("backend.api.agent.send_agent_command", new=AsyncMock(return_value=True)),
             ):
-                asyncio.run(scan_api.resume_scan("scan-1", current_user=user))
+                request = SimpleNamespace(base_url="http://testserver/")
+                asyncio.run(scan_api.resume_scan("scan-1", request=request, current_user=user))
 
             stored = store.load_scan("scan-1")[0]
             self.assertEqual(stored.total_candidates, 10)

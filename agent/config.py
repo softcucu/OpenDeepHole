@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
@@ -57,6 +58,16 @@ def apply_remote_config(config: AgentConfig, remote: dict) -> None:
         for f in dataclasses.fields(sub_cfg):
             if f.name in section and section[f.name] is not None:
                 setattr(sub_cfg, f.name, section[f.name])
+
+
+def apply_network_env(config: AgentConfig) -> None:
+    """Apply network-related Agent config to the current process environment."""
+    if config.no_proxy:
+        os.environ["no_proxy"] = config.no_proxy
+        os.environ["NO_PROXY"] = config.no_proxy
+    else:
+        os.environ.pop("no_proxy", None)
+        os.environ.pop("NO_PROXY", None)
 
 
 def remote_config_dict(config: AgentConfig) -> dict:

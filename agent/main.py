@@ -51,16 +51,19 @@ def _parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-async def _handle_command(msg: dict, config, task_manager, reporter) -> None:
+async def _handle_command(msg: dict, config, task_manager, reporter) -> dict | None:
     """Dispatch a command message from the server to the appropriate handler."""
     import agent.server as agent_server
 
     cmd_type = msg.get("type")
 
     if cmd_type == "task":
+        from agent.updater import ensure_runtime_updated
+        await ensure_runtime_updated(msg.get("agent_runtime_update"), msg)
         await agent_server.handle_task(
             scan_id=msg["scan_id"],
             project_path=msg["project_path"],
+            code_scan_path=msg.get("code_scan_path"),
             checkers=msg.get("checkers", []),
             scan_name=msg.get("scan_name", ""),
             feedback_entries=msg.get("feedback_entries", []),
@@ -69,9 +72,12 @@ async def _handle_command(msg: dict, config, task_manager, reporter) -> None:
     elif cmd_type == "stop":
         await agent_server.handle_stop(msg["scan_id"])
     elif cmd_type == "resume":
+        from agent.updater import ensure_runtime_updated
+        await ensure_runtime_updated(msg.get("agent_runtime_update"), msg)
         await agent_server.handle_resume(
             scan_id=msg["scan_id"],
             project_path=msg.get("project_path"),
+            code_scan_path=msg.get("code_scan_path"),
             checkers=msg.get("checkers"),
             scan_name=msg.get("scan_name"),
             feedback_entries=msg.get("feedback_entries"),
@@ -96,23 +102,31 @@ async def _handle_command(msg: dict, config, task_manager, reporter) -> None:
             from agent.fp_reviewer import update_local_feedback
             update_local_feedback(entry)
     elif cmd_type == "config":
-        from agent.config import apply_remote_config, save_config
+        from agent.config import apply_network_env, apply_remote_config, save_config
         if msg.get("config"):
             apply_remote_config(config, msg["config"])
+            apply_network_env(config)
             try:
                 save_config(config)
                 print("Config updated from server and persisted to agent.yaml")
             except Exception as e:
                 print(f"Config updated from server (warning: failed to persist: {e})")
+    elif cmd_type == "config_test":
+        return await agent_server.handle_config_test(
+            request_id=msg.get("request_id", ""),
+            remote_config=msg.get("config") or {},
+        )
     else:
         print(f"Unknown command type: {cmd_type!r}")
+    return None
 
 
 async def _ws_loop(config, task_manager, reporter) -> None:
     """WebSocket connection loop with automatic reconnect."""
     import websockets
     import agent.server as agent_server
-    from agent.config import apply_remote_config, remote_config_dict
+    from agent.config import apply_network_env, apply_remote_config, remote_config_dict
+    from agent.updater import compute_runtime_hash, load_pending_commands, pending_scan_snapshots
 
     name = config.agent_name or socket.gethostname()
     ws_url = config.server_url.replace("http://", "ws://").replace("https://", "wss://")
@@ -137,7 +151,8 @@ async def _ws_loop(config, task_manager, reporter) -> None:
                     "type": "hello",
                     "name": name,
                     "config": remote_config_dict(config),
-                    "active_scans": task_manager.active_snapshots(),
+                    "runtime_hash": compute_runtime_hash(),
+                    "active_scans": task_manager.active_snapshots() + pending_scan_snapshots(),
                 }
                 if config.owner_token:
                     hello_msg["owner_token"] = config.owner_token
@@ -156,6 +171,7 @@ async def _ws_loop(config, task_manager, reporter) -> None:
                 if welcome.get("config"):
                     from agent.config import save_config
                     apply_remote_config(config, welcome["config"])
+                    apply_network_env(config)
                     try:
                         save_config(config)
                     except Exception as e:
@@ -164,6 +180,8 @@ async def _ws_loop(config, task_manager, reporter) -> None:
                 reconnect_delay = 2  # reset backoff on successful connect
                 print(f"  Connected. Agent ID: {agent_id}")
                 print()
+
+                pending_commands = load_pending_commands(clear=True)
 
                 loop = asyncio.get_running_loop()
                 last_seen = loop.time()
@@ -192,7 +210,9 @@ async def _ws_loop(config, task_manager, reporter) -> None:
                         if msg is None:
                             return
                         try:
-                            await _handle_command(msg, config, task_manager, reporter)
+                            response = await _handle_command(msg, config, task_manager, reporter)
+                            if response:
+                                await ws.send(json.dumps(response))
                         except Exception as e:
                             print(f"Error handling command: {e}")
 
@@ -201,6 +221,8 @@ async def _ws_loop(config, task_manager, reporter) -> None:
                 worker_task = asyncio.create_task(_command_worker())
 
                 try:
+                    for command in pending_commands:
+                        await command_queue.put(command)
                     # Message loop
                     async for raw_msg in ws:
                         last_seen = loop.time()
@@ -233,7 +255,7 @@ async def _main() -> None:
     args = _parse_args()
 
     # Load config
-    from agent.config import load_config
+    from agent.config import apply_network_env, load_config
     config_path = Path(args.config) if args.config else None
     config = load_config(config_path)
 
@@ -244,10 +266,7 @@ async def _main() -> None:
         config.agent_name = args.name
 
     # Apply no_proxy early so httpx respects it
-    if config.no_proxy:
-        import os
-        os.environ.setdefault("no_proxy", config.no_proxy)
-        os.environ.setdefault("NO_PROXY", config.no_proxy)
+    apply_network_env(config)
 
     name = config.agent_name or socket.gethostname()
 

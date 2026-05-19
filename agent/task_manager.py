@@ -11,6 +11,7 @@ from typing import Optional
 class ScanTask:
     scan_id: str
     project_path: Path
+    code_scan_path: Path
     checkers: list[str]
     scan_name: str
     feedback_entries: list[dict] = field(default_factory=list)
@@ -27,6 +28,7 @@ class TaskManager:
         self,
         scan_id: str,
         project_path: str,
+        code_scan_path: str | None,
         checkers: list[str],
         scan_name: str,
         feedback_entries: list[dict] | None = None,
@@ -35,6 +37,7 @@ class TaskManager:
         task = ScanTask(
             scan_id=scan_id,
             project_path=Path(project_path),
+            code_scan_path=Path(code_scan_path or project_path),
             checkers=checkers,
             scan_name=scan_name,
             feedback_entries=feedback_entries or [],
@@ -73,6 +76,7 @@ class TaskManager:
             active.append({
                 "scan_id": task.scan_id,
                 "project_path": str(task.project_path),
+                "code_scan_path": str(task.code_scan_path),
                 "checkers": task.checkers,
                 "scan_name": task.scan_name,
             })

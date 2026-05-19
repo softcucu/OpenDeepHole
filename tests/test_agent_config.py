@@ -1,10 +1,11 @@
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import yaml
 
-from agent.config import AgentConfig, apply_remote_config, load_config, remote_config_dict, save_config
+from agent.config import AgentConfig, apply_network_env, apply_remote_config, load_config, remote_config_dict, save_config
 
 
 class AgentConfigTests(unittest.TestCase):
@@ -86,6 +87,16 @@ class AgentConfigTests(unittest.TestCase):
             self.assertFalse(raw["llm_api"]["stream"])
             self.assertEqual(raw["opencode"]["timeout"], 1200)
             self.assertEqual(raw["opencode"]["max_retries"], 2)
+
+    def test_apply_network_env_clears_blank_no_proxy(self) -> None:
+        cfg = AgentConfig(no_proxy="")
+
+        with patch.dict("os.environ", {"no_proxy": "old", "NO_PROXY": "old"}, clear=False):
+            apply_network_env(cfg)
+            import os
+
+            self.assertNotIn("no_proxy", os.environ)
+            self.assertNotIn("NO_PROXY", os.environ)
 
 
 if __name__ == "__main__":

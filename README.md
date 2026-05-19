@@ -93,6 +93,7 @@ opencode:
 ```
 
 > 每个检查项的调用方式（`api` 或 `opencode`）在其 `checker.yaml` 中独立配置，无需全局 `mode` 选项。
+> Agent 启动并连接服务器后，也可以在 Web UI 的 Agent 配置面板中直接保存或校验 LLM API 配置；保存后的配置会写回 `agent.yaml`。
 
 **第 3 步：安装系统代码索引工具**
 
@@ -142,6 +143,7 @@ OpenDeepHole Agent
 ```
 
 Agent 通过 WebSocket 保持长连接，等待服务器推送任务。
+启动后的 Agent 支持扫描前自动更新运行时代码。服务端更新 `agent/`、`backend/`、`checkers/`、`code_parser/`、`mcp_server/` 或 `requirements-agent.txt` 后，旧 Agent 会在下次启动扫描前下载最新 runtime 并重启继续执行该扫描；如果更新了 `run_agent.sh` 或 `run_agent.bat`，需要重新下载 Agent 包。
 
 **第 4 步：在 Web UI 创建扫描任务**
 
@@ -166,6 +168,7 @@ Agent 通过 WebSocket 保持长连接，等待服务器推送任务。
 
 - **停止**：在扫描详情页点击「停止扫描」，服务器直接通知 Agent 停止。当前候选处理完成后立即停止，已处理的结果保留。
 - **恢复**：在扫描列表页点击「恢复」，服务器通知 Agent 继续同一扫描任务，自动跳过已处理的候选，从断点继续。无需重新启动 Agent 或重新索引代码。
+- **配置更新**：运行中的扫描收到新的 Agent 配置后，不会中断当前候选点；从下一个候选点开始使用最新 LLM API、opencode 和代理配置。
 
 ## 误报反馈机制
 

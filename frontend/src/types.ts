@@ -178,6 +178,11 @@ export interface AgentRemoteConfig {
   opencode: AgentOpenCodeConfig;
 }
 
+export interface AgentConfigTestResult {
+  ok: boolean;
+  message: string;
+}
+
 export type FpReviewStatus = "pending" | "running" | "complete" | "error";
 
 export interface FpReviewResult {

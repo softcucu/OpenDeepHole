@@ -12,7 +12,7 @@ from typing import Optional
 
 import yaml
 
-from agent.config import AgentConfig
+from agent.config import AgentConfig, apply_network_env
 from agent.reporter import Reporter
 from backend.checker_sync import unpack_checker_packages
 from backend.models import Candidate, FeedbackEntry, ScanEvent, Vulnerability
@@ -26,6 +26,100 @@ def _path_matches_indexed_file(indexed_path: str, candidate_file: str) -> bool:
     indexed = indexed_path.replace("\\", "/")
     candidate = candidate_file.replace("\\", "/")
     return indexed == candidate or indexed.endswith(f"/{candidate}") or candidate.endswith(f"/{indexed}")
+
+
+def _is_relative_to(path: Path, parent: Path) -> bool:
+    try:
+        path.relative_to(parent)
+        return True
+    except ValueError:
+        return False
+
+
+def _resolve_scan_paths(project_path: Path, code_scan_path: Path | None) -> tuple[Path, Path]:
+    project_root = project_path.expanduser().resolve()
+    if not project_root.is_dir():
+        raise ValueError(f"项目总路径不存在或不是目录: {project_root}")
+
+    if code_scan_path is None:
+        scan_root = project_root
+    else:
+        raw_scan_root = code_scan_path.expanduser()
+        if not str(raw_scan_root):
+            scan_root = project_root
+        elif raw_scan_root.is_absolute():
+            scan_root = raw_scan_root.resolve()
+        else:
+            scan_root = (project_root / raw_scan_root).resolve()
+
+    if not scan_root.is_dir():
+        raise ValueError(f"代码扫描路径不存在或不是目录: {scan_root}")
+    if not _is_relative_to(scan_root, project_root):
+        raise ValueError(f"代码扫描路径必须位于项目总路径内: {scan_root} 不在 {project_root} 内")
+    return project_root, scan_root
+
+
+def _candidate_path_candidates(candidate_file: str, project_root: Path, scan_root: Path) -> list[Path]:
+    normalized = candidate_file.replace("\\", "/")
+    raw = Path(normalized)
+    if raw.is_absolute():
+        return [raw]
+
+    candidates = [scan_root / raw, project_root / raw]
+    parts = raw.parts
+    if parts and parts[0] == project_root.name:
+        candidates.append(project_root.joinpath(*parts[1:]))
+    if parts and parts[0] == scan_root.name:
+        candidates.append(scan_root.joinpath(*parts[1:]))
+    return candidates
+
+
+def _resolve_candidate_path(candidate_file: str, project_root: Path, scan_root: Path) -> Path | None:
+    candidates = _candidate_path_candidates(candidate_file, project_root, scan_root)
+    for candidate in candidates:
+        try:
+            resolved = candidate.expanduser().resolve()
+        except OSError:
+            continue
+        if resolved.exists() and _is_relative_to(resolved, project_root):
+            return resolved
+    for candidate in candidates:
+        try:
+            resolved = candidate.expanduser().resolve()
+        except OSError:
+            continue
+        if _is_relative_to(resolved, project_root):
+            return resolved
+    return None
+
+
+def _project_relative_file(path: Path, project_root: Path) -> str:
+    try:
+        return path.relative_to(project_root).as_posix()
+    except ValueError:
+        return path.as_posix()
+
+
+def _normalize_candidate_for_project(
+    candidate: Candidate,
+    project_root: Path,
+    scan_root: Path,
+) -> Candidate:
+    resolved = _resolve_candidate_path(candidate.file, project_root, scan_root)
+    if resolved is None:
+        return candidate.model_copy(update={"file": candidate.file.replace("\\", "/")})
+    return candidate.model_copy(update={"file": _project_relative_file(resolved, project_root)})
+
+
+def _candidate_in_scan_scope(candidate: Candidate, project_root: Path, scan_root: Path) -> bool:
+    if scan_root == project_root:
+        return True
+    resolved = _resolve_candidate_path(candidate.file, project_root, scan_root)
+    if resolved is None:
+        return candidate.file.replace("\\", "/").startswith(
+            scan_root.relative_to(project_root).as_posix().rstrip("/") + "/"
+        )
+    return _is_relative_to(resolved, scan_root)
 
 
 def _select_function_row(rows, candidate: Candidate):
@@ -159,6 +253,7 @@ def _configure_backend(config: AgentConfig, scan_dir: Path) -> None:
     config_path = scan_dir / "config.yaml"
     config_path.write_text(yaml.dump(raw), encoding="utf-8")
     os.environ["CONFIG_PATH"] = str(config_path)
+    apply_network_env(config)
 
     # Reset config singleton so it reloads from the new file
     import backend.config as _cfg
@@ -173,6 +268,7 @@ def _configure_backend(config: AgentConfig, scan_dir: Path) -> None:
 async def run_scan(
     config: AgentConfig,
     project_path: Path,
+    code_scan_path: Path | None,
     reporter: Reporter,
     scan_name: str,
     checker_names: list[str],
@@ -196,6 +292,8 @@ async def run_scan(
     previous_checkers_dir = os.environ.get(CHECKERS_DIR_ENV)
 
     try:
+        project_path, code_scan_path = _resolve_scan_paths(project_path, code_scan_path)
+
         if checker_packages:
             synced_checkers_dir = scan_dir / "checkers"
             unpacked = unpack_checker_packages(checker_packages, synced_checkers_dir)
@@ -212,6 +310,7 @@ async def run_scan(
 
         await emit("init", f"Scan started: {scan_name}")
         await emit("init", f"Project: {project_path}")
+        await emit("init", f"Code scan path: {code_scan_path}")
         await emit("init", f"Checkers: {checker_names or 'all'}" + (" (resume)" if is_resume else ""))
 
         # Load checker registry (discovers from bundled checkers/ dir)
@@ -391,7 +490,14 @@ async def run_scan(
         if candidates_cache_path.exists():
             await emit("static_analysis", "从缓存加载静态分析结果...")
             cached = json.loads(candidates_cache_path.read_text(encoding="utf-8"))
-            candidates = [Candidate(**d) for d in cached]
+            candidates = [
+                _normalize_candidate_for_project(Candidate(**d), project_path, code_scan_path)
+                for d in cached
+            ]
+            candidates = [
+                c for c in candidates
+                if _candidate_in_scan_scope(c, project_path, code_scan_path)
+            ]
             total = len(candidates)
             await emit("static_analysis", f"已加载 {total} 个缓存候选点", candidate_index=total)
         else:
@@ -420,9 +526,12 @@ async def run_scan(
                         entry.analyzer.on_file_progress = _on_progress
 
                     count_before = len(result)
-                    for cand in entry.analyzer.find_candidates(project_path, db=db):
+                    for raw_cand in entry.analyzer.find_candidates(code_scan_path, db=db):
                         if cancel_event.is_set():
                             return result, True
+                        cand = _normalize_candidate_for_project(raw_cand, project_path, code_scan_path)
+                        if not _candidate_in_scan_scope(cand, project_path, code_scan_path):
+                            continue
                         result.append(cand)
 
                     if hasattr(entry.analyzer, "on_file_progress"):
@@ -510,6 +619,7 @@ async def run_scan(
 
             vuln: Optional[Vulnerability] = None
             try:
+                _configure_backend(config, scan_dir)
                 from backend.opencode.runner import run_audit
                 vuln = await run_audit(
                     workspace,

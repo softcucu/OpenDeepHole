@@ -13,7 +13,7 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import Response
 
 from backend.checker_sync import build_checker_packages
@@ -125,6 +125,10 @@ def _resolve_scan_agent_id(meta: ScanMeta) -> str | None:
     return None
 
 
+def _server_url_from_request(request: Request) -> str:
+    return str(request.base_url).rstrip("/")
+
+
 def _validated_checker_names(checkers: list[str], user: User) -> list[str]:
     """Refresh checker registry and validate requested scan checkers."""
     registry = refresh_registry()
@@ -181,6 +185,7 @@ async def _push_feedback_selection_update(scan_id: str, feedback_ids: list[str])
 @router.post("/api/scan", response_model=ScanStartResponse)
 async def create_scan(
     body: CreateScanRequest,
+    request: Request,
     current_user: User = Depends(get_current_user),
 ) -> ScanStartResponse:
     """Create a new scan and dispatch it to the specified agent daemon."""
@@ -198,7 +203,11 @@ async def create_scan(
     checker_packages = _checker_packages_for(checker_names)
     scan_id = uuid.uuid4().hex
     now = datetime.now(timezone.utc).isoformat()
-    scan_name = body.scan_name or body.project_path.split("/")[-1] or scan_id
+    project_path = body.project_path.strip()
+    if not project_path:
+        raise HTTPException(status_code=400, detail="project_path is required")
+    code_scan_path = body.code_scan_path.strip() or project_path
+    scan_name = body.scan_name or project_path.split("/")[-1] or scan_id
 
     scan = ScanStatus(
         scan_id=scan_id,
@@ -219,7 +228,8 @@ async def create_scan(
         feedback_ids=body.feedback_ids,
         agent_id=body.agent_id,
         agent_name=agent.name,
-        project_path=body.project_path,
+        project_path=project_path,
+        code_scan_path=code_scan_path,
         scan_name=scan_name,
         user_id=current_user.user_id,
     )
@@ -230,16 +240,18 @@ async def create_scan(
     _scan_owners[scan_id] = current_user.user_id
 
     # Dispatch to agent via WebSocket
-    from backend.api.agent import send_agent_command
+    from backend.api.agent import create_agent_runtime_update_payload, send_agent_command
     feedback_entries = [entry.model_dump() for entry in _selected_feedback_entries(scan_id, body.feedback_ids)]
     ok = await send_agent_command(body.agent_id, {
         "type": "task",
         "scan_id": scan_id,
-        "project_path": body.project_path,
+        "project_path": project_path,
+        "code_scan_path": code_scan_path,
         "checkers": checker_names,
         "scan_name": scan_name,
         "feedback_entries": feedback_entries,
         "checker_packages": checker_packages,
+        "agent_runtime_update": create_agent_runtime_update_payload(_server_url_from_request(request)),
     })
     if not ok:
         store.update_scan_progress(scan_id, status=ScanItemStatus.ERROR, error_message="Agent not connected")
@@ -370,6 +382,7 @@ async def stop_scan(
 @router.post("/api/scan/{scan_id}/resume", response_model=ScanStartResponse)
 async def resume_scan(
     scan_id: str,
+    request: Request,
     current_user: User = Depends(get_current_user),
 ) -> ScanStartResponse:
     """Reset a cancelled/error scan to PENDING and tell the agent to resume."""
@@ -433,16 +446,18 @@ async def resume_scan(
     _scan_owners[scan_id] = current_user.user_id
 
     # Send resume command to agent via WebSocket
-    from backend.api.agent import send_agent_command
+    from backend.api.agent import create_agent_runtime_update_payload, send_agent_command
     feedback_entries = [entry.model_dump() for entry in _selected_feedback_entries(scan_id, meta.feedback_ids)]
     ok = await send_agent_command(agent_id, {
         "type": "resume",
         "scan_id": scan_id,
         "project_path": meta.project_path,
+        "code_scan_path": meta.code_scan_path or meta.project_path,
         "checkers": meta.scan_items,
         "scan_name": meta.scan_name,
         "feedback_entries": feedback_entries,
         "checker_packages": _checker_packages_for(meta.scan_items),
+        "agent_runtime_update": create_agent_runtime_update_payload(_server_url_from_request(request)),
     })
     if not ok:
         store.update_scan_progress(scan_id, status=ScanItemStatus.ERROR, error_message="Agent not connected")

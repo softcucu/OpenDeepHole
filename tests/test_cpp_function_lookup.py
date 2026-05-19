@@ -182,6 +182,30 @@ int second(void) {
         db.close()
 
 
+def test_function_lookup_file_filter_accepts_absolute_project_path(tmp_path: Path) -> None:
+    db = CodeDatabase(tmp_path / "code_index.db")
+    file_id = db.get_or_create_file("src/sample.c")
+    db.insert_function(
+        name="demo",
+        signature="int demo(void)",
+        return_type="int",
+        file_id=file_id,
+        start_line=1,
+        end_line=3,
+        is_static=False,
+        linkage="extern",
+        body="int demo(void) {\n    return 1;\n}",
+    )
+    db.commit()
+    try:
+        rows = db.get_functions_by_name("demo", file_path=str(tmp_path / "src" / "sample.c"))
+
+        assert len(rows) == 1
+        assert rows[0]["file_path"] == "src/sample.c"
+    finally:
+        db.close()
+
+
 def test_code_index_complete_marker_controls_reuse(tmp_path: Path) -> None:
     db = _index_source(
         tmp_path,

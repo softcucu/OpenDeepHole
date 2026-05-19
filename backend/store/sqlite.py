@@ -165,6 +165,8 @@ class SqliteScanStore(ScanStoreBase):
             self._conn.execute("ALTER TABLE scans ADD COLUMN agent_name TEXT DEFAULT ''")
         if "project_path" not in cols:
             self._conn.execute("ALTER TABLE scans ADD COLUMN project_path TEXT DEFAULT ''")
+        if "code_scan_path" not in cols:
+            self._conn.execute("ALTER TABLE scans ADD COLUMN code_scan_path TEXT DEFAULT ''")
         if "scan_name" not in cols:
             self._conn.execute("ALTER TABLE scans ADD COLUMN scan_name TEXT DEFAULT ''")
         if "user_id" not in cols:
@@ -263,6 +265,7 @@ class SqliteScanStore(ScanStoreBase):
             agent_id=row["agent_id"] if row["agent_id"] is not None else "",
             agent_name=row["agent_name"] if row["agent_name"] is not None else "",
             project_path=row["project_path"] if row["project_path"] is not None else "",
+            code_scan_path=row["code_scan_path"] if row["code_scan_path"] is not None else "",
             scan_name=row["scan_name"] if row["scan_name"] is not None else "",
             user_id=row["user_id"] if row["user_id"] is not None else "",
         )
@@ -283,8 +286,8 @@ class SqliteScanStore(ScanStoreBase):
                      progress, total_candidates, processed_candidates,
                      current_candidate, error_message, feedback_ids,
                      static_total_files, static_scanned_files, static_analysis_done,
-                     user_id, agent_name, agent_id, project_path, scan_name)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     user_id, agent_name, agent_id, project_path, code_scan_path, scan_name)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     scan.scan_id,
@@ -305,6 +308,7 @@ class SqliteScanStore(ScanStoreBase):
                     meta.agent_name,
                     meta.agent_id,
                     meta.project_path,
+                    meta.code_scan_path,
                     meta.scan_name,
                 ),
             )

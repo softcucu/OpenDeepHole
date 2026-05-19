@@ -1,5 +1,5 @@
 import axios from "axios";
-import type { AgentInfo, AgentRemoteConfig, CheckerCatalogItem, CheckerDashboardResponse, CheckerInfo, FeedbackEntry, FpReviewJob, IndexStatus, ScanStatus, ScanStartResponse, ScanSummary, TokenResponse, User } from "../types";
+import type { AgentConfigTestResult, AgentInfo, AgentRemoteConfig, CheckerCatalogItem, CheckerDashboardResponse, CheckerInfo, FeedbackEntry, FpReviewJob, IndexStatus, ScanStatus, ScanStartResponse, ScanSummary, TokenResponse, User } from "../types";
 
 const api = axios.create({ baseURL: "/" });
 
@@ -119,6 +119,7 @@ export async function startScan(
 export async function createScan(body: {
   agent_id: string;
   project_path: string;
+  code_scan_path?: string;
   scan_name: string;
   checkers: string[];
   feedback_ids?: string[];
@@ -253,6 +254,11 @@ export async function getAgentConfig(agentId: string): Promise<AgentRemoteConfig
 
 export async function updateAgentConfig(agentId: string, config: AgentRemoteConfig): Promise<void> {
   await api.put(`/api/agent/${agentId}/config`, config);
+}
+
+export async function testAgentConfig(agentId: string, config: AgentRemoteConfig): Promise<AgentConfigTestResult> {
+  const { data } = await api.post<AgentConfigTestResult>(`/api/agent/${agentId}/config/test`, config);
+  return data;
 }
 
 // --- FP Review ---

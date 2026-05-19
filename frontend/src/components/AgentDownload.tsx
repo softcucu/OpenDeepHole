@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { getAgents, getAgentConfig, updateAgentConfig } from "../api/client";
+import { getAgents, getAgentConfig, testAgentConfig, updateAgentConfig } from "../api/client";
 import type { AgentInfo, AgentRemoteConfig } from "../types";
 
 interface Props {
@@ -38,6 +38,8 @@ function AgentConfigPanel({ agent }: AgentConfigPanelProps) {
   const [cfg, setCfg] = useState<AgentRemoteConfig>(deepClone(DEFAULT_CONFIG));
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [testing, setTesting] = useState(false);
+  const [testResult, setTestResult] = useState<{ ok: boolean; message: string } | null>(null);
   const [saved, setSaved] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -66,6 +68,20 @@ function AgentConfigPanel({ agent }: AgentConfigPanelProps) {
       setError("保存失败，请重试");
     } finally {
       setSaving(false);
+    }
+  };
+
+  const handleTest = async () => {
+    setTesting(true);
+    setError(null);
+    setTestResult(null);
+    try {
+      const result = await testAgentConfig(agent.agent_id, cfg);
+      setTestResult(result);
+    } catch {
+      setError("API 校验失败，请确认 Agent 在线并重试");
+    } finally {
+      setTesting(false);
     }
   };
 
@@ -208,10 +224,24 @@ function AgentConfigPanel({ agent }: AgentConfigPanelProps) {
                 </p>
               )}
 
-              <div className="flex justify-end gap-2 pt-1">
+              {testResult && (
+                <p className={`text-sm rounded-lg px-3 py-2 border ${
+                  testResult.ok
+                    ? "text-green-300 bg-green-500/10 border-green-500/20"
+                    : "text-red-300 bg-red-500/10 border-red-500/20"
+                }`}>
+                  {testResult.message || (testResult.ok ? "API 配置可用" : "API 配置不可用")}
+                </p>
+              )}
+
+              <div className="flex flex-wrap justify-end gap-2 pt-1">
                 <button onClick={() => setOpen(false)}
                   className="px-4 py-1.5 text-sm text-slate-300 hover:text-white bg-slate-700 hover:bg-slate-600 rounded-lg transition-colors">
                   关闭
+                </button>
+                <button onClick={handleTest} disabled={testing || !agent.online}
+                  className="px-4 py-1.5 text-sm font-medium text-slate-100 bg-slate-700 hover:bg-slate-600 disabled:opacity-50 rounded-lg transition-colors">
+                  {testing ? "校验中…" : "校验 API"}
                 </button>
                 <button onClick={handleSave} disabled={saving}
                   className="px-4 py-1.5 text-sm font-medium text-white bg-blue-600 hover:bg-blue-500 disabled:opacity-50 rounded-lg transition-colors">
@@ -384,7 +414,7 @@ Connecting to ws://.../api/agent/ws ...
             Agent 启动并连接后，会在顶部「已连接 Agent」列表中出现。点击对应 Agent 的「配置」按钮，填写 LLM API Key 等信息并保存。
           </p>
           <p className="text-slate-400 text-sm">
-            保存后会立即推送到在线 Agent 并写回 agent.yaml。正在运行的扫描继续使用启动时配置，后续扫描使用新配置。
+            保存后会立即推送到在线 Agent 并写回 agent.yaml。正在运行的扫描会从下一个候选点开始使用新配置。
           </p>
         </div>
 

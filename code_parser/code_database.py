@@ -267,7 +267,11 @@ class CodeDatabase:
             return True
         row_path_norm = row_path.replace("\\", "/")
         file_path_norm = file_path.replace("\\", "/")
-        return row_path_norm == file_path_norm or row_path_norm.endswith(f"/{file_path_norm}")
+        return (
+            row_path_norm == file_path_norm
+            or row_path_norm.endswith(f"/{file_path_norm}")
+            or file_path_norm.endswith(f"/{row_path_norm}")
+        )
 
     @staticmethod
     def _escape_like(value: str) -> str:

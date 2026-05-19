@@ -103,6 +103,11 @@ def _probe_llm_api(llm_cfg) -> tuple[bool, str]:
     return True, ""
 
 
+def probe_llm_api_config(llm_cfg) -> tuple[bool, str]:
+    """Validate an explicit LLM API config without using the global app config."""
+    return _probe_llm_api(llm_cfg)
+
+
 async def ensure_llm_api_available(on_output=None) -> None:
     """Check that the configured LLM API can answer a minimal request."""
     llm_cfg = get_config().llm_api

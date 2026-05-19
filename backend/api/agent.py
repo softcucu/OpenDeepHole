@@ -24,8 +24,11 @@ Other:
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import io
+import secrets
 import socket
+import time
 import uuid
 import zipfile
 from datetime import datetime, timezone
@@ -68,6 +71,10 @@ _agent_disconnect_tasks: dict[str, asyncio.Task] = {}
 # Agent configs persisted by agent_name (survives agent reconnects)
 _agent_configs: dict[str, AgentRemoteConfig] = {}
 
+# Short-lived tokens used by online agents to fetch runtime update archives.
+_runtime_download_tokens: dict[str, tuple[str, float]] = {}
+_config_test_waiters: dict[str, asyncio.Future] = {}
+
 # In-memory index progress store: scan_id → {status, parsed_files, total_files}
 _scan_index_statuses: dict[str, dict] = {}
 
@@ -76,6 +83,7 @@ _SERVER_RESTART_ERROR = "Process terminated unexpectedly"
 _WEBSOCKET_AGENT_STALE_SECONDS = 120
 _AGENT_DISCONNECT_GRACE_SECONDS = 120
 _SERVER_STARTED_AT = datetime.now(timezone.utc)
+_RUNTIME_DOWNLOAD_TOKEN_TTL_SECONDS = 300
 
 _RUNNING_SCAN_STATUSES = (
     ScanItemStatus.PENDING,
@@ -386,6 +394,13 @@ async def agent_websocket(websocket: WebSocket) -> None:
             _touch_agent(agent_id)
             if isinstance(incoming, dict) and incoming.get("type") == "heartbeat":
                 await _send_agent_json(agent_id, {"type": "heartbeat_ack"})
+                continue
+            if isinstance(incoming, dict) and incoming.get("type") == "config_test_result":
+                request_id = str(incoming.get("request_id") or "")
+                waiter = _config_test_waiters.pop(request_id, None)
+                if waiter is not None and not waiter.done():
+                    waiter.set_result(incoming)
+                continue
 
     except WebSocketDisconnect:
         pass
@@ -432,6 +447,11 @@ async def send_agent_command(agent_id: str, command: dict) -> bool:
 class _AgentRegisterBody(BaseModel):
     port: int
     name: str = ""
+
+
+class _AgentConfigTestResponse(BaseModel):
+    ok: bool
+    message: str = ""
 
 
 @router.post("/register")
@@ -510,6 +530,44 @@ async def update_agent_config(
     # Push update to agent immediately if connected via WebSocket
     await send_agent_command(agent_id, {"type": "config", "config": body.model_dump()})
     return {"ok": True}
+
+
+@router.post("/{agent_id}/config/test", response_model=_AgentConfigTestResponse)
+async def test_agent_config(
+    agent_id: str,
+    body: AgentRemoteConfig,
+    current_user: User = Depends(get_current_user),
+) -> _AgentConfigTestResponse:
+    """Ask the online Agent to validate the provided LLM API config."""
+    agent = _registered_agents.get(agent_id)
+    if agent is None:
+        raise HTTPException(status_code=404, detail="Agent not found")
+    if current_user.role != "admin" and agent.user_id != current_user.user_id:
+        raise HTTPException(status_code=403, detail="Access denied")
+    if agent_id not in _agent_ws:
+        raise HTTPException(status_code=400, detail="Agent is offline")
+
+    request_id = uuid.uuid4().hex
+    loop = asyncio.get_running_loop()
+    waiter = loop.create_future()
+    _config_test_waiters[request_id] = waiter
+    ok = await send_agent_command(agent_id, {
+        "type": "config_test",
+        "request_id": request_id,
+        "config": body.model_dump(),
+    })
+    if not ok:
+        _config_test_waiters.pop(request_id, None)
+        raise HTTPException(status_code=502, detail="Agent not connected")
+    try:
+        result = await asyncio.wait_for(waiter, timeout=20.0)
+    except asyncio.TimeoutError:
+        _config_test_waiters.pop(request_id, None)
+        raise HTTPException(status_code=504, detail="Agent API config test timed out")
+    return _AgentConfigTestResponse(
+        ok=bool(result.get("ok")),
+        message=str(result.get("message") or ""),
+    )
 
 
 @router.get("/agents")
@@ -806,12 +864,68 @@ async def agent_get_feedback(vuln_types: Optional[str] = None) -> list:
 # ---------------------------------------------------------------------------
 
 _AGENT_DIRS = ["agent", "checkers", "code_parser", "mcp_server", "backend"]
+_AGENT_RUNTIME_ROOT_FILES = ["requirements-agent.txt"]
 _AGENT_ROOT_FILES = [
     "agent.yaml",
     "run_agent.sh",
     "run_agent.bat",
     "requirements-agent.txt",
 ]
+_AGENT_SKIP_DIRS = {"__pycache__", ".git", ".mypy_cache", ".pytest_cache", "static"}
+_AGENT_SKIP_SUFFIXES = {".pyc", ".pyo"}
+
+
+def _should_skip_agent_file(path: Path) -> bool:
+    return path.suffix in _AGENT_SKIP_SUFFIXES or any(part in _AGENT_SKIP_DIRS for part in path.parts)
+
+
+def _iter_agent_runtime_files():
+    for dir_name in _AGENT_DIRS:
+        dir_path = _PROJECT_ROOT / dir_name
+        if not dir_path.is_dir():
+            continue
+        for file_path in sorted(dir_path.rglob("*")):
+            if file_path.is_file() and not _should_skip_agent_file(file_path):
+                yield file_path.relative_to(_PROJECT_ROOT).as_posix(), file_path
+    for filename in _AGENT_RUNTIME_ROOT_FILES:
+        file_path = _PROJECT_ROOT / filename
+        if file_path.is_file():
+            yield filename, file_path
+
+
+def _agent_runtime_hash() -> str:
+    digest = hashlib.sha256()
+    for arcname, file_path in _iter_agent_runtime_files():
+        digest.update(arcname.encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(file_path.read_bytes())
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
+def _build_agent_runtime_zip() -> bytes:
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        for arcname, file_path in _iter_agent_runtime_files():
+            zf.write(file_path, arcname)
+    return buf.getvalue()
+
+
+def create_agent_runtime_update_payload(server_url: str) -> dict:
+    data = _build_agent_runtime_zip()
+    runtime_hash = _agent_runtime_hash()
+    token = secrets.token_urlsafe(32)
+    _runtime_download_tokens[token] = (
+        runtime_hash,
+        time.time() + _RUNTIME_DOWNLOAD_TOKEN_TTL_SECONDS,
+    )
+    return {
+        "hash": runtime_hash,
+        "archive_sha256": hashlib.sha256(data).hexdigest(),
+        "download_url": f"{server_url.rstrip('/')}/api/agent/runtime/download",
+        "token": token,
+        "expires_at": int(time.time() + _RUNTIME_DOWNLOAD_TOKEN_TTL_SECONDS),
+    }
 
 
 def _build_agent_zip(server_url: str = "", owner_token: str = "") -> bytes:
@@ -823,7 +937,7 @@ def _build_agent_zip(server_url: str = "", owner_token: str = "") -> bytes:
             if not dir_path.is_dir():
                 continue
             for file_path in dir_path.rglob("*"):
-                if file_path.is_file() and "__pycache__" not in str(file_path):
+                if file_path.is_file() and not _should_skip_agent_file(file_path):
                     arcname = str(file_path.relative_to(_PROJECT_ROOT))
                     zf.write(file_path, arcname)
 
@@ -891,6 +1005,10 @@ Usage
 -----
 The agent daemon connects to the server via WebSocket and waits for scan tasks.
 Use the "新建扫描" button in the web UI to start a scan.
+Before each scan, the agent checks whether the server has newer runtime code.
+Runtime code updates are installed automatically and the scan continues after
+the agent restarts. If run_agent.sh or run_agent.bat changes, download a new
+agent package.
 
 Results appear at: <server_url> (the web interface)
 """
@@ -913,4 +1031,31 @@ async def agent_download(
         content=data,
         media_type="application/zip",
         headers={"Content-Disposition": 'attachment; filename="opendeephole-agent.zip"'},
+    )
+
+
+@router.get("/runtime/manifest")
+async def agent_runtime_manifest() -> dict:
+    """Return the current server-side Agent runtime hash."""
+    return {"hash": _agent_runtime_hash()}
+
+
+@router.get("/runtime/download")
+async def agent_runtime_download(request: Request) -> Response:
+    """Serve a short-lived Agent runtime update archive."""
+    token = request.headers.get("X-Agent-Update-Token") or request.query_params.get("token") or ""
+    token_info = _runtime_download_tokens.pop(token, None)
+    if token_info is None:
+        raise HTTPException(status_code=403, detail="Invalid or expired runtime update token")
+    expected_hash, expires_at = token_info
+    if time.time() > expires_at:
+        raise HTTPException(status_code=403, detail="Runtime update token expired")
+
+    data = _build_agent_runtime_zip()
+    if _agent_runtime_hash() != expected_hash:
+        raise HTTPException(status_code=409, detail="Agent runtime changed; request a new scan command")
+    return Response(
+        content=data,
+        media_type="application/zip",
+        headers={"Content-Disposition": 'attachment; filename="opendeephole-agent-runtime.zip"'},
     )

@@ -16,6 +16,7 @@ export default function NewScanForm({ onScanStarted, onBack }: Props) {
 
   const [selectedAgent, setSelectedAgent] = useState<string>("");
   const [projectPath, setProjectPath] = useState<string>("");
+  const [codeScanPath, setCodeScanPath] = useState<string>("");
   const [scanName, setScanName] = useState<string>("");
   const [selectedCheckers, setSelectedCheckers] = useState<Set<string>>(new Set());
 
@@ -70,6 +71,7 @@ export default function NewScanForm({ onScanStarted, onBack }: Props) {
       const resp = await createScan({
         agent_id: selectedAgent,
         project_path: projectPath.trim(),
+        code_scan_path: codeScanPath.trim(),
         scan_name: scanName.trim(),
         checkers: Array.from(selectedCheckers),
       });
@@ -91,7 +93,7 @@ export default function NewScanForm({ onScanStarted, onBack }: Props) {
         <div className="flex items-center justify-between">
           <div>
             <h1 className="text-lg font-bold text-white">新建扫描</h1>
-            <p className="text-sm text-slate-400 mt-0.5">选择客户端、代码路径和检测项，创建扫描任务</p>
+            <p className="text-sm text-slate-400 mt-0.5">选择客户端、项目路径、代码扫描范围和检测项，创建扫描任务</p>
           </div>
           <button
             onClick={onBack}
@@ -169,17 +171,34 @@ export default function NewScanForm({ onScanStarted, onBack }: Props) {
             {/* Project path */}
             <div className="bg-slate-800 border border-slate-700 rounded-xl p-5">
               <label className="block text-sm font-medium text-slate-300 mb-3">
-                项目路径
+                项目总路径
               </label>
               <input
                 type="text"
                 value={projectPath}
                 onChange={(e) => setProjectPath(e.target.value)}
-                placeholder="/path/to/your/c-project"
+                placeholder="/path/to/your/project"
                 className="w-full bg-slate-900 border border-slate-600 rounded-lg px-3 py-2 text-sm text-white placeholder-slate-500 focus:outline-none focus:border-blue-500 transition-colors"
               />
               <p className="text-xs text-slate-500 mt-2">
-                Agent 所在机器上的 C/C++ 源代码目录绝对路径
+                Agent 所在机器上的项目根目录，用于代码索引和 opencode 工作区
+              </p>
+            </div>
+
+            {/* Code scan path */}
+            <div className="bg-slate-800 border border-slate-700 rounded-xl p-5">
+              <label className="block text-sm font-medium text-slate-300 mb-3">
+                代码扫描路径 <span className="text-slate-500 font-normal">（可选）</span>
+              </label>
+              <input
+                type="text"
+                value={codeScanPath}
+                onChange={(e) => setCodeScanPath(e.target.value)}
+                placeholder="留空则扫描项目总路径，可填写子目录或绝对路径"
+                className="w-full bg-slate-900 border border-slate-600 rounded-lg px-3 py-2 text-sm text-white placeholder-slate-500 focus:outline-none focus:border-blue-500 transition-colors"
+              />
+              <p className="text-xs text-slate-500 mt-2">
+                静态分析只扫描该目录；必须位于项目总路径内
               </p>
             </div>
 
