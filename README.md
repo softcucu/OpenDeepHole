@@ -131,7 +131,7 @@ OpenDeepHole Agent
 ```
 
 Agent 通过 WebSocket 保持长连接，等待服务器推送任务。
-启动后的 Agent 支持扫描前自动更新运行时代码。服务端更新 `agent/`、`backend/`、`checkers/`、`code_parser/`、`mcp_server/`、包内 Windows ctags 目录或 `requirements-agent.txt` 后，旧 Agent 会在下次启动扫描前下载最新 runtime 并重启继续执行该扫描；如果更新了 `run_agent.sh` 或 `run_agent.bat`，需要重新下载 Agent 包。
+启动后的 Agent 支持扫描前自动更新运行时代码。服务端更新 `agent/`、`backend/`、`code_parser/`、`mcp_server/`、包内 Windows ctags 目录或 `requirements-agent.txt` 后，旧 Agent 会在下次启动扫描前下载最新 runtime 并重启继续执行该扫描；runtime 更新包会携带快照 manifest，用于校验下载 zip 的文件集合和逐文件 hash；`checkers/` 更新会在创建或恢复扫描时按选中检查项同步到 Agent，不会触发 Agent 重启；如果更新了 `run_agent.sh` 或 `run_agent.bat`，需要重新下载 Agent 包。
 
 **第 4 步：在 Web UI 创建扫描任务**
 
@@ -496,7 +496,7 @@ npm run build
 tail -f logs/opendeephole.log
 ```
 
-> **注意：** Agent 需要运行支持 checker 同步的新版本。之后新增 checker 时，只要点击开始扫描，后端会把本次选中的 checker 同步到 Agent，无需重启后端或 Agent。
+> **注意：** Agent 需要运行支持 checker 同步的新版本。之后新增或修改 checker 时，只要点击开始扫描，后端会把本次选中的 checker 同步到 Agent，无需重启后端或 Agent，也不会触发 Agent runtime 自更新重启。
 
 ## 数据存储位置
 

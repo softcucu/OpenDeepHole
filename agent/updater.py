@@ -17,7 +17,7 @@ from typing import Any
 import httpx
 
 
-RUNTIME_DIRS = ("agent", "checkers", "code_parser", "mcp_server", "backend")
+RUNTIME_DIRS = ("agent", "code_parser", "mcp_server", "backend")
 RUNTIME_TOOL_DIRS = ("ctags-p6.2.20260517.0-x64",)
 RUNTIME_ROOT_FILES = ("requirements-agent.txt",)
 SKIP_DIRS = {"__pycache__", ".git", ".mypy_cache", ".pytest_cache", "static"}
@@ -31,6 +31,17 @@ def runtime_root() -> Path:
 
 def _should_skip(path: Path) -> bool:
     return path.suffix in SKIP_SUFFIXES or any(part in SKIP_DIRS for part in path.parts)
+
+
+def runtime_hash_scope() -> dict[str, Any]:
+    return {
+        "version": 2,
+        "dirs": list(RUNTIME_DIRS),
+        "tool_dirs": list(RUNTIME_TOOL_DIRS),
+        "root_files": list(RUNTIME_ROOT_FILES),
+        "skip_dirs": sorted(SKIP_DIRS),
+        "skip_suffixes": sorted(SKIP_SUFFIXES),
+    }
 
 
 def _iter_runtime_files(root: Path):
@@ -61,6 +72,16 @@ def compute_runtime_hash(root: Path | None = None) -> str:
         digest.update(arcname.encode("utf-8"))
         digest.update(b"\0")
         digest.update(file_path.read_bytes())
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
+def _runtime_hash_for_contents(files: list[tuple[str, bytes]]) -> str:
+    digest = hashlib.sha256()
+    for arcname, content in files:
+        digest.update(arcname.encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(content)
         digest.update(b"\0")
     return digest.hexdigest()
 
@@ -133,7 +154,7 @@ async def ensure_runtime_updated(update: dict[str, Any] | None, command: dict[st
         return False
 
     save_pending_command(command)
-    _install_update_archive(archive, expected_hash)
+    _install_update_archive(archive, expected_hash, update.get("manifest"))
     _install_requirements_if_needed()
     _restart_process()
     return True
@@ -153,14 +174,22 @@ async def _download_update(update: dict[str, Any]) -> bytes:
     if expected_archive_hash:
         actual_hash = hashlib.sha256(data).hexdigest()
         if actual_hash != expected_archive_hash:
-            raise RuntimeError("Agent runtime update archive hash mismatch")
+            raise RuntimeError(
+                "Agent runtime update archive hash mismatch "
+                f"(expected={expected_archive_hash}, actual={actual_hash})"
+            )
     return data
 
 
-def _install_update_archive(archive: bytes, expected_hash: str) -> None:
+def _install_update_archive(
+    archive: bytes,
+    expected_hash: str,
+    manifest: dict[str, Any] | None = None,
+) -> None:
     root = runtime_root()
     with tempfile.TemporaryDirectory(prefix="opendeephole-agent-update-") as tmp:
         tmp_root = Path(tmp)
+        archive_files: dict[str, bytes] = {}
         with zipfile.ZipFile(io.BytesIO(archive)) as zf:
             for info in zf.infolist():
                 if info.is_dir():
@@ -168,16 +197,20 @@ def _install_update_archive(archive: bytes, expected_hash: str) -> None:
                 member = Path(info.filename)
                 if member.is_absolute() or ".." in member.parts:
                     raise RuntimeError(f"Unsafe runtime update path: {info.filename}")
+                arcname = member.as_posix()
+                if arcname in archive_files:
+                    raise RuntimeError(f"Duplicate runtime update path: {arcname}")
+                content = zf.read(info)
+                archive_files[arcname] = content
                 dest = (tmp_root / member).resolve()
                 dest.relative_to(tmp_root.resolve())
                 dest.parent.mkdir(parents=True, exist_ok=True)
-                dest.write_bytes(zf.read(info))
+                dest.write_bytes(content)
 
-        actual_hash = compute_runtime_hash(tmp_root)
-        if actual_hash != expected_hash:
-            raise RuntimeError("Agent runtime update content hash mismatch")
+        _verify_update_contents(tmp_root, archive_files, expected_hash, manifest)
 
-        for dir_name in (*RUNTIME_DIRS, *RUNTIME_TOOL_DIRS):
+        runtime_dirs, runtime_files = _install_targets(manifest)
+        for dir_name in runtime_dirs:
             src = tmp_root / dir_name
             if not src.exists():
                 continue
@@ -186,10 +219,126 @@ def _install_update_archive(archive: bytes, expected_hash: str) -> None:
                 shutil.rmtree(dest)
             shutil.copytree(src, dest)
 
-        for filename in RUNTIME_ROOT_FILES:
+        for filename in runtime_files:
             src = tmp_root / filename
             if src.is_file():
                 shutil.copy2(src, root / filename)
+
+
+def _verify_update_contents(
+    tmp_root: Path,
+    archive_files: dict[str, bytes],
+    expected_hash: str,
+    manifest: dict[str, Any] | None,
+) -> None:
+    if not manifest:
+        actual_hash = compute_runtime_hash(tmp_root)
+        if actual_hash != expected_hash:
+            raise RuntimeError(
+                "Agent runtime update content hash mismatch "
+                f"(expected={expected_hash}, actual={actual_hash}, files={len(archive_files)})"
+            )
+        return
+
+    manifest_files = manifest.get("files")
+    if not isinstance(manifest_files, list):
+        raise RuntimeError("Agent runtime update manifest missing files")
+
+    expected_paths: list[str] = []
+    for entry in manifest_files:
+        if not isinstance(entry, dict):
+            raise RuntimeError("Agent runtime update manifest contains invalid file entry")
+        path = str(entry.get("path") or "")
+        expected_paths.append(path)
+
+    expected_set = set(expected_paths)
+    actual_set = set(archive_files)
+    missing = sorted(expected_set - actual_set)
+    extra = sorted(actual_set - expected_set)
+    if missing or extra:
+        detail = []
+        if missing:
+            detail.append(f"missing={missing[0]}")
+        if extra:
+            detail.append(f"extra={extra[0]}")
+        raise RuntimeError(
+            "Agent runtime update manifest mismatch "
+            f"({', '.join(detail)}, manifest_files={len(expected_set)}, archive_files={len(actual_set)})"
+        )
+    if len(expected_paths) != len(expected_set):
+        raise RuntimeError("Agent runtime update manifest contains duplicate paths")
+
+    ordered_files: list[tuple[str, bytes]] = []
+    for entry in manifest_files:
+        path = str(entry["path"])
+        content = archive_files[path]
+        expected_file_hash = str(entry.get("sha256") or "")
+        actual_file_hash = hashlib.sha256(content).hexdigest()
+        if expected_file_hash != actual_file_hash:
+            raise RuntimeError(
+                "Agent runtime update manifest hash mismatch "
+                f"(path={path}, expected={expected_file_hash}, actual={actual_file_hash})"
+            )
+        expected_size = entry.get("size")
+        if expected_size is not None:
+            try:
+                expected_size_int = int(expected_size)
+            except (TypeError, ValueError) as exc:
+                raise RuntimeError(
+                    "Agent runtime update manifest size invalid "
+                    f"(path={path}, value={expected_size})"
+                ) from exc
+        else:
+            expected_size_int = None
+        if expected_size_int is not None and expected_size_int != len(content):
+            raise RuntimeError(
+                "Agent runtime update manifest size mismatch "
+                f"(path={path}, expected={expected_size_int}, actual={len(content)})"
+            )
+        ordered_files.append((path, content))
+
+    manifest_hash = str(manifest.get("runtime_hash") or "")
+    if manifest_hash and manifest_hash != expected_hash:
+        raise RuntimeError(
+            "Agent runtime update manifest runtime hash mismatch "
+            f"(expected={expected_hash}, manifest={manifest_hash})"
+        )
+
+    actual_manifest_hash = _runtime_hash_for_contents(ordered_files)
+    if actual_manifest_hash != expected_hash:
+        raise RuntimeError(
+            "Agent runtime update content hash mismatch "
+            f"(expected={expected_hash}, actual={actual_manifest_hash}, scope=manifest, files={len(ordered_files)})"
+        )
+
+    remote_scope = manifest.get("hash_scope")
+    if remote_scope == runtime_hash_scope():
+        actual_hash = compute_runtime_hash(tmp_root)
+        if actual_hash != expected_hash:
+            raise RuntimeError(
+                "Agent runtime update content hash mismatch "
+                f"(expected={expected_hash}, actual={actual_hash}, scope=local, files={len(archive_files)})"
+            )
+
+
+def _install_targets(manifest: dict[str, Any] | None) -> tuple[set[str], set[str]]:
+    if not manifest:
+        return set((*RUNTIME_DIRS, *RUNTIME_TOOL_DIRS)), set(RUNTIME_ROOT_FILES)
+
+    dirs: set[str] = set()
+    files: set[str] = set()
+    for entry in manifest.get("files") or []:
+        if not isinstance(entry, dict):
+            continue
+        path = str(entry.get("path") or "")
+        if not path:
+            continue
+        first, sep, _rest = path.partition("/")
+        if sep:
+            dirs.add(first)
+        else:
+            files.add(first)
+    return dirs, files
 
 
 def _install_requirements_if_needed() -> None:

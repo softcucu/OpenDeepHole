@@ -77,6 +77,7 @@ _agent_configs: dict[str, AgentRemoteConfig] = {}
 class _RuntimeDownload:
     runtime_hash: str
     archive_sha256: str
+    manifest: dict
     data: bytes
     expires_at: float
 
@@ -885,6 +886,7 @@ async def agent_get_feedback(vuln_types: Optional[str] = None) -> list:
 # ---------------------------------------------------------------------------
 
 _AGENT_DIRS = ["agent", "checkers", "code_parser", "mcp_server", "backend"]
+_AGENT_RUNTIME_DIRS = ["agent", "code_parser", "mcp_server", "backend"]
 _AGENT_TOOL_DIRS = ["ctags-p6.2.20260517.0-x64"]
 _AGENT_RUNTIME_ROOT_FILES = ["requirements-agent.txt"]
 _AGENT_ROOT_FILES = [
@@ -897,12 +899,23 @@ _AGENT_SKIP_DIRS = {"__pycache__", ".git", ".mypy_cache", ".pytest_cache", "stat
 _AGENT_SKIP_SUFFIXES = {".pyc", ".pyo"}
 
 
+def _agent_runtime_hash_scope() -> dict:
+    return {
+        "version": 2,
+        "dirs": list(_AGENT_RUNTIME_DIRS),
+        "tool_dirs": list(_AGENT_TOOL_DIRS),
+        "root_files": list(_AGENT_RUNTIME_ROOT_FILES),
+        "skip_dirs": sorted(_AGENT_SKIP_DIRS),
+        "skip_suffixes": sorted(_AGENT_SKIP_SUFFIXES),
+    }
+
+
 def _should_skip_agent_file(path: Path) -> bool:
     return path.suffix in _AGENT_SKIP_SUFFIXES or any(part in _AGENT_SKIP_DIRS for part in path.parts)
 
 
 def _iter_agent_runtime_files():
-    for dir_name in [*_AGENT_DIRS, *_AGENT_TOOL_DIRS]:
+    for dir_name in [*_AGENT_RUNTIME_DIRS, *_AGENT_TOOL_DIRS]:
         dir_path = _PROJECT_ROOT / dir_name
         if not dir_path.is_dir():
             continue
@@ -941,6 +954,20 @@ def _agent_runtime_hash_for_files(files: list[tuple[str, bytes]]) -> str:
     return digest.hexdigest()
 
 
+def _agent_runtime_manifest_for_files(files: list[tuple[str, bytes]]) -> dict:
+    return {
+        "hash_scope": _agent_runtime_hash_scope(),
+        "files": [
+            {
+                "path": arcname,
+                "sha256": hashlib.sha256(content).hexdigest(),
+                "size": len(content),
+            }
+            for arcname, content in files
+        ],
+    }
+
+
 def _read_agent_runtime_files() -> list[tuple[str, bytes]]:
     return [(arcname, file_path.read_bytes()) for arcname, file_path in _iter_agent_runtime_files()]
 
@@ -960,9 +987,13 @@ def _build_agent_runtime_zip_from_files(files: list[tuple[str, bytes]]) -> bytes
 def _build_agent_runtime_download() -> _RuntimeDownload:
     files = _read_agent_runtime_files()
     data = _build_agent_runtime_zip_from_files(files)
+    runtime_hash = _agent_runtime_hash_for_files(files)
+    manifest = _agent_runtime_manifest_for_files(files)
+    manifest["runtime_hash"] = runtime_hash
     return _RuntimeDownload(
-        runtime_hash=_agent_runtime_hash_for_files(files),
+        runtime_hash=runtime_hash,
         archive_sha256=hashlib.sha256(data).hexdigest(),
+        manifest=manifest,
         data=data,
         expires_at=time.time() + _RUNTIME_DOWNLOAD_TOKEN_TTL_SECONDS,
     )
@@ -976,6 +1007,8 @@ def create_agent_runtime_update_payload(server_url: str) -> dict:
     return {
         "hash": download.runtime_hash,
         "archive_sha256": download.archive_sha256,
+        "manifest": download.manifest,
+        "hash_scope": download.manifest["hash_scope"],
         "download_url": f"{server_url.rstrip('/')}/api/agent/runtime/download",
         "token": token,
         "expires_at": int(download.expires_at),
@@ -1062,7 +1095,8 @@ The agent daemon connects to the server via WebSocket and waits for scan tasks.
 Use the "新建扫描" button in the web UI to start a scan.
 Before each scan, the agent checks whether the server has newer runtime code.
 Runtime code updates, including the bundled Windows ctags directory, are
-installed automatically and the scan continues after the agent restarts. If
+installed automatically and the scan continues after the agent restarts.
+Checker updates are synced with each scan and do not restart the agent. If
 run_agent.sh or run_agent.bat changes, download a new agent package.
 
 Results appear at: <server_url> (the web interface)
@@ -1092,7 +1126,15 @@ async def agent_download(
 @router.get("/runtime/manifest")
 async def agent_runtime_manifest() -> dict:
     """Return the current server-side Agent runtime hash."""
-    return {"hash": _agent_runtime_hash()}
+    files = _read_agent_runtime_files()
+    runtime_hash = _agent_runtime_hash_for_files(files)
+    manifest = _agent_runtime_manifest_for_files(files)
+    manifest["runtime_hash"] = runtime_hash
+    return {
+        "hash": runtime_hash,
+        "hash_scope": manifest["hash_scope"],
+        "manifest": manifest,
+    }
 
 
 @router.get("/runtime/download")

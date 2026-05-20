@@ -1,5 +1,9 @@
 # 更新日志
 
+## 2026-05-20
+
+- **修复** Agent runtime 自更新不再把 `checkers/` 纳入重启判断，并为 runtime 更新包增加快照 manifest 校验，确保下载 zip 的文件集合、逐文件 hash 与服务端发布 hash 来自同一份快照，避免新建扫描时报 `Agent runtime update content hash mismatch`
+
 ## 2026-05-19
 
 - **修复** Windows 中文系统（GBK/CP936）下所有 semgrep checker 静态分析因编码不兼容崩溃的问题，为 semgrep 子进程强制设置 UTF-8 环境变量，并在 semgrep 返回错误码但仍有部分扫描结果时继续解析而非直接丢弃
