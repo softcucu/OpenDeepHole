@@ -247,6 +247,7 @@ def register_tools(mcp: FastMCP) -> None:
         severity: str,
         description: str,
         ai_analysis: str,
+        vulnerability_report: str = "",
     ) -> str:
         """
         提交本次漏洞分析的最终结论。分析完成后必须调用此工具，否则结果将丢失。
@@ -257,6 +258,7 @@ def register_tools(mcp: FastMCP) -> None:
             severity: 严重程度，可选值为 "high"、"medium"、"low"（仅 confirmed=true 时有意义）。
             description: 漏洞的一句话摘要。
             ai_analysis: 详细的分析推理过程，需包含具体的代码路径。
+            vulnerability_report: 可选 Markdown 漏洞报告。外部可触发且 severity="high" 时填写。
 
         返回：
             提交成功的确认消息。
@@ -271,6 +273,7 @@ def register_tools(mcp: FastMCP) -> None:
             "severity": severity,
             "description": description,
             "ai_analysis": ai_analysis,
+            "vulnerability_report": vulnerability_report,
         }, ensure_ascii=False), encoding="utf-8")
         _mcp_log("◀", "submit_result", f"saved → {result_path}")
         return f"结果已提交（result_id={result_id}）。"

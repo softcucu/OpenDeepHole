@@ -732,10 +732,15 @@ async def agent_fp_review_result(scan_id: str, body: AgentFpReviewResult) -> dic
     """Agent pushes a single FP review result."""
     store = get_scan_store()
     now = datetime.now(timezone.utc).isoformat()
+    severity = body.severity if body.severity in {"high", "medium", "low"} else "low"
+    if body.verdict == "fp":
+        severity = "low"
     result = FpReviewResult(
         vuln_index=body.vuln_index,
         verdict=body.verdict,
+        severity=severity,
         reason=body.reason,
+        vulnerability_report=body.vulnerability_report if severity == "high" else "",
         created_at=now,
     )
     store.add_fp_review_result(body.review_id, result)

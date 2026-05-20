@@ -185,6 +185,10 @@ async def run_fp_review(
                 f"你的 result_id 是 `{result_id}`。"
                 f"分析完成后，你**必须**使用此 result_id 调用 submit_result MCP 工具提交结论。"
                 f"真正报使用 confirmed=true，误报使用 confirmed=false。"
+                f"severity 必须按外部可触发性重新判断：外部可触发使用 high；"
+                f"有代码问题但未证明外部可触发使用 medium 或 low；误报使用 low。"
+                f"如果 severity=high，必须在 submit_result 的 vulnerability_report 参数中提交 Markdown 漏洞报告，"
+                f"包含触发入口、调用链、关键数据流、问题代码位置、利用条件和修复建议。"
                 f"**重要：你必须直接完成所有分析工作，禁止使用子 Agent（sub-agent）或委托任何子任务。"
                 f"所有 MCP 工具调用（包括 submit_result）必须由你自己直接执行。**"
             )
@@ -197,7 +201,9 @@ async def run_fp_review(
             )
 
             verdict = "tp"
+            severity = "low"
             reason = "Review incomplete — no result returned"
+            vulnerability_report = ""
 
             try:
                 import threading
@@ -223,12 +229,17 @@ async def run_fp_review(
                 result = _read_result(result_id, fake_candidate)
                 if result is not None:
                     verdict = "tp" if result.confirmed else "fp"
+                    severity = _normalize_fp_severity(result.severity, verdict)
+                    payload = _read_fp_result_payload(result_id)
+                    vulnerability_report = str(payload.get("vulnerability_report") or "")
+                    if severity != "high":
+                        vulnerability_report = ""
                     reason = result.ai_analysis or (
                         "Confirmed as true positive" if result.confirmed else "Identified as false positive"
                     )
                     await emit(
                         "fp_review",
-                        f"[{idx + 1}] {'TRUE POSITIVE' if verdict == 'tp' else 'FALSE POSITIVE'}",
+                        f"[{idx + 1}] {'TRUE POSITIVE' if verdict == 'tp' else 'FALSE POSITIVE'} severity={severity}",
                     )
                 else:
                     await emit("fp_review", f"[{idx + 1}] No result returned — keeping as TP")
@@ -240,7 +251,15 @@ async def run_fp_review(
             except Exception as exc:
                 await emit("fp_review", f"[{idx + 1}] Review error: {exc}")
 
-            await reporter.push_fp_result(scan_id, review_id, idx, verdict, reason)
+            await reporter.push_fp_result(
+                scan_id,
+                review_id,
+                idx,
+                verdict,
+                severity,
+                reason,
+                vulnerability_report,
+            )
 
         await reporter.finish_fp_review(scan_id, review_id, "complete", None)
         await emit("fp_review", f"FP review complete: {len(vulnerabilities)} vulnerabilities reviewed")
@@ -335,6 +354,28 @@ def _configure_fp_backend(config, review_dir: Path) -> None:
     _cfg._config = None
     import backend.registry as _reg
     _reg._registry = None
+
+
+def _normalize_fp_severity(severity: str, verdict: str) -> str:
+    normalized = (severity or "").strip().lower()
+    if normalized not in {"high", "medium", "low"}:
+        return "low"
+    if verdict == "fp":
+        return "low"
+    return normalized
+
+
+def _read_fp_result_payload(result_id: str) -> dict:
+    """Read optional FP review fields that are not part of Vulnerability."""
+    try:
+        from backend.config import get_config
+
+        result_path = Path(get_config().storage.scans_dir) / f"{result_id}.json"
+        if not result_path.exists():
+            return {}
+        return json.loads(result_path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
 
 
 def _create_fp_workspace(

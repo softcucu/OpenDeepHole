@@ -188,7 +188,9 @@ export type FpReviewStatus = "pending" | "running" | "complete" | "error";
 export interface FpReviewResult {
   vuln_index: number;
   verdict: "tp" | "fp";
+  severity: "high" | "medium" | "low";
   reason: string;
+  vulnerability_report: string;
   created_at: string;
 }
 

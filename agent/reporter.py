@@ -199,12 +199,14 @@ class Reporter:
         review_id: str,
         vuln_index: int,
         verdict: str,
+        severity: str,
         reason: str,
+        vulnerability_report: str = "",
     ) -> None:
         """Push a single FP review result to the server."""
         if self.dry_run:
             marker = "FP" if verdict == "fp" else "TP"
-            print(f"  [fp_review] [{marker}] vuln[{vuln_index}]: {reason[:80]}")
+            print(f"  [fp_review] [{marker}/{severity}] vuln[{vuln_index}]: {reason[:80]}")
             return
         try:
             await self._client.post(
@@ -213,7 +215,9 @@ class Reporter:
                     "review_id": review_id,
                     "vuln_index": vuln_index,
                     "verdict": verdict,
+                    "severity": severity,
                     "reason": reason,
+                    "vulnerability_report": vulnerability_report,
                 },
                 timeout=10.0,
             )

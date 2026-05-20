@@ -22,6 +22,54 @@ from backend.registry import CHECKERS_DIR_ENV
 FunctionSourceSnapshot = tuple[str, int | None]
 
 
+def _candidate_key(candidate: Candidate) -> tuple[str, int, str, str]:
+    return (candidate.file, candidate.line, candidate.function, candidate.vuln_type)
+
+
+def _order_candidates_for_audit(
+    candidates: list[Candidate],
+    checker_names: list[str],
+) -> list[Candidate]:
+    """Audit sparse checker results first while keeping per-checker order stable."""
+    if len(candidates) <= 1:
+        return list(candidates)
+
+    counts: dict[str, int] = {}
+    for candidate in candidates:
+        counts[candidate.vuln_type] = counts.get(candidate.vuln_type, 0) + 1
+
+    checker_order = {name: index for index, name in enumerate(checker_names)}
+    fallback_order: dict[str, int] = {}
+
+    def _checker_order(vuln_type: str) -> int:
+        if vuln_type in checker_order:
+            return checker_order[vuln_type]
+        if vuln_type not in fallback_order:
+            fallback_order[vuln_type] = len(checker_order) + len(fallback_order)
+        return fallback_order[vuln_type]
+
+    ordered = sorted(
+        enumerate(candidates),
+        key=lambda item: (
+            counts[item[1].vuln_type],
+            _checker_order(item[1].vuln_type),
+            item[0],
+        ),
+    )
+    return [candidate for _, candidate in ordered]
+
+
+def _audit_order_summary(candidates: list[Candidate]) -> str:
+    counts: dict[str, int] = {}
+    order: list[str] = []
+    for candidate in candidates:
+        if candidate.vuln_type not in counts:
+            order.append(candidate.vuln_type)
+            counts[candidate.vuln_type] = 0
+        counts[candidate.vuln_type] += 1
+    return ", ".join(f"{name}={counts[name]}" for name in order)
+
+
 def _path_matches_indexed_file(indexed_path: str, candidate_file: str) -> bool:
     indexed = indexed_path.replace("\\", "/")
     candidate = candidate_file.replace("\\", "/")
@@ -588,13 +636,16 @@ async def run_scan(
         # Filter out already-processed candidates
         remaining = [
             c for c in candidates
-            if (c.file, c.line, c.function, c.vuln_type) not in processed_keys
+            if _candidate_key(c) not in processed_keys
         ]
+        remaining = _order_candidates_for_audit(remaining, checker_names or list(registry.keys()))
         already_done = total - len(remaining)
 
         # --- Phase 7: AI audit ---
         vulnerabilities: list[Vulnerability] = []
         await emit("auditing", f"Starting AI audit of {len(remaining)} candidate(s)...")
+        if remaining:
+            await emit("auditing", f"Audit order: {_audit_order_summary(remaining)}")
 
         cancelled = False
         for i, candidate in enumerate(remaining):

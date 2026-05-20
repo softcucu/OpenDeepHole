@@ -112,7 +112,9 @@ CREATE TABLE IF NOT EXISTS fp_review_results (
     review_id   TEXT NOT NULL REFERENCES fp_review_jobs(review_id) ON DELETE CASCADE,
     vuln_index  INTEGER NOT NULL,
     verdict     TEXT NOT NULL,
+    severity    TEXT NOT NULL DEFAULT 'low',
     reason      TEXT NOT NULL,
+    vulnerability_report TEXT NOT NULL DEFAULT '',
     created_at  TEXT NOT NULL,
     UNIQUE(review_id, vuln_index)
 );
@@ -224,12 +226,24 @@ class SqliteScanStore(ScanStoreBase):
                 review_id   TEXT NOT NULL REFERENCES fp_review_jobs(review_id) ON DELETE CASCADE,
                 vuln_index  INTEGER NOT NULL,
                 verdict     TEXT NOT NULL,
+                severity    TEXT NOT NULL DEFAULT 'low',
                 reason      TEXT NOT NULL,
+                vulnerability_report TEXT NOT NULL DEFAULT '',
                 created_at  TEXT NOT NULL,
                 UNIQUE(review_id, vuln_index)
             );
             CREATE INDEX IF NOT EXISTS idx_fp_review_scan ON fp_review_jobs(scan_id);
         """)
+        fp_cur = self._conn.execute("PRAGMA table_info(fp_review_results)")
+        fp_cols = {r[1] for r in fp_cur.fetchall()}
+        if "severity" not in fp_cols:
+            self._conn.execute(
+                "ALTER TABLE fp_review_results ADD COLUMN severity TEXT NOT NULL DEFAULT 'low'"
+            )
+        if "vulnerability_report" not in fp_cols:
+            self._conn.execute(
+                "ALTER TABLE fp_review_results ADD COLUMN vulnerability_report TEXT NOT NULL DEFAULT ''"
+            )
         self._conn.commit()
 
     # -- helpers --
@@ -960,7 +974,9 @@ class SqliteScanStore(ScanStoreBase):
             FpReviewResult(
                 vuln_index=r["vuln_index"],
                 verdict=r["verdict"],
+                severity=r["severity"] or "low",
                 reason=r["reason"],
+                vulnerability_report=r["vulnerability_report"] or "",
                 created_at=r["created_at"],
             )
             for r in cur.fetchall()
@@ -977,7 +993,9 @@ class SqliteScanStore(ScanStoreBase):
             FpReviewResult(
                 vuln_index=r["vuln_index"],
                 verdict=r["verdict"],
+                severity=r["severity"] or "low",
                 reason=r["reason"],
+                vulnerability_report=r["vulnerability_report"] or "",
                 created_at=r["created_at"],
             )
             for r in cur.fetchall()
@@ -1025,10 +1043,18 @@ class SqliteScanStore(ScanStoreBase):
         self._conn.execute(
             """\
             INSERT OR REPLACE INTO fp_review_results
-                (review_id, vuln_index, verdict, reason, created_at)
-            VALUES (?, ?, ?, ?, ?)
+                (review_id, vuln_index, verdict, severity, reason, vulnerability_report, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
             """,
-            (review_id, result.vuln_index, result.verdict, result.reason, result.created_at),
+            (
+                review_id,
+                result.vuln_index,
+                result.verdict,
+                result.severity,
+                result.reason,
+                result.vulnerability_report,
+                result.created_at,
+            ),
         )
         self._conn.commit()
 

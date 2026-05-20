@@ -25,6 +25,12 @@ class AgentFeedbackTests(unittest.TestCase):
                     {"id": "fb-1", "vuln_type": "npd", "reason": "new"}
                 ])
 
+    def test_fp_review_severity_normalization(self) -> None:
+        self.assertEqual(fp_reviewer._normalize_fp_severity("high", "tp"), "high")
+        self.assertEqual(fp_reviewer._normalize_fp_severity("medium", "tp"), "medium")
+        self.assertEqual(fp_reviewer._normalize_fp_severity("high", "fp"), "low")
+        self.assertEqual(fp_reviewer._normalize_fp_severity("critical", "tp"), "low")
+
     def test_scanner_snapshots_function_source_for_vulnerability(self) -> None:
         class FakeDb:
             def get_functions_by_name(self, name: str):

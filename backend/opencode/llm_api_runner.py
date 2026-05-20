@@ -212,6 +212,10 @@ SUBMIT_RESULT_TOOL = {
                     "type": "string",
                     "description": "详细的分析推理过程，需包含具体的代码路径",
                 },
+                "vulnerability_report": {
+                    "type": "string",
+                    "description": "可选 Markdown 漏洞报告，外部可触发高风险漏洞时填写",
+                },
             },
             "required": ["confirmed", "severity", "description", "ai_analysis"],
         },
@@ -464,6 +468,7 @@ def _tool_submit_result(args: dict, result_id: str, scans_dir: str) -> str:
         "severity": args.get("severity", "unknown"),
         "description": args.get("description", ""),
         "ai_analysis": args.get("ai_analysis", ""),
+        "vulnerability_report": args.get("vulnerability_report", ""),
     }, ensure_ascii=False), encoding="utf-8")
     return f"结果已提交（result_id={result_id}）"
 

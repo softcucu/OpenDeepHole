@@ -394,7 +394,9 @@ class FpReviewResult(BaseModel):
     """Per-vulnerability false-positive review result."""
     vuln_index: int           # index in the parent scan's vulnerability list
     verdict: str              # "tp" (true positive) | "fp" (false positive)
+    severity: str = "low"     # "high" | "medium" | "low"
     reason: str               # AI reasoning
+    vulnerability_report: str = ""  # Markdown report for externally triggerable issues
     created_at: str
 
 
@@ -420,7 +422,9 @@ class AgentFpReviewResult(BaseModel):
     review_id: str
     vuln_index: int
     verdict: str       # "tp" | "fp"
+    severity: str = "low"
     reason: str
+    vulnerability_report: str = ""
 
 
 class AgentFpReviewFinish(BaseModel):

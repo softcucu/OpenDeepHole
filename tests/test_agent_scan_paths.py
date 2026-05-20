@@ -3,12 +3,25 @@ import unittest
 from pathlib import Path
 
 from agent.scanner import (
+    _audit_order_summary,
     _candidate_in_scan_scope,
+    _candidate_key,
     _normalize_candidate_for_project,
+    _order_candidates_for_audit,
     _resolve_scan_paths,
 )
 from backend.models import Candidate, ScanItemStatus, ScanMeta, ScanStatus
 from backend.store.sqlite import SqliteScanStore
+
+
+def _candidate(vuln_type: str, line: int) -> Candidate:
+    return Candidate(
+        file=f"{vuln_type}.c",
+        line=line,
+        function=f"{vuln_type}_fn_{line}",
+        description=f"{vuln_type} candidate {line}",
+        vuln_type=vuln_type,
+    )
 
 
 class AgentScanPathTests(unittest.TestCase):
@@ -74,6 +87,110 @@ class AgentScanPathTests(unittest.TestCase):
             )
 
             self.assertFalse(_candidate_in_scan_scope(candidate, project.resolve(), scan_dir.resolve()))
+
+
+class AgentAuditOrderingTests(unittest.TestCase):
+    def test_orders_candidates_by_checker_candidate_count(self) -> None:
+        candidates = [
+            _candidate("memleak", 1),
+            _candidate("npd", 1),
+            _candidate("memleak", 2),
+            _candidate("intoverflow", 1),
+            _candidate("memleak", 3),
+            _candidate("intoverflow", 2),
+        ]
+
+        ordered = _order_candidates_for_audit(
+            candidates,
+            ["memleak", "npd", "intoverflow"],
+        )
+
+        self.assertEqual(
+            [(c.vuln_type, c.line) for c in ordered],
+            [
+                ("npd", 1),
+                ("intoverflow", 1),
+                ("intoverflow", 2),
+                ("memleak", 1),
+                ("memleak", 2),
+                ("memleak", 3),
+            ],
+        )
+
+    def test_equal_counts_keep_selected_checker_order(self) -> None:
+        candidates = [
+            _candidate("intoverflow", 1),
+            _candidate("memleak", 1),
+            _candidate("npd", 1),
+            _candidate("intoverflow", 2),
+            _candidate("memleak", 2),
+            _candidate("npd", 2),
+        ]
+
+        ordered = _order_candidates_for_audit(
+            candidates,
+            ["npd", "memleak", "intoverflow"],
+        )
+
+        self.assertEqual(
+            [(c.vuln_type, c.line) for c in ordered],
+            [
+                ("npd", 1),
+                ("npd", 2),
+                ("memleak", 1),
+                ("memleak", 2),
+                ("intoverflow", 1),
+                ("intoverflow", 2),
+            ],
+        )
+
+    def test_resume_order_uses_remaining_candidate_counts(self) -> None:
+        candidates = [
+            _candidate("small", 1),
+            _candidate("large", 1),
+            _candidate("large", 2),
+            _candidate("small", 2),
+            _candidate("large", 3),
+        ]
+        processed_keys = {_candidate_key(candidates[3])}
+        remaining = [c for c in candidates if _candidate_key(c) not in processed_keys]
+
+        ordered = _order_candidates_for_audit(remaining, ["small", "large"])
+
+        self.assertEqual(
+            [(c.vuln_type, c.line) for c in ordered],
+            [
+                ("small", 1),
+                ("large", 1),
+                ("large", 2),
+                ("large", 3),
+            ],
+        )
+
+    def test_single_checker_order_is_unchanged(self) -> None:
+        candidates = [
+            _candidate("npd", 3),
+            _candidate("npd", 1),
+            _candidate("npd", 2),
+        ]
+
+        ordered = _order_candidates_for_audit(candidates, ["npd"])
+
+        self.assertEqual([c.line for c in ordered], [3, 1, 2])
+
+    def test_audit_order_summary_uses_actual_audit_order(self) -> None:
+        candidates = [
+            _candidate("npd", 1),
+            _candidate("intoverflow", 1),
+            _candidate("intoverflow", 2),
+            _candidate("memleak", 1),
+            _candidate("memleak", 2),
+        ]
+
+        self.assertEqual(
+            _audit_order_summary(candidates),
+            "npd=1, intoverflow=2, memleak=2",
+        )
 
 
 class ScanStoreCodeScanPathTests(unittest.TestCase):
