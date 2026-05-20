@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { getScanStatus, stopScan, downloadScanReport, getCheckers, updateScanFeedback, getSkillContent, triggerFpReview, getFpReview, getIndexStatus, getFpReviewSkill } from "../api/client";
+import { getScanStatus, stopScan, downloadScanReport, getCheckers, updateScanFeedback, getSkillContent, triggerFpReview, getFpReview, getAgentIndexStatus, getFpReviewSkill } from "../api/client";
 import type { FpReviewJob, IndexStatus, ScanItemStatus, ScanStatus as ScanStatusType, ScanEvent, CheckerInfo } from "../types";
 import VulnerabilityList from "./VulnerabilityList";
 import FeedbackManager from "./FeedbackManager";
@@ -145,7 +145,7 @@ export default function ScanStatus({ scanId, onBack }: Props) {
 
   // Poll indexing progress while scan is waiting for code index
   useEffect(() => {
-    if (!scan?.project_id) return;
+    if (!scan) return;
     if (scan.status !== "pending" && scan.status !== "analyzing") return;
     if (scan.static_total_files > 0) return;
     if (indexStatus?.status === "done" || indexStatus?.status === "error") return;
@@ -153,7 +153,7 @@ export default function ScanStatus({ scanId, onBack }: Props) {
     let timer: ReturnType<typeof setInterval>;
     const poll = async () => {
       try {
-        const status = await getIndexStatus(scan.project_id);
+        const status = await getAgentIndexStatus(scanId);
         setIndexStatus(status);
         if (status.status === "done" || status.status === "error") {
           clearInterval(timer);
@@ -165,7 +165,7 @@ export default function ScanStatus({ scanId, onBack }: Props) {
     poll();
     timer = setInterval(poll, 2000);
     return () => clearInterval(timer);
-  }, [scan?.project_id, scan?.status, scan?.static_total_files, indexStatus?.status]);
+  }, [scan?.status, scan?.static_total_files, scanId, indexStatus?.status]);
 
   const handleStop = async () => {
     setStopping(true);

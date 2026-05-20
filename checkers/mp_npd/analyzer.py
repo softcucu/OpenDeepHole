@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import json
 import re
-import subprocess
 from pathlib import Path
 from typing import TYPE_CHECKING, Iterator
 
@@ -19,6 +18,8 @@ import tree_sitter_cpp
 from tree_sitter import Language
 
 from backend.analyzers.base import BaseAnalyzer, Candidate
+from backend.analyzers.semgrep_locations import function_from_db_location
+from backend.analyzers.semgrep_runner import run_semgrep
 from backend.logger import get_logger
 
 if TYPE_CHECKING:
@@ -184,20 +185,13 @@ def _func_from_db(
     line: int,
 ) -> str:
     """从 CodeDatabase 按文件+行号反查函数名。"""
-    try:
-        for func in db.get_all_functions():
-            fp = _row_get(func, "file_path", "")
-            start = _row_get(func, "start_line", 0)
-            end = _row_get(func, "end_line", 0)
-            if (
-                fp
-                and _path_matches(str(fp), reported_path, project_path)
-                and start <= line <= end
-            ):
-                return _clean_func_name(_row_get(func, "name", ""))
-    except Exception:
-        pass
-    return ""
+    return function_from_db_location(
+        db,
+        project_path,
+        reported_path,
+        line,
+        clean_func_name=_clean_func_name,
+    )
 
 
 def _func_from_message(message: str) -> str:
@@ -238,79 +232,6 @@ def _expr_from_lines(matched_lines: str) -> str:
     return ""
 
 
-def _decode_output(value: object) -> str:
-    if isinstance(value, bytes):
-        return value.decode("utf-8", "replace")
-    if isinstance(value, str):
-        return value
-    return ""
-
-
-def _read_semgrep_json(output_path: Path, fallback: object) -> str:
-    try:
-        if output_path.is_file():
-            text = output_path.read_text(encoding="utf-8", errors="replace")
-            if text.strip():
-                return text
-    except OSError:
-        pass
-    return _decode_output(fallback)
-
-
-def _run_semgrep(project_path: Path) -> tuple[int | None, str, str] | None:
-    import tempfile
-
-    import os
-
-    with tempfile.TemporaryDirectory(prefix="opendeephole-mp-npd-semgrep-") as tmp:
-        output_path = Path(tmp) / "semgrep.json"
-        cmd = [
-            "semgrep",
-            "--config", str(_RULE_FILE),
-            "--json",
-            f"--json-output={output_path}",
-            "--no-git-ignore",
-            str(project_path),
-        ]
-        # Force UTF-8 to avoid GBK codec errors on Windows Chinese locale
-        env = os.environ.copy()
-        env["PYTHONUTF8"] = "1"
-        env["PYTHONIOENCODING"] = "utf-8"
-        try:
-            proc = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                env=env,
-                timeout=_SEMGREP_TIMEOUT_SECONDS,
-            )
-        except subprocess.TimeoutExpired as exc:
-            stdout = _read_semgrep_json(
-                output_path,
-                getattr(exc, "stdout", None) or getattr(exc, "output", None),
-            )
-            if stdout.strip():
-                _log.warning(
-                    "semgrep timed out after %s seconds for mp_npd scan; "
-                    "using partial JSON output",
-                    _SEMGREP_TIMEOUT_SECONDS,
-                )
-                return None, stdout, _decode_output(getattr(exc, "stderr", None))
-            _log.warning(
-                "semgrep timed out after %s seconds for mp_npd scan and produced no JSON output",
-                _SEMGREP_TIMEOUT_SECONDS,
-            )
-            return None
-        except Exception as exc:
-            _log.warning(f"semgrep failed to run: {exc}")
-            return None
-
-        stdout = _read_semgrep_json(output_path, proc.stdout)
-        return proc.returncode, stdout, proc.stderr
-
-
 # ------------------------------------------------------------------ #
 #  Analyzer
 # ------------------------------------------------------------------ #
@@ -331,12 +252,20 @@ class Analyzer(BaseAnalyzer):
 
         _src_cache.clear()
 
-        result = _run_semgrep(project_path)
+        result = run_semgrep(
+            project_path,
+            rule_file=_RULE_FILE,
+            checker_name=self.vuln_type,
+            timeout=_SEMGREP_TIMEOUT_SECONDS,
+        )
         if result is None:
             return
-        returncode, stdout, stderr = result
+        returncode = result.returncode
+        stdout = result.stdout
+        stderr = result.stderr
 
-        # semgrep: rc=0 无发现，rc=1 有发现，rc>1 工具报错（但可能仍有部分结果）
+        # semgrep scan: rc=0 表示进程成功；候选是否存在取决于 JSON results。
+        # rc>1 表示工具报错，但可能仍有部分结果。
         if returncode is not None and returncode > 1:
             _log.warning(
                 f"semgrep exited with rc={returncode}: {stderr[:300]}"

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 from pathlib import Path
 from subprocess import CompletedProcess, TimeoutExpired
 from unittest.mock import patch
@@ -18,12 +19,16 @@ def test_safe_mem_oob_semgrep_output_uses_utf8_replace(tmp_path: Path) -> None:
         assert kwargs["encoding"] == "utf-8"
         assert kwargs["errors"] == "replace"
         assert kwargs["timeout"] == 900
+        assert kwargs["stdin"] == subprocess.DEVNULL
+        assert cmd[:2] == ["semgrep", "scan"]
         assert any(arg.startswith("--json-output=") for arg in cmd)
+        assert "--metrics=off" in cmd
+        assert "--disable-version-check" in cmd
         return CompletedProcess(cmd, 0, stdout='{"results":[]}', stderr="")
 
     with (
         patch("shutil.which", return_value="/usr/bin/semgrep"),
-        patch("checkers.safe_mem_oob.analyzer.subprocess.run", side_effect=fake_run),
+        patch("backend.analyzers.semgrep_runner.subprocess.run", side_effect=fake_run),
     ):
         assert list(SafeMemOobAnalyzer().find_candidates(tmp_path)) == []
 
@@ -54,7 +59,7 @@ def test_safe_mem_oob_prefers_json_output_file(tmp_path: Path) -> None:
 
     with (
         patch("shutil.which", return_value="/usr/bin/semgrep"),
-        patch("checkers.safe_mem_oob.analyzer.subprocess.run", side_effect=fake_run),
+        patch("backend.analyzers.semgrep_runner.subprocess.run", side_effect=fake_run),
     ):
         candidates = list(SafeMemOobAnalyzer().find_candidates(tmp_path))
 
@@ -84,7 +89,7 @@ def test_safe_mem_oob_uses_semgrep_json_file_after_timeout(tmp_path: Path) -> No
 
     with (
         patch("shutil.which", return_value="/usr/bin/semgrep"),
-        patch("checkers.safe_mem_oob.analyzer.subprocess.run", side_effect=fake_run),
+        patch("backend.analyzers.semgrep_runner.subprocess.run", side_effect=fake_run),
     ):
         candidates = list(SafeMemOobAnalyzer().find_candidates(tmp_path))
 
@@ -97,7 +102,7 @@ def test_safe_mem_oob_skips_tool_errors_and_bad_json(tmp_path: Path) -> None:
     with (
         patch("shutil.which", return_value="/usr/bin/semgrep"),
         patch(
-            "checkers.safe_mem_oob.analyzer.subprocess.run",
+            "backend.analyzers.semgrep_runner.subprocess.run",
             return_value=CompletedProcess(["semgrep"], 2, stdout="", stderr="bad config"),
         ),
     ):
@@ -106,7 +111,7 @@ def test_safe_mem_oob_skips_tool_errors_and_bad_json(tmp_path: Path) -> None:
     with (
         patch("shutil.which", return_value="/usr/bin/semgrep"),
         patch(
-            "checkers.safe_mem_oob.analyzer.subprocess.run",
+            "backend.analyzers.semgrep_runner.subprocess.run",
             return_value=CompletedProcess(["semgrep"], 0, stdout="not-json", stderr=""),
         ),
     ):
@@ -146,7 +151,7 @@ def test_safe_mem_oob_deduplicates_same_rule_and_destination(tmp_path: Path) -> 
     with (
         patch("shutil.which", return_value="/usr/bin/semgrep"),
         patch(
-            "checkers.safe_mem_oob.analyzer.subprocess.run",
+            "backend.analyzers.semgrep_runner.subprocess.run",
             return_value=CompletedProcess(["semgrep"], 1, stdout=json.dumps(payload), stderr=""),
         ),
     ):
@@ -174,7 +179,7 @@ def test_safe_mem_oob_describes_identical_dstsz_and_count(tmp_path: Path) -> Non
 
     with (
         patch("shutil.which", return_value="/usr/bin/semgrep"),
-        patch("checkers.safe_mem_oob.analyzer.subprocess.run", return_value=output),
+        patch("backend.analyzers.semgrep_runner.subprocess.run", return_value=output),
     ):
         candidates = list(SafeMemOobAnalyzer().find_candidates(tmp_path))
 
@@ -202,7 +207,7 @@ def test_safe_mem_oob_describes_three_argument_string_call_without_count(tmp_pat
 
     with (
         patch("shutil.which", return_value="/usr/bin/semgrep"),
-        patch("checkers.safe_mem_oob.analyzer.subprocess.run", return_value=output),
+        patch("backend.analyzers.semgrep_runner.subprocess.run", return_value=output),
     ):
         candidates = list(SafeMemOobAnalyzer().find_candidates(tmp_path))
 
@@ -248,7 +253,7 @@ def test_safe_mem_oob_prefers_specific_rule_over_identical_size_rule(tmp_path: P
     with (
         patch("shutil.which", return_value="/usr/bin/semgrep"),
         patch(
-            "checkers.safe_mem_oob.analyzer.subprocess.run",
+            "backend.analyzers.semgrep_runner.subprocess.run",
             return_value=CompletedProcess(["semgrep"], 1, stdout=json.dumps(payload), stderr=""),
         ),
     ):

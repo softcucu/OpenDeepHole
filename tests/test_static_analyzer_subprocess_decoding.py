@@ -1,4 +1,5 @@
 import json
+import subprocess
 from pathlib import Path
 from subprocess import CompletedProcess, TimeoutExpired
 from unittest.mock import patch
@@ -12,11 +13,15 @@ def test_inf_loop_semgrep_output_uses_utf8_replace(tmp_path: Path) -> None:
         assert kwargs["encoding"] == "utf-8"
         assert kwargs["errors"] == "replace"
         assert kwargs["timeout"] == 900
+        assert kwargs["stdin"] == subprocess.DEVNULL
+        assert cmd[:2] == ["semgrep", "scan"]
+        assert "--metrics=off" in cmd
+        assert "--disable-version-check" in cmd
         return CompletedProcess(cmd, 0, stdout='{"results":[]}', stderr="")
 
     with (
         patch("shutil.which", return_value="/usr/bin/semgrep"),
-        patch("checkers.inf_loop.analyzer.subprocess.run", side_effect=fake_run),
+        patch("backend.analyzers.semgrep_runner.subprocess.run", side_effect=fake_run),
     ):
         assert list(InfLoopAnalyzer().find_candidates(tmp_path)) == []
 
@@ -39,7 +44,7 @@ def test_inf_loop_uses_semgrep_json_file_after_timeout(tmp_path: Path) -> None:
 
     with (
         patch("shutil.which", return_value="/usr/bin/semgrep"),
-        patch("checkers.inf_loop.analyzer.subprocess.run", side_effect=fake_run),
+        patch("backend.analyzers.semgrep_runner.subprocess.run", side_effect=fake_run),
     ):
         candidates = list(InfLoopAnalyzer().find_candidates(tmp_path))
 
@@ -69,7 +74,7 @@ def test_inf_loop_uses_function_name_from_semgrep_message(tmp_path: Path) -> Non
 
     with (
         patch("shutil.which", return_value="/usr/bin/semgrep"),
-        patch("checkers.inf_loop.analyzer.subprocess.run", return_value=output),
+        patch("backend.analyzers.semgrep_runner.subprocess.run", return_value=output),
     ):
         candidates = list(InfLoopAnalyzer().find_candidates(tmp_path))
 
@@ -100,7 +105,7 @@ def test_inf_loop_matches_windows_semgrep_path_to_code_database(tmp_path: Path) 
 
     with (
         patch("shutil.which", return_value="/usr/bin/semgrep"),
-        patch("checkers.inf_loop.analyzer.subprocess.run", return_value=output),
+        patch("backend.analyzers.semgrep_runner.subprocess.run", return_value=output),
     ):
         candidates = list(InfLoopAnalyzer().find_candidates(project, FakeDb()))
 
@@ -130,7 +135,7 @@ def test_inf_loop_resolves_windows_semgrep_path_for_tree_sitter(tmp_path: Path) 
 
     with (
         patch("shutil.which", return_value="/usr/bin/semgrep"),
-        patch("checkers.inf_loop.analyzer.subprocess.run", return_value=output),
+        patch("backend.analyzers.semgrep_runner.subprocess.run", return_value=output),
     ):
         candidates = list(InfLoopAnalyzer().find_candidates(project))
 

@@ -103,6 +103,11 @@ export async function getIndexStatus(projectId: string): Promise<IndexStatus> {
   return data;
 }
 
+export async function getAgentIndexStatus(scanId: string): Promise<IndexStatus> {
+  const { data } = await api.get<IndexStatus>(`/api/agent/scan/${scanId}/index-status`);
+  return data;
+}
+
 export async function startScan(
   projectId: string,
   scanItems: string[],
