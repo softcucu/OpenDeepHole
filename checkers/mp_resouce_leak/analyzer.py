@@ -29,11 +29,13 @@ _log = get_logger(__name__)
 
 _RULE_FILE = Path(__file__).parent / "mp_res_leak.yaml"
 _SEMGREP_TIMEOUT_SECONDS = DEFAULT_SEMGREP_TIMEOUT_SECONDS
+_SEMGREP_HEARTBEAT_SECONDS = 30
+_CONVERSION_PROGRESS_INTERVAL = 100
 _SEV_LABEL = {"ERROR": "高风险", "WARNING": "中风险", "INFO": "低风险"}
 _CPP_LANGUAGE = Language(tree_sitter_cpp.language())
 # 规则消息形如 "多层指针成员 `$FIELD` ..."；函数名不出现在 message 中，
 # 此正则作为兜底（极少命中），主要靠 tree-sitter / CodeDatabase 反查。
-_MESSAGE_FUNCTION_RE = re.compile(r"(?:函数|Function)\s+`?([A-Za-z_][A-Za-z0-9_:]*)`?")
+_MESSAGE_FUNCTION_RE = re.compile(r"(?:函数\s+|Function(?:\s*=\s*|\s+))`?([A-Za-z_][A-Za-z0-9_:]*)`?")
 
 
 # ------------------------------------------------------------------ #
@@ -66,6 +68,7 @@ def _func_name_from_node(func_node, source: bytes) -> str:
 
 # 文件内容缓存，避免同一次扫描中重复读取和解析
 _src_cache: dict[str, bytes] = {}
+_func_range_cache: dict[str, list[tuple[int, int, str]]] = {}
 
 
 def _clean_func_name(name: object) -> str:
@@ -167,16 +170,25 @@ def _func_at_line(project_path: Path, reported_path: str, line: int) -> str:
         _src_cache[cache_key] = src
 
     try:
-        parser = tree_sitter.Parser(_CPP_LANGUAGE)
-        tree = parser.parse(src)
+        ranges = _func_range_cache.get(cache_key)
+        if ranges is None:
+            parser = tree_sitter.Parser(_CPP_LANGUAGE)
+            tree = parser.parse(src)
+            ranges = [
+                (
+                    func.start_point[0] + 1,
+                    func.end_point[0] + 1,
+                    _func_name_from_node(func, src),
+                )
+                for func in _iter_functions(tree.root_node)
+            ]
+            _func_range_cache[cache_key] = ranges
     except Exception:
         return ""
 
-    for func in _iter_functions(tree.root_node):
-        start = func.start_point[0] + 1
-        end = func.end_point[0] + 1
+    for start, end, name in ranges:
         if start <= line <= end:
-            return _func_name_from_node(func, src)
+            return name
     return ""
 
 
@@ -252,12 +264,14 @@ class Analyzer(BaseAnalyzer):
             return
 
         _src_cache.clear()
+        _func_range_cache.clear()
 
         result = run_semgrep(
             project_path,
             rule_file=_RULE_FILE,
             checker_name=self.vuln_type,
             timeout=_SEMGREP_TIMEOUT_SECONDS,
+            heartbeat_interval=_SEMGREP_HEARTBEAT_SECONDS,
         )
         if result is None:
             return
@@ -280,11 +294,25 @@ class Analyzer(BaseAnalyzer):
             _log.warning(f"semgrep output JSON parse error: {exc}")
             return
 
+        matches = data.get("results", [])
+        total_matches = len(matches)
+        print(f"  [static] {self.vuln_type} semgrep results: {total_matches} match(es)", flush=True)
+
         # 去重键：文件 + 函数 + 规则 + 字段表达式 + 资源调用名
         # 同函数对不同 field 或不同 acquire 调用仍保留独立告警
         seen: set[tuple[str, str, str, str, str]] = set()
+        produced = 0
 
-        for match in data.get("results", []):
+        for idx, match in enumerate(matches, 1):
+            if (
+                idx == 1
+                or idx == total_matches
+                or idx % _CONVERSION_PROGRESS_INTERVAL == 0
+            ):
+                print(
+                    f"  [static] {self.vuln_type} converting candidates: {idx}/{total_matches}",
+                    flush=True,
+                )
             abs_path: str = match.get("path", "")
             start_line: int = match.get("start", {}).get("line", 0)
             check_id: str = match.get("check_id", "")
@@ -304,13 +332,22 @@ class Analyzer(BaseAnalyzer):
             rule_category = check_id.split(".")[-1] if check_id else "unknown"
 
             # 函数名：metavar $FUNC → message → CodeDB → tree-sitter 逐行反查
-            func_name = (
-                _clean_func_name(_mv(metavars, "$FUNC"))
-                or _func_from_message(message)
-                or (db and _func_from_db(db, project_path, abs_path, start_line))
-                or _func_at_line(project_path, abs_path, start_line)
-                or "unknown"
-            )
+            func_name = _clean_func_name(_mv(metavars, "$FUNC")) or _func_from_message(message)
+            if not func_name and db:
+                print(
+                    f"  [static] {self.vuln_type} resolving function from code index: "
+                    f"{idx}/{total_matches} {rel_path}:{start_line}",
+                    flush=True,
+                )
+                func_name = _func_from_db(db, project_path, abs_path, start_line)
+            if not func_name:
+                print(
+                    f"  [static] {self.vuln_type} resolving function with tree-sitter: "
+                    f"{idx}/{total_matches} {rel_path}:{start_line}",
+                    flush=True,
+                )
+                func_name = _func_at_line(project_path, abs_path, start_line)
+            func_name = func_name or "unknown"
 
             # 关键 metavar（社区版多半为空，有则纳入描述）
             field_expr = _mv(metavars, "$FIELD") or _field_from_lines(matched_lines)
@@ -361,6 +398,7 @@ class Analyzer(BaseAnalyzer):
             if matched_lines:
                 parts.append(f"匹配代码:\n{matched_lines}")
 
+            produced += 1
             yield Candidate(
                 file=rel_path,
                 line=start_line,
@@ -368,3 +406,5 @@ class Analyzer(BaseAnalyzer):
                 description="\n".join(p for p in parts if p),
                 vuln_type=self.vuln_type,
             )
+
+        print(f"  [static] {self.vuln_type} produced candidates: {produced}", flush=True)

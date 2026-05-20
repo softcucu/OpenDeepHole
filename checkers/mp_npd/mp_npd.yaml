@@ -18,7 +18,7 @@ rules:
     languages: [c, cpp]
     severity: WARNING
     message: >
-      多层指针 `$ROOT->$F1->$F2` 在使用前疑似未完整判空。
+      Function=`$FUNC`. 多层指针 `$ROOT->$F1->$F2` 在使用前疑似未完整判空。
       该访问至少依赖 `$ROOT != NULL` 和 `$ROOT->$F1 != NULL`。
       请检查当前路径上是否已经同时校验根指针和中间层指针。
     metadata:
@@ -27,6 +27,11 @@ rules:
       technology: [c, cpp]
       confidence: medium
     patterns:
+      - pattern-inside: |
+          $RET $FUNC(...) {
+            ...
+          }
+
       - pattern-either:
           # 二层以上成员访问
           - pattern: $ROOT->$F1->$F2
@@ -280,7 +285,7 @@ rules:
     languages: [c, cpp]
     severity: WARNING
     message: >
-      `$ROOT` 已经判空，但多层指针 `$ROOT->$F1->$F2`
+      Function=`$FUNC`. `$ROOT` 已经判空，但多层指针 `$ROOT->$F1->$F2`
       的中间层 `$ROOT->$F1` 疑似未判空，存在空指针解引用风险。
     metadata:
       cwe: ["CWE-476"]
@@ -288,6 +293,11 @@ rules:
       technology: [c, cpp]
       confidence: high
     patterns:
+      - pattern-inside: |
+          $RET $FUNC(...) {
+            ...
+          }
+
       - pattern-either:
           - patterns:
               - pattern-inside: |
@@ -362,7 +372,7 @@ rules:
     languages: [c, cpp]
     severity: WARNING
     message: >
-      多层指针 `$ROOT->$F1->$F2` 作为函数参数传入 `$CALL(...)`，
+      Function=`$FUNC`. 多层指针 `$ROOT->$F1->$F2` 作为函数参数传入 `$CALL(...)`，
       使用前疑似未完整判空。请确认 `$ROOT` 和 `$ROOT->$F1` 均已校验。
     metadata:
       cwe: ["CWE-476"]
@@ -370,6 +380,11 @@ rules:
       technology: [c, cpp]
       confidence: medium
     patterns:
+      - pattern-inside: |
+          $RET $FUNC(...) {
+            ...
+          }
+
       - pattern-either:
           - pattern: $CALL($ROOT->$F1->$F2, ...)
           - pattern: $CALL(..., $ROOT->$F1->$F2, ...)

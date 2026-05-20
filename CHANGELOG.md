@@ -2,6 +2,9 @@
 
 ## 2026-05-20
 
+- **优化** `safe_mem_oob` 删除 `dstsz` 与拷贝长度复用的高噪声检出规则，并扩充偏移目标、指针参数、成员子数组和格式化安全函数等更具体的 `dst/dstsz` 不匹配召回形态
+- **优化** `mp_npd` 与 `mp_resouce_leak` 的候选转换优先从 semgrep message 获取函数名，并限制 CodeDB 路径 fallback 次数，避免少量候选在函数名解析阶段长时间停住
+- **优化** `mp_npd` 与 `mp_resouce_leak` 在 Agent 控制台输出 semgrep 运行心跳和候选转换进度，便于定位大项目扫描卡在 semgrep 还是 JSON 转候选阶段
 - **修复** 多个 semgrep checker 的候选函数定位改为优先按文件和行号查询索引，避免 `mp_resouce_leak`、`mp_npd` 等规则在 semgrep 结束后对每个命中重复全量扫描函数表导致卡住
 - **修复** semgrep checker 统一改为非交互式启动，关闭 stdin、metrics 和版本检查，并统一读取 `--json-output` 产物，避免 Agent 终端关闭后 semgrep 才继续执行或超时后丢失已产出的扫描结果
 - **修复** Agent 扫描详情页索引进度轮询改用 scan_id 查询 Agent 专用接口，避免 Windows 项目路径被拼入 `/api/project/.../index-status` 后因盘符和斜杠触发 404

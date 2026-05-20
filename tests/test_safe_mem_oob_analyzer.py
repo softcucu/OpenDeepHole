@@ -160,20 +160,20 @@ def test_safe_mem_oob_deduplicates_same_rule_and_destination(tmp_path: Path) -> 
     assert len(candidates) == 1
 
 
-def test_safe_mem_oob_describes_identical_dstsz_and_count(tmp_path: Path) -> None:
+def test_safe_mem_oob_describes_pointer_sizeof_dst(tmp_path: Path) -> None:
     output = _semgrep_output(
-        path=str(tmp_path / "same_size.c"),
+        path=str(tmp_path / "ptr.c"),
         line=9,
-        check_id="c-cpp.safe-mem.identical-size-source-named",
+        check_id="c-cpp.safe-mem.pointer-sizeof-dst",
         message=(
-            "Function=`copy_pkt`. Safe memory call `memcpy_s` uses the same "
-            "source-like expression for dstsz and copy length."
+            "Function=`copy_ptr`. Safe memory call `memcpy_s` uses "
+            "sizeof(pointer) as dstsz."
         ),
         metavars={
-            "$FUNC": {"abstract_content": "copy_pkt"},
+            "$FUNC": {"abstract_content": "copy_ptr"},
             "$CALL": {"abstract_content": "memcpy_s"},
-            "$DST": {"abstract_content": "dst"},
-            "$SZ": {"abstract_content": "packet_len"},
+            "$PTR": {"abstract_content": "dst"},
+            "$COUNT": {"abstract_content": "len"},
         },
     )
 
@@ -184,10 +184,10 @@ def test_safe_mem_oob_describes_identical_dstsz_and_count(tmp_path: Path) -> Non
         candidates = list(SafeMemOobAnalyzer().find_candidates(tmp_path))
 
     assert len(candidates) == 1
-    assert "identical-size-source-named" in candidates[0].description
+    assert "pointer-sizeof-dst" in candidates[0].description
     assert "dst: dst" in candidates[0].description
-    assert "dstsz: packet_len" in candidates[0].description
-    assert "count: packet_len" in candidates[0].description
+    assert "dstsz: sizeof(dst)" in candidates[0].description
+    assert "count: len" in candidates[0].description
 
 
 def test_safe_mem_oob_describes_three_argument_string_call_without_count(tmp_path: Path) -> None:
@@ -216,52 +216,6 @@ def test_safe_mem_oob_describes_three_argument_string_call_without_count(tmp_pat
     assert "dst: msg.name" in candidates[0].description
     assert "dstsz: sizeof(msg)" in candidates[0].description
     assert "count:" not in candidates[0].description
-
-
-def test_safe_mem_oob_prefers_specific_rule_over_identical_size_rule(tmp_path: Path) -> None:
-    payload = {
-        "results": [
-            _match(
-                path=str(tmp_path / "overlap.c"),
-                line=11,
-                check_id="c-cpp.safe-mem.identical-size-member-dst",
-                message="Function=`f`. Safe memory call `memcpy_s` uses the same expression.",
-                metavars={
-                    "$FUNC": {"abstract_content": "f"},
-                    "$CALL": {"abstract_content": "memcpy_s"},
-                    "$OBJ": {"abstract_content": "msg"},
-                    "$FIELD": {"abstract_content": "payload"},
-                    "$SZ": {"abstract_content": "sizeof(msg)"},
-                },
-            ),
-            _match(
-                path=str(tmp_path / "overlap.c"),
-                line=11,
-                check_id="c-cpp.safe-mem.member-non-member-size",
-                message="Function=`f`. Safe memory call `memcpy_s` writes to member target.",
-                metavars={
-                    "$FUNC": {"abstract_content": "f"},
-                    "$CALL": {"abstract_content": "memcpy_s"},
-                    "$OBJ": {"abstract_content": "msg"},
-                    "$FIELD": {"abstract_content": "payload"},
-                    "$DSTSZ": {"abstract_content": "sizeof(msg)"},
-                },
-            ),
-        ],
-    }
-
-    with (
-        patch("shutil.which", return_value="/usr/bin/semgrep"),
-        patch(
-            "backend.analyzers.semgrep_runner.subprocess.run",
-            return_value=CompletedProcess(["semgrep"], 1, stdout=json.dumps(payload), stderr=""),
-        ),
-    ):
-        candidates = list(SafeMemOobAnalyzer().find_candidates(tmp_path))
-
-    assert len(candidates) == 1
-    assert "member-non-member-size" in candidates[0].description
-    assert "identical-size-member-dst" not in candidates[0].description
 
 
 def _semgrep_output(

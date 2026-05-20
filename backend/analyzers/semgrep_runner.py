@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import subprocess
 import tempfile
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -48,6 +49,7 @@ def run_semgrep(
     rule_file: Path,
     checker_name: str,
     timeout: int = DEFAULT_SEMGREP_TIMEOUT_SECONDS,
+    heartbeat_interval: float | None = None,
 ) -> SemgrepRunResult | None:
     """Run semgrep non-interactively and return JSON output.
 
@@ -76,16 +78,25 @@ def run_semgrep(
 
         print(f"  [semgrep] {checker_name} starting: {project_path}", flush=True)
         try:
-            proc = subprocess.run(
-                cmd,
-                stdin=subprocess.DEVNULL,
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                env=env,
-                timeout=timeout,
-            )
+            if heartbeat_interval is None:
+                proc = subprocess.run(
+                    cmd,
+                    stdin=subprocess.DEVNULL,
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    env=env,
+                    timeout=timeout,
+                )
+            else:
+                proc = _run_with_heartbeat(
+                    cmd,
+                    env=env,
+                    timeout=timeout,
+                    checker_name=checker_name,
+                    heartbeat_interval=heartbeat_interval,
+                )
         except subprocess.TimeoutExpired as exc:
             stdout = _read_semgrep_json(
                 output_path,
@@ -118,3 +129,53 @@ def run_semgrep(
         stdout = _read_semgrep_json(output_path, proc.stdout)
         print(f"  [semgrep] {checker_name} finished: rc={proc.returncode}", flush=True)
         return SemgrepRunResult(proc.returncode, stdout, proc.stderr)
+
+
+def _run_with_heartbeat(
+    cmd: list[str],
+    *,
+    env: dict[str, str],
+    timeout: int,
+    checker_name: str,
+    heartbeat_interval: float,
+) -> subprocess.CompletedProcess[str]:
+    started = time.monotonic()
+    next_heartbeat = started + heartbeat_interval
+    proc = subprocess.Popen(
+        cmd,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        env=env,
+    )
+    while True:
+        now = time.monotonic()
+        timeout_at = started + timeout
+        wait_for = max(0.1, min(next_heartbeat, timeout_at) - now)
+        try:
+            stdout, stderr = proc.communicate(timeout=wait_for)
+            return subprocess.CompletedProcess(
+                cmd,
+                proc.returncode,
+                stdout=stdout,
+                stderr=stderr,
+            )
+        except subprocess.TimeoutExpired:
+            now = time.monotonic()
+            if now >= timeout_at:
+                proc.kill()
+                stdout, stderr = proc.communicate()
+                raise subprocess.TimeoutExpired(
+                    cmd,
+                    timeout,
+                    output=stdout,
+                    stderr=stderr,
+                )
+            if now >= next_heartbeat:
+                elapsed = int(now - started)
+                print(f"  [semgrep] {checker_name} still running: {elapsed}s", flush=True)
+                while next_heartbeat <= now:
+                    next_heartbeat += heartbeat_interval

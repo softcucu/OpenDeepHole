@@ -41,3 +41,40 @@ def test_semgrep_runner_returns_none_when_timeout_has_no_json(tmp_path: Path) ->
         result = run_semgrep(tmp_path, rule_file=rule_file, checker_name="unit", timeout=1)
 
     assert result is None
+
+
+def test_semgrep_runner_prints_heartbeat_when_enabled(tmp_path: Path, capsys) -> None:
+    rule_file = tmp_path / "rule.yml"
+    rule_file.write_text("rules: []\n", encoding="utf-8")
+
+    class FakePopen:
+        def __init__(self, cmd, **kwargs):
+            self.cmd = cmd
+            self.returncode = 0
+            self.calls = 0
+
+        def communicate(self, timeout=None):
+            self.calls += 1
+            if self.calls == 1:
+                raise TimeoutExpired(self.cmd, timeout, output="", stderr="")
+            return '{"results":[]}', ""
+
+        def kill(self):
+            self.returncode = -9
+
+    with (
+        patch("backend.analyzers.semgrep_runner.subprocess.Popen", side_effect=FakePopen),
+        patch("backend.analyzers.semgrep_runner.time.monotonic", side_effect=[0.0, 0.0, 0.2, 0.2]),
+    ):
+        result = run_semgrep(
+            tmp_path,
+            rule_file=rule_file,
+            checker_name="unit",
+            timeout=3,
+            heartbeat_interval=0.1,
+        )
+
+    assert result is not None
+    assert result.stdout == '{"results":[]}'
+    captured = capsys.readouterr()
+    assert "[semgrep] unit still running: 0s" in captured.out

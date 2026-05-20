@@ -29,6 +29,10 @@ rules:
           - pattern: $CALL(&$OBJ.$FIELD, $DSTSZ, $ARG3)
           - pattern: $CALL($P->$FIELD, $DSTSZ, $ARG3)
           - pattern: $CALL(&$P->$FIELD, $DSTSZ, $ARG3)
+          - pattern: $CALL($OBJ.$FIELD, $DSTSZ, ...)
+          - pattern: $CALL(&$OBJ.$FIELD, $DSTSZ, ...)
+          - pattern: $CALL($P->$FIELD, $DSTSZ, ...)
+          - pattern: $CALL(&$P->$FIELD, $DSTSZ, ...)
       - pattern-not: $CALL($OBJ.$FIELD, sizeof($OBJ.$FIELD), $ARG3, $COUNT)
       - pattern-not: $CALL(&$OBJ.$FIELD, sizeof($OBJ.$FIELD), $ARG3, $COUNT)
       - pattern-not: $CALL($P->$FIELD, sizeof($P->$FIELD), $ARG3, $COUNT)
@@ -37,9 +41,13 @@ rules:
       - pattern-not: $CALL(&$OBJ.$FIELD, sizeof($OBJ.$FIELD), $ARG3)
       - pattern-not: $CALL($P->$FIELD, sizeof($P->$FIELD), $ARG3)
       - pattern-not: $CALL(&$P->$FIELD, sizeof($P->$FIELD), $ARG3)
+      - pattern-not: $CALL($OBJ.$FIELD, sizeof($OBJ.$FIELD), ...)
+      - pattern-not: $CALL(&$OBJ.$FIELD, sizeof($OBJ.$FIELD), ...)
+      - pattern-not: $CALL($P->$FIELD, sizeof($P->$FIELD), ...)
+      - pattern-not: $CALL(&$P->$FIELD, sizeof($P->$FIELD), ...)
       - metavariable-regex:
           metavariable: $CALL
-          regex: '^(memcpy_s|memmove_s|memset_s|memcpy_sp|memcpy_safe|VOS_memcpy_safe|VOS_MemCpy_S|VOS_Mem_Copy_Safe|VOS_MemCpy_Safe|strcpy_s|strcat_s|wcscpy_s|wcscat_s|strncpy_s|strncat_s|wcsncpy_s|wcsncat_s|strcpy_safe|strcat_safe|strncpy_safe|strncat_safe|VOS_StrCpy_S|VOS_StrCat_S|VOS_StrNCpy_S|VOS_StrNCat_S|VOS_StrCpy_Safe|VOS_StrCat_Safe|VOS_StrNCpy_Safe|VOS_StrNCat_Safe)$'
+          regex: '^(memcpy_s|memmove_s|memset_s|memcpy_sp|memcpy_safe|VOS_memcpy_safe|VOS_MemCpy_S|VOS_Mem_Copy_Safe|VOS_MemCpy_Safe|strcpy_s|strcat_s|wcscpy_s|wcscat_s|strncpy_s|strncat_s|wcsncpy_s|wcsncat_s|strcpy_safe|strcat_safe|strncpy_safe|strncat_safe|VOS_StrCpy_S|VOS_StrCat_S|VOS_StrNCpy_S|VOS_StrNCat_S|VOS_StrCpy_Safe|VOS_StrCat_Safe|VOS_StrNCpy_Safe|VOS_StrNCat_Safe|sprintf_s|snprintf_s|vsprintf_s|vsnprintf_s)$'
 
   - id: c-cpp.safe-mem.offset-full-size
     languages: [c, cpp]
@@ -65,21 +73,49 @@ rules:
       - pattern-either:
           - pattern: $CALL($BUF + $OFF, sizeof($BUF), $ARG3, $COUNT)
           - pattern: $CALL($BUF - $OFF, sizeof($BUF), $ARG3, $COUNT)
+          - pattern: $CALL(($BUF + $OFF), sizeof($BUF), $ARG3, $COUNT)
+          - pattern: $CALL(($BUF - $OFF), sizeof($BUF), $ARG3, $COUNT)
           - pattern: $CALL(&$BUF[$IDX], sizeof($BUF), $ARG3, $COUNT)
+          - pattern: $CALL((&$BUF[$IDX]), sizeof($BUF), $ARG3, $COUNT)
           - pattern: $CALL(($CAST *)$BUF + $OFF, sizeof($TYPE), $ARG3, $COUNT)
           - pattern: $CALL((char *)$BUF + $OFF, sizeof($TYPE), $ARG3, $COUNT)
           - pattern: $CALL((unsigned char *)$BUF + $OFF, sizeof($TYPE), $ARG3, $COUNT)
           - pattern: $CALL((uint8_t *)$BUF + $OFF, sizeof($TYPE), $ARG3, $COUNT)
+          - pattern: $CALL((char *)($BUF + $OFF), sizeof($BUF), $ARG3, $COUNT)
+          - pattern: $CALL((unsigned char *)($BUF + $OFF), sizeof($BUF), $ARG3, $COUNT)
+          - pattern: $CALL((uint8_t *)($BUF + $OFF), sizeof($BUF), $ARG3, $COUNT)
+          - pattern: $CALL((void *)($BUF + $OFF), sizeof($BUF), $ARG3, $COUNT)
           - pattern: $CALL($BUF + $OFF, sizeof($BUF), $ARG3)
           - pattern: $CALL($BUF - $OFF, sizeof($BUF), $ARG3)
+          - pattern: $CALL(($BUF + $OFF), sizeof($BUF), $ARG3)
+          - pattern: $CALL(($BUF - $OFF), sizeof($BUF), $ARG3)
           - pattern: $CALL(&$BUF[$IDX], sizeof($BUF), $ARG3)
+          - pattern: $CALL((&$BUF[$IDX]), sizeof($BUF), $ARG3)
           - pattern: $CALL(($CAST *)$BUF + $OFF, sizeof($TYPE), $ARG3)
           - pattern: $CALL((char *)$BUF + $OFF, sizeof($TYPE), $ARG3)
           - pattern: $CALL((unsigned char *)$BUF + $OFF, sizeof($TYPE), $ARG3)
           - pattern: $CALL((uint8_t *)$BUF + $OFF, sizeof($TYPE), $ARG3)
+          - pattern: $CALL((char *)($BUF + $OFF), sizeof($BUF), $ARG3)
+          - pattern: $CALL((unsigned char *)($BUF + $OFF), sizeof($BUF), $ARG3)
+          - pattern: $CALL((uint8_t *)($BUF + $OFF), sizeof($BUF), $ARG3)
+          - pattern: $CALL((void *)($BUF + $OFF), sizeof($BUF), $ARG3)
+          - pattern: $CALL($BUF + $OFF, sizeof($BUF), ...)
+          - pattern: $CALL($BUF - $OFF, sizeof($BUF), ...)
+          - pattern: $CALL(($BUF + $OFF), sizeof($BUF), ...)
+          - pattern: $CALL(($BUF - $OFF), sizeof($BUF), ...)
+          - pattern: $CALL(&$BUF[$IDX], sizeof($BUF), ...)
+          - pattern: $CALL((&$BUF[$IDX]), sizeof($BUF), ...)
+          - pattern: $CALL(($CAST *)$BUF + $OFF, sizeof($TYPE), ...)
+          - pattern: $CALL((char *)$BUF + $OFF, sizeof($TYPE), ...)
+          - pattern: $CALL((unsigned char *)$BUF + $OFF, sizeof($TYPE), ...)
+          - pattern: $CALL((uint8_t *)$BUF + $OFF, sizeof($TYPE), ...)
+          - pattern: $CALL((char *)($BUF + $OFF), sizeof($BUF), ...)
+          - pattern: $CALL((unsigned char *)($BUF + $OFF), sizeof($BUF), ...)
+          - pattern: $CALL((uint8_t *)($BUF + $OFF), sizeof($BUF), ...)
+          - pattern: $CALL((void *)($BUF + $OFF), sizeof($BUF), ...)
       - metavariable-regex:
           metavariable: $CALL
-          regex: '^(memcpy_s|memmove_s|memset_s|memcpy_sp|memcpy_safe|VOS_memcpy_safe|VOS_MemCpy_S|VOS_Mem_Copy_Safe|VOS_MemCpy_Safe|strcpy_s|strcat_s|wcscpy_s|wcscat_s|strncpy_s|strncat_s|wcsncpy_s|wcsncat_s|strcpy_safe|strcat_safe|strncpy_safe|strncat_safe|VOS_StrCpy_S|VOS_StrCat_S|VOS_StrNCpy_S|VOS_StrNCat_S|VOS_StrCpy_Safe|VOS_StrCat_Safe|VOS_StrNCpy_Safe|VOS_StrNCat_Safe)$'
+          regex: '^(memcpy_s|memmove_s|memset_s|memcpy_sp|memcpy_safe|VOS_memcpy_safe|VOS_MemCpy_S|VOS_Mem_Copy_Safe|VOS_MemCpy_Safe|strcpy_s|strcat_s|wcscpy_s|wcscat_s|strncpy_s|strncat_s|wcsncpy_s|wcsncat_s|strcpy_safe|strcat_safe|strncpy_safe|strncat_safe|VOS_StrCpy_S|VOS_StrCat_S|VOS_StrNCpy_S|VOS_StrNCat_S|VOS_StrCpy_Safe|VOS_StrCat_Safe|VOS_StrNCpy_Safe|VOS_StrNCat_Safe|sprintf_s|snprintf_s|vsprintf_s|vsnprintf_s)$'
 
   - id: c-cpp.safe-mem.member-offset-full-member-size
     languages: [c, cpp]
@@ -104,16 +140,38 @@ rules:
               }
       - pattern-either:
           - pattern: $CALL($OBJ.$FIELD + $OFF, sizeof($OBJ.$FIELD), $ARG3, $COUNT)
+          - pattern: $CALL(($OBJ.$FIELD + $OFF), sizeof($OBJ.$FIELD), $ARG3, $COUNT)
           - pattern: $CALL(&$OBJ.$FIELD[$IDX], sizeof($OBJ.$FIELD), $ARG3, $COUNT)
+          - pattern: $CALL((&$OBJ.$FIELD[$IDX]), sizeof($OBJ.$FIELD), $ARG3, $COUNT)
           - pattern: $CALL($P->$FIELD + $OFF, sizeof($P->$FIELD), $ARG3, $COUNT)
+          - pattern: $CALL(($P->$FIELD + $OFF), sizeof($P->$FIELD), $ARG3, $COUNT)
           - pattern: $CALL(&$P->$FIELD[$IDX], sizeof($P->$FIELD), $ARG3, $COUNT)
+          - pattern: $CALL((&$P->$FIELD[$IDX]), sizeof($P->$FIELD), $ARG3, $COUNT)
+          - pattern: $CALL((char *)($OBJ.$FIELD + $OFF), sizeof($OBJ.$FIELD), $ARG3, $COUNT)
+          - pattern: $CALL((char *)($P->$FIELD + $OFF), sizeof($P->$FIELD), $ARG3, $COUNT)
           - pattern: $CALL($OBJ.$FIELD + $OFF, sizeof($OBJ.$FIELD), $ARG3)
+          - pattern: $CALL(($OBJ.$FIELD + $OFF), sizeof($OBJ.$FIELD), $ARG3)
           - pattern: $CALL(&$OBJ.$FIELD[$IDX], sizeof($OBJ.$FIELD), $ARG3)
+          - pattern: $CALL((&$OBJ.$FIELD[$IDX]), sizeof($OBJ.$FIELD), $ARG3)
           - pattern: $CALL($P->$FIELD + $OFF, sizeof($P->$FIELD), $ARG3)
+          - pattern: $CALL(($P->$FIELD + $OFF), sizeof($P->$FIELD), $ARG3)
           - pattern: $CALL(&$P->$FIELD[$IDX], sizeof($P->$FIELD), $ARG3)
+          - pattern: $CALL((&$P->$FIELD[$IDX]), sizeof($P->$FIELD), $ARG3)
+          - pattern: $CALL((char *)($OBJ.$FIELD + $OFF), sizeof($OBJ.$FIELD), $ARG3)
+          - pattern: $CALL((char *)($P->$FIELD + $OFF), sizeof($P->$FIELD), $ARG3)
+          - pattern: $CALL($OBJ.$FIELD + $OFF, sizeof($OBJ.$FIELD), ...)
+          - pattern: $CALL(($OBJ.$FIELD + $OFF), sizeof($OBJ.$FIELD), ...)
+          - pattern: $CALL(&$OBJ.$FIELD[$IDX], sizeof($OBJ.$FIELD), ...)
+          - pattern: $CALL((&$OBJ.$FIELD[$IDX]), sizeof($OBJ.$FIELD), ...)
+          - pattern: $CALL($P->$FIELD + $OFF, sizeof($P->$FIELD), ...)
+          - pattern: $CALL(($P->$FIELD + $OFF), sizeof($P->$FIELD), ...)
+          - pattern: $CALL(&$P->$FIELD[$IDX], sizeof($P->$FIELD), ...)
+          - pattern: $CALL((&$P->$FIELD[$IDX]), sizeof($P->$FIELD), ...)
+          - pattern: $CALL((char *)($OBJ.$FIELD + $OFF), sizeof($OBJ.$FIELD), ...)
+          - pattern: $CALL((char *)($P->$FIELD + $OFF), sizeof($P->$FIELD), ...)
       - metavariable-regex:
           metavariable: $CALL
-          regex: '^(memcpy_s|memmove_s|memset_s|memcpy_sp|memcpy_safe|VOS_memcpy_safe|VOS_MemCpy_S|VOS_Mem_Copy_Safe|VOS_MemCpy_Safe|strcpy_s|strcat_s|wcscpy_s|wcscat_s|strncpy_s|strncat_s|wcsncpy_s|wcsncat_s|strcpy_safe|strcat_safe|strncpy_safe|strncat_safe|VOS_StrCpy_S|VOS_StrCat_S|VOS_StrNCpy_S|VOS_StrNCat_S|VOS_StrCpy_Safe|VOS_StrCat_Safe|VOS_StrNCpy_Safe|VOS_StrNCat_Safe)$'
+          regex: '^(memcpy_s|memmove_s|memset_s|memcpy_sp|memcpy_safe|VOS_memcpy_safe|VOS_MemCpy_S|VOS_Mem_Copy_Safe|VOS_MemCpy_Safe|strcpy_s|strcat_s|wcscpy_s|wcscat_s|strncpy_s|strncat_s|wcsncpy_s|wcsncat_s|strcpy_safe|strcat_safe|strncpy_safe|strncat_safe|VOS_StrCpy_S|VOS_StrCat_S|VOS_StrNCpy_S|VOS_StrNCat_S|VOS_StrCpy_Safe|VOS_StrCat_Safe|VOS_StrNCpy_Safe|VOS_StrNCat_Safe|sprintf_s|snprintf_s|vsprintf_s|vsnprintf_s)$'
 
   - id: c-cpp.safe-mem.pointer-sizeof-dst
     languages: [c, cpp]
@@ -149,12 +207,29 @@ rules:
           - pattern-inside: |
               $TYPE*$PTR = $INIT;
               ...
+          - pattern-inside: |
+              $RET $FUNC(..., $TYPE *$PTR, ...) {
+                ...
+              }
+          - pattern-inside: |
+              $RET $QUAL::$FUNC(..., $TYPE *$PTR, ...) {
+                ...
+              }
+          - pattern-inside: |
+              $RET $FUNC(..., $TYPE*$PTR, ...) {
+                ...
+              }
+          - pattern-inside: |
+              $RET $QUAL::$FUNC(..., $TYPE*$PTR, ...) {
+                ...
+              }
       - pattern-either:
           - pattern: $CALL($PTR, sizeof($PTR), $ARG3, $COUNT)
           - pattern: $CALL($PTR, sizeof($PTR), $ARG3)
+          - pattern: $CALL($PTR, sizeof($PTR), ...)
       - metavariable-regex:
           metavariable: $CALL
-          regex: '^(memcpy_s|memmove_s|memset_s|memcpy_sp|memcpy_safe|VOS_memcpy_safe|VOS_MemCpy_S|VOS_Mem_Copy_Safe|VOS_MemCpy_Safe|strcpy_s|strcat_s|wcscpy_s|wcscat_s|strncpy_s|strncat_s|wcsncpy_s|wcsncat_s|strcpy_safe|strcat_safe|strncpy_safe|strncat_safe|VOS_StrCpy_S|VOS_StrCat_S|VOS_StrNCpy_S|VOS_StrNCat_S|VOS_StrCpy_Safe|VOS_StrCat_Safe|VOS_StrNCpy_Safe|VOS_StrNCat_Safe)$'
+          regex: '^(memcpy_s|memmove_s|memset_s|memcpy_sp|memcpy_safe|VOS_memcpy_safe|VOS_MemCpy_S|VOS_Mem_Copy_Safe|VOS_MemCpy_Safe|strcpy_s|strcat_s|wcscpy_s|wcscat_s|strncpy_s|strncat_s|wcsncpy_s|wcsncat_s|strcpy_safe|strcat_safe|strncpy_safe|strncat_safe|VOS_StrCpy_S|VOS_StrCat_S|VOS_StrNCpy_S|VOS_StrNCat_S|VOS_StrCpy_Safe|VOS_StrCat_Safe|VOS_StrNCpy_Safe|VOS_StrNCat_Safe|sprintf_s|snprintf_s|vsprintf_s|vsnprintf_s)$'
 
   - id: c-cpp.safe-mem.multidim-array-full-size
     languages: [c, cpp]
@@ -179,112 +254,35 @@ rules:
               }
       - pattern-either:
           - pattern: $CALL($ARR[$IDX], sizeof($ARR), $ARG3, $COUNT)
+          - pattern: $CALL(&$ARR[$IDX], sizeof($ARR), $ARG3, $COUNT)
+          - pattern: $CALL($OBJ.$FIELD[$IDX], sizeof($OBJ.$FIELD), $ARG3, $COUNT)
+          - pattern: $CALL(&$OBJ.$FIELD[$IDX], sizeof($OBJ.$FIELD), $ARG3, $COUNT)
+          - pattern: $CALL($P->$FIELD[$IDX], sizeof($P->$FIELD), $ARG3, $COUNT)
+          - pattern: $CALL(&$P->$FIELD[$IDX], sizeof($P->$FIELD), $ARG3, $COUNT)
+          - pattern: $CALL($ARR[$ROW][$COL], sizeof($ARR), $ARG3, $COUNT)
+          - pattern: $CALL(&$ARR[$ROW][$COL], sizeof($ARR), $ARG3, $COUNT)
+          - pattern: $CALL($OBJ.$FIELD[$ROW][$COL], sizeof($OBJ.$FIELD), $ARG3, $COUNT)
+          - pattern: $CALL(&$OBJ.$FIELD[$ROW][$COL], sizeof($OBJ.$FIELD), $ARG3, $COUNT)
           - pattern: $CALL($ARR[$IDX], sizeof($ARR), $ARG3)
+          - pattern: $CALL(&$ARR[$IDX], sizeof($ARR), $ARG3)
+          - pattern: $CALL($OBJ.$FIELD[$IDX], sizeof($OBJ.$FIELD), $ARG3)
+          - pattern: $CALL(&$OBJ.$FIELD[$IDX], sizeof($OBJ.$FIELD), $ARG3)
+          - pattern: $CALL($P->$FIELD[$IDX], sizeof($P->$FIELD), $ARG3)
+          - pattern: $CALL(&$P->$FIELD[$IDX], sizeof($P->$FIELD), $ARG3)
+          - pattern: $CALL($ARR[$ROW][$COL], sizeof($ARR), $ARG3)
+          - pattern: $CALL(&$ARR[$ROW][$COL], sizeof($ARR), $ARG3)
+          - pattern: $CALL($OBJ.$FIELD[$ROW][$COL], sizeof($OBJ.$FIELD), $ARG3)
+          - pattern: $CALL(&$OBJ.$FIELD[$ROW][$COL], sizeof($OBJ.$FIELD), $ARG3)
+          - pattern: $CALL($ARR[$IDX], sizeof($ARR), ...)
+          - pattern: $CALL(&$ARR[$IDX], sizeof($ARR), ...)
+          - pattern: $CALL($OBJ.$FIELD[$IDX], sizeof($OBJ.$FIELD), ...)
+          - pattern: $CALL(&$OBJ.$FIELD[$IDX], sizeof($OBJ.$FIELD), ...)
+          - pattern: $CALL($P->$FIELD[$IDX], sizeof($P->$FIELD), ...)
+          - pattern: $CALL(&$P->$FIELD[$IDX], sizeof($P->$FIELD), ...)
+          - pattern: $CALL($ARR[$ROW][$COL], sizeof($ARR), ...)
+          - pattern: $CALL(&$ARR[$ROW][$COL], sizeof($ARR), ...)
+          - pattern: $CALL($OBJ.$FIELD[$ROW][$COL], sizeof($OBJ.$FIELD), ...)
+          - pattern: $CALL(&$OBJ.$FIELD[$ROW][$COL], sizeof($OBJ.$FIELD), ...)
       - metavariable-regex:
           metavariable: $CALL
-          regex: '^(memcpy_s|memmove_s|memset_s|memcpy_sp|memcpy_safe|VOS_memcpy_safe|VOS_MemCpy_S|VOS_Mem_Copy_Safe|VOS_MemCpy_Safe|strcpy_s|strcat_s|wcscpy_s|wcscat_s|strncpy_s|strncat_s|wcsncpy_s|wcsncat_s|strcpy_safe|strcat_safe|strncpy_safe|strncat_safe|VOS_StrCpy_S|VOS_StrCat_S|VOS_StrNCpy_S|VOS_StrNCat_S|VOS_StrCpy_Safe|VOS_StrCat_Safe|VOS_StrNCpy_Safe|VOS_StrNCat_Safe)$'
-
-  - id: c-cpp.safe-mem.identical-size-array-dst
-    languages: [c, cpp]
-    severity: WARNING
-    message: >
-      Function=`$FUNC`. Safe memory call `$CALL` uses the same expression for dstsz and copy length when writing to a fixed array.
-      Check whether this expression is a source/input length rather than the destination array capacity.
-    metadata:
-      category: security
-      cwe:
-        - "CWE-787: Out-of-bounds Write"
-      risk_class: "D: identical dstsz and copy length for fixed array dst"
-    patterns:
-      - pattern-either:
-          - pattern-inside: |
-              $RET $FUNC(...) {
-                ...
-              }
-          - pattern-inside: |
-              $RET $QUAL::$FUNC(...) {
-                ...
-              }
-      - pattern-either:
-          - pattern-inside: |
-              $TYPE $DST[$N];
-              ...
-          - pattern-inside: |
-              $TYPE $DST[$N] = $INIT;
-              ...
-      - pattern: $CALL($DST, $SZ, $SRC, $SZ)
-      - pattern-not: $CALL($DST, sizeof($DST), $SRC, sizeof($DST))
-      - metavariable-regex:
-          metavariable: $CALL
-          regex: '^(memcpy_s|memmove_s|memcpy_sp|memcpy_safe|VOS_memcpy_safe|VOS_MemCpy_S|VOS_Mem_Copy_Safe|VOS_MemCpy_Safe|strncpy_s|strncat_s|wcsncpy_s|wcsncat_s|strncpy_safe|strncat_safe|VOS_StrNCpy_S|VOS_StrNCat_S|VOS_StrNCpy_Safe|VOS_StrNCat_Safe)$'
-      - metavariable-regex:
-          metavariable: $SZ
-          regex: '^(?!sizeof\s*\().+'
-
-  - id: c-cpp.safe-mem.identical-size-member-dst
-    languages: [c, cpp]
-    severity: WARNING
-    message: >
-      Function=`$FUNC`. Safe memory call `$CALL` uses the same expression for dstsz and copy length when writing to a member.
-      Check whether this expression is a source/input length rather than the member capacity.
-    metadata:
-      category: security
-      cwe:
-        - "CWE-787: Out-of-bounds Write"
-      risk_class: "D: identical dstsz and copy length for member dst"
-    patterns:
-      - pattern-either:
-          - pattern-inside: |
-              $RET $FUNC(...) {
-                ...
-              }
-          - pattern-inside: |
-              $RET $QUAL::$FUNC(...) {
-                ...
-              }
-      - pattern-either:
-          - pattern: $CALL($OBJ.$FIELD, $SZ, $SRC, $SZ)
-          - pattern: $CALL(&$OBJ.$FIELD, $SZ, $SRC, $SZ)
-          - pattern: $CALL($P->$FIELD, $SZ, $SRC, $SZ)
-          - pattern: $CALL(&$P->$FIELD, $SZ, $SRC, $SZ)
-      - pattern-not: $CALL($OBJ.$FIELD, sizeof($OBJ.$FIELD), $SRC, sizeof($OBJ.$FIELD))
-      - pattern-not: $CALL(&$OBJ.$FIELD, sizeof($OBJ.$FIELD), $SRC, sizeof($OBJ.$FIELD))
-      - pattern-not: $CALL($P->$FIELD, sizeof($P->$FIELD), $SRC, sizeof($P->$FIELD))
-      - pattern-not: $CALL(&$P->$FIELD, sizeof($P->$FIELD), $SRC, sizeof($P->$FIELD))
-      - metavariable-regex:
-          metavariable: $CALL
-          regex: '^(memcpy_s|memmove_s|memcpy_sp|memcpy_safe|VOS_memcpy_safe|VOS_MemCpy_S|VOS_Mem_Copy_Safe|VOS_MemCpy_Safe|strncpy_s|strncat_s|wcsncpy_s|wcsncat_s|strncpy_safe|strncat_safe|VOS_StrNCpy_S|VOS_StrNCat_S|VOS_StrNCpy_Safe|VOS_StrNCat_Safe)$'
-      - metavariable-regex:
-          metavariable: $SZ
-          regex: '^(?!sizeof\s*\().+'
-
-  - id: c-cpp.safe-mem.identical-size-source-named
-    languages: [c, cpp]
-    severity: WARNING
-    message: >
-      Function=`$FUNC`. Safe memory call `$CALL` uses the same source-like expression for dstsz and copy length.
-      This often means the destination capacity was confused with the source or packet length.
-    metadata:
-      category: security
-      cwe:
-        - "CWE-787: Out-of-bounds Write"
-      risk_class: "D: identical dstsz and source-like copy length"
-    patterns:
-      - pattern-either:
-          - pattern-inside: |
-              $RET $FUNC(...) {
-                ...
-              }
-          - pattern-inside: |
-              $RET $QUAL::$FUNC(...) {
-                ...
-              }
-      - pattern: $CALL($DST, $SZ, $SRC, $SZ)
-      - pattern-not: $CALL($DST, sizeof($DST), $SRC, sizeof($DST))
-      - pattern-not: $CALL($DST, sizeof(*$DST), $SRC, sizeof(*$DST))
-      - metavariable-regex:
-          metavariable: $CALL
-          regex: '^(memcpy_s|memmove_s|memcpy_sp|memcpy_safe|VOS_memcpy_safe|VOS_MemCpy_S|VOS_Mem_Copy_Safe|VOS_MemCpy_Safe|strncpy_s|strncat_s|wcsncpy_s|wcsncat_s|strncpy_safe|strncat_safe|VOS_StrNCpy_S|VOS_StrNCat_S|VOS_StrNCpy_Safe|VOS_StrNCat_Safe)$'
-      - metavariable-regex:
-          metavariable: $SZ
-          regex: '(?i).*(src|source|input|recv|pkt|packet|msg|body|payload|read).*'
+          regex: '^(memcpy_s|memmove_s|memset_s|memcpy_sp|memcpy_safe|VOS_memcpy_safe|VOS_MemCpy_S|VOS_Mem_Copy_Safe|VOS_MemCpy_Safe|strcpy_s|strcat_s|wcscpy_s|wcscat_s|strncpy_s|strncat_s|wcsncpy_s|wcsncat_s|strcpy_safe|strcat_safe|strncpy_safe|strncat_safe|VOS_StrCpy_S|VOS_StrCat_S|VOS_StrNCpy_S|VOS_StrNCat_S|VOS_StrCpy_Safe|VOS_StrCat_Safe|VOS_StrNCpy_Safe|VOS_StrNCat_Safe|sprintf_s|snprintf_s|vsprintf_s|vsnprintf_s)$'

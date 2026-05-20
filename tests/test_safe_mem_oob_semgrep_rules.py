@@ -24,6 +24,7 @@ typedef struct {
     int type;
     char payload[64];
     char name[16];
+    char chunks[4][16];
 } Msg;
 
 errno_t memcpy_s(void *dst, size_t dstsz, const void *src, size_t count);
@@ -33,6 +34,10 @@ errno_t strcpy_s(char *dst, size_t dstsz, const char *src);
 errno_t strncpy_s(char *dst, size_t dstsz, const char *src, size_t count);
 errno_t strncat_s(char *dst, size_t dstsz, const char *src, size_t count);
 errno_t wcscpy_s(void *dst, size_t dstsz, const void *src);
+errno_t sprintf_s(char *dst, size_t dstsz, const char *fmt, ...);
+errno_t snprintf_s(char *dst, size_t dstsz, size_t count, const char *fmt, ...);
+errno_t vsprintf_s(char *dst, size_t dstsz, const char *fmt, void *args);
+errno_t vsnprintf_s(char *dst, size_t dstsz, size_t count, const char *fmt, void *args);
 
 void member_parent(Msg msg, const char *src, size_t len) {
     memcpy_s(msg.payload, sizeof(msg), src, len);
@@ -52,21 +57,12 @@ void pointer_sizeof(char *src, size_t len) {
     memcpy_s(buf, sizeof(buf), src, len);
 }
 
+void pointer_param(char *dst, const char *src, size_t len) {
+    memcpy_s(dst, sizeof(dst), src, len);
+}
+
 void memset_bad(Msg *msg, size_t len) {
     memset_s(msg->payload, sizeof(*msg), 0, len);
-}
-
-void same_array(const char *src, size_t src_len) {
-    char buf[64];
-    memcpy_s(buf, src_len, src, src_len);
-}
-
-void same_member(Msg *msg, const char *src, size_t msg_len) {
-    memcpy_s(msg->payload, msg_len, src, msg_len);
-}
-
-void same_source_named(char *dst, const char *src, size_t packet_len) {
-    memcpy_s(dst, packet_len, src, packet_len);
 }
 
 void string_member_parent(Msg msg, const char *src) {
@@ -78,12 +74,38 @@ void string_offset_full(const char *src, size_t off) {
     strncpy_s(buf + off, sizeof(buf), src, 16);
 }
 
-void string_same_source_named(char *dst, const char *src, size_t packet_len) {
-    strncat_s(dst, packet_len, src, packet_len);
+void offset_cast_parentheses(const char *src, size_t off, size_t len) {
+    char buf[128];
+    memcpy_s((char *)(buf + off), sizeof(buf), src, len);
+}
+
+void member_subarray(Msg *msg, const char *src, size_t row, size_t len) {
+    memcpy_s(msg->chunks[row], sizeof(msg->chunks), src, len);
 }
 
 void wide_string_member_parent(Msg *msg, const void *src) {
     wcscpy_s(msg->name, sizeof(*msg), src);
+}
+
+void format_member_parent(Msg msg, int code) {
+    sprintf_s(msg.name, sizeof(msg), "code=%d", code);
+}
+
+void format_offset_full(int code, size_t off) {
+    char buf[128];
+    snprintf_s(buf + off, sizeof(buf), 32, "code=%d", code);
+}
+
+void format_pointer_param(char *dst, int code) {
+    sprintf_s(dst, sizeof(dst), "code=%d", code);
+}
+
+void vformat_member_parent(Msg *msg, void *args) {
+    vsnprintf_s(msg->name, sizeof(*msg), 16, "%s", args);
+}
+
+void vformat_s_member_parent(Msg *msg, void *args) {
+    vsprintf_s(msg->name, sizeof(*msg), "%s", args);
 }
 """,
         encoding="utf-8",
@@ -96,13 +118,25 @@ void wide_string_member_parent(Msg *msg, const void *src) {
     assert "offset-full-size" in descriptions
     assert "member-offset-full-member-size" in descriptions
     assert "pointer-sizeof-dst" in descriptions
-    assert "identical-size-array-dst" in descriptions
-    assert "identical-size-member-dst" in descriptions
-    assert "identical-size-source-named" in descriptions
+    assert "multidim-array-full-size" in descriptions
+    assert "pointer_param" in descriptions
+    assert "offset_cast_parentheses" in descriptions
+    assert "member_subarray" in descriptions
+    assert "format_member_parent" in descriptions
+    assert "format_offset_full" in descriptions
+    assert "format_pointer_param" in descriptions
+    assert "vformat_member_parent" in descriptions
+    assert "vformat_s_member_parent" in descriptions
+    assert "identical-size-array-dst" not in descriptions
+    assert "identical-size-member-dst" not in descriptions
+    assert "identical-size-source-named" not in descriptions
     assert "strcpy_s" in descriptions
     assert "strncpy_s" in descriptions
-    assert "strncat_s" in descriptions
     assert "wcscpy_s" in descriptions
+    assert "sprintf_s" in descriptions
+    assert "snprintf_s" in descriptions
+    assert "vsprintf_s" in descriptions
+    assert "vsnprintf_s" in descriptions
     assert len(candidates) >= 5
 
 
@@ -121,6 +155,8 @@ errno_t memcpy_s(void *dst, size_t dstsz, const void *src, size_t count);
 errno_t memset_s(void *dst, size_t dstsz, int value, size_t count);
 errno_t strcpy_s(char *dst, size_t dstsz, const char *src);
 errno_t strncpy_s(char *dst, size_t dstsz, const char *src, size_t count);
+errno_t sprintf_s(char *dst, size_t dstsz, const char *fmt, ...);
+errno_t snprintf_s(char *dst, size_t dstsz, size_t count, const char *fmt, ...);
 
 void safe_array(const char *src, size_t len) {
     char buf[128];
@@ -166,6 +202,19 @@ void safe_string_member(Msg *msg, const char *src) {
 
 void safe_string_same_dst_named(char *dst, const char *src, size_t dst_len) {
     strncpy_s(dst, dst_len, src, dst_len);
+}
+
+void safe_format_array(int code) {
+    char buf[128];
+    sprintf_s(buf, sizeof(buf), "code=%d", code);
+}
+
+void safe_format_member(Msg *msg, int code) {
+    sprintf_s(msg->payload, sizeof(msg->payload), "code=%d", code);
+}
+
+void safe_snprintf_dst_named(char *dst, size_t dst_len, int code) {
+    snprintf_s(dst, dst_len, dst_len - 1, "code=%d", code);
 }
 """,
         encoding="utf-8",

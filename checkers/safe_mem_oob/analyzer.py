@@ -27,11 +27,6 @@ _RULE_FILE = Path(__file__).parent / "safe_mem_oob_semgrep.yml"
 _SEMGREP_TIMEOUT_SECONDS = 15 * 60
 _SEV_LABEL = {"ERROR": "高风险", "WARNING": "中风险", "INFO": "低风险"}
 _MESSAGE_FUNCTION_RE = re.compile(r"Function=`([^`]+)`")
-_LOW_PRIORITY_RULE_SUFFIXES = (
-    "identical-size-array-dst",
-    "identical-size-member-dst",
-    "identical-size-source-named",
-)
 
 
 def _clean_text(value: object) -> str:
@@ -72,7 +67,7 @@ def _best_effort_dst_expr(metavars: dict) -> str:
         return dst
 
     obj = _mv(metavars, "$OBJ")
-    ptr = _mv(metavars, "$P")
+    ptr = _mv(metavars, "$P") or _mv(metavars, "$PTR")
     field = _mv(metavars, "$FIELD")
     buf = _mv(metavars, "$BUF")
     arr = _mv(metavars, "$ARR")
@@ -97,7 +92,7 @@ def _best_effort_dst_expr(metavars: dict) -> str:
         return f"&{buf}[{idx}]"
     if arr and idx:
         return f"{arr}[{idx}]"
-    return buf or arr
+    return buf or arr or ptr
 
 
 def _best_effort_dstsz_expr(metavars: dict) -> str:
@@ -109,7 +104,7 @@ def _best_effort_dstsz_expr(metavars: dict) -> str:
         return same_size
 
     obj = _mv(metavars, "$OBJ")
-    ptr = _mv(metavars, "$P")
+    ptr = _mv(metavars, "$P") or _mv(metavars, "$PTR")
     field = _mv(metavars, "$FIELD")
     buf = _mv(metavars, "$BUF")
     arr = _mv(metavars, "$ARR")
@@ -123,6 +118,8 @@ def _best_effort_dstsz_expr(metavars: dict) -> str:
         return f"sizeof({buf})"
     if arr:
         return f"sizeof({arr})"
+    if ptr:
+        return f"sizeof({ptr})"
     if type_name:
         return f"sizeof({type_name})"
     return ""
@@ -200,12 +197,8 @@ class Analyzer(BaseAnalyzer):
             _log.warning("semgrep output JSON parse error: %s", exc)
             return
 
-        results = sorted(
-            data.get("results", []),
-            key=lambda item: _is_low_priority_rule(str(item.get("check_id", ""))),
-        )
+        results = data.get("results", [])
         seen: set[tuple[str, int, str, str, str]] = set()
-        seen_locations: set[tuple[str, int]] = set()
 
         for match in results:
             abs_path: str = match.get("path", "")
@@ -223,9 +216,6 @@ class Analyzer(BaseAnalyzer):
             rel_path = _relative_reported_path(project_path, abs_path)
             rule_category = check_id.split(".")[-1] if check_id else "unknown"
             risk_class = _clean_text(metadata.get("risk_class")) or "high-risk"
-            location_key = (rel_path, start_line)
-            if _is_low_priority_rule(check_id) and location_key in seen_locations:
-                continue
 
             func_name = (
                 _clean_func_name(_mv(metavars, "$FUNC"))
@@ -242,7 +232,6 @@ class Analyzer(BaseAnalyzer):
             if dedup_key in seen:
                 continue
             seen.add(dedup_key)
-            seen_locations.add(location_key)
 
             sev_label = _SEV_LABEL.get(severity, severity)
             parts: list[str] = [f"[{sev_label}] {rule_category}", message]
@@ -271,7 +260,3 @@ class Analyzer(BaseAnalyzer):
                 description="\n".join(p for p in parts if p),
                 vuln_type=self.vuln_type,
             )
-
-
-def _is_low_priority_rule(check_id: str) -> bool:
-    return check_id.endswith(_LOW_PRIORITY_RULE_SUFFIXES)

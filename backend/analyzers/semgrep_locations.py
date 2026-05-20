@@ -72,16 +72,19 @@ def function_from_db_location(
     """Resolve a semgrep match to an indexed function without full-table scans."""
     get_by_location = getattr(db, "get_function_by_location", None)
     if callable(get_by_location):
-        for path in sorted(path_variants(reported_path, project_path), key=len):
-            try:
-                row = get_by_location(path, line)
-            except Exception:
-                continue
-            if row is None:
-                continue
+        # CodeDatabase.get_function_by_location already has an exact lookup plus
+        # suffix fallback. Calling it repeatedly for every path variant can make
+        # one semgrep match scan line-range candidates multiple times.
+        best_path = relative_reported_path(project_path, reported_path)
+        try:
+            row = get_by_location(best_path, line)
+        except Exception:
+            row = None
+        if row is not None:
             name = clean_func_name(_row_get(row, "name", ""))
             if name:
                 return name
+        return ""
 
     get_all_functions = getattr(db, "get_all_functions", None)
     if not callable(get_all_functions):

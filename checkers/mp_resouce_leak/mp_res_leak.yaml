@@ -16,7 +16,7 @@ rules:
     languages: [c, cpp]
     severity: WARNING
     message: >
-      多层指针成员 `$FIELD` 接收了资源获取函数 `$ACQ(...)` 的返回值，
+      Function=`$FUNC`. 多层指针成员 `$FIELD` 接收了资源获取函数 `$ACQ(...)` 的返回值，
       但当前函数内未看到 `$FIELD` 被传入释放/托管函数，疑似多层指针资源泄露。
       请检查 `$FIELD` 的所有权是否转移到其他对象，或是否在 cleanup/destroy/free 路径中释放。
     metadata:
@@ -80,7 +80,7 @@ rules:
     languages: [c, cpp]
     severity: ERROR
     message: >
-      多层指针成员 `$FIELD` 在两次资源赋值之间没有看到释放/托管调用，
+      Function=`$FUNC`. 多层指针成员 `$FIELD` 在两次资源赋值之间没有看到释放/托管调用，
       第二次赋值可能覆盖旧资源，导致资源泄露。
     metadata:
       cwe: ["CWE-401", "CWE-772"]
@@ -146,7 +146,7 @@ rules:
     languages: [c, cpp]
     severity: WARNING
     message: >
-      多层指针成员 `$FIELD` 被直接置为 NULL，
+      Function=`$FUNC`. 多层指针成员 `$FIELD` 被直接置为 NULL，
       但当前函数内在置空前未看到释放/托管调用，可能导致原资源泄露。
     metadata:
       cwe: ["CWE-401", "CWE-772"]
@@ -212,7 +212,7 @@ rules:
     languages: [c, cpp]
     severity: ERROR
     message: >
-      多层指针成员 `$FIELD` 直接接收 `$REALLOC(...)` 返回值。
+      Function=`$FUNC`. 多层指针成员 `$FIELD` 直接接收 `$REALLOC(...)` 返回值。
       如果 realloc 类函数失败返回 NULL，旧资源指针会丢失，导致资源泄露。
       建议使用临时变量保存返回值，成功后再赋给 `$FIELD`。
     metadata:
@@ -220,6 +220,11 @@ rules:
       category: security
       technology: [c, cpp]
     patterns:
+      - pattern-inside: |
+          $RET $FUNC(...) {
+            ...
+          }
+
       - pattern: |
           $FIELD = $REALLOC($FIELD, ...);
 
@@ -255,7 +260,7 @@ rules:
     languages: [c, cpp]
     severity: WARNING
     message: >
-      临时资源变量 `$TMP` 被保存到多层指针成员 `$FIELD`，
+      Function=`$FUNC`. 临时资源变量 `$TMP` 被保存到多层指针成员 `$FIELD`，
       但当前函数内未看到 `$FIELD` 被释放/托管，疑似多层指针资源泄露或所有权不清晰。
     metadata:
       cwe: ["CWE-401", "CWE-772"]
