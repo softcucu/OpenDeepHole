@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { getScans, resumeScan, deleteScan } from "../api/client";
 import type { ScanSummary, ScanItemStatus, User } from "../types";
 
@@ -32,6 +32,131 @@ const NAV_BUTTON_STYLES: Record<NavButtonVariant, string> = {
   default: "text-slate-300 hover:text-white bg-slate-700 hover:bg-slate-600",
   primary: "text-white bg-blue-600 hover:bg-blue-700",
 };
+
+const ALL_FILTER = "__all__";
+
+function projectName(scan: ScanSummary) {
+  return scan.scan_name || scan.project_id || scan.scan_id.slice(0, 8);
+}
+
+function uniqueOptions(values: string[]) {
+  return Array.from(new Set(values)).sort((a, b) => a.localeCompare(b));
+}
+
+interface HeaderFilterOption {
+  value: string;
+  label: string;
+}
+
+function FilterIcon({ active }: { active: boolean }) {
+  return (
+    <svg
+      className={`h-3.5 w-3.5 ${active ? "text-blue-300" : "text-slate-500"}`}
+      fill="none"
+      stroke="currentColor"
+      viewBox="0 0 24 24"
+      aria-hidden="true"
+    >
+      <path
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        strokeWidth={2}
+        d="M3 5h18M6 12h12M10 19h4"
+      />
+    </svg>
+  );
+}
+
+function HeaderFilter({
+  id,
+  label,
+  value,
+  options,
+  open,
+  onOpenChange,
+  onChange,
+}: {
+  id: string;
+  label: string;
+  value: string;
+  options: HeaderFilterOption[];
+  open: boolean;
+  onOpenChange: (id: string | null) => void;
+  onChange: (value: string) => void;
+}) {
+  const active = value !== ALL_FILTER;
+  const activeOption = options.find((option) => option.value === value);
+  const displayValue = activeOption?.label ?? value;
+
+  return (
+    <div
+      className="relative inline-flex min-w-[7.5rem] max-w-[14rem] flex-col items-start gap-1 normal-case tracking-normal"
+      onBlur={(e) => {
+        if (!e.currentTarget.contains(e.relatedTarget as Node | null)) {
+          onOpenChange(null);
+        }
+      }}
+    >
+      <button
+        type="button"
+        onClick={() => onOpenChange(open ? null : id)}
+        className={`inline-flex max-w-full items-center gap-1.5 rounded-md px-1.5 py-1 text-xs font-semibold transition-colors ${
+          active
+            ? "bg-blue-500/10 text-blue-300 hover:bg-blue-500/15"
+            : "text-slate-400 hover:bg-slate-700/60 hover:text-slate-200"
+        }`}
+        aria-label={`${label}筛选`}
+        aria-expanded={open}
+      >
+        <span className="truncate uppercase tracking-wider">{label}</span>
+        <FilterIcon active={active} />
+      </button>
+      {active && (
+        <span className="max-w-full truncate text-[11px] font-medium text-blue-300/80" title={displayValue}>
+          {displayValue}
+        </span>
+      )}
+      {open && (
+        <div className="absolute left-0 top-full z-40 mt-2 w-56 overflow-hidden rounded-lg border border-slate-600 bg-slate-900 shadow-xl shadow-black/30">
+          <button
+            type="button"
+            onMouseDown={(e) => e.preventDefault()}
+            onClick={() => {
+              onChange(ALL_FILTER);
+              onOpenChange(null);
+            }}
+            className={`flex w-full items-center justify-between px-3 py-2 text-left text-xs transition-colors ${
+              value === ALL_FILTER ? "bg-blue-500/15 text-blue-200" : "text-slate-300 hover:bg-slate-800"
+            }`}
+          >
+            <span>全部</span>
+            {value === ALL_FILTER && <span className="text-blue-300">✓</span>}
+          </button>
+          <div className="max-h-64 overflow-y-auto border-t border-slate-700/70 py-1">
+            {options.map((option) => (
+              <button
+                key={option.value}
+                type="button"
+                title={option.label}
+                onMouseDown={(e) => e.preventDefault()}
+                onClick={() => {
+                  onChange(option.value);
+                  onOpenChange(null);
+                }}
+                className={`flex w-full items-center justify-between gap-3 px-3 py-2 text-left text-xs transition-colors ${
+                  value === option.value ? "bg-blue-500/15 text-blue-200" : "text-slate-300 hover:bg-slate-800"
+                }`}
+              >
+                <span className="min-w-0 truncate">{option.label}</span>
+                {value === option.value && <span className="shrink-0 text-blue-300">✓</span>}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
 
 function NavButton({
   label,
@@ -69,6 +194,9 @@ export default function ScanHistory({ onViewScan, onDownloadAgent, onNewScan, us
   const [loading, setLoading] = useState(true);
   const [actionLoading, setActionLoading] = useState<string | null>(null);
   const [deleteConfirmId, setDeleteConfirmId] = useState<string | null>(null);
+  const [projectFilter, setProjectFilter] = useState(ALL_FILTER);
+  const [creatorFilter, setCreatorFilter] = useState(ALL_FILTER);
+  const [openFilter, setOpenFilter] = useState<string | null>(null);
 
   const fetchScans = async () => {
     try {
@@ -129,8 +257,32 @@ export default function ScanHistory({ onViewScan, onDownloadAgent, onNewScan, us
     ? scans.find((scan) => scan.scan_id === deleteConfirmId)
     : null;
   const deleteTargetName = deleteTarget
-    ? deleteTarget.scan_name || deleteTarget.project_id || deleteTarget.scan_id.slice(0, 8)
+    ? projectName(deleteTarget)
     : deleteConfirmId?.slice(0, 8);
+
+  const projectOptions = useMemo(
+    () => uniqueOptions(scans.map(projectName)).map((value) => ({ value, label: value })),
+    [scans],
+  );
+
+  const creatorOptions = useMemo(
+    () => uniqueOptions(scans.map((scan) => scan.username || "-")).map((value) => ({ value, label: value })),
+    [scans],
+  );
+
+  const filteredScans = useMemo(
+    () =>
+      scans.filter((scan) => {
+        if (projectFilter !== ALL_FILTER && projectName(scan) !== projectFilter) {
+          return false;
+        }
+        if (creatorFilter !== ALL_FILTER && (scan.username || "-") !== creatorFilter) {
+          return false;
+        }
+        return true;
+      }),
+    [creatorFilter, projectFilter, scans],
+  );
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-900 via-slate-800 to-slate-900 flex flex-col">
@@ -230,11 +382,21 @@ export default function ScanHistory({ onViewScan, onDownloadAgent, onNewScan, us
             <p className="text-sm mt-1">点击右上角「新建扫描」开始</p>
           </div>
         ) : (
-          <div className="border border-slate-700 rounded-xl overflow-hidden">
+          <div className="border border-slate-700 rounded-xl">
             <table className="w-full text-sm">
               <thead>
                 <tr className="bg-slate-800 border-b border-slate-700">
-                  <th className="text-left px-4 py-3 text-xs font-semibold text-slate-400 uppercase tracking-wider">项目名称</th>
+                  <th className="text-left px-4 py-3 text-xs font-semibold text-slate-400 uppercase tracking-wider">
+                    <HeaderFilter
+                      id="project"
+                      label="项目名称"
+                      value={projectFilter}
+                      options={projectOptions}
+                      open={openFilter === "project"}
+                      onOpenChange={setOpenFilter}
+                      onChange={setProjectFilter}
+                    />
+                  </th>
                   <th className="text-left px-4 py-3 text-xs font-semibold text-slate-400 uppercase tracking-wider">状态</th>
                   <th className="text-left px-4 py-3 text-xs font-semibold text-slate-400 uppercase tracking-wider">进度</th>
                   <th className="text-left px-4 py-3 text-xs font-semibold text-slate-400 uppercase tracking-wider">漏洞数</th>
@@ -242,29 +404,39 @@ export default function ScanHistory({ onViewScan, onDownloadAgent, onNewScan, us
                   <th className="text-left px-4 py-3 text-xs font-semibold text-slate-400 uppercase tracking-wider">检查项</th>
                   <th className="text-left px-4 py-3 text-xs font-semibold text-slate-400 uppercase tracking-wider">Agent</th>
                   {user.role === "admin" && (
-                    <th className="text-left px-4 py-3 text-xs font-semibold text-slate-400 uppercase tracking-wider">创建者</th>
+                    <th className="text-left px-4 py-3 text-xs font-semibold text-slate-400 uppercase tracking-wider">
+                      <HeaderFilter
+                        id="creator"
+                        label="创建者"
+                        value={creatorFilter}
+                        options={creatorOptions}
+                        open={openFilter === "creator"}
+                        onOpenChange={setOpenFilter}
+                        onChange={setCreatorFilter}
+                      />
+                    </th>
                   )}
                   <th className="text-left px-4 py-3 text-xs font-semibold text-slate-400 uppercase tracking-wider">创建时间</th>
                   <th className="text-left px-4 py-3 text-xs font-semibold text-slate-400 uppercase tracking-wider">操作</th>
                 </tr>
               </thead>
               <tbody>
-                {scans.map((scan) => {
+                {filteredScans.map((scan) => {
                   const st = STATUS_STYLES[scan.status];
                   const pct = Math.round(scan.progress * 100);
                   const running = isRunning(scan.status);
                   const canResume = scan.status === "cancelled" || scan.status === "error";
                   const canDelete = !running;
                   const isLoading = actionLoading === scan.scan_id;
-                  const projectName = scan.scan_name || scan.project_id || scan.scan_id.slice(0, 8);
+                  const displayProjectName = projectName(scan);
 
                   return (
                     <tr
                       key={scan.scan_id}
                       className="border-b border-slate-700/50 hover:bg-slate-800/50 transition-colors"
                     >
-                      <td className="px-4 py-3 text-sm font-medium text-slate-200 max-w-[14rem] truncate" title={projectName}>
-                        {projectName}
+                      <td className="px-4 py-3 text-sm font-medium text-slate-200 max-w-[14rem] truncate" title={displayProjectName}>
+                        {displayProjectName}
                       </td>
                       <td className="px-4 py-3">
                         <span className={`text-xs font-semibold px-2 py-0.5 rounded border ${st.cls}`}>
@@ -359,6 +531,16 @@ export default function ScanHistory({ onViewScan, onDownloadAgent, onNewScan, us
                     </tr>
                   );
                 })}
+                {filteredScans.length === 0 && (
+                  <tr>
+                    <td
+                      colSpan={user.role === "admin" ? 10 : 9}
+                      className="px-4 py-8 text-center text-sm text-slate-500"
+                    >
+                      当前筛选条件下无扫描记录
+                    </td>
+                  </tr>
+                )}
               </tbody>
             </table>
           </div>
