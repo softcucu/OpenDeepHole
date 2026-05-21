@@ -3,6 +3,7 @@
 ## 2026-05-21
 
 - **修复** 扫描详情页刷新后会丢失已存在的 AI 去误报复核列，并在复核运行中显示当前正在复核的漏洞位置
+- **修复** `loop_mut_idx_oob` Semgrep 规则因动态 `metavariable-comparison` 和非法派生指针 pattern 导致真实扫描提不出候选的问题，并让 Semgrep runner 将日志和配置写入临时目录以兼容只读 home 环境
 - **优化** `loop_mut_idx_oob` Semgrep 初筛改为更宽泛地召回循环中递增/递减索引参与数组、指针和内存函数访问的候选，缺失校验和真实越界交由 opencode 严格复核
 
 ## 2026-05-20

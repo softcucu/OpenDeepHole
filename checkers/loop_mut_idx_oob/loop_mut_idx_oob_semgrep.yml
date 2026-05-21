@@ -236,9 +236,22 @@ rules:
       - metavariable-regex:
           metavariable: $IDX
           regex: ^[A-Za-z_][A-Za-z0-9_]*$
-      - metavariable-comparison:
-          metavariable: $COND
-          comparison: not re.match("(^|[\\s\\S]*[^A-Za-z0-9_])" + str($IDX) + "([^A-Za-z0-9_]|$)[\\s\\S]*", str($COND))
+      - pattern-not-inside: |
+          for (...; $IDX < $BOUND; ...) {
+            ...
+          }
+      - pattern-not-inside: |
+          for (...; $IDX <= $BOUND; ...) {
+            ...
+          }
+      - pattern-not-inside: |
+          while ($IDX < $BOUND) {
+            ...
+          }
+      - pattern-not-inside: |
+          while ($IDX <= $BOUND) {
+            ...
+          }
       - pattern-not-inside: |
           if ($IDX < $BOUND) {
             ...
@@ -401,9 +414,22 @@ rules:
       - metavariable-regex:
           metavariable: $IDX
           regex: ^[A-Za-z_][A-Za-z0-9_]*$
-      - metavariable-comparison:
-          metavariable: $COND
-          comparison: not re.match("(^|[\\s\\S]*[^A-Za-z0-9_])" + str($IDX) + "([^A-Za-z0-9_]|$)[\\s\\S]*", str($COND))
+      - pattern-not-inside: |
+          for (...; $IDX < $BOUND; ...) {
+            ...
+          }
+      - pattern-not-inside: |
+          for (...; $IDX <= $BOUND; ...) {
+            ...
+          }
+      - pattern-not-inside: |
+          while ($IDX < $BOUND) {
+            ...
+          }
+      - pattern-not-inside: |
+          while ($IDX <= $BOUND) {
+            ...
+          }
       - pattern-not-inside: |
           if ($IDX < $BOUND) {
             ...
@@ -511,9 +537,22 @@ rules:
       - metavariable-regex:
           metavariable: $IDX
           regex: ^[A-Za-z_][A-Za-z0-9_]*$
-      - metavariable-comparison:
-          metavariable: $COND
-          comparison: not re.match("(^|[\\s\\S]*[^A-Za-z0-9_])" + str($IDX) + "([^A-Za-z0-9_]|$)[\\s\\S]*", str($COND))
+      - pattern-not-inside: |
+          for (...; $IDX < $BOUND; ...) {
+            ...
+          }
+      - pattern-not-inside: |
+          for (...; $IDX <= $BOUND; ...) {
+            ...
+          }
+      - pattern-not-inside: |
+          while ($IDX < $BOUND) {
+            ...
+          }
+      - pattern-not-inside: |
+          while ($IDX <= $BOUND) {
+            ...
+          }
       - pattern-not-inside: |
           if ($IDX < $BOUND) {
             ...
@@ -592,49 +631,62 @@ rules:
           - pattern: |
               $TMP = $BASE + $IDX;
               ...
-              *$TMP = ...
+              *($TMP) = $VALUE;
           - pattern: |
               $TYPE *$TMP = $BASE + $IDX;
               ...
-              *$TMP = ...
+              *($TMP) = $VALUE;
           - pattern: |
               $TMP = $IDX + $BASE;
               ...
-              *$TMP = ...
+              *($TMP) = $VALUE;
           - pattern: |
               $TYPE *$TMP = $IDX + $BASE;
               ...
-              *$TMP = ...
+              *($TMP) = $VALUE;
           - pattern: |
               $TMP = &$BASE[$IDX];
               ...
-              *$TMP = ...
+              *($TMP) = $VALUE;
           - pattern: |
               $TYPE *$TMP = &$BASE[$IDX];
               ...
-              *$TMP = ...
+              *($TMP) = $VALUE;
           - pattern: |
               $TMP = $BASE + $IDX;
               ...
-              $MEMFUNC(..., $TMP, ...)
+              $MEMFUNC(..., $TMP, ...);
           - pattern: |
               $TYPE *$TMP = $BASE + $IDX;
               ...
-              $MEMFUNC(..., $TMP, ...)
+              $MEMFUNC(..., $TMP, ...);
           - pattern: |
               $TMP = &$BASE[$IDX];
               ...
-              $MEMFUNC(..., $TMP, ...)
+              $MEMFUNC(..., $TMP, ...);
           - pattern: |
               $TYPE *$TMP = &$BASE[$IDX];
               ...
-              $MEMFUNC(..., $TMP, ...)
+              $MEMFUNC(..., $TMP, ...);
       - metavariable-regex:
           metavariable: $IDX
           regex: ^[A-Za-z_][A-Za-z0-9_]*$
-      - metavariable-comparison:
-          metavariable: $COND
-          comparison: not re.match("(^|[\\s\\S]*[^A-Za-z0-9_])" + str($IDX) + "([^A-Za-z0-9_]|$)[\\s\\S]*", str($COND))
+      - pattern-not-inside: |
+          for (...; $IDX < $BOUND; ...) {
+            ...
+          }
+      - pattern-not-inside: |
+          for (...; $IDX <= $BOUND; ...) {
+            ...
+          }
+      - pattern-not-inside: |
+          while ($IDX < $BOUND) {
+            ...
+          }
+      - pattern-not-inside: |
+          while ($IDX <= $BOUND) {
+            ...
+          }
       - pattern-not-inside: |
           if ($IDX < $BOUND) {
             ...

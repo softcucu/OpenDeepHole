@@ -75,6 +75,10 @@ def run_semgrep(
         env["PYTHONIOENCODING"] = "utf-8"
         env["SEMGREP_SEND_METRICS"] = "off"
         env["SEMGREP_ENABLE_VERSION_CHECK"] = "0"
+        env["XDG_CONFIG_HOME"] = str(Path(tmp) / "config")
+        env["XDG_CACHE_HOME"] = str(Path(tmp) / "cache")
+        env["SEMGREP_SETTINGS_FILE"] = str(Path(tmp) / "settings.yml")
+        env["SEMGREP_LOG_FILE"] = str(Path(tmp) / "semgrep.log")
 
         print(f"  [semgrep] {checker_name} starting: {project_path}", flush=True)
         try:

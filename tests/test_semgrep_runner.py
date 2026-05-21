@@ -20,6 +20,10 @@ def test_semgrep_runner_sets_noninteractive_env(tmp_path: Path) -> None:
         assert kwargs["env"]["PYTHONIOENCODING"] == "utf-8"
         assert kwargs["env"]["SEMGREP_SEND_METRICS"] == "off"
         assert kwargs["env"]["SEMGREP_ENABLE_VERSION_CHECK"] == "0"
+        assert kwargs["env"]["SEMGREP_SETTINGS_FILE"].endswith("settings.yml")
+        assert kwargs["env"]["SEMGREP_LOG_FILE"].endswith("semgrep.log")
+        assert kwargs["env"]["XDG_CONFIG_HOME"].endswith("config")
+        assert kwargs["env"]["XDG_CACHE_HOME"].endswith("cache")
         return CompletedProcess(cmd, 0, stdout='{"results":[]}', stderr="")
 
     with patch("backend.analyzers.semgrep_runner.subprocess.run", side_effect=fake_run):

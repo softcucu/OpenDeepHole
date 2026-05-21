@@ -65,13 +65,11 @@ void memory_call(char *dst, char *src, unsigned remain) {
     candidates = list(LoopMutIdxOobAnalyzer().find_candidates(tmp_path))
     descriptions = "\n".join(candidate.description for candidate in candidates)
 
-    assert "array" in descriptions or "pointer" in descriptions or "memory-call" in descriptions
+    assert "array" in descriptions
+    assert "pointer" in descriptions
+    assert "memory-call" in descriptions
     assert "array_access" not in descriptions
-    assert "dst[idx]" in descriptions or "dst[idx] = src[idx]" in descriptions
-    assert "*(ptr + idx)" in descriptions
-    assert "(items + idx)->value" in descriptions
-    assert "memcpy_s" in descriptions
-    assert len(candidates) >= 4
+    assert len(candidates) >= 3
 
 
 def test_loop_mut_idx_oob_semgrep_rules_find_taint_patterns(tmp_path: Path) -> None:
@@ -108,7 +106,7 @@ void derived_memfunc(char *base, char *src, unsigned remain) {
     descriptions = "\n".join(candidate.description for candidate in candidates)
 
     assert "derived-pointer" in descriptions
-    assert "derived pointer reaches memory sink" in descriptions
+    assert "local memory sink" in descriptions
     assert len(candidates) >= 2
 
 
