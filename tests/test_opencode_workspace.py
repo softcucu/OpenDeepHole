@@ -10,6 +10,13 @@ from backend.opencode.config import cleanup_workspace, create_scan_workspace
 from backend.registry import CheckerEntry
 
 
+def assert_opencode_read_permissions(testcase: unittest.TestCase, config: dict) -> None:
+    permission = config.get("permission", {})
+    for key in ("read", "list", "glob", "grep", "external_directory"):
+        testcase.assertEqual(permission.get(key), {"*": "allow"})
+    testcase.assertEqual(permission.get("edit"), {"*": "deny"})
+
+
 class OpencodeWorkspaceTests(unittest.TestCase):
     def test_scan_cleanup_preserves_fp_review_skill_and_config(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -55,6 +62,7 @@ class OpencodeWorkspaceTests(unittest.TestCase):
                 config["mcp"]["deephole-code"]["url"],
                 "http://127.0.0.1:9123/mcp",
             )
+            assert_opencode_read_permissions(self, config)
             self.assertTrue((workspace / ".opencode" / "skills" / "fp-review" / "SKILL.md").is_file())
 
     def test_fp_workspace_injects_only_selected_feedback_for_vuln_type(self) -> None:
@@ -175,6 +183,7 @@ class OpencodeWorkspaceTests(unittest.TestCase):
                 config["mcp"]["deephole-code"]["url"],
                 "http://127.0.0.1:9123/mcp",
             )
+            assert_opencode_read_permissions(self, config)
 
 
 if __name__ == "__main__":

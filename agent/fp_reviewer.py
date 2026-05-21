@@ -399,23 +399,17 @@ def _create_fp_workspace(
     feedback_entries: list[dict] | None = None,
 ) -> Path:
     """Ensure project-root opencode config and fp-review SKILL exist."""
-    from backend.opencode.config import get_workspace_lock
+    from backend.opencode.config import build_opencode_config, get_workspace_lock
     from backend.opencode.feedback_format import format_feedback_experience
 
     workspace = project_path
 
     with get_workspace_lock(workspace):
         (workspace / "opencode.json").write_text(
-            json.dumps({
-                "$schema": "https://opencode.ai/config.json",
-                "mcp": {
-                    "deephole-code": {
-                        "type": "remote",
-                        "url": f"http://127.0.0.1:{mcp_port}/mcp",
-                        "enabled": True,
-                    }
-                },
-            }, indent=2),
+            json.dumps(
+                build_opencode_config(f"http://127.0.0.1:{mcp_port}/mcp"),
+                indent=2,
+            ),
             encoding="utf-8",
         )
 

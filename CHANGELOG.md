@@ -13,10 +13,12 @@
 - **优化** 扫描历史和扫描详情页的表头筛选改为按钮式浮层菜单，降低表头高度和边框噪声，激活筛选时显示当前条件
 - **优化** 扫描历史页支持在项目名称和创建者表头下拉筛选，扫描详情页结果表支持按文件、类型、严重性、AI 判定、用户反馈和 FP 复核表头筛选，并移除原顶部点击筛选按钮
 - **新增** `loop_mut_idx_oob` checker，使用 Semgrep 初筛循环中变化索引参与数组下标、指针偏移和内存函数访问且缺少明显边界约束的潜在越界风险，并由 opencode 复核真实可达性
+- **优化** `safe_mem_oob` 的 LLM 审计策略明确 `dstsz` 等于真实缓冲区大小时由安全函数容量校验拦截超长写入，不再继续依据 `count` 确认越界
 - **优化** `safe_mem_oob` 删除 `dstsz` 与拷贝长度复用的高噪声检出规则，并扩充偏移目标、指针参数、成员子数组和格式化安全函数等更具体的 `dst/dstsz` 不匹配召回形态
 - **优化** `mp_npd` 与 `mp_resouce_leak` 的候选转换优先从 semgrep message 获取函数名，并限制 CodeDB 路径 fallback 次数，避免少量候选在函数名解析阶段长时间停住
 - **优化** `mp_npd` 与 `mp_resouce_leak` 在 Agent 控制台输出 semgrep 运行心跳和候选转换进度，便于定位大项目扫描卡在 semgrep 还是 JSON 转候选阶段
 - **修复** 多个 semgrep checker 的候选函数定位改为优先按文件和行号查询索引，避免 `mp_resouce_leak`、`mp_npd` 等规则在 semgrep 结束后对每个命中重复全量扫描函数表导致卡住
+- **修复** opencode 工作区配置默认允许读取、列举和搜索所有文件路径，并允许访问项目工作目录外的只读路径，避免审计过程中触发 `PermissionRejectedError` 后直接退出无结果
 - **修复** semgrep checker 统一改为非交互式启动，关闭 stdin、metrics 和版本检查，并统一读取 `--json-output` 产物，避免 Agent 终端关闭后 semgrep 才继续执行或超时后丢失已产出的扫描结果
 - **修复** Agent 扫描详情页索引进度轮询改用 scan_id 查询 Agent 专用接口，避免 Windows 项目路径被拼入 `/api/project/.../index-status` 后因盘符和斜杠触发 404
 - **修复** Agent runtime 自更新不再把 `checkers/` 纳入重启判断，并为 runtime 更新包增加快照 manifest 校验，确保下载 zip 的文件集合、逐文件 hash 与服务端发布 hash 来自同一份快照，避免新建扫描时报 `Agent runtime update content hash mismatch`

@@ -109,13 +109,9 @@ def _link_skill_resources(entry, link_dir: Path) -> None:
             link_dest.symlink_to(src.resolve())
 
 
-def _write_opencode_config(workspace: Path, mcp_port: int | None = None) -> None:
-    """Generate opencode.json with MCP server configuration."""
-    config = get_config()
-    port = mcp_port if mcp_port is not None else config.mcp_server.port
-    mcp_url = f"http://127.0.0.1:{port}/mcp"
-
-    opencode_config = {
+def build_opencode_config(mcp_url: str) -> dict:
+    """Build the canonical opencode.json content for OpenDeepHole workspaces."""
+    return {
         "$schema": "https://opencode.ai/config.json",
         "mcp": {
             "deephole-code": {
@@ -124,10 +120,25 @@ def _write_opencode_config(workspace: Path, mcp_port: int | None = None) -> None
                 "enabled": True,
             }
         },
+        "permission": {
+            "read": {"*": "allow"},
+            "list": {"*": "allow"},
+            "glob": {"*": "allow"},
+            "grep": {"*": "allow"},
+            "external_directory": {"*": "allow"},
+            "edit": {"*": "deny"},
+        },
     }
 
+
+def _write_opencode_config(workspace: Path, mcp_port: int | None = None) -> None:
+    """Generate opencode.json with MCP server and read-only file permissions."""
+    config = get_config()
+    port = mcp_port if mcp_port is not None else config.mcp_server.port
+    mcp_url = f"http://127.0.0.1:{port}/mcp"
+
     config_path = workspace / "opencode.json"
-    config_path.write_text(json.dumps(opencode_config, indent=2))
+    config_path.write_text(json.dumps(build_opencode_config(mcp_url), indent=2))
 
 
 def _link_skills(
