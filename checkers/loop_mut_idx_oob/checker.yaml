@@ -5,4 +5,4 @@ description: >
   但循环退出条件没有直接约束该索引且访问点附近缺少明显范围校验的潜在越界读写风险。
 enabled: true
 mode: opencode
-visibility: admin
+visibility: public
