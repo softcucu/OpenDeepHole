@@ -9,6 +9,7 @@ from pydantic import BaseModel
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 _DEFAULT_DATA_ROOT = _REPO_ROOT.parent / "OpenDeepHoleData"
+_AI_CLI_TOOLS = {"nga", "opencode", "hac", "claude"}
 
 
 class ServerConfig(BaseModel):
@@ -29,6 +30,7 @@ class MCPServerConfig(BaseModel):
 
 
 class OpenCodeConfig(BaseModel):
+    tool: str = "opencode"
     executable: str = "opencode"  # CLI executable name or full path
     model: str = "anthropic/claude-sonnet-4-20250514"
     timeout: int = 1200
@@ -66,6 +68,7 @@ class AppConfig(BaseModel):
     server: ServerConfig = ServerConfig()
     mcp_server: MCPServerConfig = MCPServerConfig()
     opencode: OpenCodeConfig = OpenCodeConfig()
+    fp_review_cli: OpenCodeConfig | None = None
     storage: StorageConfig = StorageConfig()
     logging: LoggingConfig = LoggingConfig()
     llm_api: LLMApiConfig = LLMApiConfig()
@@ -90,6 +93,8 @@ def load_config(config_path: str | None = None) -> AppConfig:
         _resolve_storage_paths(raw, path.parent)
     else:
         raw = {}
+    _normalize_cli_section(raw.get("opencode"))
+    _normalize_cli_section(raw.get("fp_review_cli"))
 
     # Environment variable overrides
     if model := os.environ.get("OPENCODE_MODEL"):
@@ -108,6 +113,19 @@ def load_config(config_path: str | None = None) -> AppConfig:
         raw["no_proxy"] = v
 
     return AppConfig(**raw)
+
+
+def _normalize_cli_section(section: object) -> None:
+    if not isinstance(section, dict):
+        return
+    tool = str(section.get("tool") or "").strip().lower()
+    if tool in _AI_CLI_TOOLS:
+        section["tool"] = tool
+        return
+    executable = str(section.get("executable") or "").strip()
+    inferred = Path(executable).name.lower() if executable else ""
+    if inferred in _AI_CLI_TOOLS:
+        section["tool"] = inferred
 
 
 def _resolve_storage_paths(raw: dict, base_dir: Path) -> None:

@@ -9,7 +9,7 @@ import pytest
 from backend.models import Candidate
 from backend.opencode import llm_api_runner
 from backend.opencode.llm_api_runner import LLMApiUnavailableError
-from backend.opencode.runner import run_audit, run_audit_batch
+from backend.opencode.runner import _build_cli_command, _prepare_cli_workspace, run_audit, run_audit_batch
 
 
 def _candidate(line: int = 12) -> Candidate:
@@ -20,6 +20,36 @@ def _candidate(line: int = 12) -> Candidate:
         description="candidate issue",
         vuln_type="memleak",
     )
+
+
+def test_cli_command_builders_use_selected_tool(tmp_path: Path) -> None:
+    claude = _build_cli_command("claude", "claude", tmp_path, "hello", "sonnet")
+    hac = _build_cli_command("hac", "hac", tmp_path, "hello", "gemini-model")
+    nga = _build_cli_command("nga", "nga", tmp_path, "hello", "qwen")
+
+    assert claude[:3] == ["claude", "-p", "--mcp-config"]
+    assert "--model" in claude
+    assert hac == ["hac", "--model", "gemini-model", "-p", "hello"]
+    assert nga[:3] == ["nga", "run", "--dir"]
+    assert "--model" in nga
+
+
+def test_prepare_cli_workspace_creates_claude_and_gemini_skill_configs(tmp_path: Path) -> None:
+    (tmp_path / "opencode.json").write_text(
+        '{"mcp":{"deephole-code":{"url":"http://127.0.0.1:9123/mcp"}}}',
+        encoding="utf-8",
+    )
+    skill_dir = tmp_path / ".opencode" / "skills" / "fp-review"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text("fp skill", encoding="utf-8")
+
+    _prepare_cli_workspace(tmp_path, "claude")
+    _prepare_cli_workspace(tmp_path, "hac")
+
+    assert (tmp_path / ".claude" / "opendeephole-mcp.json").is_file()
+    assert (tmp_path / ".claude" / "skills" / "fp-review" / "SKILL.md").is_file()
+    assert (tmp_path / ".gemini" / "settings.json").is_file()
+    assert (tmp_path / ".gemini" / "skills" / "fp-review" / "SKILL.md").is_file()
 
 
 def test_api_checker_uses_api_even_when_legacy_global_switch_is_false(tmp_path: Path) -> None:

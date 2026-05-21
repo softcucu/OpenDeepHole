@@ -264,6 +264,7 @@ class AgentLLMApiConfig(BaseModel):
 
 
 class AgentOpenCodeConfig(BaseModel):
+    tool: str = "opencode"
     executable: str = "opencode"
     model: str = ""
     timeout: int = 1200
@@ -275,6 +276,7 @@ class AgentRemoteConfig(BaseModel):
     no_proxy: str = "10.0.0.0/8"
     llm_api: AgentLLMApiConfig = AgentLLMApiConfig()
     opencode: AgentOpenCodeConfig = AgentOpenCodeConfig()
+    fp_review_cli: AgentOpenCodeConfig | None = None
 
 
 class CreateScanRequest(BaseModel):

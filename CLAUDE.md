@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-OpenDeepHole is a SKILL-based C/C++ source code white-box audit tool. It uses static analysis to find candidate vulnerability locations, then invokes opencode CLI (or a direct LLM API) with specialized skills and MCP tools for AI-powered deep semantic analysis.
+OpenDeepHole is a SKILL-based C/C++ source code white-box audit tool. It uses static analysis to find candidate vulnerability locations, then invokes a configured AI CLI tool (or a direct LLM API) with specialized skills and MCP tools for AI-powered deep semantic analysis.
 
 ## Architecture
 
@@ -17,17 +17,17 @@ Browser  ──HTTP──►  Backend (FastAPI, port 8000)
                         │                                       ├── tree-sitter indexer
                         │                                       ├── static analyzers
                         │                                       ├── LocalMCPServer (random port)
-                        │                                       └── opencode CLI / LLM API
+                        │                                       └── AI CLI / LLM API
                         │
                    MCP Server (FastMCP, port 8100)
                         │  streamable-http transport
-                        └── code query tools for opencode
+                        └── code query tools for AI CLI tools
 ```
 
 - **Frontend**: React + TypeScript + Vite + Tailwind CSS (builds to `backend/static/`)
 - **Backend**: Python FastAPI (port 8000) — serves API + frontend static files, stores scan records in SQLite, manages WebSocket connections to agents
 - **Agent**: Python daemon (`agent/`) — runs on the machine with the source code, connects to backend via WebSocket, executes the full scan pipeline locally
-- **MCP Server**: Python FastMCP (port 8100) — provides source code query tools for opencode CLI (server-side; agent also spawns a local in-process copy)
+- **MCP Server**: Python FastMCP (port 8100) — provides source code query tools for AI CLI tools (server-side; agent also spawns a local in-process copy)
 - **Deployment**: `start.sh` builds frontend and restarts uvicorn; Docker via `docker-compose.yml`
 
 ## Agent — Connection Model (v2)
@@ -64,10 +64,10 @@ Each scan runs the full pipeline locally on the agent machine:
 ```
 1. Index    — tree-sitter C++ parse → code_index.db (reuses IndexStore cache if available)
 2. Feedback — fetch false-positive history from server (for SKILL enrichment)
-3. MCP      — start LocalMCPServer in-process on a random port (opencode mode only)
+3. MCP      — start LocalMCPServer in-process on a random port (CLI audit mode only)
 4. Workspace — create_scan_workspace() with opencode.json + skill symlinks + merged feedback
 5. Static   — each checker's analyzer.find_candidates() → candidate list (cached for resume)
-6. AI audit — run_audit() per candidate (opencode CLI or LLM API direct call)
+6. AI audit — run_audit() per candidate (selected CLI tool or LLM API direct call)
 7. Report   — upload vulnerabilities + finish event to server; clean up on completion
 ```
 
@@ -87,8 +87,14 @@ checkers/<name>/
 ```
 
 Each checker independently chooses its AI invocation mode via `checker.yaml`:
-- `mode: opencode` (default) — uses opencode CLI + `SKILL.md`
+- `mode: opencode` (default) — uses the selected Agent CLI tool (`nga`, `opencode`, `hac`, or `claude`) + `SKILL.md`
 - `mode: api` — uses LLM API direct call + `prompt.txt` as system prompt (requires `llm_api.enabled: true` in `config.yaml`)
+
+Agent CLI tool notes:
+- `nga` and `opencode` use OpenCode-compatible `opencode.json` MCP config and `.opencode/skills`.
+- `hac` uses Gemini CLI-compatible `.gemini/settings.json` MCP config and copied `.gemini/skills`.
+- `claude` uses Claude Code-compatible `--mcp-config` plus copied `.claude/skills`.
+- `fp_review_cli` may override the AI false-positive review tool/model; when omitted, FP review inherits the normal audit CLI config.
 
 To add a new checker: create a directory with `checker.yaml` + `SKILL.md` (or `prompt.txt`). No code changes needed.  
 Backend refreshes checker discovery via `backend/registry.py` when listing checkers and when creating scans. Frontend fetches available checkers from `GET /api/checkers`.
@@ -143,7 +149,7 @@ tail -f logs/opendeephole.log
 - Logging uses `backend/logger.py` — get logger with `get_logger(__name__)`
 - Pydantic models for all API request/response in `backend/models.py`
 - `vuln_type` is a plain string (not enum) matching the checker directory name
-- opencode workspaces are created per-scan in a temp dir, containing only `opencode.json` + skill symlinks; opencode accesses source via MCP tools
+- CLI workspaces are created under the project root, with `opencode.json` as the canonical MCP config and tool-specific copies for Claude/Gemini-compatible CLIs
 - Agent configs (LLM API key, model, etc.) are stored server-side in `_agent_configs` (keyed by agent name) and pushed to agents on connect and on UI save
 - **Always update both README.md and CLAUDE.md when making structural or architectural changes**
 
@@ -175,7 +181,7 @@ backend/
     feedback.py   — Feedback CRUD
   analyzers/base.py — BaseAnalyzer ABC + Candidate dataclass
   opencode/
-    runner.py     — run_audit(): dispatches to opencode CLI or LLM API
+    runner.py     — run_audit(): dispatches to selected AI CLI or LLM API
     llm_api_runner.py — LLM API direct-call mode with function calling
     config.py     — create_scan_workspace(), cleanup_workspace()
   registry.py     — Auto-discovers and loads checkers from checkers/
@@ -199,5 +205,5 @@ code_parser/      — Shared C/C++ indexer (ctags + tree-sitter + SQLite)
 mcp_server/       — MCP Server (tools.py, server.py)
 frontend/         — React + TypeScript + Vite + Tailwind CSS
 config.yaml       — Server-side settings (ports, storage, logging, llm_api, opencode)
-agent.yaml        — Agent-side settings (server_url, agent_name, llm_api, opencode)
+agent.yaml        — Agent-side settings (server_url, agent_name, llm_api, opencode, fp_review_cli)
 ```

@@ -1,106 +1,308 @@
 ---
-name: safe-mem-oob-analysis
-description: 验证安全内存函数 dst/dstsz 不匹配导致的越界写候选漏洞
+name: safe_mem_oob
+description: 判断安全内存函数调用是否存在真实的越界写风险
 ---
 
-# 安全内存函数越界验证
+# 安全内存函数越界审计
 
-你正在验证一个由 semgrep 静态规则发现的 C/C++ 安全内存函数候选漏洞。目标是判断 `memcpy_s`、`memmove_s`、`memset_s`、`strcpy_s`、`strncpy_s`、`strcat_s`、`strncat_s`、`sprintf_s`、`snprintf_s`、`vsprintf_s`、`vsnprintf_s` 及项目内等价安全函数中，`dst` 与 `dstsz` 是否明显不匹配，导致安全函数的容量参数大于真实可写空间。
+你正在分析一个 C/C++ 安全内存函数调用点，判断它是否存在真实的越界写风险。
 
-## 背景
+你的任务不是判断写法是否“看起来可疑”，而是判断这次调用是否真的可能把数据写到目标可写空间之外。
 
-静态规则只召回高风险形态，不做白名单后处理。候选通常属于以下场景：
+只在你能建立“可达写入超过真实可写空间”的证据时，才确认漏洞。
+如果只能证明参数写法不对，但无法证明实际会越界写，判为误报。
 
-- 成员目标使用父对象大小：`memcpy_s(msg.payload, sizeof(msg), src, len)`
-- 成员地址使用完整对象大小：`memcpy_s(&obj.field, sizeof(CLASS), src, len)`
-- 偏移目标仍使用完整大小：`memcpy_s(buf + off, sizeof(buf), src, len)`
-- 成员偏移仍使用完整成员大小：`memcpy_s(msg.payload + off, sizeof(msg.payload), src, len)`
-- 指针变量使用 `sizeof(ptr)`：`memcpy_s(buf, sizeof(buf), src, len)`，其中 `buf` 是指针
-- 字符串安全函数中出现同类容量错误：`strcpy_s(msg.name, sizeof(msg), src)`、`strncpy_s(buf + off, sizeof(buf), src, n)`
-- 格式化安全函数中出现同类容量错误：`sprintf_s(msg.name, sizeof(msg), "id=%d", id)`、`snprintf_s(buf + off, sizeof(buf), n, "%s", src)`
-- `memset_s` 的 `dst, dstsz, value, count` 中存在同类误用
+## 审计目标
 
-安全函数在 `count > dstsz` 时通常会失败返回，但如果 `dstsz` 本身大于真实剩余空间，安全函数可能认为容量足够而向 `dst` 后方越界写。你的重点是验证 `dstsz` 是否大于真实可写空间，而不是只看 `count` 是否大于 `dstsz`。
+- 证明目标缓冲区的真实可写空间
+- 证明本次调用实际可能写入的字节数
+- 比较两者是否存在真实的越界写风险
+- 把安全函数失败、截断、长度写法可疑、返回值未检查与真实 OOB 区分开
+
+## 基本原则
+
+- 以“真实可写空间”而不是“语法表面”作为判断依据
+- 仅有 `sizeof(parent)`、`sizeof(pointer)`、`dstsz == count`、`dstsz == srcsz` 这类表面形态，不足以单独确认
+- 安全函数返回错误、失败退出、截断，通常不是 OOB 写
+- 如果你无法证明越界写路径存在，也无法证明它不存在，优先保守为误报，并说明缺失的关键事实
+- 如果 `dst` 的申请长度和 `dstsz` 一致，通常不构成问题，不要仅凭表达式外观下结论
 
 ## 可用工具
 
-- `view_function_code(project_id, function_name, file_path)` - 查看函数完整源码。若 candidate 中函数名为 `unknown`，优先根据候选文件和行号定位上下文，或尝试使用文件路径约束查看同文件相关函数。
-- `view_struct_code(project_id, struct_name)` - 查看结构体或类定义，确认成员大小和布局。
-- `submit_result(result_id, confirmed, severity, description, ai_analysis)` - 提交最终结论，必须调用。
+- `view_function_code(project_id, function_name, file_path="")` - 读取完整函数
+- `view_struct_code(project_id, struct_name)` - 读取结构体或类定义
+- `view_global_variable_definition(project_id, global_variable_name)` - 读取全局变量定义
+- `submit_result(result_id, confirmed, severity, description, ai_analysis)` - 审计完成后必须调用
 
-## 分析步骤
+## 标准流程
 
-### Step 1 - 获取完整上下文
+### Step 1 - 先确认调用语义
 
-先查看 candidate 所在函数源码。candidate 描述中的匹配行不足以判断真实容量，必须结合局部声明、结构体定义、参数来源和返回值处理。
+先读命中函数的完整代码，确认这次调用到底是哪一类安全函数。
 
-若函数名是 `unknown`，不要直接放弃；根据 candidate 的文件、行号和匹配代码，在同文件上下文中定位该调用。
+先回答三个问题：
 
-### Step 2 - 识别参数语义
+- 这个调用属于哪一类安全函数
+- 第 2 个参数或等价参数到底表示什么
+- 本项目封装函数的参数顺序是否与标准库一致
 
-对命中调用拆分参数：
+如果是项目内封装函数，且无法证明它的参数顺序和你假设的一致，直接按误报处理。
 
-- `memcpy_s` / `memmove_s` / `memcpy_sp` / `*_Safe`：通常为 `dst, dstsz, src, count`
-- `strcpy_s` / `strcat_s` / `wcscpy_s` / `wcscat_s`：通常为 `dst, dstsz, src`
-- `strncpy_s` / `strncat_s` / `wcsncpy_s` / `wcsncat_s`：通常为 `dst, dstsz, src, count`
-- `sprintf_s` / `vsprintf_s`：通常为 `dst, dstsz, fmt, ...`
-- `snprintf_s` / `vsnprintf_s`：常见形态为 `dst, dstsz, count, fmt, ...`
-- `memset_s`：通常为 `dst, dstsz, value, count`
+### Step 2 - 先证明目标的真实几何和申请方式
 
-确认本项目封装函数的参数顺序是否一致。如果封装函数参数顺序不同，且无法证明该规则适用，应判为误报。
+判断 `dst` 的真实起点、真实可写空间，以及 `dst` 是怎么申请出来的，不要只看文本上的对象名。
 
-### Step 3 - 计算真实可写空间
+重点识别这些形态：
 
-按 `dst` 形态判断真实剩余空间：
+- `buf`：完整局部数组起点
+- `&obj`：完整对象起点
+- `obj.field` / `ptr->field`：成员本体起点，不是父对象起点
+- `buf + off` / `&buf[i]`：偏移后的剩余空间
+- `obj.field + off` / `&obj.field[i]`：成员内偏移后的剩余空间
+- `&arr[row][col]`：二维数组中的子数组或元素位置
+- `(char *)obj + off`：强制转换后的字节偏移，必须先恢复基对象和偏移
+- `char *p` / `void *p`：仅凭类型不能证明容量
+- `sizeof(p)` / `sizeof(ptr)`：只是指针宽度，不是目标容量
 
-- `buf + off` / `&buf[i]`：真实剩余空间是 `sizeof(buf) - off` 或 `sizeof(buf) - i`
-- `obj.field` / `ptr->field`：真实空间是该成员本体大小，不是父对象大小
-- `obj.field + off` / `&obj.field[i]`：真实剩余空间是 `sizeof(field) - off`
-- `(char *)obj + off`：真实剩余空间取决于对象大小和 offset，不能直接相信完整对象大小
-- 指针 `p`：`sizeof(p)` 是指针宽度，不是分配容量
+同时要检查 `dst` 的申请方式：
 
-必要时调用 `view_struct_code` 查看成员定义，或追踪调用方确认指针实际指向的缓冲区。
+- 看 `malloc` / `calloc` / `new` / 栈上数组 / 成员数组 / 容器内部缓冲区
+- 看申请长度、对象大小、成员大小、偏移后的剩余空间
+- 如果 `dst` 的申请长度和 `dstsz` 一致，通常不构成问题
+- 如果 `dst` 是从更大对象中切出来的子区域，就不能把父对象大小当成真实容量
 
-### Step 4 - 验证可达性和影响
+判断目标时，先问自己：
 
-重点确认：
+- 这个位置是不是完整对象的起点
+- 还是成员、子数组、切片、偏移或强转后的局部区域
+- 申请长度和 `dstsz` 是否一致
+- 如果不一致，差异是否真的会导致越界写
 
-- `count` 是否可能大于真实剩余空间
-- `off` / `i` / `count` 是否来自外部输入、协议字段、文件、网络或用户可控参数
-- 调用前是否存在等价校验，例如 `off <= sizeof(buf)` 且 `count <= sizeof(buf) - off`
-- 安全函数返回值是否被检查。若 `dstsz` 偏小只会导致失败返回，且返回值被正确处理，通常不是 OOB 写
-- 若返回值未检查，失败后继续使用目标缓冲区，可能是逻辑缺陷，但不要误判成越界写，除非 `dstsz` 大于真实空间
-- 对字符串函数，额外确认目标缓冲区是否能容纳结尾 `\0`；`strncpy_s` / `strncat_s` 的 `count` 不等同于目标总容量。
-- 对格式化函数，只判断 `dst/dstsz` 容量是否不匹配；格式字符串内容、参数类型不匹配或格式化注入不属于本 checker 的确认重点。
+### Step 3 - 计算实际写入预算
 
-### Step 5 - 判定
+把这次调用“实际可能写多少”算出来，而不是只看 `dstsz`。
 
-判为真实漏洞的条件：
+#### 对拷贝/移动/填充类
 
-- `dst` 不是完整对象或完整缓冲区起点，或 `dst` 是成员/偏移/子数组
-- `dstsz` 大于该 `dst` 的真实可写剩余空间
-- `count` 在可达路径上可能超过真实剩余空间
-- 缺少等价边界校验或校验不覆盖所有路径
+适用函数包括：
 
-判为误报的常见情况：
+- `memcpy_s`
+- `memmove_s`
+- `memset_s`
+- `memcpy_sp`
+- `memcpy_safe`
+- `VOS_memcpy_safe`
+- `VOS_MemCpy_S`
+- `VOS_Mem_Copy_Safe`
+- `VOS_MemCpy_Safe`
 
-- 项目封装函数参数顺序与规则假设不一致
-- 调用前已经严格保证 `count <= 真实剩余空间`
-- `off` 恒为 0，或被严格约束到不会减少剩余空间
-- `dstsz` 虽然写法可疑，但实际小于真实空间，只会让安全函数失败且返回值被正确处理
+关注点：
+
+- 实际写入量通常由 `count` 决定
+- `memset_s` 的 `value` 不影响边界，只看 `count`
+- 如果 `count` 在可达路径上可能超过真实剩余空间，才继续考虑确认
+- 如果 `count` 已被严格限制在真实剩余空间内，不要确认
+- 如果 `count` 大于 `dstsz`，很多安全实现会失败或清理，不要只凭这一点确认 OOB
+
+#### 对字符串安全函数
+
+适用函数包括：
+
+- `strcpy_s`
+- `strncpy_s`
+- `strcat_s`
+- `strncat_s`
+- `wcscpy_s`
+- `wcsncpy_s`
+- `wcscat_s`
+- `wcsncat_s`
+- `strcpy_safe`
+- `strcat_safe`
+- `strncpy_safe`
+- `strncat_safe`
+- `VOS_StrCpy_S`
+- `VOS_StrCat_S`
+- `VOS_StrNCpy_S`
+- `VOS_StrNCat_S`
+- `VOS_StrCpy_Safe`
+- `VOS_StrCat_Safe`
+- `VOS_StrNCpy_Safe`
+- `VOS_StrNCat_Safe`
+
+关注点：
+
+- 先算目标字符串当前已经占用了多少
+- 再算还需要写入多少字符
+- 必须把结尾 `\0` 一并算进去
+- `strcat_s` / `wcscat_s` 这类拼接函数，要看“旧内容长度 + 新内容长度 + 1”
+- `strncpy_s` / `wcsncpy_s` / `strncat_s` / `wcsncat_s` 的 `count` 只是上限，不是自动安全
+- 只有当“实际所需写入量”可能大于真实剩余空间，且路径可达时，才考虑确认
+
+#### 对格式化安全函数
+
+适用函数包括：
+
+- `sprintf_s`
+- `snprintf_s`
+- `vsprintf_s`
+- `vsnprintf_s`
+
+关注点：
+
+- 先判断格式字符串是否固定
+- 再根据参数和格式约束估计最坏输出长度
+- `snprintf_s` / `vsnprintf_s` 中的 `count` 是额外上限，不是自动安全保证
+- 如果格式化输出的最坏长度可能超过真实剩余空间，才继续考虑确认
+- 格式字符串不安全、参数类型不匹配、格式化注入，不是本 checker 的确认重点
+
+### Step 4 - 追踪长度、偏移和来源
+
+重点追踪这些值从哪来：
+
+- `count`
+- `src` 的长度
+- `off` / `idx`
+- 格式化宽度、精度、返回值
+- `dstsz` 的来源
+- `dst` 是否已经是切片或子对象
+- `dst` 的申请长度是否与 `dstsz` 一致
+
+优先检查这些来源：
+
+- 外部输入
+- 网络包 / 文件内容
+- 用户可控字段
+- 长度字段
+- 调用参数
+- 上一层函数的返回值
+- 全局配置
+- 常量或编译期可证明的表达式
+
+判断标准：
+
+- 如果长度或偏移可能增大到超过真实剩余空间，且没有等价约束，才是候选漏洞
+- 如果已经有严格边界检查，且检查覆盖所有路径，不要确认
+- 如果安全函数失败后程序只是走错误分支，没有发生越界写，不要把它当成 OOB
+- 如果返回值未检查，但函数本身并不会越界写，也不要因为“后续逻辑可疑”就确认 OOB
+
+### Step 5 - 用人类专家的方式排查边界
+
+按下面顺序排查，避免只盯着 `dstsz`：
+
+- `dst` 到底指向什么
+- `dst` 是怎么申请出来的
+- 申请长度是多少
+- 真实可写空间是多少
+- 这次调用实际会写多少
+- 写入前有没有边界检查
+- 边界检查是否覆盖所有路径
+- `dstsz` 是否只是“看起来不对”，还是确实大于剩余空间
+- 是否存在能把写入长度推过边界的外部输入或可控路径
+- 如果申请长度和 `dstsz` 一致，是否还有其他独立证据能证明越界
+
+### Step 6 - 再做最终判定
+
+只有同时满足下面条件，才确认真实漏洞：
+
+- `dst` 不是完整对象或完整缓冲区起点，或者虽然看起来是缓冲区，但已经偏移、切片、取成员或强转成更小区域
+- `dst` 的申请长度小于 `dstsz`，或者 `dstsz` 大于该 `dst` 的真实可写空间
+- 本次调用在可达路径上可能写入超过该真实空间的字节数
+- 没有等价边界校验，或者校验无法覆盖所有路径
+
+如果只能证明以下任一情况，判为误报：
+
+- 只是 `dstsz` 写法可疑，但实际不会越界写
+- 调用会因 `dstsz` 太小而失败，且不会写出边界
+- `count` / `src` 长度 / 格式化输出已经被严格限制在真实剩余空间内
+- `dst` 是完整对象起点，`dstsz` 与真实容量一致
+- `dst` 的申请长度和 `dstsz` 一致，且没有其他证据证明越界
 - 代码位于测试、mock、stub 或不可达分支
+- 项目封装函数的参数顺序与规则假设不一致，无法证明适用
+
+## 重点反误报规则
+
+### 1. `sizeof(pointer)` 不要单独确认
+
+`sizeof(ptr)` 只是指针宽度，不是容量。
+
+但是，是否构成 OOB 不能只凭这一点下结论。
+只有当你能证明 `ptr` 实际指向一个更小的剩余区域，或者 `ptr` 已经是偏移后的局部目标时，才可能确认。
+
+如果 `ptr` 只是普通指针参数，而你无法证明它所指向区域的真实大小，不要因为 `sizeof(ptr)` 就确认漏洞。
+
+### 2. `dstsz == count` / `dstsz == srcsz` 不要单独确认
+
+长度相同不等于越界。
+必须继续证明：
+
+- `dst` 的真实可写空间更小
+- 且本次调用确实可能写入超出该空间
+
+### 3. 安全函数失败不等于 OOB
+
+很多安全函数在参数不匹配时会失败、截断、清理或返回错误。
+如果没有真正写出边界，不要把“失败返回”当成越界写。
+
+### 4. 字符串函数必须算 `\0`
+
+对于字符串类函数，结尾 `\0` 也属于写入预算。
+如果只差 1 个字节就能越界，也要如实确认。
+如果没有跨过结尾写入边界，不要扩大解释。
+
+### 5. 拼接函数要看现有内容长度
+
+`strcat_s` / `wcscat_s` / `strncat_s` / `wcsncat_s` 不是只看目标容量。
+必须把目标当前已有内容长度算进去。
+
+### 6. 格式化函数只看写入预算，不看格式漏洞
+
+`printf` 风格的格式化安全函数，在这里只审计目标缓冲区是否会被写超。
+格式字符串注入、参数类型不匹配、格式化语义错误，不是本 checker 的确认重点。
 
 ## 严重程度
 
-- `high`：外部输入可控制 `off` / `count` / 长度字段，可导致越界写
-- `medium`：需要特定内部状态或配置触发，但真实容量不匹配成立
-- `low`：触发条件苛刻，或主要是未检查安全函数失败返回造成的后续逻辑风险
+- `high`：外部输入可直接控制 `count`、偏移、长度字段或格式化输出上限，且能导致真实越界写
+- `medium`：需要特定内部状态、配置或调用顺序，但真实越界写路径成立
+- `low`：触发条件苛刻，或者接近边界，但仍能证明真实越界路径存在
 
 ## 提交结果
 
 分析完成后必须调用 `submit_result`：
 
-- `confirmed`: true 表示确认漏洞，false 表示误报
+- `confirmed`: `true` 表示确认漏洞，`false` 表示误报
 - `severity`: `"high"` / `"medium"` / `"low"`
-- `description`: 一句话说明问题
-- `ai_analysis`: 写清楚 `dst`、真实可写空间、`dstsz`、`count` 来源、边界校验和最终判定理由
+- `description`: 一句话说明问题，尽量写清楚“真实越界写”的根因
+- `ai_analysis`: 写清楚 `dst`、申请长度、真实可写空间、`dstsz`、实际写入预算、来源、边界校验和最终判定理由
+
+## 推荐的 `ai_analysis` 结构
+
+```
+=== 风险点 1 ===
+场景：S1 安全内存函数越界
+调用：<函数调用代码或摘要>
+dst：<dst 表达式>
+申请长度：<dst 的申请或分配长度>
+真实可写空间：<具体大小或推导结果>
+dstsz：<dstsz 表达式>
+实际写入预算：<count / src 长度 / 格式化输出上限 / 终止符开销>
+来源：<长度、偏移、格式参数来源>
+校验情况：<是否存在边界检查，是否覆盖所有路径>
+判定：<为什么真实越界写成立或为什么不成立>
+修复建议：<如何修正 dst/dstsz 或增加校验>
+```
+
+## 无风险时的模板
+
+```
+场景：N/A
+调用：N/A
+dst：N/A
+申请长度：N/A
+真实可写空间：N/A
+dstsz：N/A
+实际写入预算：N/A
+来源：N/A
+校验情况：函数经完整审计未发现真实越界写路径。
+判定：该调用未能证明存在可达的越界写风险。
+修复建议：N/A
+```

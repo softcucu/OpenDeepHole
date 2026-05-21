@@ -233,10 +233,11 @@ def cleanup_workspace(workspace: Path) -> None:
     cannot break a concurrent false-positive review.
     """
     with get_workspace_lock(workspace):
+        checker_names = list(get_registry().keys())
         skills_dir = workspace / ".opencode" / "skills"
         try:
             if skills_dir.is_dir():
-                for checker_name in get_registry().keys():
+                for checker_name in checker_names:
                     skill_dir = skills_dir / checker_name
                     if skill_dir.is_symlink():
                         skill_dir.unlink()
@@ -265,6 +266,35 @@ def cleanup_workspace(workspace: Path) -> None:
                 opencode_json.unlink()
         except Exception as exc:
             logger.warning("Failed to remove opencode.json from workspace: %s", exc)
+
+        _cleanup_copied_cli_skills(workspace, checker_names)
+
+
+def _cleanup_copied_cli_skills(workspace: Path, skill_names: list[str]) -> None:
+    """Remove OpenDeepHole skill copies written for Claude/Gemini-compatible CLIs."""
+    for root in (workspace / ".claude" / "skills", workspace / ".gemini" / "skills"):
+        try:
+            if root.is_dir():
+                for name in skill_names:
+                    skill_dir = root / name
+                    if skill_dir.is_symlink():
+                        skill_dir.unlink()
+                    elif skill_dir.is_dir():
+                        shutil.rmtree(skill_dir)
+                if not any(root.iterdir()):
+                    root.rmdir()
+        except Exception as exc:
+            logger.warning("Failed to remove copied CLI skills from %s: %s", root, exc)
+
+    claude_dir = workspace / ".claude"
+    try:
+        mcp_config = claude_dir / "opendeephole-mcp.json"
+        if mcp_config.exists():
+            mcp_config.unlink()
+        if claude_dir.is_dir() and not any(claude_dir.iterdir()):
+            claude_dir.rmdir()
+    except Exception as exc:
+        logger.warning("Failed to remove Claude CLI artifacts: %s", exc)
 
 
 def get_skill_content(workspace: Path, vuln_type: str) -> str | None:

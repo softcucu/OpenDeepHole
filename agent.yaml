@@ -28,9 +28,20 @@ llm_api:
   max_retries: 3
   stream: false      # 是否使用流式传输（部分 API 仅支持流式）
 
-# opencode CLI 配置（供 mode: opencode 的检查项使用）
+# CLI 审计工具配置（供 mode: opencode 的检查项使用）
+# tool 可选: nga, opencode, hac, claude
 opencode:
-  executable: "nga"  # 可执行文件名或完整路径，Windows 示例："myopencode"
+  tool: "nga"
+  executable: "nga"  # 可执行文件名或完整路径，Windows 示例："C:/tools/nga.cmd"
   model: ""               # 留空则使用 opencode 默认模型
   timeout: 1200            # 单次调用超时（秒）
   max_retries: 2           # 非超时错误重试次数
+
+# AI 去误报 CLI 配置（可选）
+# 删除或设为 null 时，默认继承上面的 opencode 工具和模型配置。
+# fp_review_cli:
+#   tool: "claude"
+#   executable: "claude"
+#   model: ""
+#   timeout: 1200
+#   max_retries: 2

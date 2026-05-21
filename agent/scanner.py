@@ -276,6 +276,7 @@ def _configure_backend(config: AgentConfig, scan_dir: Path) -> None:
             "stream": config.llm_api.stream,
         },
         "opencode": {
+            "tool": config.opencode.tool,
             "executable": config.opencode.executable,
             "model": config.opencode.model,
             "timeout": config.opencode.timeout,
@@ -298,6 +299,15 @@ def _configure_backend(config: AgentConfig, scan_dir: Path) -> None:
         },
         "no_proxy": config.no_proxy,
     }
+    if config.fp_review_cli is not None:
+        raw["fp_review_cli"] = {
+            "tool": config.fp_review_cli.tool,
+            "executable": config.fp_review_cli.executable,
+            "model": config.fp_review_cli.model,
+            "timeout": config.fp_review_cli.timeout,
+            "max_retries": config.fp_review_cli.max_retries,
+            "mock": False,
+        }
     config_path = scan_dir / "config.yaml"
     config_path.write_text(yaml.dump(raw), encoding="utf-8")
     os.environ["CONFIG_PATH"] = str(config_path)

@@ -86,10 +86,20 @@ llm_api:
   api_key: "your-api-key-here"
   model: "claude-sonnet-4-6"
 
-# opencode CLI 配置（供 mode: opencode 的检查项使用）
+# CLI 审计工具配置（供 mode: opencode 的检查项使用）
+# tool 可选: nga, opencode, hac, claude
 opencode:
+  tool: "opencode"
   executable: "opencode"
+  model: ""
   timeout: 1200
+
+# AI 去误报 CLI 配置可选；不配置则继承上面的审计工具和模型
+# fp_review_cli:
+#   tool: "claude"
+#   executable: "claude"
+#   model: ""
+#   timeout: 1200
 ```
 
 > 每个检查项的调用方式（`api` 或 `opencode`）在其 `checker.yaml` 中独立配置，无需全局 `mode` 选项。
@@ -156,7 +166,7 @@ Agent 通过 WebSocket 保持长连接，等待服务器推送任务。
 
 - **停止**：在扫描详情页点击「停止扫描」，服务器直接通知 Agent 停止。当前候选处理完成后立即停止，已处理的结果保留。
 - **恢复**：在扫描列表页点击「恢复」，服务器通知 Agent 继续同一扫描任务，自动跳过已处理的候选，从断点继续。无需重新启动 Agent 或重新索引代码。
-- **配置更新**：运行中的扫描收到新的 Agent 配置后，不会中断当前候选点；从下一个候选点开始使用最新 LLM API、opencode 和代理配置。
+- **配置更新**：运行中的扫描收到新的 Agent 配置后，不会中断当前候选点；从下一个候选点开始使用最新 LLM API、AI CLI 工具和代理配置。
 
 ## 误报反馈机制
 
@@ -295,7 +305,7 @@ PYTHONPATH=. python3 tools/checker_test.py mycheck /path/to/source --json
 # 精确断言候选点数量
 PYTHONPATH=. python3 tools/checker_test.py mycheck /path/to/source --expect-candidates 3
 
-# 可选：对前 1 个候选点运行真实 AI 审计（会使用 agent.yaml 中的 LLM/opencode 配置）
+# 可选：对前 1 个候选点运行真实 AI 审计（会使用 agent.yaml 中的 LLM/AI CLI 配置）
 PYTHONPATH=. python3 tools/checker_test.py mycheck /path/to/source --audit --audit-limit 1 --config agent.yaml
 ```
 
@@ -469,13 +479,29 @@ llm_api:
   max_retries: 3
   stream: false
 
-# opencode CLI 配置（供 mode: opencode 的检查项使用）
+# CLI 审计工具配置（供 mode: opencode 的检查项使用）
+# tool 可选: nga, opencode, hac, claude
 opencode:
+  tool: "opencode"
   executable: "opencode"
   model: ""      # 留空则使用 opencode 默认模型
   timeout: 1200
   max_retries: 2
+
+# AI 去误报 CLI 配置（可选；不配置则继承上面的审计工具和模型）
+# fp_review_cli:
+#   tool: "claude"
+#   executable: "claude"
+#   model: ""
+#   timeout: 1200
+#   max_retries: 2
 ```
+
+CLI 工具调用约定：
+
+- `nga` / `opencode`：使用 OpenCode 兼容布局，项目根目录写入 `opencode.json` 的 MCP 配置，并在 `.opencode/skills/<skill>/SKILL.md` 放置技能。
+- `hac`：按 Gemini CLI 兼容方式运行，Agent 会写入 `.gemini/settings.json` 的 MCP server，并把技能复制到 `.gemini/skills/`。
+- `claude`：按 Claude Code 兼容方式运行，Agent 会写入 `.claude/opendeephole-mcp.json` 并通过 `--mcp-config` 注入 MCP，同时把技能复制到 `.claude/skills/`。
 
 ## 本地开发
 
@@ -531,7 +557,7 @@ OpenDeepHole/
 │   ├── task_manager.py    # 任务生命周期管理（创建/停止/恢复）
 │   ├── scanner.py         # 完整扫描流程（索引→静态分析→AI审计→上报）
 │   ├── reporter.py        # 向服务器上报进度和结果
-│   └── local_mcp.py       # opencode 模式：本地启动 MCP Server
+│   └── local_mcp.py       # CLI 审计模式：本地启动 MCP Server
 ├── checkers/              # 插件目录（每种漏洞类型一个子目录）
 │   ├── npd/               # checker.yaml + SKILL.md/prompt.txt + analyzer.py
 │   ├── oob/
@@ -555,8 +581,8 @@ OpenDeepHole/
 │   │   └── auth.py        # 用户认证与管理 API
 │   ├── registry.py        # Checker 自动发现与注册
 │   ├── analyzers/base.py  # 静态分析器基类
-│   └── opencode/          # opencode CLI + LLM API 集成
-├── mcp_server/            # MCP Server（Agent opencode 模式本地启动）
+│   └── opencode/          # AI CLI + LLM API 集成
+├── mcp_server/            # MCP Server（Agent CLI 审计模式本地启动）
 ├── agent.yaml             # Agent 配置模板
 ├── run_agent.sh           # Agent 守护进程启动脚本（Linux/macOS）
 ├── run_agent.bat          # Agent 守护进程启动脚本（Windows）

@@ -18,6 +18,14 @@ from backend.models import Candidate, Vulnerability
 
 logger = get_logger(__name__)
 
+AI_CLI_TOOLS = ("nga", "opencode", "hac", "claude")
+_DEFAULT_EXECUTABLES = {
+    "nga": "nga",
+    "opencode": "opencode",
+    "hac": "hac",
+    "claude": "claude",
+}
+
 # Regex to strip ANSI escape sequences from CLI output
 _ANSI_RE = re.compile(
     r'\x1b\[[0-9;]*[a-zA-Z]'    # CSI sequences: ESC[...X
@@ -92,11 +100,11 @@ async def run_audit(
             )
         except LLMApiUnavailableError as exc:
             logger.warning(
-                "LLM API unavailable for checker %s; falling back to opencode: %s",
+                "LLM API unavailable for checker %s; falling back to CLI audit: %s",
                 candidate.vuln_type, exc,
             )
             if on_output:
-                on_output(f"[API] API 不可用，降级为 opencode: {exc}")
+                on_output(f"[API] API 不可用，降级为 CLI 审计: {exc}")
 
     return await _run_audit_via_opencode(
         workspace,
@@ -121,6 +129,7 @@ async def _run_audit_via_opencode(
     """Run the opencode CLI path regardless of checker mode."""
     config = get_config()
     effective_timeout = timeout if timeout is not None else config.opencode.timeout
+    tool = _normalize_tool(config.opencode)
 
     # Skill directory is .opencode/skills/<name>/ where <name> == vuln_type.
     # Use checker_entry.skill_name if explicitly set, otherwise fall back to
@@ -151,10 +160,11 @@ async def _run_audit_via_opencode(
         log_path = workspace / f"opencode_{result_id}.log"
 
         if on_output:
-            on_output(f"[opencode] 初始提示词:\n{prompt}")
+            on_output(f"[{tool}] 初始提示词:\n{prompt}")
 
         logger.info(
-            "Running opencode audit: %s:%d (%s) result_id=%s timeout=%ds attempt=%d/%d",
+            "Running %s audit: %s:%d (%s) result_id=%s timeout=%ds attempt=%d/%d",
+            tool,
             candidate.file, candidate.line, candidate.vuln_type, result_id,
             effective_timeout, attempt, max_retries + 1,
         )
@@ -166,7 +176,7 @@ async def _run_audit_via_opencode(
             )
         except asyncio.TimeoutError:
             # Timeout — no retry; check if result was submitted before kill
-            logger.error("opencode timed out for %s:%d (timeout=%ds)", candidate.file, candidate.line, effective_timeout)
+            logger.error("%s timed out for %s:%d (timeout=%ds)", tool, candidate.file, candidate.line, effective_timeout)
             result = _read_result(result_id, candidate)
             if result is not None:
                 logger.info("Result file found despite timeout — using submitted result")
@@ -186,11 +196,11 @@ async def _run_audit_via_opencode(
             raise
         except Exception as exc:
             # Process error (e.g. certificate error, crash) — may retry
-            logger.exception("opencode failed for %s:%d (attempt %d)", candidate.file, candidate.line, attempt)
+            logger.exception("%s failed for %s:%d (attempt %d)", tool, candidate.file, candidate.line, attempt)
             if attempt <= max_retries:
                 logger.info("Retrying opencode for %s:%d ...", candidate.file, candidate.line)
                 if on_output:
-                    on_output(f"[retry {attempt}/{max_retries}] opencode error: {exc}")
+                    on_output(f"[retry {attempt}/{max_retries}] {tool} error: {exc}")
                 continue
             return None
 
@@ -202,29 +212,47 @@ async def _run_audit_via_opencode(
         # submit_result was not called — retry if attempts remain
         if attempt <= max_retries:
             logger.warning(
-                "opencode did not call submit_result for %s:%d (attempt %d), retrying...",
-                candidate.file, candidate.line, attempt,
+                "%s did not call submit_result for %s:%d (attempt %d), retrying...",
+                tool, candidate.file, candidate.line, attempt,
             )
             if on_output:
                 on_output(f"[retry {attempt}/{max_retries}] No result submitted, retrying...")
             continue
 
-        logger.warning("opencode did not call submit_result for %s:%d after %d attempts", candidate.file, candidate.line, attempt)
+        logger.warning("%s did not call submit_result for %s:%d after %d attempts", tool, candidate.file, candidate.line, attempt)
         return None
 
     return None  # should not reach here
 
 
-def _resolve_opencode() -> str:
-    """Return the full path to the opencode executable.
+def _cfg_value(config_obj, key: str, default=None):
+    if isinstance(config_obj, dict):
+        return config_obj.get(key, default)
+    return getattr(config_obj, key, default)
 
-    Uses the name/path from config (opencode.executable, default "opencode").
+
+def _normalize_tool(config_obj) -> str:
+    tool = str(_cfg_value(config_obj, "tool", "") or "").strip().lower()
+    executable = str(_cfg_value(config_obj, "executable", "") or "").strip()
+    if tool in AI_CLI_TOOLS:
+        return tool
+    inferred = Path(executable).name.lower() if executable else ""
+    if inferred in AI_CLI_TOOLS:
+        return inferred
+    return "opencode"
+
+
+def _resolve_cli_executable(config_obj) -> str:
+    """Return the full path to the configured AI CLI executable.
+
+    Uses the name/path from config (executable, default per selected tool).
     Falls back to a bash login shell lookup so that executables installed in
     non-standard locations (e.g. ~/.bun/bin, ~/.local/bin) that are added to
     PATH by ~/.profile or ~/.bash_profile are found even when the Python
     process was started without sourcing those files.
     """
-    name = get_config().opencode.executable or "opencode"
+    tool = _normalize_tool(config_obj)
+    name = _cfg_value(config_obj, "executable", "") or _DEFAULT_EXECUTABLES[tool]
     # Direct resolution: works when the binary is already in the current PATH
     resolved = shutil.which(name)
     if resolved:
@@ -240,14 +268,123 @@ def _resolve_opencode() -> str:
             if result.returncode == 0:
                 path = result.stdout.strip()
                 if path:
-                    logger.debug("opencode resolved via login shell: %s", path)
+                    logger.debug("%s resolved via login shell: %s", tool, path)
                     return path
         except Exception:
             pass
     raise FileNotFoundError(
-        f"opencode executable '{name}' not found in PATH. "
-        "Check the opencode.executable setting in agent.yaml."
+        f"{tool} executable '{name}' not found in PATH. "
+        "Check the Agent CLI tool executable setting in agent.yaml."
     )
+
+
+def _read_mcp_url(workspace: Path) -> str:
+    try:
+        data = json.loads((workspace / "opencode.json").read_text(encoding="utf-8"))
+        server = data.get("mcp", {}).get("deephole-code", {})
+        return str(server.get("url") or "")
+    except Exception:
+        return ""
+
+
+def _copy_skill_tree(src_root: Path, dst_root: Path) -> None:
+    if not src_root.is_dir():
+        return
+    dst_root.mkdir(parents=True, exist_ok=True)
+    for src in src_root.iterdir():
+        if not src.is_dir():
+            continue
+        dst = dst_root / src.name
+        if dst.is_symlink() or dst.is_file():
+            dst.unlink()
+        elif dst.is_dir():
+            shutil.rmtree(dst)
+        shutil.copytree(src, dst, symlinks=True)
+
+
+def _merge_json_file(path: Path, data: dict) -> None:
+    current: dict = {}
+    if path.is_file():
+        try:
+            loaded = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(loaded, dict):
+                current = loaded
+        except Exception:
+            current = {}
+    for key, value in data.items():
+        if isinstance(value, dict) and isinstance(current.get(key), dict):
+            current[key].update(value)
+        else:
+            current[key] = value
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(current, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _prepare_cli_workspace(workspace: Path, tool: str) -> None:
+    """Create tool-specific MCP and skill files from the canonical opencode files."""
+    if tool in {"nga", "opencode"}:
+        return
+
+    mcp_url = _read_mcp_url(workspace)
+    opencode_skills = workspace / ".opencode" / "skills"
+
+    if tool == "claude":
+        claude_dir = workspace / ".claude"
+        claude_dir.mkdir(parents=True, exist_ok=True)
+        mcp_config = {
+            "mcpServers": {
+                "deephole-code": {
+                    "type": "http",
+                    "url": mcp_url,
+                }
+            }
+        }
+        (claude_dir / "opendeephole-mcp.json").write_text(
+            json.dumps(mcp_config, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        _copy_skill_tree(opencode_skills, claude_dir / "skills")
+        return
+
+    if tool == "hac":
+        gemini_dir = workspace / ".gemini"
+        settings_path = gemini_dir / "settings.json"
+        _merge_json_file(
+            settings_path,
+            {
+                "mcpServers": {
+                    "deephole-code": {
+                        "httpUrl": mcp_url,
+                    }
+                }
+            },
+        )
+        _copy_skill_tree(opencode_skills, gemini_dir / "skills")
+
+
+def _build_cli_command(tool: str, executable: str, workspace: Path, prompt: str, model: str) -> list[str]:
+    if tool in {"nga", "opencode"}:
+        cmd = [executable, "run", "--dir", str(workspace)]
+        if model:
+            cmd += ["--model", model]
+        cmd.append(prompt)
+        return cmd
+
+    if tool == "claude":
+        cmd = [executable, "-p", "--mcp-config", str(workspace / ".claude" / "opendeephole-mcp.json")]
+        if model:
+            cmd += ["--model", model]
+        cmd.append(prompt)
+        return cmd
+
+    if tool == "hac":
+        cmd = [executable]
+        if model:
+            cmd += ["--model", model]
+        cmd += ["-p", prompt]
+        return cmd
+
+    raise ValueError(f"Unsupported AI CLI tool: {tool}")
 
 
 async def _invoke_opencode(
@@ -257,48 +394,24 @@ async def _invoke_opencode(
     log_path: Path | None = None,
     on_line=None,
     cancel_event=None,
+    cli_config=None,
 ) -> None:
-    """Invoke opencode CLI, stream output line-by-line, write to log file.
+    """Invoke the configured AI CLI, stream output line-by-line, write to log file.
 
     Uses subprocess.Popen in a thread executor instead of
     asyncio.create_subprocess_exec to avoid the asyncio child-watcher
     requirement on Linux (which raises NotImplementedError in some
     environments regardless of Python version).
     """
-    import tempfile
-
     config = get_config()
-    opencode_exe = _resolve_opencode()
+    cli_config = cli_config or config.opencode
+    tool = _normalize_tool(cli_config)
+    executable = _resolve_cli_executable(cli_config)
+    model = str(_cfg_value(cli_config, "model", "") or "")
+    _prepare_cli_workspace(workspace, tool)
+    cmd = _build_cli_command(tool, executable, workspace, prompt, model)
 
-    # 将 prompt 写入临时文件，通过管道符传递给 opencode，避免命令行长度截断
-    prompt_file = tempfile.NamedTemporaryFile(
-        mode="w", suffix=".txt", encoding="utf-8", delete=False,
-        dir=str(workspace),
-    )
-    prompt_file.write(prompt)
-    prompt_file.close()
-    prompt_file_path = prompt_file.name
-
-    # 构建命令：prompt 通过临时文件 + shell 命令替换传递，避免命令行长度截断
-    if sys.platform == "win32":
-        # Windows：直接传参（CreateProcess 支持 32767 字符，远大于 cmd.exe 的 8191 限制）
-        cmd = [opencode_exe, "run", "--dir", str(workspace)]
-        if config.opencode.model:
-            cmd += ["--model", config.opencode.model]
-        cmd.append(prompt)
-        shell_cmd = None
-        # 不再需要临时文件
-        os.unlink(prompt_file_path)
-        prompt_file_path = None
-    else:
-        # Linux/macOS：通过 $(cat file) 将临时文件内容作为参数传递
-        cmd_parts = [shlex.quote(opencode_exe), "run", "--dir", shlex.quote(str(workspace))]
-        if config.opencode.model:
-            cmd_parts += ["--model", shlex.quote(config.opencode.model)]
-        shell_cmd = f'{" ".join(cmd_parts)} "$(cat {shlex.quote(prompt_file_path)})"'
-        cmd = None
-
-    logger.debug("opencode command: %s", shell_cmd or " ".join(cmd))
+    logger.debug("%s command: %s", tool, " ".join(shlex.quote(part) for part in cmd))
 
     env = os.environ.copy()
     env["NODE_TLS_REJECT_UNAUTHORIZED"] = "0"
@@ -315,34 +428,19 @@ async def _invoke_opencode(
     proc_holder: list[subprocess.Popen | None] = [None]
 
     def _stream() -> int:
-        """Blocking: run opencode, push lines into the asyncio queue."""
-        if shell_cmd is not None:
-            # Linux/macOS: shell 模式，通过 $(cat file) 传递 prompt
-            proc = subprocess.Popen(
-                shell_cmd,
-                shell=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                bufsize=1,
-                encoding="utf-8",
-                errors="replace",
-                env=env,
-                **kwargs,
-            )
-        else:
-            # Windows: 直接传参模式
-            proc = subprocess.Popen(
-                cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                bufsize=1,
-                encoding="utf-8",
-                errors="replace",
-                env=env,
-                **kwargs,
-            )
+        """Blocking: run the selected CLI, push lines into the asyncio queue."""
+        proc = subprocess.Popen(
+            cmd,
+            cwd=str(workspace),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+            encoding="utf-8",
+            errors="replace",
+            env=env,
+            **kwargs,
+        )
         proc_holder[0] = proc
         try:
             assert proc.stdout is not None
@@ -362,12 +460,6 @@ async def _invoke_opencode(
                 pass
             proc.wait()
             loop.call_soon_threadsafe(queue.put_nowait, None)
-            # 清理临时文件（Windows 下已提前删除）
-            if prompt_file_path is not None:
-                try:
-                    os.unlink(prompt_file_path)
-                except Exception:
-                    pass
         return proc.returncode
 
     def _kill() -> None:
@@ -413,7 +505,7 @@ async def _invoke_opencode(
             if line is None:  # end-of-stream sentinel
                 break
             log_lines.append(line)
-            logger.debug("[opencode] %s", line)
+            logger.debug("[%s] %s", tool, line)
             if on_line:
                 on_line(line)
     finally:
@@ -436,8 +528,8 @@ async def _invoke_opencode(
 
     proc = proc_holder[0]
     if proc and proc.returncode not in (0, None):
-        logger.error("opencode exited with code %d", proc.returncode)
-        raise RuntimeError(f"opencode exited with code {proc.returncode}")
+        logger.error("%s exited with code %d", tool, proc.returncode)
+        raise RuntimeError(f"{tool} exited with code {proc.returncode}")
 
 
 def _read_result(result_id: str, candidate: Candidate) -> Vulnerability | None:
@@ -518,13 +610,13 @@ async def run_audit_batch(
             )
         except LLMApiUnavailableError as exc:
             logger.warning(
-                "LLM API unavailable for checker %s batch; falling back to opencode: %s",
+                "LLM API unavailable for checker %s batch; falling back to CLI audit: %s",
                 candidates[0].vuln_type, exc,
             )
             if on_output:
-                on_output(f"[API] API 不可用，批量审计降级为 opencode: {exc}")
+                on_output(f"[API] API 不可用，批量审计降级为 CLI 审计: {exc}")
 
-    # opencode CLI 模式：退化为逐个调用
+    # CLI 模式：退化为逐个调用
     results = []
     for candidate in candidates:
         if cancel_event and cancel_event.is_set():

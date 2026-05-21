@@ -10,6 +10,14 @@ from typing import Optional
 
 import yaml
 
+AI_CLI_TOOLS = ("nga", "opencode", "hac", "claude")
+_DEFAULT_EXECUTABLES = {
+    "nga": "nga",
+    "opencode": "opencode",
+    "hac": "hac",
+    "claude": "claude",
+}
+
 
 @dataclass
 class LLMApiConfig:
@@ -24,10 +32,34 @@ class LLMApiConfig:
 
 @dataclass
 class OpenCodeConfig:
+    tool: str = "opencode"
     executable: str = "opencode"  # CLI executable name or full path
     model: str = ""
     timeout: int = 1200
     max_retries: int = 2          # retry on transient errors (not timeout)
+
+
+def normalize_cli_config(config: OpenCodeConfig) -> OpenCodeConfig:
+    """Normalize a CLI config in place while keeping legacy executable values."""
+    tool = (config.tool or "").strip().lower()
+    executable = (config.executable or "").strip()
+    if tool not in AI_CLI_TOOLS:
+        inferred = Path(executable).name.lower() if executable else ""
+        if inferred in AI_CLI_TOOLS:
+            tool = inferred
+        else:
+            tool = "opencode"
+    config.tool = tool
+    if not executable:
+        config.executable = _DEFAULT_EXECUTABLES[tool]
+    return config
+
+
+def effective_fp_review_cli_config(config: "AgentConfig") -> OpenCodeConfig:
+    """Return the FP review CLI config, inheriting audit CLI settings by default."""
+    if config.fp_review_cli is None:
+        return config.opencode
+    return config.fp_review_cli
 
 
 @dataclass
@@ -40,6 +72,7 @@ class AgentConfig:
     checkers: list = field(default_factory=list)
     llm_api: LLMApiConfig = field(default_factory=LLMApiConfig)
     opencode: OpenCodeConfig = field(default_factory=OpenCodeConfig)
+    fp_review_cli: OpenCodeConfig | None = None
     # Runtime-only: path to the loaded config file (not serialized)
     config_file: Optional[Path] = field(default=None, repr=False, compare=False)
 
@@ -55,9 +88,22 @@ def apply_remote_config(config: AgentConfig, remote: dict) -> None:
         config.no_proxy = remote["no_proxy"]
     for attr, sub_cfg in [("llm_api", config.llm_api), ("opencode", config.opencode)]:
         section = remote.get(attr) or {}
+        if attr == "opencode" and isinstance(section, dict) and "tool" not in section and "executable" in section:
+            sub_cfg.tool = ""
         for f in dataclasses.fields(sub_cfg):
             if f.name in section and section[f.name] is not None:
                 setattr(sub_cfg, f.name, section[f.name])
+        if attr == "opencode":
+            normalize_cli_config(sub_cfg)
+    if "fp_review_cli" in remote:
+        section = remote.get("fp_review_cli")
+        if section is None:
+            config.fp_review_cli = None
+        elif isinstance(section, dict):
+            config.fp_review_cli = normalize_cli_config(OpenCodeConfig(**{
+                k: v for k, v in section.items()
+                if k in {f.name for f in dataclasses.fields(OpenCodeConfig)}
+            }))
 
 
 def apply_network_env(config: AgentConfig) -> None:
@@ -82,6 +128,12 @@ def remote_config_dict(config: AgentConfig) -> dict:
             f.name: getattr(config.opencode, f.name)
             for f in dataclasses.fields(config.opencode)
         },
+        "fp_review_cli": (
+            None if config.fp_review_cli is None else {
+                f.name: getattr(config.fp_review_cli, f.name)
+                for f in dataclasses.fields(config.fp_review_cli)
+            }
+        ),
     }
 
 
@@ -107,6 +159,15 @@ def load_config(path: Optional[Path] = None) -> AgentConfig:
 
     llm_raw = {k: v for k, v in raw.get("llm_api", {}).items() if k in llm_fields}
     oc_raw = {k: v for k, v in raw.get("opencode", {}).items() if k in oc_fields}
+    if "tool" not in oc_raw and "executable" in oc_raw:
+        oc_raw["tool"] = ""
+    fp_raw = raw.get("fp_review_cli", None)
+    fp_cfg = None
+    if isinstance(fp_raw, dict):
+        fp_values = {k: v for k, v in fp_raw.items() if k in oc_fields}
+        if "tool" not in fp_values and "executable" in fp_values:
+            fp_values["tool"] = ""
+        fp_cfg = OpenCodeConfig(**fp_values)
 
     cfg = AgentConfig(
         server_url=raw.get("server_url", "http://localhost:8000"),
@@ -116,7 +177,8 @@ def load_config(path: Optional[Path] = None) -> AgentConfig:
         no_proxy=raw.get("no_proxy", "10.0.0.0/8"),
         checkers=raw.get("checkers", []),
         llm_api=LLMApiConfig(**llm_raw),
-        opencode=OpenCodeConfig(**oc_raw),
+        opencode=normalize_cli_config(OpenCodeConfig(**oc_raw)),
+        fp_review_cli=normalize_cli_config(fp_cfg) if fp_cfg is not None else None,
         config_file=path,
     )
     return cfg
@@ -141,5 +203,12 @@ def save_config(config: AgentConfig) -> None:
                       for f in dataclasses.fields(config.llm_api)}
     raw["opencode"] = {f.name: getattr(config.opencode, f.name)
                        for f in dataclasses.fields(config.opencode)}
+    if config.fp_review_cli is None:
+        raw.pop("fp_review_cli", None)
+    else:
+        raw["fp_review_cli"] = {
+            f.name: getattr(config.fp_review_cli, f.name)
+            for f in dataclasses.fields(config.fp_review_cli)
+        }
     with open(path, "w", encoding="utf-8") as f:
         yaml.dump(raw, f, allow_unicode=True, default_flow_style=False)

@@ -166,6 +166,7 @@ export interface AgentLLMApiConfig {
 }
 
 export interface AgentOpenCodeConfig {
+  tool: "nga" | "opencode" | "hac" | "claude" | string;
   executable: string;
   model: string;
   timeout: number;
@@ -176,6 +177,7 @@ export interface AgentRemoteConfig {
   no_proxy: string;
   llm_api: AgentLLMApiConfig;
   opencode: AgentOpenCodeConfig;
+  fp_review_cli?: AgentOpenCodeConfig | null;
 }
 
 export interface AgentConfigTestResult {

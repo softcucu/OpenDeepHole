@@ -5,7 +5,15 @@ from unittest.mock import patch
 
 import yaml
 
-from agent.config import AgentConfig, apply_network_env, apply_remote_config, load_config, remote_config_dict, save_config
+from agent.config import (
+    AgentConfig,
+    apply_network_env,
+    apply_remote_config,
+    effective_fp_review_cli_config,
+    load_config,
+    remote_config_dict,
+    save_config,
+)
 
 
 class AgentConfigTests(unittest.TestCase):
@@ -15,8 +23,10 @@ class AgentConfigTests(unittest.TestCase):
         self.assertEqual(cfg.no_proxy, "10.0.0.0/8")
         self.assertEqual(cfg.llm_api.timeout, 300)
         self.assertFalse(cfg.llm_api.stream)
+        self.assertEqual(cfg.opencode.tool, "opencode")
         self.assertEqual(cfg.opencode.timeout, 1200)
         self.assertEqual(cfg.opencode.max_retries, 2)
+        self.assertIsNone(cfg.fp_review_cli)
 
     def test_apply_remote_config_overwrites_falsey_values(self) -> None:
         cfg = AgentConfig()
@@ -29,7 +39,14 @@ class AgentConfigTests(unittest.TestCase):
             {
                 "no_proxy": "",
                 "llm_api": {"stream": False, "timeout": 300},
-                "opencode": {"max_retries": 0, "timeout": 1200},
+                "opencode": {"tool": "nga", "executable": "nga", "max_retries": 0, "timeout": 1200},
+                "fp_review_cli": {
+                    "tool": "claude",
+                    "executable": "claude",
+                    "model": "sonnet",
+                    "timeout": 900,
+                    "max_retries": 1,
+                },
             },
         )
 
@@ -38,10 +55,15 @@ class AgentConfigTests(unittest.TestCase):
         self.assertEqual(cfg.llm_api.timeout, 300)
         self.assertEqual(cfg.opencode.max_retries, 0)
         self.assertEqual(cfg.opencode.timeout, 1200)
+        self.assertEqual(cfg.opencode.tool, "nga")
+        self.assertIsNotNone(cfg.fp_review_cli)
+        self.assertEqual(cfg.fp_review_cli.tool, "claude")
+        self.assertEqual(cfg.fp_review_cli.model, "sonnet")
 
     def test_remote_config_dict_exports_managed_fields(self) -> None:
         cfg = AgentConfig()
         cfg.llm_api.stream = True
+        cfg.opencode.tool = "nga"
         cfg.opencode.executable = "nga"
 
         remote = remote_config_dict(cfg)
@@ -50,8 +72,10 @@ class AgentConfigTests(unittest.TestCase):
         self.assertTrue(remote["llm_api"]["stream"])
         self.assertEqual(remote["llm_api"]["timeout"], 300)
         self.assertEqual(remote["opencode"]["executable"], "nga")
+        self.assertEqual(remote["opencode"]["tool"], "nga")
         self.assertEqual(remote["opencode"]["timeout"], 1200)
         self.assertEqual(remote["opencode"]["max_retries"], 2)
+        self.assertIsNone(remote["fp_review_cli"])
 
     def test_save_config_persists_remote_managed_fields(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -62,7 +86,7 @@ class AgentConfigTests(unittest.TestCase):
                         "server_url": "http://example.test",
                         "agent_name": "local-agent",
                         "llm_api": {"stream": True, "timeout": 120},
-                        "opencode": {"timeout": 300, "max_retries": 4},
+                        "opencode": {"executable": "nga", "timeout": 300, "max_retries": 4},
                     }
                 ),
                 encoding="utf-8",
@@ -74,7 +98,8 @@ class AgentConfigTests(unittest.TestCase):
                 {
                     "no_proxy": "10.0.0.0/8",
                     "llm_api": {"stream": False, "timeout": 300},
-                    "opencode": {"timeout": 1200, "max_retries": 2},
+                    "opencode": {"tool": "opencode", "executable": "opencode", "timeout": 1200, "max_retries": 2},
+                    "fp_review_cli": {"tool": "claude", "executable": "claude", "timeout": 900},
                 },
             )
             save_config(cfg)
@@ -85,8 +110,24 @@ class AgentConfigTests(unittest.TestCase):
             self.assertEqual(raw["no_proxy"], "10.0.0.0/8")
             self.assertEqual(raw["llm_api"]["timeout"], 300)
             self.assertFalse(raw["llm_api"]["stream"])
+            self.assertEqual(raw["opencode"]["tool"], "opencode")
             self.assertEqual(raw["opencode"]["timeout"], 1200)
             self.assertEqual(raw["opencode"]["max_retries"], 2)
+            self.assertEqual(raw["fp_review_cli"]["tool"], "claude")
+            self.assertEqual(raw["fp_review_cli"]["timeout"], 900)
+
+    def test_legacy_executable_infers_tool_and_fp_review_inherits(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "agent.yaml"
+            path.write_text(
+                yaml.dump({"opencode": {"executable": "nga", "model": "audit-model"}}),
+                encoding="utf-8",
+            )
+
+            cfg = load_config(path)
+
+            self.assertEqual(cfg.opencode.tool, "nga")
+            self.assertEqual(effective_fp_review_cli_config(cfg).model, "audit-model")
 
     def test_apply_network_env_clears_blank_no_proxy(self) -> None:
         cfg = AgentConfig(no_proxy="")

@@ -17,6 +17,7 @@ from typing import Optional
 from uuid import uuid4
 
 from backend.models import ScanEvent
+from agent.config import effective_fp_review_cli_config
 
 
 _FP_FEEDBACK_FILE = Path.home() / ".opendeephole" / "fp_feedback.json"
@@ -164,6 +165,7 @@ async def run_fp_review(
         from backend.models import Candidate
 
         cfg = get_config()
+        fp_cli = effective_fp_review_cli_config(config)
 
         for vuln in vulnerabilities:
             idx = vuln["index"]
@@ -213,10 +215,11 @@ async def run_fp_review(
                 await _invoke_opencode(
                     workspace,
                     prompt,
-                    cfg.opencode.timeout,
+                    fp_cli.timeout,
                     log_path=log_path,
                     on_line=lambda line: print(f"  [fp_opencode] {line}", flush=True),
                     cancel_event=cancel_event,
+                    cli_config=fp_cli,
                 )
 
                 fake_candidate = Candidate(
@@ -326,6 +329,7 @@ def _configure_fp_backend(config, review_dir: Path) -> None:
             "stream": config.llm_api.stream,
         },
         "opencode": {
+            "tool": config.opencode.tool,
             "executable": config.opencode.executable,
             "model": config.opencode.model,
             "timeout": config.opencode.timeout,
@@ -346,6 +350,15 @@ def _configure_fp_backend(config, review_dir: Path) -> None:
         },
         "no_proxy": config.no_proxy,
     }
+    if config.fp_review_cli is not None:
+        raw["fp_review_cli"] = {
+            "tool": config.fp_review_cli.tool,
+            "executable": config.fp_review_cli.executable,
+            "model": config.fp_review_cli.model,
+            "timeout": config.fp_review_cli.timeout,
+            "max_retries": config.fp_review_cli.max_retries,
+            "mock": False,
+        }
     config_path = review_dir / "config.yaml"
     config_path.write_text(yaml.dump(raw), encoding="utf-8")
     os.environ["CONFIG_PATH"] = str(config_path)
@@ -437,6 +450,18 @@ def _cleanup_fp_workspace(workspace: Path) -> None:
             fp_skill_dir = workspace / ".opencode" / "skills" / "fp-review"
             if fp_skill_dir.is_dir():
                 shutil.rmtree(fp_skill_dir)
+            for root in (workspace / ".claude" / "skills", workspace / ".gemini" / "skills"):
+                copied_fp_skill = root / "fp-review"
+                if copied_fp_skill.is_dir():
+                    shutil.rmtree(copied_fp_skill)
+                if root.is_dir() and not any(root.iterdir()):
+                    root.rmdir()
+            claude_mcp = workspace / ".claude" / "opendeephole-mcp.json"
+            if claude_mcp.exists():
+                claude_mcp.unlink()
+            claude_dir = workspace / ".claude"
+            if claude_dir.is_dir() and not any(claude_dir.iterdir()):
+                claude_dir.rmdir()
             skills_dir = workspace / ".opencode" / "skills"
             if skills_dir.is_dir() and not any(skills_dir.iterdir()):
                 skills_dir.rmdir()

@@ -18,11 +18,27 @@ const DEFAULT_CONFIG: AgentRemoteConfig = {
     stream: false,
   },
   opencode: {
+    tool: "opencode",
     executable: "opencode",
     model: "",
     timeout: 1200,
     max_retries: 2,
   },
+  fp_review_cli: null,
+};
+
+const TOOL_OPTIONS = [
+  { value: "nga", label: "nga" },
+  { value: "opencode", label: "opencode" },
+  { value: "hac", label: "hac" },
+  { value: "claude", label: "claude" },
+];
+
+const DEFAULT_EXECUTABLE_BY_TOOL: Record<string, string> = {
+  nga: "nga",
+  opencode: "opencode",
+  hac: "hac",
+  claude: "claude",
 };
 
 function deepClone<T>(obj: T): T {
@@ -91,6 +107,38 @@ function AgentConfigPanel({ agent }: AgentConfigPanelProps) {
 
   const setOC = (key: keyof AgentRemoteConfig["opencode"], value: string | number) => {
     setCfg((prev) => ({ ...prev, opencode: { ...prev.opencode, [key]: value } }));
+  };
+
+  const setAuditTool = (tool: string) => {
+    setCfg((prev) => ({
+      ...prev,
+      opencode: {
+        ...prev.opencode,
+        tool,
+        executable: DEFAULT_EXECUTABLE_BY_TOOL[tool] ?? tool,
+      },
+    }));
+  };
+
+  const setFpCli = (key: keyof AgentRemoteConfig["opencode"], value: string | number) => {
+    setCfg((prev) => {
+      const base = prev.fp_review_cli ?? { ...prev.opencode };
+      return { ...prev, fp_review_cli: { ...base, [key]: value } };
+    });
+  };
+
+  const setFpTool = (tool: string) => {
+    setCfg((prev) => {
+      const base = prev.fp_review_cli ?? { ...prev.opencode };
+      return {
+        ...prev,
+        fp_review_cli: {
+          ...base,
+          tool,
+          executable: DEFAULT_EXECUTABLE_BY_TOOL[tool] ?? tool,
+        },
+      };
+    });
   };
 
   return (
@@ -179,14 +227,23 @@ function AgentConfigPanel({ agent }: AgentConfigPanelProps) {
                 </div>
               </div>
 
-              {/* opencode */}
+              {/* CLI audit */}
               <div>
-                <h3 className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-3">opencode 配置</h3>
+                <h3 className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-3">LLM 审计工具</h3>
                 <div className="grid grid-cols-1 gap-3">
+                  <Field label="工具">
+                    <select value={cfg.opencode.tool || "opencode"}
+                      onChange={(e) => setAuditTool(e.target.value)}
+                      className={inputCls}>
+                      {TOOL_OPTIONS.map((item) => (
+                        <option key={item.value} value={item.value}>{item.label}</option>
+                      ))}
+                    </select>
+                  </Field>
                   <Field label="可执行文件" hint="CLI 名称或完整路径">
                     <input type="text" value={cfg.opencode.executable}
                       onChange={(e) => setOC("executable", e.target.value)}
-                      className={inputCls} placeholder="opencode" />
+                      className={inputCls} placeholder={DEFAULT_EXECUTABLE_BY_TOOL[cfg.opencode.tool] ?? "opencode"} />
                   </Field>
                   <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
                     <Field label="模型" hint="留空使用默认">
@@ -206,6 +263,60 @@ function AgentConfigPanel({ agent }: AgentConfigPanelProps) {
                     </Field>
                   </div>
                 </div>
+              </div>
+
+              {/* FP review CLI */}
+              <div>
+                <h3 className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-3">AI 去误报工具</h3>
+                <label className="flex items-center gap-2 text-sm text-slate-300 mb-3">
+                  <input
+                    type="checkbox"
+                    checked={!cfg.fp_review_cli}
+                    onChange={(e) => {
+                      setCfg((prev) => ({
+                        ...prev,
+                        fp_review_cli: e.target.checked ? null : { ...prev.opencode },
+                      }));
+                    }}
+                    className="h-4 w-4 rounded border-slate-600 bg-slate-900 text-blue-600 focus:ring-blue-500"
+                  />
+                  继承 LLM 审计工具和模型
+                </label>
+                {cfg.fp_review_cli && (
+                  <div className="grid grid-cols-1 gap-3">
+                    <Field label="工具">
+                      <select value={cfg.fp_review_cli.tool || "opencode"}
+                        onChange={(e) => setFpTool(e.target.value)}
+                        className={inputCls}>
+                        {TOOL_OPTIONS.map((item) => (
+                          <option key={item.value} value={item.value}>{item.label}</option>
+                        ))}
+                      </select>
+                    </Field>
+                    <Field label="可执行文件" hint="CLI 名称或完整路径">
+                      <input type="text" value={cfg.fp_review_cli.executable}
+                        onChange={(e) => setFpCli("executable", e.target.value)}
+                        className={inputCls} placeholder={DEFAULT_EXECUTABLE_BY_TOOL[cfg.fp_review_cli.tool] ?? "opencode"} />
+                    </Field>
+                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                      <Field label="模型" hint="留空使用默认">
+                        <input type="text" value={cfg.fp_review_cli.model}
+                          onChange={(e) => setFpCli("model", e.target.value)}
+                          className={inputCls} placeholder="（默认）" />
+                      </Field>
+                      <Field label="超时（秒）">
+                        <input type="number" value={cfg.fp_review_cli.timeout}
+                          onChange={(e) => setFpCli("timeout", Number(e.target.value))}
+                          className={inputCls} min={30} />
+                      </Field>
+                      <Field label="最大重试">
+                        <input type="number" value={cfg.fp_review_cli.max_retries}
+                          onChange={(e) => setFpCli("max_retries", Number(e.target.value))}
+                          className={inputCls} min={0} max={10} />
+                      </Field>
+                    </div>
+                  </div>
+                )}
               </div>
 
               {/* no_proxy */}
