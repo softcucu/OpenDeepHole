@@ -1,4 +1,5 @@
 import asyncio
+import time
 import sys
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
@@ -9,7 +10,14 @@ import pytest
 from backend.models import Candidate
 from backend.opencode import llm_api_runner
 from backend.opencode.llm_api_runner import LLMApiUnavailableError
-from backend.opencode.runner import _build_cli_command, _prepare_cli_workspace, run_audit, run_audit_batch
+from backend.opencode.runner import (
+    _build_cli_command,
+    _prepare_cli_workspace,
+    _terminate_process_tree,
+    _wait_for_stream_exit_after_termination,
+    run_audit,
+    run_audit_batch,
+)
 
 
 def _candidate(line: int = 12) -> Candidate:
@@ -50,6 +58,101 @@ def test_prepare_cli_workspace_creates_claude_and_gemini_skill_configs(tmp_path:
     assert (tmp_path / ".claude" / "skills" / "fp-review" / "SKILL.md").is_file()
     assert (tmp_path / ".gemini" / "settings.json").is_file()
     assert (tmp_path / ".gemini" / "skills" / "fp-review" / "SKILL.md").is_file()
+
+
+class _FakeStdout:
+    def __init__(self) -> None:
+        self.closed = False
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class _FakeProc:
+    def __init__(self) -> None:
+        self.pid = 12345
+        self.returncode = None
+        self.stdout = _FakeStdout()
+        self.killed = False
+
+    def poll(self):
+        return self.returncode
+
+    def kill(self) -> None:
+        self.killed = True
+        self.returncode = -9
+
+
+def test_terminate_process_tree_uses_taskkill_on_windows() -> None:
+    proc = _FakeProc()
+    calls = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append((cmd, kwargs))
+        proc.returncode = -9
+        return SimpleNamespace(returncode=0)
+
+    with (
+        patch("backend.opencode.runner.sys.platform", "win32"),
+        patch("backend.opencode.runner.subprocess.run", side_effect=fake_run),
+    ):
+        _terminate_process_tree(proc, tool="opencode", reason="timeout")
+
+    assert calls[0][0] == ["taskkill", "/F", "/T", "/PID", "12345"]
+    assert proc.stdout.closed is True
+    assert proc.killed is False
+
+
+def test_terminate_process_tree_falls_back_when_taskkill_fails() -> None:
+    proc = _FakeProc()
+
+    with (
+        patch("backend.opencode.runner.sys.platform", "win32"),
+        patch(
+            "backend.opencode.runner.subprocess.run",
+            return_value=SimpleNamespace(returncode=1),
+        ),
+    ):
+        _terminate_process_tree(proc, tool="opencode", reason="timeout")
+
+    assert proc.killed is True
+    assert proc.stdout.closed is True
+
+
+def test_terminate_process_tree_uses_process_group_on_posix() -> None:
+    proc = _FakeProc()
+
+    with (
+        patch("backend.opencode.runner.sys.platform", "linux"),
+        patch("backend.opencode.runner.os.getpgid", return_value=999) as getpgid,
+        patch("backend.opencode.runner.os.killpg") as killpg,
+    ):
+        _terminate_process_tree(proc, tool="opencode", reason="timeout")
+
+    getpgid.assert_called_once_with(12345)
+    killpg.assert_called_once()
+    assert proc.stdout.closed is True
+
+
+def test_stream_exit_wait_after_termination_is_bounded() -> None:
+    async def run_check() -> None:
+        future = asyncio.get_running_loop().create_future()
+        started = time.monotonic()
+
+        await _wait_for_stream_exit_after_termination(
+            future,
+            tool="opencode",
+            timed_out=True,
+            cancelled=False,
+            timeout=1,
+            started=started,
+            grace_seconds=0.01,
+        )
+
+        assert future.cancelled() is False
+        future.cancel()
+
+    asyncio.run(run_check())
 
 
 def test_api_checker_uses_api_even_when_legacy_global_switch_is_false(tmp_path: Path) -> None:

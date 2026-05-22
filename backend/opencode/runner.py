@@ -9,6 +9,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 from uuid import uuid4
 
@@ -19,6 +20,9 @@ from backend.models import Candidate, Vulnerability
 logger = get_logger(__name__)
 
 AI_CLI_TOOLS = ("nga", "opencode", "hac", "claude")
+CREATE_NO_WINDOW = 0x08000000
+CREATE_NEW_PROCESS_GROUP = 0x00000200
+PROCESS_EXIT_GRACE_SECONDS = 5.0
 _DEFAULT_EXECUTABLES = {
     "nga": "nga",
     "opencode": "opencode",
@@ -387,6 +391,80 @@ def _build_cli_command(tool: str, executable: str, workspace: Path, prompt: str,
     raise ValueError(f"Unsupported AI CLI tool: {tool}")
 
 
+def _close_process_stdout(proc: subprocess.Popen) -> None:
+    try:
+        if proc.stdout is not None:
+            proc.stdout.close()
+    except Exception:
+        pass
+
+
+def _terminate_process_tree(proc: subprocess.Popen, *, tool: str, reason: str) -> None:
+    """Best-effort termination of the CLI and any child processes it spawned."""
+    if proc.poll() is not None:
+        return
+
+    logger.warning(
+        "Terminating %s process tree pid=%s reason=%s",
+        tool, proc.pid, reason,
+    )
+    if sys.platform == "win32":
+        try:
+            result = subprocess.run(
+                ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=10,
+                check=False,
+            )
+            if result.returncode != 0 and proc.poll() is None:
+                proc.kill()
+        except Exception as exc:
+            logger.warning(
+                "taskkill failed for %s pid=%s reason=%s: %s",
+                tool, proc.pid, reason, exc,
+            )
+            try:
+                proc.kill()
+            except Exception:
+                pass
+        _close_process_stdout(proc)
+        return
+
+    try:
+        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+    except Exception:
+        try:
+            proc.kill()
+        except Exception:
+            pass
+    _close_process_stdout(proc)
+
+
+async def _wait_for_stream_exit_after_termination(
+    stream_future,
+    *,
+    tool: str,
+    timed_out: bool,
+    cancelled: bool,
+    timeout: int,
+    started: float,
+    grace_seconds: float = PROCESS_EXIT_GRACE_SECONDS,
+) -> None:
+    elapsed = time.monotonic() - started
+    logger.warning(
+        "%s process termination requested after %.1fs (timeout=%ds, timed_out=%s, cancelled=%s)",
+        tool, elapsed, timeout, timed_out, cancelled,
+    )
+    try:
+        await asyncio.wait_for(asyncio.shield(stream_future), timeout=grace_seconds)
+    except asyncio.TimeoutError:
+        logger.error(
+            "%s output reader did not exit within %.1fs after process termination",
+            tool, grace_seconds,
+        )
+
+
 async def _invoke_opencode(
     workspace: Path,
     prompt: str,
@@ -418,7 +496,7 @@ async def _invoke_opencode(
 
     kwargs: dict = {}
     if sys.platform == "win32":
-        kwargs["creationflags"] = 0x08000000  # CREATE_NO_WINDOW
+        kwargs["creationflags"] = CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP
     else:
         kwargs["start_new_session"] = True
 
@@ -462,19 +540,10 @@ async def _invoke_opencode(
             loop.call_soon_threadsafe(queue.put_nowait, None)
         return proc.returncode
 
-    def _kill() -> None:
+    def _terminate(reason: str) -> None:
         proc = proc_holder[0]
         if proc is not None:
-            try:
-                if sys.platform != "win32":
-                    os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-                else:
-                    proc.kill()
-            except Exception:
-                try:
-                    proc.kill()
-                except Exception:
-                    pass
+            _terminate_process_tree(proc, tool=tool, reason=reason)
 
     stream_future = loop.run_in_executor(None, _stream)
 
@@ -483,20 +552,26 @@ async def _invoke_opencode(
         if cancel_event:
             while not cancel_event.is_set():
                 await asyncio.sleep(0.2)
-            _kill()
+            _terminate("cancel")
 
     watcher = asyncio.create_task(_cancel_watcher()) if cancel_event else None
 
     log_lines: list[str] = []
+    started = time.monotonic()
     deadline = asyncio.get_event_loop().time() + timeout
     timed_out = False
+    cancelled = False
 
     try:
         while True:
+            if cancel_event and cancel_event.is_set():
+                cancelled = True
+                _terminate("cancel")
+                break
             remaining = deadline - asyncio.get_event_loop().time()
             if remaining <= 0:
                 timed_out = True
-                _kill()
+                _terminate("timeout")
                 break
             try:
                 line = await asyncio.wait_for(queue.get(), timeout=min(remaining, 1.0))
@@ -521,10 +596,20 @@ async def _invoke_opencode(
             except Exception:
                 pass
 
-    await stream_future  # wait for thread to exit cleanly
+    if timed_out or cancelled:
+        await _wait_for_stream_exit_after_termination(
+            stream_future,
+            tool=tool,
+            timed_out=timed_out,
+            cancelled=cancelled,
+            timeout=timeout,
+            started=started,
+        )
+        if timed_out:
+            raise asyncio.TimeoutError()
+        return
 
-    if timed_out:
-        raise asyncio.TimeoutError()
+    await stream_future  # wait for thread to exit cleanly
 
     proc = proc_holder[0]
     if proc and proc.returncode not in (0, None):
