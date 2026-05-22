@@ -500,9 +500,9 @@ opencode:
 
 CLI 工具调用约定：
 
-- `nga` / `opencode`：使用 OpenCode 兼容布局，项目根目录写入 `opencode.json` 的 MCP 配置，并在 `.opencode/skills/<skill>/SKILL.md` 放置技能。
-- `hac`：按 Gemini CLI 兼容方式运行，Agent 会写入 `.gemini/settings.json` 的 MCP server，并把技能复制到 `.gemini/skills/`。
-- `claude`：按 Claude Code 兼容方式运行，Agent 会写入 `.claude/opendeephole-mcp.json` 并通过 `--mcp-config` 注入 MCP，同时把技能复制到 `.claude/skills/`。
+- `nga` / `opencode`：每个扫描或复核任务使用隔离的 OpenCode 配置目录，并通过 `OPENCODE_CONFIG_CONTENT` 注入当前任务的 MCP URL 和 SKILL 路径；`--dir` 仍指向真实项目根目录，不复制源码。
+- `hac`：按 Gemini CLI 兼容方式运行，Agent 会在任务隔离配置目录写入 `.gemini/settings.json` 的 MCP server，并把技能复制到 `.gemini/skills/`。
+- `claude`：按 Claude Code 兼容方式运行，Agent 会在任务隔离配置目录写入 `.claude/opendeephole-mcp.json` 并通过 `--mcp-config` 注入 MCP，同时把技能复制到 `.claude/skills/`。
 
 ## 本地开发
 
@@ -532,10 +532,9 @@ Agent 运行时会在以下位置产生数据：
 | 位置 | 内容 | 生命周期 |
 |------|------|---------|
 | `<项目目录>/code_index.db` | tree-sitter 代码索引（函数/结构体/调用关系） | 持久保留，后续扫描复用 |
-| `~/.opendeephole/scans/<scan_id>/` | 扫描工作目录（candidates.json、config.yaml、agent.log） | 扫描成功后自动删除；取消/出错时保留用于恢复 |
+| `~/.opendeephole/scans/<scan_id>/` | 扫描工作目录（candidates.json、config.yaml、agent.log、隔离 OpenCode 配置目录） | 扫描成功后自动删除；取消/出错时保留用于恢复 |
 | `~/.opendeephole/fp_feedback.json` | 本地误报反馈缓存 | 持久保留 |
 | `~/.opendeephole/fp_reviews/<review_id>/` | 误报复审临时目录 | 复审完成后自动删除 |
-| `<项目目录>/opencode.json` + `<项目目录>/.opencode/` | opencode 工作区（SKILL 文件、MCP 配置） | 扫描完成后自动清理 |
 
 服务端数据：
 

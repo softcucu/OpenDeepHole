@@ -42,27 +42,24 @@ def create_scan_workspace(
 ) -> Path:
     """Create an opencode workspace for a scan.
 
-    When *project_dir* is given the workspace is placed **inside** the
-    project directory so that opencode (and any LSP server it may use) can
-    locate and index the actual source files.  The opencode.json and skill
-    definitions are written to the project directory.
-
-    Falls back to a scan-specific directory under ``scans_dir`` when no
-    project directory is provided.
+    The workspace contains only OpenCode configuration and generated skills.
+    It is deliberately kept outside the project directory so concurrent scans
+    of the same project do not overwrite each other's MCP URL.
 
     Args:
         scan_id: Unique scan identifier.
-        project_dir: Project directory (preferred — enables LSP support).
+        project_dir: Project directory used only for legacy feedback lookup.
 
     Returns:
         Path to the workspace directory.
     """
-    if project_dir is not None and project_dir.is_dir():
-        workspace = project_dir
+    config = get_config()
+    scans_dir = Path(config.storage.scans_dir)
+    if scans_dir.name == scan_id:
+        workspace = scans_dir / "opencode_workspace"
     else:
-        config = get_config()
-        workspace = Path(config.storage.scans_dir) / scan_id
-        workspace.mkdir(parents=True, exist_ok=True)
+        workspace = scans_dir / scan_id / "opencode_workspace"
+    workspace.mkdir(parents=True, exist_ok=True)
 
     with get_workspace_lock(workspace):
         _write_opencode_config(workspace, mcp_port=mcp_port)
@@ -109,9 +106,9 @@ def _link_skill_resources(entry, link_dir: Path) -> None:
             link_dest.symlink_to(src.resolve())
 
 
-def build_opencode_config(mcp_url: str) -> dict:
+def build_opencode_config(mcp_url: str, skills_paths: list[str] | None = None) -> dict:
     """Build the canonical opencode.json content for OpenDeepHole workspaces."""
-    return {
+    data = {
         "$schema": "https://opencode.ai/config.json",
         "mcp": {
             "deephole-code": {
@@ -129,6 +126,9 @@ def build_opencode_config(mcp_url: str) -> dict:
             "edit": {"*": "deny"},
         },
     }
+    if skills_paths:
+        data["skills"] = {"paths": skills_paths}
+    return data
 
 
 def _write_opencode_config(workspace: Path, mcp_port: int | None = None) -> None:
@@ -138,7 +138,11 @@ def _write_opencode_config(workspace: Path, mcp_port: int | None = None) -> None
     mcp_url = f"http://127.0.0.1:{port}/mcp"
 
     config_path = workspace / "opencode.json"
-    config_path.write_text(json.dumps(build_opencode_config(mcp_url), indent=2))
+    skills_dir = (workspace / ".opencode" / "skills").resolve()
+    config_path.write_text(
+        json.dumps(build_opencode_config(mcp_url, [str(skills_dir)]), indent=2),
+        encoding="utf-8",
+    )
 
 
 def _link_skills(
@@ -238,12 +242,18 @@ def _link_skills(
 def cleanup_workspace(workspace: Path) -> None:
     """Remove opencode artifacts written into the workspace directory.
 
-    Only removes checker skill directories created by
-    :func:`create_scan_workspace`.  Shared FP review artifacts such as
-    ``.opencode/skills/fp-review`` are preserved so a resumed scan finishing
-    cannot break a concurrent false-positive review.
+    New scan workspaces are isolated ``opencode_workspace`` directories and can
+    be removed as a whole.  The legacy selective cleanup remains as a guard in
+    case callers pass a project-root workspace from an older runtime.
     """
     with get_workspace_lock(workspace):
+        if workspace.name == "opencode_workspace":
+            try:
+                shutil.rmtree(workspace, ignore_errors=True)
+            except Exception as exc:
+                logger.warning("Failed to remove opencode workspace %s: %s", workspace, exc)
+            return
+
         checker_names = list(get_registry().keys())
         skills_dir = workspace / ".opencode" / "skills"
         try:

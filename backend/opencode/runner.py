@@ -54,6 +54,7 @@ async def run_audit(
     on_output=None,
     cancel_event=None,
     timeout: int | None = None,
+    project_dir: Path | None = None,
 ) -> Vulnerability | None:
     """Run opencode to analyze a single candidate vulnerability.
 
@@ -62,7 +63,8 @@ async def run_audit(
     - LLM API mode: direct API call with function calling
 
     Args:
-        workspace: Path to the opencode workspace (contains opencode.json + skills).
+        workspace: Path to the generated opencode config workspace.
+        project_dir: Real project root used as the CLI code workspace.
         candidate: The candidate vulnerability to analyze.
         project_id: Project identifier for MCP tool calls.
         on_output: Optional callback(line: str) called for each output line in real-time.
@@ -118,6 +120,7 @@ async def run_audit(
         on_output=on_output,
         cancel_event=cancel_event,
         timeout=effective_timeout,
+        project_dir=project_dir,
     )
 
 
@@ -129,6 +132,7 @@ async def _run_audit_via_opencode(
     on_output=None,
     cancel_event=None,
     timeout: int | None = None,
+    project_dir: Path | None = None,
 ) -> Vulnerability | None:
     """Run the opencode CLI path regardless of checker mode."""
     config = get_config()
@@ -177,6 +181,7 @@ async def _run_audit_via_opencode(
             await _invoke_opencode(
                 workspace, prompt, effective_timeout,
                 log_path=log_path, on_line=on_output, cancel_event=cancel_event,
+                project_dir=project_dir,
             )
         except asyncio.TimeoutError:
             # Timeout — no retry; check if result was submitted before kill
@@ -282,9 +287,19 @@ def _resolve_cli_executable(config_obj) -> str:
     )
 
 
-def _read_mcp_url(workspace: Path) -> str:
+def _read_opencode_config(workspace: Path) -> dict:
     try:
         data = json.loads((workspace / "opencode.json").read_text(encoding="utf-8"))
+        if isinstance(data, dict):
+            return data
+    except Exception:
+        return {}
+    return {}
+
+
+def _read_mcp_url(workspace: Path) -> str:
+    try:
+        data = _read_opencode_config(workspace)
         server = data.get("mcp", {}).get("deephole-code", {})
         return str(server.get("url") or "")
     except Exception:
@@ -366,9 +381,17 @@ def _prepare_cli_workspace(workspace: Path, tool: str) -> None:
         _copy_skill_tree(opencode_skills, gemini_dir / "skills")
 
 
-def _build_cli_command(tool: str, executable: str, workspace: Path, prompt: str, model: str) -> list[str]:
+def _build_cli_command(
+    tool: str,
+    executable: str,
+    workspace: Path,
+    prompt: str,
+    model: str,
+    project_dir: Path | None = None,
+) -> list[str]:
     if tool in {"nga", "opencode"}:
-        cmd = [executable, "run", "--dir", str(workspace)]
+        code_dir = project_dir or workspace
+        cmd = [executable, "run", "--dir", str(code_dir)]
         if model:
             cmd += ["--model", model]
         cmd.append(prompt)
@@ -389,6 +412,22 @@ def _build_cli_command(tool: str, executable: str, workspace: Path, prompt: str,
         return cmd
 
     raise ValueError(f"Unsupported AI CLI tool: {tool}")
+
+
+def _build_cli_env(workspace: Path, tool: str, base_env: dict[str, str] | None = None) -> dict[str, str]:
+    env = dict(base_env or os.environ)
+    env["NODE_TLS_REJECT_UNAUTHORIZED"] = "0"
+    if tool in {"nga", "opencode"}:
+        opencode_config = _read_opencode_config(workspace)
+        if opencode_config:
+            env["OPENCODE_CONFIG_CONTENT"] = json.dumps(opencode_config, ensure_ascii=False)
+    return env
+
+
+def _select_cli_cwd(workspace: Path, tool: str, project_dir: Path | None = None) -> Path:
+    if tool in {"nga", "opencode"} and project_dir:
+        return project_dir
+    return workspace
 
 
 def _close_process_stdout(proc: subprocess.Popen) -> None:
@@ -473,6 +512,7 @@ async def _invoke_opencode(
     on_line=None,
     cancel_event=None,
     cli_config=None,
+    project_dir: Path | None = None,
 ) -> None:
     """Invoke the configured AI CLI, stream output line-by-line, write to log file.
 
@@ -487,12 +527,12 @@ async def _invoke_opencode(
     executable = _resolve_cli_executable(cli_config)
     model = str(_cfg_value(cli_config, "model", "") or "")
     _prepare_cli_workspace(workspace, tool)
-    cmd = _build_cli_command(tool, executable, workspace, prompt, model)
+    cmd = _build_cli_command(tool, executable, workspace, prompt, model, project_dir=project_dir)
 
     logger.debug("%s command: %s", tool, " ".join(shlex.quote(part) for part in cmd))
 
-    env = os.environ.copy()
-    env["NODE_TLS_REJECT_UNAUTHORIZED"] = "0"
+    env = _build_cli_env(workspace, tool)
+    cwd = _select_cli_cwd(workspace, tool, project_dir)
 
     kwargs: dict = {}
     if sys.platform == "win32":
@@ -509,7 +549,7 @@ async def _invoke_opencode(
         """Blocking: run the selected CLI, push lines into the asyncio queue."""
         proc = subprocess.Popen(
             cmd,
-            cwd=str(workspace),
+            cwd=str(cwd),
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
@@ -659,6 +699,7 @@ async def run_audit_batch(
     on_output=None,
     cancel_event=None,
     timeout: int | None = None,
+    project_dir: Path | None = None,
 ) -> list[Vulnerability | None]:
     """Run batch audit for multiple candidates in the same function.
 
@@ -713,6 +754,7 @@ async def run_audit_batch(
             on_output=on_output,
             cancel_event=cancel_event,
             timeout=timeout,
+            project_dir=project_dir,
         )
         results.append(vuln)
     return results

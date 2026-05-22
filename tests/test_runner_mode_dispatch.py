@@ -1,4 +1,5 @@
 import asyncio
+import json
 import time
 import sys
 from pathlib import Path
@@ -12,7 +13,9 @@ from backend.opencode import llm_api_runner
 from backend.opencode.llm_api_runner import LLMApiUnavailableError
 from backend.opencode.runner import (
     _build_cli_command,
+    _build_cli_env,
     _prepare_cli_workspace,
+    _select_cli_cwd,
     _terminate_process_tree,
     _wait_for_stream_exit_after_termination,
     run_audit,
@@ -34,11 +37,14 @@ def test_cli_command_builders_use_selected_tool(tmp_path: Path) -> None:
     claude = _build_cli_command("claude", "claude", tmp_path, "hello", "sonnet")
     hac = _build_cli_command("hac", "hac", tmp_path, "hello", "gemini-model")
     nga = _build_cli_command("nga", "nga", tmp_path, "hello", "qwen")
+    project_dir = tmp_path / "project"
+    isolated_nga = _build_cli_command("nga", "nga", tmp_path, "hello", "qwen", project_dir=project_dir)
 
     assert claude[:3] == ["claude", "-p", "--mcp-config"]
     assert "--model" in claude
     assert hac == ["hac", "--model", "gemini-model", "-p", "hello"]
     assert nga[:3] == ["nga", "run", "--dir"]
+    assert isolated_nga[:4] == ["nga", "run", "--dir", str(project_dir)]
     assert "--model" in nga
 
 
@@ -58,6 +64,23 @@ def test_prepare_cli_workspace_creates_claude_and_gemini_skill_configs(tmp_path:
     assert (tmp_path / ".claude" / "skills" / "fp-review" / "SKILL.md").is_file()
     assert (tmp_path / ".gemini" / "settings.json").is_file()
     assert (tmp_path / ".gemini" / "skills" / "fp-review" / "SKILL.md").is_file()
+
+
+def test_opencode_uses_injected_config_and_project_dir_with_isolated_workspace(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    project = tmp_path / "project"
+    workspace.mkdir()
+    project.mkdir()
+    config_payload = {
+        "mcp": {"deephole-code": {"url": "http://127.0.0.1:9123/mcp"}},
+        "skills": {"paths": [str(workspace / ".opencode" / "skills")]},
+    }
+    (workspace / "opencode.json").write_text(json.dumps(config_payload), encoding="utf-8")
+    env = _build_cli_env(workspace, "opencode", base_env={})
+
+    assert _select_cli_cwd(workspace, "opencode", project) == project
+    assert json.loads(env["OPENCODE_CONFIG_CONTENT"]) == config_payload
+    assert env["NODE_TLS_REJECT_UNAUTHORIZED"] == "0"
 
 
 class _FakeStdout:

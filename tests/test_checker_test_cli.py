@@ -135,7 +135,15 @@ def test_checker_test_cli_audit_uses_existing_audit_path(tmp_path: Path, monkeyp
         def stop(self) -> None:
             return None
 
-    async def fake_run_audit(workspace, candidate, project_id, on_output=None, cancel_event=None, timeout=None):
+    async def fake_run_audit(
+        workspace,
+        candidate,
+        project_id,
+        on_output=None,
+        cancel_event=None,
+        timeout=None,
+        project_dir=None,
+    ):
         calls.append((candidate.file, candidate.line))
         return Vulnerability(
             file=candidate.file,

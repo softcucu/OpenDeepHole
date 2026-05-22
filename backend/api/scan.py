@@ -955,6 +955,7 @@ async def _run_scan(
     store = get_scan_store()
     if processed_keys is None:
         processed_keys = set()
+    workspace: Path | None = None
 
     def emit(phase: str, message: str, candidate_index: int | None = None) -> None:
         event = ScanEvent.create(phase, message, candidate_index)
@@ -973,6 +974,9 @@ async def _run_scan(
         # Phase 1+2: Static analysis + AI audit (concurrent via queue)
         scan.status = ScanItemStatus.ANALYZING
         store.update_scan_progress(scan_id, status=ScanItemStatus.ANALYZING)
+
+        from backend.opencode.config import create_scan_workspace
+        from backend.opencode.runner import run_audit, run_audit_batch
 
         workspace = create_scan_workspace(scan_id, project_dir=project_dir, feedback_entries=feedback_entries)
         _scan_workspaces[scan_id] = workspace
@@ -1134,6 +1138,7 @@ async def _run_scan(
                             workspace, candidate, project_id,
                             on_output=on_output,
                             cancel_event=cancel_event,
+                            project_dir=project_dir,
                         )
 
                         if cancel_event.is_set():
@@ -1188,6 +1193,7 @@ async def _run_scan(
                             workspace, group, project_id,
                             on_output=on_batch_output,
                             cancel_event=cancel_event,
+                            project_dir=project_dir,
                         )
 
                         if cancel_event.is_set():
@@ -1325,3 +1331,6 @@ async def _run_scan(
         _scan_owners.pop(scan_id, None)
         _scan_cancel_events.pop(scan_id, None)
         _scan_workspaces.pop(scan_id, None)
+        if workspace is not None:
+            from backend.opencode.config import cleanup_workspace
+            cleanup_workspace(workspace)

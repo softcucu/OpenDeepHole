@@ -377,6 +377,7 @@ async def _run_audits(
                 scan_id,
                 on_output=None if quiet else lambda line: print(f"  {line}", flush=True),
                 cancel_event=cancel_event,
+                project_dir=project_path,
             )
             results.append(_audit_payload(candidate, vuln))
         return results

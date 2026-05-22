@@ -156,8 +156,8 @@ async def run_fp_review(
 
         await emit("fp_review", f"Starting FP review: {len(vulnerabilities)} confirmed vulnerabilities")
 
-        # Create workspace with opencode.json + fp-review SKILL.
-        workspace = _create_fp_workspace(project, mcp_port)
+        # Create an isolated config workspace with opencode.json + fp-review SKILL.
+        workspace = _create_fp_workspace(review_dir / "opencode_workspace", mcp_port)
         await emit("fp_review", "FP review workspace ready")
 
         from backend.config import get_config
@@ -171,7 +171,7 @@ async def run_fp_review(
             vuln_index = int(vuln["index"])
             result_id = uuid4().hex
             _create_fp_workspace(
-                project,
+                workspace,
                 mcp_port,
                 vuln_type=vuln["vuln_type"],
                 feedback_entries=get_fp_review_feedback(scan_id),
@@ -221,6 +221,7 @@ async def run_fp_review(
                     on_line=lambda line: print(f"  [fp_opencode] {line}", flush=True),
                     cancel_event=cancel_event,
                     cli_config=fp_cli,
+                    project_dir=project,
                 )
 
                 fake_candidate = Candidate(
@@ -393,21 +394,24 @@ def _read_fp_result_payload(result_id: str) -> dict:
 
 
 def _create_fp_workspace(
-    project_path: Path,
+    workspace: Path,
     mcp_port: int,
     vuln_type: str | None = None,
     feedback_entries: list[dict] | None = None,
 ) -> Path:
-    """Ensure project-root opencode config and fp-review SKILL exist."""
+    """Ensure isolated opencode config and fp-review SKILL exist."""
     from backend.opencode.config import build_opencode_config, get_workspace_lock
     from backend.opencode.feedback_format import format_feedback_experience
 
-    workspace = project_path
-
     with get_workspace_lock(workspace):
+        workspace.mkdir(parents=True, exist_ok=True)
+        skills_root = (workspace / ".opencode" / "skills").resolve()
         (workspace / "opencode.json").write_text(
             json.dumps(
-                build_opencode_config(f"http://127.0.0.1:{mcp_port}/mcp"),
+                build_opencode_config(
+                    f"http://127.0.0.1:{mcp_port}/mcp",
+                    [str(skills_root)],
+                ),
                 indent=2,
             ),
             encoding="utf-8",
@@ -437,10 +441,14 @@ def _create_fp_workspace(
 
 
 def _cleanup_fp_workspace(workspace: Path) -> None:
-    """Remove FP review artifacts written into the project directory."""
+    """Remove FP review artifacts written into the isolated config workspace."""
     from backend.opencode.config import get_workspace_lock
 
     with get_workspace_lock(workspace):
+        if workspace.name == "opencode_workspace":
+            shutil.rmtree(workspace, ignore_errors=True)
+            return
+
         try:
             fp_skill_dir = workspace / ".opencode" / "skills" / "fp-review"
             if fp_skill_dir.is_dir():

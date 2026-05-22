@@ -689,6 +689,7 @@ async def run_scan(
                     on_output=lambda line: print(f"  {line}", flush=True),
                     cancel_event=cancel_event,
                     timeout=config.opencode.timeout,
+                    project_dir=project_path,
                 )
             except Exception as exc:
                 await emit("auditing", f"[{global_index + 1}] Analysis error: {exc}", candidate_index=global_index)

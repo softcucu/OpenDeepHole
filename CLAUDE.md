@@ -65,7 +65,7 @@ Each scan runs the full pipeline locally on the agent machine:
 1. Index    — tree-sitter C++ parse → code_index.db (reuses IndexStore cache if available)
 2. Feedback — fetch false-positive history from server (for SKILL enrichment)
 3. MCP      — start LocalMCPServer in-process on a random port (CLI audit mode only)
-4. Workspace — create_scan_workspace() with opencode.json + skill symlinks + merged feedback
+4. Workspace — create_scan_workspace() with per-task opencode.json + skill symlinks + merged feedback
 5. Static   — each checker's analyzer.find_candidates() → candidate list (cached for resume)
 6. AI audit — run_audit() per candidate (selected CLI tool or LLM API direct call)
 7. Report   — upload vulnerabilities + finish event to server; clean up on completion
@@ -91,9 +91,9 @@ Each checker independently chooses its AI invocation mode via `checker.yaml`:
 - `mode: api` — uses LLM API direct call + `prompt.txt` as system prompt (requires `llm_api.enabled: true` in `config.yaml`)
 
 Agent CLI tool notes:
-- `nga` and `opencode` use OpenCode-compatible `opencode.json` MCP config and `.opencode/skills`.
-- `hac` uses Gemini CLI-compatible `.gemini/settings.json` MCP config and copied `.gemini/skills`.
-- `claude` uses Claude Code-compatible `--mcp-config` plus copied `.claude/skills`.
+- `nga` and `opencode` use per-task OpenCode-compatible config injected through `OPENCODE_CONFIG_CONTENT`; `--dir` still points at the real project root.
+- `hac` uses per-task Gemini CLI-compatible `.gemini/settings.json` MCP config and copied `.gemini/skills`.
+- `claude` uses per-task Claude Code-compatible `--mcp-config` plus copied `.claude/skills`.
 - `fp_review_cli` may override the AI false-positive review tool/model; when omitted, FP review inherits the normal audit CLI config.
 
 To add a new checker: create a directory with `checker.yaml` + `SKILL.md` (or `prompt.txt`). No code changes needed.  
@@ -149,7 +149,7 @@ tail -f logs/opendeephole.log
 - Logging uses `backend/logger.py` — get logger with `get_logger(__name__)`
 - Pydantic models for all API request/response in `backend/models.py`
 - `vuln_type` is a plain string (not enum) matching the checker directory name
-- CLI workspaces are created under the project root, with `opencode.json` as the canonical MCP config and tool-specific copies for Claude/Gemini-compatible CLIs
+- CLI config workspaces are created per scan/review under the task directory; `opencode`/`nga` receive config through `OPENCODE_CONFIG_CONTENT` while `--dir` still points at the real project root
 - Agent configs (LLM API key, model, etc.) are stored server-side in `_agent_configs` (keyed by agent name) and pushed to agents on connect and on UI save
 - **Always update both README.md and CLAUDE.md when making structural or architectural changes**
 

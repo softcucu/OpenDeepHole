@@ -2,6 +2,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from agent.fp_reviewer import _cleanup_fp_workspace, _create_fp_workspace
@@ -156,19 +157,30 @@ class OpencodeWorkspaceTests(unittest.TestCase):
                 updated_at="2026-05-16T00:00:00",
             )
 
-            with patch("backend.opencode.config.get_registry", return_value={"memleak": entry}):
-                create_scan_workspace(
+            scans_dir = root / "scans"
+            fake_config = SimpleNamespace(
+                storage=SimpleNamespace(scans_dir=str(scans_dir)),
+                mcp_server=SimpleNamespace(port=8100),
+            )
+
+            with (
+                patch("backend.opencode.config.get_config", return_value=fake_config),
+                patch("backend.opencode.config.get_registry", return_value={"memleak": entry}),
+            ):
+                workspace = create_scan_workspace(
                     "scan-1",
                     project_dir=project,
                     feedback_entries=[feedback],
                     mcp_port=9123,
                 )
 
-            skill_dir = project / ".opencode" / "skills" / "memleak"
+            skill_dir = workspace / ".opencode" / "skills" / "memleak"
             prompt = (skill_dir / "PROMPT.md").read_text(encoding="utf-8")
             skill = (skill_dir / "SKILL.md").read_text(encoding="utf-8")
-            config = json.loads((project / "opencode.json").read_text(encoding="utf-8"))
+            config = json.loads((workspace / "opencode.json").read_text(encoding="utf-8"))
 
+            self.assertEqual(workspace, scans_dir / "scan-1" / "opencode_workspace")
+            self.assertFalse((project / "opencode.json").exists())
             self.assertIn("api prompt", prompt)
             self.assertIn("fallback skill", skill)
             self.assertIn("历史用户经验", prompt)
@@ -183,7 +195,34 @@ class OpencodeWorkspaceTests(unittest.TestCase):
                 config["mcp"]["deephole-code"]["url"],
                 "http://127.0.0.1:9123/mcp",
             )
+            self.assertEqual(config["skills"]["paths"], [str((workspace / ".opencode" / "skills").resolve())])
             assert_opencode_read_permissions(self, config)
+
+    def test_scan_workspaces_are_isolated_per_scan_for_same_project(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            project = root / "project"
+            project.mkdir()
+            scans_dir = root / "scans"
+            fake_config = SimpleNamespace(
+                storage=SimpleNamespace(scans_dir=str(scans_dir)),
+                mcp_server=SimpleNamespace(port=8100),
+            )
+
+            with (
+                patch("backend.opencode.config.get_config", return_value=fake_config),
+                patch("backend.opencode.config.get_registry", return_value={}),
+            ):
+                workspace_a = create_scan_workspace("scan-a", project_dir=project, mcp_port=9001)
+                workspace_b = create_scan_workspace("scan-b", project_dir=project, mcp_port=9002)
+
+            config_a = json.loads((workspace_a / "opencode.json").read_text(encoding="utf-8"))
+            config_b = json.loads((workspace_b / "opencode.json").read_text(encoding="utf-8"))
+
+            self.assertNotEqual(workspace_a, workspace_b)
+            self.assertEqual(config_a["mcp"]["deephole-code"]["url"], "http://127.0.0.1:9001/mcp")
+            self.assertEqual(config_b["mcp"]["deephole-code"]["url"], "http://127.0.0.1:9002/mcp")
+            self.assertFalse((project / "opencode.json").exists())
 
 
 if __name__ == "__main__":
