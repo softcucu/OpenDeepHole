@@ -60,6 +60,8 @@ export interface Vulnerability {
   ai_verdict?: "confirmed" | "not_confirmed" | "timeout" | "no_result" | "";
   user_verdict?: "confirmed" | "false_positive" | null;
   user_verdict_reason?: string | null;
+  ticket_submitted?: boolean;
+  ticket_id?: string;
   function_source?: string;
   function_start_line?: number | null;
 }
@@ -114,6 +116,8 @@ export interface FeedbackEntry {
   function: string;
   description: string;
   reason: string;
+  ticket_submitted: boolean;
+  ticket_id: string;
   function_source: string;
   function_start_line: number | null;
   source_scan_id: string | null;
@@ -225,6 +229,7 @@ export interface CheckerScanDashboardStats {
   fp_review_false_positive_count: number;
   human_confirmed_count: number;
   human_false_positive_count: number;
+  ticket_submitted_count: number;
   accuracy_basis_count: number;
   accuracy: number | null;
 }
@@ -242,6 +247,7 @@ export interface CheckerDashboardStats {
   fp_review_false_positive_count: number;
   human_confirmed_count: number;
   human_false_positive_count: number;
+  ticket_submitted_count: number;
   accuracy_basis_count: number;
   accuracy: number | null;
   scans: CheckerScanDashboardStats[];
@@ -257,6 +263,7 @@ export interface CheckerDashboardSummary {
   fp_review_false_positive_count: number;
   total_issue_count: number;
   human_confirmed_count: number;
+  ticket_submitted_count: number;
   accuracy_basis_count: number;
   accuracy: number | null;
 }

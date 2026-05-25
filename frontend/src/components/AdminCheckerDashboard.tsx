@@ -84,13 +84,15 @@ export default function AdminCheckerDashboard({ onBack, onViewScan }: Props) {
           </div>
         ) : data ? (
           <div className="max-w-7xl mx-auto">
-            <div className="grid grid-cols-2 md:grid-cols-4 xl:grid-cols-7 gap-3 mb-6">
+            <div className="grid grid-cols-2 md:grid-cols-4 xl:grid-cols-9 gap-3 mb-6">
               <MetricTile label="SKILL" value={data.summary.checker_count} />
+              <MetricTile label="扫描次数" value={data.summary.scan_count} />
               <MetricTile label="静态发现" value={data.summary.static_issue_count} />
               <MetricTile label="LLM 确认" value={data.summary.llm_issue_count} />
               <MetricTile label="复核确认" value={data.summary.fp_review_issue_count} />
               <MetricTile label="有效问题" value={data.summary.total_issue_count} />
               <MetricTile label="人工确认" value={data.summary.human_confirmed_count} />
+              <MetricTile label="已提单" value={data.summary.ticket_submitted_count} />
               <MetricTile
                 label="准确率"
                 value={formatAccuracy(data.summary.accuracy)}
@@ -217,13 +219,14 @@ function CheckerDetail({
         </div>
       </div>
 
-      <div className="grid grid-cols-2 lg:grid-cols-6 border-b border-slate-800">
+      <div className="grid grid-cols-2 lg:grid-cols-7 border-b border-slate-800">
         <DetailStat label="扫描项目" value={checker.project_count} />
         <DetailStat label="扫描次数" value={checker.scan_count} />
         <DetailStat label="静态报告问题" value={checker.static_issue_count} />
         <DetailStat label="LLM 判定问题" value={checker.llm_issue_count} />
         <DetailStat label="FP 复核真问题" value={checker.fp_review_issue_count} tone="red" />
         <DetailStat label="FP 复核误报" value={checker.fp_review_false_positive_count} tone="amber" />
+        <DetailStat label="已提单" value={checker.ticket_submitted_count} tone="blue" />
       </div>
 
       <div className="px-5 py-4 border-b border-slate-800">
@@ -256,6 +259,7 @@ function CheckerDetail({
               <Th>LLM 问题</Th>
               <Th>FP 真/误</Th>
               <Th>人工真/误</Th>
+              <Th>已提单</Th>
               <Th>准确率</Th>
               <Th>创建者</Th>
               <Th>时间</Th>
@@ -264,7 +268,7 @@ function CheckerDetail({
           <tbody>
             {checker.scans.length === 0 ? (
               <tr>
-                <td colSpan={10} className="px-4 py-10 text-center text-sm text-slate-500">
+                <td colSpan={11} className="px-4 py-10 text-center text-sm text-slate-500">
                   这个 SKILL 还没有扫描记录
                 </td>
               </tr>
@@ -319,6 +323,7 @@ function ScanRow({
         <span className="text-slate-600 mx-1">/</span>
         <span className="text-slate-400">{scan.human_false_positive_count}</span>
       </td>
+      <td className="px-4 py-3 text-blue-300">{scan.ticket_submitted_count}</td>
       <td className="px-4 py-3">
         <span className={scan.accuracy === null ? "text-xs text-slate-500" : "text-xs font-semibold text-emerald-300"}>
           {formatAccuracy(scan.accuracy)}
@@ -337,10 +342,16 @@ function DetailStat({
 }: {
   label: string;
   value: number;
-  tone?: "slate" | "red" | "amber";
+  tone?: "slate" | "red" | "amber" | "blue";
 }) {
   const valueCls =
-    tone === "red" ? "text-red-300" : tone === "amber" ? "text-amber-300" : "text-white";
+    tone === "red"
+      ? "text-red-300"
+      : tone === "amber"
+        ? "text-amber-300"
+        : tone === "blue"
+          ? "text-blue-300"
+          : "text-white";
   return (
     <div className="px-5 py-4 border-r border-slate-800 last:border-r-0">
       <div className="text-xs text-slate-500 mb-1">{label}</div>

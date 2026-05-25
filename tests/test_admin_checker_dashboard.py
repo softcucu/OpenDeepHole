@@ -5,6 +5,7 @@ from unittest.mock import patch
 
 from backend.api.admin import get_checker_dashboard
 from backend.models import (
+    FeedbackEntry,
     FpReviewResult,
     ScanItemStatus,
     ScanMeta,
@@ -56,6 +57,43 @@ class FakeScanStore:
                 verdict="tp",
                 reason="reviewed true positive",
                 created_at="2026-01-01T00:01:00+00:00",
+            ),
+        ]
+
+    def list_feedback_by_scan(self, scan_id: str) -> list[FeedbackEntry]:
+        if scan_id != self.scan.scan_id:
+            return []
+        return [
+            FeedbackEntry(
+                id="feedback-1",
+                project_id=self.scan.project_id,
+                vuln_type="npd",
+                verdict="confirmed",
+                file="a.c",
+                line=1,
+                function="a",
+                description="confirmed by llm and human",
+                reason="filed",
+                ticket_submitted=True,
+                ticket_id="BUG-1",
+                source_scan_id=scan_id,
+                created_at="2026-01-01T00:00:00+00:00",
+                updated_at="2026-01-01T00:00:00+00:00",
+            ),
+            FeedbackEntry(
+                id="feedback-2",
+                project_id=self.scan.project_id,
+                vuln_type="npd",
+                verdict="false_positive",
+                file="b.c",
+                line=2,
+                function="b",
+                description="review false positive",
+                reason="not filed",
+                ticket_submitted=False,
+                source_scan_id=scan_id,
+                created_at="2026-01-01T00:01:00+00:00",
+                updated_at="2026-01-01T00:01:00+00:00",
             ),
         ]
 
@@ -153,8 +191,12 @@ class AdminCheckerDashboardTests(unittest.TestCase):
         self.assertEqual(response.summary.fp_review_false_positive_count, 1)
         self.assertEqual(response.summary.total_issue_count, 2)
         self.assertEqual(response.summary.human_confirmed_count, 2)
+        self.assertEqual(response.summary.ticket_submitted_count, 1)
         self.assertEqual(response.summary.accuracy_basis_count, 2)
         self.assertEqual(response.summary.accuracy, 1.0)
+        npd = next(checker for checker in response.checkers if checker.checker == "npd")
+        self.assertEqual(npd.ticket_submitted_count, 1)
+        self.assertEqual(npd.scans[0].ticket_submitted_count, 1)
 
 
 if __name__ == "__main__":

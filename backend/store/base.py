@@ -80,7 +80,13 @@ class ScanStoreBase(ABC):
 
     @abstractmethod
     def update_vulnerability(
-        self, scan_id: str, index: int, verdict: str, reason: str
+        self,
+        scan_id: str,
+        index: int,
+        verdict: str,
+        reason: str,
+        ticket_submitted: bool = False,
+        ticket_id: str = "",
     ) -> None:
         """Update user verdict on a vulnerability."""
 
@@ -123,8 +129,15 @@ class ScanStoreBase(ABC):
         """Create or replace feedback for the same source vulnerability report."""
 
     @abstractmethod
-    def update_feedback(self, feedback_id: str, verdict: str | None, reason: str | None) -> bool:
-        """Update verdict/reason on a feedback entry. Returns False if not found."""
+    def update_feedback(
+        self,
+        feedback_id: str,
+        verdict: str | None,
+        reason: str | None,
+        ticket_submitted: bool | None = None,
+        ticket_id: str | None = None,
+    ) -> bool:
+        """Update mutable feedback fields. Returns False if not found."""
 
     @abstractmethod
     def delete_feedback(self, feedback_id: str) -> bool:

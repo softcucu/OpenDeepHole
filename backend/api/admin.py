@@ -40,6 +40,7 @@ class _MutableCheckerStats:
     fp_review_false_positive_count: int = 0
     human_confirmed_count: int = 0
     human_false_positive_count: int = 0
+    ticket_submitted_count: int = 0
     accuracy_basis_count: int = 0
     scans: list[CheckerScanDashboardStats] = field(default_factory=list)
 
@@ -53,6 +54,7 @@ def _scan_stats_for_checker(
     scan_name: str,
     project_path: str,
     agent_name: str,
+    ticket_submitted_count: int,
 ) -> CheckerScanDashboardStats:
     metrics = calculate_issue_metrics(
         scan.vulnerabilities,
@@ -75,6 +77,7 @@ def _scan_stats_for_checker(
         fp_review_false_positive_count=metrics.fp_review_false_positive_count,
         human_confirmed_count=metrics.human_confirmed_count,
         human_false_positive_count=metrics.human_false_positive_count,
+        ticket_submitted_count=ticket_submitted_count,
         accuracy_basis_count=metrics.accuracy_basis_count,
         accuracy=metrics.accuracy,
     )
@@ -113,6 +116,7 @@ async def get_checker_dashboard(
         fp_results = latest_fp_review_result_map(
             store.list_fp_review_results_by_scan(scan.scan_id)
         )
+        feedback_entries = store.list_feedback_by_scan(scan.scan_id)
 
         for checker in meta.scan_items:
             if checker not in stats:
@@ -126,6 +130,11 @@ async def get_checker_dashboard(
             checker_stats.scan_count += 1
             if project_label:
                 checker_stats.projects.add(project_label)
+            ticket_submitted_count = sum(
+                1
+                for entry in feedback_entries
+                if entry.vuln_type == checker and entry.ticket_submitted
+            )
 
             per_scan = _scan_stats_for_checker(
                 scan=scan,
@@ -135,6 +144,7 @@ async def get_checker_dashboard(
                 scan_name=meta.scan_name,
                 project_path=meta.project_path,
                 agent_name=meta.agent_name,
+                ticket_submitted_count=ticket_submitted_count,
             )
             checker_stats.static_issue_count += per_scan.static_issue_count
             checker_stats.llm_issue_count += per_scan.llm_issue_count
@@ -142,6 +152,7 @@ async def get_checker_dashboard(
             checker_stats.fp_review_false_positive_count += per_scan.fp_review_false_positive_count
             checker_stats.human_confirmed_count += per_scan.human_confirmed_count
             checker_stats.human_false_positive_count += per_scan.human_false_positive_count
+            checker_stats.ticket_submitted_count += per_scan.ticket_submitted_count
             checker_stats.accuracy_basis_count += per_scan.accuracy_basis_count
             checker_stats.scans.append(per_scan)
 
@@ -159,6 +170,7 @@ async def get_checker_dashboard(
             fp_review_false_positive_count=item.fp_review_false_positive_count,
             human_confirmed_count=item.human_confirmed_count,
             human_false_positive_count=item.human_false_positive_count,
+            ticket_submitted_count=item.ticket_submitted_count,
             accuracy_basis_count=item.accuracy_basis_count,
             accuracy=accuracy(item.human_confirmed_count, item.accuracy_basis_count),
             scans=item.scans,
@@ -174,6 +186,7 @@ async def get_checker_dashboard(
         item.fp_review_false_positive_count for item in checkers
     )
     human_confirmed_count = sum(item.human_confirmed_count for item in checkers)
+    ticket_submitted_count = sum(item.ticket_submitted_count for item in checkers)
     accuracy_basis_count = sum(item.accuracy_basis_count for item in checkers)
 
     return CheckerDashboardResponse(
@@ -187,6 +200,7 @@ async def get_checker_dashboard(
             fp_review_false_positive_count=fp_review_false_positive_count,
             total_issue_count=llm_issue_count - fp_review_false_positive_count,
             human_confirmed_count=human_confirmed_count,
+            ticket_submitted_count=ticket_submitted_count,
             accuracy_basis_count=accuracy_basis_count,
             accuracy=accuracy(human_confirmed_count, accuracy_basis_count),
         ),

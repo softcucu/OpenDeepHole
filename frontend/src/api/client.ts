@@ -152,8 +152,16 @@ export async function markVulnerability(
   index: number,
   verdict: string,
   reason: string,
+  ticketSubmitted = false,
+  ticketId = "",
 ): Promise<{ ok: boolean; feedback_id: string }> {
-  const { data } = await api.post(`/api/scan/${scanId}/mark`, { index, verdict, reason });
+  const { data } = await api.post(`/api/scan/${scanId}/mark`, {
+    index,
+    verdict,
+    reason,
+    ticket_submitted: ticketSubmitted,
+    ticket_id: ticketSubmitted ? ticketId : "",
+  });
   return data;
 }
 
@@ -194,6 +202,8 @@ export async function createFeedback(body: {
   function: string;
   description: string;
   reason?: string;
+  ticket_submitted?: boolean;
+  ticket_id?: string;
   function_source?: string;
   function_start_line?: number | null;
   source_scan_id?: string;
@@ -204,7 +214,7 @@ export async function createFeedback(body: {
 
 export async function updateFeedback(
   feedbackId: string,
-  body: { verdict?: string; reason?: string },
+  body: { verdict?: string; reason?: string; ticket_submitted?: boolean; ticket_id?: string },
 ): Promise<FeedbackEntry> {
   const { data } = await api.put<FeedbackEntry>(`/api/feedback/${feedbackId}`, body);
   return data;

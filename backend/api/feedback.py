@@ -50,6 +50,8 @@ async def create_feedback(
         function=body.function,
         description=body.description,
         reason=body.reason,
+        ticket_submitted=body.ticket_submitted,
+        ticket_id=body.ticket_id.strip() if body.ticket_submitted else "",
         function_source=body.function_source,
         function_start_line=body.function_start_line,
         source_scan_id=body.source_scan_id,
@@ -73,7 +75,13 @@ async def update_feedback(
         raise HTTPException(status_code=400, detail="Invalid verdict")
 
     store = get_scan_store()
-    ok = store.update_feedback(feedback_id, body.verdict, body.reason)
+    ok = store.update_feedback(
+        feedback_id,
+        body.verdict,
+        body.reason,
+        body.ticket_submitted,
+        body.ticket_id,
+    )
     if not ok:
         raise HTTPException(status_code=404, detail="Feedback entry not found")
 

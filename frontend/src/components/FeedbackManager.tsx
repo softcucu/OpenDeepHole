@@ -41,6 +41,8 @@ export default function FeedbackManager({
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editVerdict, setEditVerdict] = useState<string>("");
   const [editReason, setEditReason] = useState<string>("");
+  const [editTicketSubmitted, setEditTicketSubmitted] = useState(false);
+  const [editTicketId, setEditTicketId] = useState("");
   const [addMode, setAddMode] = useState(false);
   const [addForm, setAddForm] = useState({
     vuln_type: "",
@@ -50,6 +52,8 @@ export default function FeedbackManager({
     function: "",
     description: "",
     reason: "",
+    ticket_submitted: false,
+    ticket_id: "",
     function_source: "",
   });
 
@@ -132,6 +136,8 @@ export default function FeedbackManager({
     setEditingId(entry.id);
     setEditVerdict(entry.verdict);
     setEditReason(entry.reason);
+    setEditTicketSubmitted(entry.ticket_submitted);
+    setEditTicketId(entry.ticket_id || "");
   };
 
   const handleSaveEdit = async () => {
@@ -140,6 +146,8 @@ export default function FeedbackManager({
       const updated = await updateFeedback(editingId, {
         verdict: editVerdict,
         reason: editReason,
+        ticket_submitted: editTicketSubmitted,
+        ticket_id: editTicketSubmitted ? editTicketId : "",
       });
       setEntries((prev) => prev.map((e) => (e.id === editingId ? updated : e)));
       setEditingId(null);
@@ -174,7 +182,10 @@ export default function FeedbackManager({
         function: addForm.function,
         description: addForm.description,
         reason: addForm.reason,
+        ticket_submitted: addForm.ticket_submitted,
+        ticket_id: addForm.ticket_submitted ? addForm.ticket_id : "",
         function_source: addForm.function_source,
+        source_scan_id: scanId,
       });
       setEntries((prev) => [entry, ...prev]);
       await onFeedbackCreated?.([entry.id]);
@@ -187,6 +198,8 @@ export default function FeedbackManager({
         function: "",
         description: "",
         reason: "",
+        ticket_submitted: false,
+        ticket_id: "",
         function_source: "",
       });
     } catch {
@@ -384,6 +397,29 @@ export default function FeedbackManager({
               placeholder="理由"
               className="w-full bg-slate-700 border border-slate-600 rounded px-2 py-1 text-xs text-slate-200 placeholder-slate-500"
             />
+            <div className="flex flex-wrap items-center gap-2">
+              <label className="flex items-center gap-1.5 text-xs text-slate-300">
+                <input
+                  type="checkbox"
+                  checked={addForm.ticket_submitted}
+                  onChange={(e) => setAddForm((f) => ({
+                    ...f,
+                    ticket_submitted: e.target.checked,
+                    ticket_id: e.target.checked ? f.ticket_id : "",
+                  }))}
+                  className="h-3.5 w-3.5 rounded accent-blue-600"
+                />
+                已提单
+              </label>
+              {addForm.ticket_submitted && (
+                <input
+                  value={addForm.ticket_id}
+                  onChange={(e) => setAddForm((f) => ({ ...f, ticket_id: e.target.value }))}
+                  placeholder="问题单号"
+                  className="min-w-[10rem] flex-1 bg-slate-700 border border-slate-600 rounded px-2 py-1 text-xs text-slate-200 placeholder-slate-500"
+                />
+              )}
+            </div>
             <textarea
               value={addForm.function_source}
               onChange={(e) => setAddForm((f) => ({ ...f, function_source: e.target.value }))}
@@ -430,8 +466,12 @@ export default function FeedbackManager({
                   editing={editingId === entry.id}
                   editVerdict={editVerdict}
                   editReason={editReason}
+                  editTicketSubmitted={editTicketSubmitted}
+                  editTicketId={editTicketId}
                   onEditVerdictChange={setEditVerdict}
                   onEditReasonChange={setEditReason}
+                  onEditTicketSubmittedChange={setEditTicketSubmitted}
+                  onEditTicketIdChange={setEditTicketId}
                   onStartEdit={() => handleStartEdit(entry)}
                   onSaveEdit={handleSaveEdit}
                   onCancelEdit={() => setEditingId(null)}
@@ -454,8 +494,12 @@ function FeedbackRow({
   editing,
   editVerdict,
   editReason,
+  editTicketSubmitted,
+  editTicketId,
   onEditVerdictChange,
   onEditReasonChange,
+  onEditTicketSubmittedChange,
+  onEditTicketIdChange,
   onStartEdit,
   onSaveEdit,
   onCancelEdit,
@@ -468,8 +512,12 @@ function FeedbackRow({
   editing: boolean;
   editVerdict: string;
   editReason: string;
+  editTicketSubmitted: boolean;
+  editTicketId: string;
   onEditVerdictChange: (v: string) => void;
   onEditReasonChange: (v: string) => void;
+  onEditTicketSubmittedChange: (v: boolean) => void;
+  onEditTicketIdChange: (v: string) => void;
   onStartEdit: () => void;
   onSaveEdit: () => void;
   onCancelEdit: () => void;
@@ -497,13 +545,21 @@ function FeedbackRow({
 
         <div className="flex-1 min-w-0">
           {/* Header line */}
-          <div className="flex items-center gap-2 mb-1">
+          <div className="flex flex-wrap items-center gap-2 mb-1">
             <span className={`text-xs font-semibold px-1.5 py-0.5 rounded border ${verdictBadge}`}>
               {verdictLabel}
             </span>
             <span className="text-xs font-semibold text-slate-400 bg-slate-700/50 px-1.5 py-0.5 rounded">
               {entry.vuln_type.toUpperCase()}
             </span>
+            {entry.ticket_submitted && (
+              <span
+                className="text-xs font-semibold text-blue-300 bg-blue-500/10 border border-blue-500/30 px-1.5 py-0.5 rounded"
+                title={entry.ticket_id || "已提单"}
+              >
+                {entry.ticket_id ? `已提单 ${entry.ticket_id}` : "已提单"}
+              </span>
+            )}
             <span className="text-xs font-mono text-slate-400 truncate">
               {entry.file}:{entry.line}
             </span>
@@ -515,7 +571,7 @@ function FeedbackRow({
 
           {/* Editing mode */}
           {editing ? (
-            <div className="flex items-center gap-2 mt-2">
+            <div className="flex flex-wrap items-center gap-2 mt-2">
               <select
                 value={editVerdict}
                 onChange={(e) => onEditVerdictChange(e.target.value)}
@@ -532,6 +588,27 @@ function FeedbackRow({
                 autoFocus
                 onKeyDown={(e) => { if (e.key === "Enter") onSaveEdit(); }}
               />
+              <label className="flex items-center gap-1.5 text-xs text-slate-300">
+                <input
+                  type="checkbox"
+                  checked={editTicketSubmitted}
+                  onChange={(e) => {
+                    onEditTicketSubmittedChange(e.target.checked);
+                    if (!e.target.checked) onEditTicketIdChange("");
+                  }}
+                  className="h-3.5 w-3.5 rounded accent-blue-600"
+                />
+                已提单
+              </label>
+              {editTicketSubmitted && (
+                <input
+                  value={editTicketId}
+                  onChange={(e) => onEditTicketIdChange(e.target.value)}
+                  placeholder="问题单号"
+                  className="w-32 bg-slate-700 border border-slate-600 rounded px-2 py-1 text-xs text-slate-200 placeholder-slate-500"
+                  onKeyDown={(e) => { if (e.key === "Enter") onSaveEdit(); }}
+                />
+              )}
               <button
                 onClick={onSaveEdit}
                 className="px-2 py-1 text-xs font-medium text-white bg-blue-600 hover:bg-blue-700 rounded transition-colors"

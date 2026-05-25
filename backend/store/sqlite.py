@@ -56,6 +56,8 @@ CREATE TABLE IF NOT EXISTS vulnerabilities (
     function_start_line INTEGER,
     user_verdict        TEXT,
     user_verdict_reason TEXT,
+    ticket_submitted    INTEGER NOT NULL DEFAULT 0,
+    ticket_id           TEXT NOT NULL DEFAULT '',
     UNIQUE(scan_id, idx)
 );
 
@@ -87,6 +89,8 @@ CREATE TABLE IF NOT EXISTS feedback_entries (
     function        TEXT NOT NULL,
     description     TEXT NOT NULL,
     reason          TEXT NOT NULL DEFAULT '',
+    ticket_submitted INTEGER NOT NULL DEFAULT 0,
+    ticket_id       TEXT NOT NULL DEFAULT '',
     function_source TEXT NOT NULL DEFAULT '',
     function_start_line INTEGER,
     source_scan_id  TEXT,
@@ -189,6 +193,14 @@ class SqliteScanStore(ScanStoreBase):
             self._conn.execute(
                 "ALTER TABLE vulnerabilities ADD COLUMN function_start_line INTEGER"
             )
+        if "ticket_submitted" not in vuln_cols:
+            self._conn.execute(
+                "ALTER TABLE vulnerabilities ADD COLUMN ticket_submitted INTEGER NOT NULL DEFAULT 0"
+            )
+        if "ticket_id" not in vuln_cols:
+            self._conn.execute(
+                "ALTER TABLE vulnerabilities ADD COLUMN ticket_id TEXT NOT NULL DEFAULT ''"
+            )
 
         feedback_cur = self._conn.execute("PRAGMA table_info(feedback_entries)")
         feedback_cols = {r[1] for r in feedback_cur.fetchall()}
@@ -199,6 +211,14 @@ class SqliteScanStore(ScanStoreBase):
         if "function_start_line" not in feedback_cols:
             self._conn.execute(
                 "ALTER TABLE feedback_entries ADD COLUMN function_start_line INTEGER"
+            )
+        if "ticket_submitted" not in feedback_cols:
+            self._conn.execute(
+                "ALTER TABLE feedback_entries ADD COLUMN ticket_submitted INTEGER NOT NULL DEFAULT 0"
+            )
+        if "ticket_id" not in feedback_cols:
+            self._conn.execute(
+                "ALTER TABLE feedback_entries ADD COLUMN ticket_id TEXT NOT NULL DEFAULT ''"
             )
         # Ensure users table exists
         self._conn.executescript("""\
@@ -527,8 +547,9 @@ class SqliteScanStore(ScanStoreBase):
                     (scan_id, idx, file, line, function, vuln_type,
                      severity, description, ai_analysis, confirmed,
                      ai_verdict, user_verdict, user_verdict_reason,
+                     ticket_submitted, ticket_id,
                      function_source, function_start_line)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     scan_id,
@@ -544,6 +565,8 @@ class SqliteScanStore(ScanStoreBase):
                     vuln.ai_verdict,
                     vuln.user_verdict,
                     vuln.user_verdict_reason,
+                    1 if vuln.ticket_submitted else 0,
+                    vuln.ticket_id if vuln.ticket_submitted else "",
                     vuln.function_source,
                     vuln.function_start_line,
                 ),
@@ -552,16 +575,33 @@ class SqliteScanStore(ScanStoreBase):
             return next_idx
 
     def update_vulnerability(
-        self, scan_id: str, index: int, verdict: str, reason: str
+        self,
+        scan_id: str,
+        index: int,
+        verdict: str,
+        reason: str,
+        ticket_submitted: bool = False,
+        ticket_id: str = "",
     ) -> None:
+        normalized_ticket_id = ticket_id.strip() if ticket_submitted else ""
         with self._lock:
             self._conn.execute(
                 """\
                 UPDATE vulnerabilities
-                SET user_verdict = ?, user_verdict_reason = ?
+                SET user_verdict = ?,
+                    user_verdict_reason = ?,
+                    ticket_submitted = ?,
+                    ticket_id = ?
                 WHERE scan_id = ? AND idx = ?
                 """,
-                (verdict, reason, scan_id, index),
+                (
+                    verdict,
+                    reason,
+                    1 if ticket_submitted else 0,
+                    normalized_ticket_id,
+                    scan_id,
+                    index,
+                ),
             )
             self._conn.commit()
 
@@ -587,6 +627,8 @@ class SqliteScanStore(ScanStoreBase):
                 ai_verdict=r["ai_verdict"] or "",
                 user_verdict=r["user_verdict"],
                 user_verdict_reason=r["user_verdict_reason"],
+                ticket_submitted=bool(r["ticket_submitted"]),
+                ticket_id=r["ticket_id"] or "",
                 function_source=r["function_source"] or "",
                 function_start_line=r["function_start_line"],
             )
@@ -662,14 +704,18 @@ class SqliteScanStore(ScanStoreBase):
                 """\
                 INSERT INTO feedback_entries
                     (id, project_id, vuln_type, verdict, file, line, function,
-                     description, reason, function_source, function_start_line,
+                     description, reason, ticket_submitted, ticket_id,
+                     function_source, function_start_line,
                      source_scan_id, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     entry.id, entry.project_id, entry.vuln_type, entry.verdict,
                     entry.file, entry.line, entry.function, entry.description,
-                    entry.reason, entry.function_source, entry.function_start_line,
+                    entry.reason,
+                    1 if entry.ticket_submitted else 0,
+                    entry.ticket_id if entry.ticket_submitted else "",
+                    entry.function_source, entry.function_start_line,
                     entry.source_scan_id,
                     entry.created_at, entry.updated_at,
                 ),
@@ -712,14 +758,18 @@ class SqliteScanStore(ScanStoreBase):
                     """\
                     INSERT INTO feedback_entries
                         (id, project_id, vuln_type, verdict, file, line, function,
-                         description, reason, function_source, function_start_line,
+                         description, reason, ticket_submitted, ticket_id,
+                         function_source, function_start_line,
                          source_scan_id, created_at, updated_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         entry.id, entry.project_id, entry.vuln_type, entry.verdict,
                         entry.file, entry.line, entry.function, entry.description,
-                        entry.reason, entry.function_source, entry.function_start_line,
+                        entry.reason,
+                        1 if entry.ticket_submitted else 0,
+                        entry.ticket_id if entry.ticket_submitted else "",
+                        entry.function_source, entry.function_start_line,
                         entry.source_scan_id,
                         entry.created_at, entry.updated_at,
                     ),
@@ -732,6 +782,8 @@ class SqliteScanStore(ScanStoreBase):
                     UPDATE feedback_entries
                     SET verdict = ?,
                         reason = ?,
+                        ticket_submitted = ?,
+                        ticket_id = ?,
                         function_source = ?,
                         function_start_line = ?,
                         updated_at = ?
@@ -740,6 +792,8 @@ class SqliteScanStore(ScanStoreBase):
                     (
                         entry.verdict,
                         entry.reason,
+                        1 if entry.ticket_submitted else 0,
+                        entry.ticket_id if entry.ticket_submitted else "",
                         entry.function_source,
                         entry.function_start_line,
                         entry.updated_at,
@@ -764,7 +818,14 @@ class SqliteScanStore(ScanStoreBase):
                 raise RuntimeError(f"feedback entry not found after upsert: {kept_id}")
             return self._row_to_feedback(row)
 
-    def update_feedback(self, feedback_id: str, verdict: str | None, reason: str | None) -> bool:
+    def update_feedback(
+        self,
+        feedback_id: str,
+        verdict: str | None,
+        reason: str | None,
+        ticket_submitted: bool | None = None,
+        ticket_id: str | None = None,
+    ) -> bool:
         updates: list[str] = []
         params: list = []
         if verdict is not None:
@@ -773,6 +834,15 @@ class SqliteScanStore(ScanStoreBase):
         if reason is not None:
             updates.append("reason = ?")
             params.append(reason)
+        if ticket_submitted is not None:
+            updates.append("ticket_submitted = ?")
+            params.append(1 if ticket_submitted else 0)
+            if not ticket_submitted and ticket_id is None:
+                updates.append("ticket_id = ?")
+                params.append("")
+        if ticket_id is not None:
+            updates.append("ticket_id = ?")
+            params.append(ticket_id.strip() if ticket_submitted is not False else "")
         if not updates:
             return True
         updates.append("updated_at = ?")
@@ -848,6 +918,8 @@ class SqliteScanStore(ScanStoreBase):
             function_source=row["function_source"] or "",
             function_start_line=row["function_start_line"],
             source_scan_id=row["source_scan_id"],
+            ticket_submitted=bool(row["ticket_submitted"]),
+            ticket_id=row["ticket_id"] or "",
             created_at=row["created_at"],
             updated_at=row["updated_at"],
         )

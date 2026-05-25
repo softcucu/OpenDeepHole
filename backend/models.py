@@ -82,6 +82,8 @@ class Vulnerability(BaseModel):
     ai_verdict: str = ""                     # "confirmed" | "not_confirmed" | "timeout" | "no_result"
     user_verdict: str | None = None          # "confirmed" | "false_positive" | None
     user_verdict_reason: str | None = None   # 用户填写的理由
+    ticket_submitted: bool = False           # 是否已提问题单
+    ticket_id: str = ""                      # 问题单号
     function_source: str = ""
     function_start_line: int | None = None
 
@@ -143,12 +145,16 @@ class MarkRequest(BaseModel):
     index: int
     verdict: str        # "confirmed" | "false_positive"
     reason: str = ""
+    ticket_submitted: bool = False
+    ticket_id: str = ""
 
 class BatchMarkItem(BaseModel):
     """Single item in a batch mark request."""
     index: int
     verdict: str        # "confirmed" | "false_positive"
     reason: str = ""
+    ticket_submitted: bool = False
+    ticket_id: str = ""
 
 class BatchMarkRequest(BaseModel):
     """Request to batch-mark multiple vulnerabilities."""
@@ -172,6 +178,8 @@ class FeedbackEntry(BaseModel):
     function: str
     description: str
     reason: str = ""
+    ticket_submitted: bool = False
+    ticket_id: str = ""
     function_source: str = ""
     function_start_line: int | None = None
     source_scan_id: str | None = None
@@ -189,6 +197,8 @@ class FeedbackCreateRequest(BaseModel):
     function: str
     description: str
     reason: str = ""
+    ticket_submitted: bool = False
+    ticket_id: str = ""
     function_source: str = ""
     function_start_line: int | None = None
     source_scan_id: str | None = None
@@ -198,6 +208,8 @@ class FeedbackUpdateRequest(BaseModel):
     """Request to update an existing feedback entry."""
     verdict: str | None = None
     reason: str | None = None
+    ticket_submitted: bool | None = None
+    ticket_id: str | None = None
 
 
 class ScanStatus(BaseModel):
@@ -339,6 +351,7 @@ class CheckerScanDashboardStats(BaseModel):
     fp_review_false_positive_count: int = 0
     human_confirmed_count: int = 0
     human_false_positive_count: int = 0
+    ticket_submitted_count: int = 0
     accuracy_basis_count: int = 0
     accuracy: float | None = None
 
@@ -357,6 +370,7 @@ class CheckerDashboardStats(BaseModel):
     fp_review_false_positive_count: int = 0
     human_confirmed_count: int = 0
     human_false_positive_count: int = 0
+    ticket_submitted_count: int = 0
     accuracy_basis_count: int = 0
     accuracy: float | None = None
     scans: list[CheckerScanDashboardStats] = []
@@ -373,6 +387,7 @@ class CheckerDashboardSummary(BaseModel):
     fp_review_false_positive_count: int = 0
     total_issue_count: int = 0
     human_confirmed_count: int = 0
+    ticket_submitted_count: int = 0
     accuracy_basis_count: int = 0
     accuracy: float | None = None
 

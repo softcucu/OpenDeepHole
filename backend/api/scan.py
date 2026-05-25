@@ -529,7 +529,16 @@ async def download_report(
     )
 
 
-def _mark_single(scan_id: str, scan: ScanStatus, store, index: int, verdict: str, reason: str) -> str:
+def _mark_single(
+    scan_id: str,
+    scan: ScanStatus,
+    store,
+    index: int,
+    verdict: str,
+    reason: str,
+    ticket_submitted: bool = False,
+    ticket_id: str = "",
+) -> str:
     """Mark a single vulnerability and create a feedback entry. Returns feedback_id."""
     if verdict not in ("confirmed", "false_positive"):
         raise HTTPException(status_code=400, detail="Invalid verdict")
@@ -537,14 +546,24 @@ def _mark_single(scan_id: str, scan: ScanStatus, store, index: int, verdict: str
         raise HTTPException(status_code=400, detail=f"Invalid vulnerability index: {index}")
 
     vuln = scan.vulnerabilities[index]
+    normalized_ticket_id = ticket_id.strip() if ticket_submitted else ""
 
     if scan_id in _running_scans:
         live = _running_scans[scan_id]
         if index < len(live.vulnerabilities):
             live.vulnerabilities[index].user_verdict = verdict
             live.vulnerabilities[index].user_verdict_reason = reason
+            live.vulnerabilities[index].ticket_submitted = ticket_submitted
+            live.vulnerabilities[index].ticket_id = normalized_ticket_id
 
-    store.update_vulnerability(scan_id, index, verdict, reason)
+    store.update_vulnerability(
+        scan_id,
+        index,
+        verdict,
+        reason,
+        ticket_submitted,
+        normalized_ticket_id,
+    )
 
     now = datetime.now(timezone.utc).isoformat()
     entry = FeedbackEntry(
@@ -557,6 +576,8 @@ def _mark_single(scan_id: str, scan: ScanStatus, store, index: int, verdict: str
         function=vuln.function,
         description=vuln.description,
         reason=reason,
+        ticket_submitted=ticket_submitted,
+        ticket_id=normalized_ticket_id,
         function_source=vuln.function_source,
         function_start_line=vuln.function_start_line,
         source_scan_id=scan_id,
@@ -601,7 +622,16 @@ async def mark_vulnerability(
     _check_scan_owner(scan_id, current_user)
     scan = await get_scan_status(scan_id, current_user)
     store = get_scan_store()
-    feedback_id = _mark_single(scan_id, scan, store, body.index, body.verdict, body.reason)
+    feedback_id = _mark_single(
+        scan_id,
+        scan,
+        store,
+        body.index,
+        body.verdict,
+        body.reason,
+        body.ticket_submitted,
+        body.ticket_id,
+    )
     return {"ok": True, "feedback_id": feedback_id}
 
 
@@ -618,7 +648,16 @@ async def batch_mark_vulnerabilities(
     scan = await get_scan_status(scan_id, current_user)
     store = get_scan_store()
     feedback_ids = [
-        _mark_single(scan_id, scan, store, item.index, item.verdict, item.reason)
+        _mark_single(
+            scan_id,
+            scan,
+            store,
+            item.index,
+            item.verdict,
+            item.reason,
+            item.ticket_submitted,
+            item.ticket_id,
+        )
         for item in body.items
     ]
     return {"ok": True, "feedback_ids": feedback_ids}
