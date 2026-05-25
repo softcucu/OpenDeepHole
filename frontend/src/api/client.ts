@@ -126,6 +126,7 @@ export async function createScan(body: {
   project_path: string;
   code_scan_path?: string;
   scan_name: string;
+  product?: string;
   checkers: string[];
   feedback_ids?: string[];
 }): Promise<ScanStartResponse> {
@@ -136,6 +137,15 @@ export async function createScan(body: {
 export async function getScanStatus(scanId: string): Promise<ScanStatus> {
   const { data } = await api.get<ScanStatus>(`/api/scan/${scanId}`);
   return data;
+}
+
+export async function getScanProducts(): Promise<string[]> {
+  const { data } = await api.get<{ products: string[] }>("/api/scan/products");
+  return data.products;
+}
+
+export async function updateScanProduct(scanId: string, product: string): Promise<void> {
+  await api.put(`/api/scan/${scanId}/product`, { product });
 }
 
 export async function stopScan(scanId: string): Promise<void> {
@@ -255,8 +265,9 @@ export async function deleteScan(scanId: string): Promise<void> {
   await api.delete(`/api/scan/${scanId}`);
 }
 
-export async function getCheckerDashboard(): Promise<CheckerDashboardResponse> {
-  const { data } = await api.get<CheckerDashboardResponse>("/api/admin/checker-dashboard");
+export async function getCheckerDashboard(product?: string): Promise<CheckerDashboardResponse> {
+  const params = product ? { product } : undefined;
+  const { data } = await api.get<CheckerDashboardResponse>("/api/admin/checker-dashboard", { params });
   return data;
 }
 

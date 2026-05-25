@@ -90,6 +90,7 @@ export interface ScanEvent {
 export interface ScanStatus {
   scan_id: string;
   project_id: string;
+  product: string;
   scan_items: string[];
   created_at: string;
   status: ScanItemStatus;
@@ -142,6 +143,7 @@ export interface ScanSummary {
   scan_id: string;
   project_id: string;
   scan_name: string;
+  product: string;
   status: ScanItemStatus;
   created_at: string;
   progress: number;
@@ -225,6 +227,7 @@ export interface CheckerScanDashboardStats {
   project_id: string;
   scan_name: string;
   project_path: string;
+  product: string;
   status: ScanItemStatus;
   created_at: string;
   username: string;

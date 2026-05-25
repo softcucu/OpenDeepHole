@@ -33,9 +33,11 @@ from backend.models import (
     MarkRequest,
     ScanItemStatus,
     ScanMeta,
+    ScanProductList,
     ScanStartResponse,
     ScanStatus,
     ScanSummary,
+    UpdateScanProductRequest,
     User,
 )
 from backend.opencode.feedback_format import build_feedback_section
@@ -52,6 +54,26 @@ _running_scans: dict[str, ScanStatus] = {}
 
 # Map scan_id → user_id for ownership checks on in-memory scans
 _scan_owners: dict[str, str] = {}
+
+
+def _configured_products() -> list[str]:
+    products: list[str] = []
+    seen: set[str] = set()
+    for product in get_config().scan.products:
+        normalized = str(product).strip()
+        if normalized and normalized not in seen:
+            products.append(normalized)
+            seen.add(normalized)
+    return products
+
+
+def _validate_product(product: str) -> str:
+    normalized = product.strip()
+    if not normalized:
+        return ""
+    if normalized not in _configured_products():
+        raise HTTPException(status_code=400, detail=f"Unknown product: {normalized}")
+    return normalized
 
 
 def _check_scan_owner(scan_id: str, user: User) -> None:
@@ -210,10 +232,12 @@ async def create_scan(
         raise HTTPException(status_code=400, detail="project_path is required")
     code_scan_path = body.code_scan_path.strip() or project_path
     scan_name = body.scan_name or project_path.split("/")[-1] or scan_id
+    product = _validate_product(body.product)
 
     scan = ScanStatus(
         scan_id=scan_id,
         project_id=scan_name,
+        product=product,
         scan_items=checker_names,
         created_at=now,
         status=ScanItemStatus.PENDING,
@@ -233,6 +257,7 @@ async def create_scan(
         project_path=project_path,
         code_scan_path=code_scan_path,
         scan_name=scan_name,
+        product=product,
         user_id=current_user.user_id,
     )
 
@@ -320,6 +345,14 @@ async def list_scans(current_user: User = Depends(get_current_user)) -> list[Sca
     return summaries
 
 
+@router.get("/api/scan/products", response_model=ScanProductList)
+async def list_scan_products(
+    _current_user: User = Depends(get_current_user),
+) -> ScanProductList:
+    """Return configured scan product options."""
+    return ScanProductList(products=_configured_products())
+
+
 @router.get("/api/scan/{scan_id}", response_model=ScanStatus)
 async def get_scan_status(
     scan_id: str,
@@ -339,6 +372,24 @@ async def get_scan_status(
         scan = result[0]
         scan.agent_name = result[1].agent_name
     return reconcile_offline_agent_scan_state(scan_id, scan)
+
+
+@router.put("/api/scan/{scan_id}/product")
+async def update_scan_product(
+    scan_id: str,
+    body: UpdateScanProductRequest,
+    current_user: User = Depends(get_current_user),
+) -> dict:
+    """Update the product associated with an existing scan."""
+    _check_scan_owner(scan_id, current_user)
+    product = _validate_product(body.product)
+    store = get_scan_store()
+    if store.load_scan(scan_id) is None:
+        raise HTTPException(status_code=404, detail="Scan not found")
+    if scan_id in _running_scans:
+        _running_scans[scan_id].product = product
+    store.update_scan_product(scan_id, product)
+    return {"ok": True}
 
 
 @router.post("/api/scan/{scan_id}/stop")

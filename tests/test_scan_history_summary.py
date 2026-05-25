@@ -47,6 +47,7 @@ class FakeScanStore:
             scan_id=self.scan.scan_id,
             project_id=self.scan.project_id,
             scan_name=self.meta.scan_name,
+            product=self.meta.product,
             status=self.scan.status,
             created_at=self.scan.created_at,
             progress=self.scan.progress,
@@ -63,6 +64,7 @@ class ScanHistorySummaryTests(unittest.TestCase):
         scan = ScanStatus(
             scan_id="scan-1",
             project_id="project-1",
+            product="LTE",
             scan_items=["npd"],
             created_at="2026-01-01T00:00:00+00:00",
             status=ScanItemStatus.COMPLETE,
@@ -123,6 +125,7 @@ class ScanHistorySummaryTests(unittest.TestCase):
             scan_items=["npd"],
             created_at=scan.created_at,
             scan_name="Project One",
+            product="LTE",
             agent_name="agent-1",
         )
 
@@ -141,6 +144,7 @@ class ScanHistorySummaryTests(unittest.TestCase):
             )
 
         self.assertEqual(response[0].scan_name, "Project One")
+        self.assertEqual(response[0].product, "LTE")
         self.assertEqual(response[0].vulnerability_count, 2)
         self.assertEqual(response[0].human_confirmed_count, 2)
 

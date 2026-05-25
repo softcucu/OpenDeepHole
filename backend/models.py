@@ -221,6 +221,7 @@ class FeedbackUpdateRequest(BaseModel):
 class ScanStatus(BaseModel):
     scan_id: str
     project_id: str = ""
+    product: str = ""
     scan_items: list[str] = []
     created_at: str = ""
     status: ScanItemStatus
@@ -303,8 +304,17 @@ class CreateScanRequest(BaseModel):
     project_path: str
     code_scan_path: str = ""
     scan_name: str = ""
+    product: str = ""
     checkers: list[str]
     feedback_ids: list[str] = []
+
+
+class ScanProductList(BaseModel):
+    products: list[str]
+
+
+class UpdateScanProductRequest(BaseModel):
+    product: str = ""
 
 
 class ScanMeta(BaseModel):
@@ -317,6 +327,7 @@ class ScanMeta(BaseModel):
     project_path: str = ""
     code_scan_path: str = ""
     scan_name: str = ""
+    product: str = ""
     user_id: str = ""
 
 
@@ -325,6 +336,7 @@ class ScanSummary(BaseModel):
     scan_id: str
     project_id: str
     scan_name: str = ""
+    product: str = ""
     status: ScanItemStatus
     created_at: str
     progress: float
@@ -347,6 +359,7 @@ class CheckerScanDashboardStats(BaseModel):
     project_id: str
     scan_name: str = ""
     project_path: str = ""
+    product: str = ""
     status: ScanItemStatus
     created_at: str
     username: str = ""

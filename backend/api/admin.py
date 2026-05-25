@@ -25,6 +25,7 @@ from backend.scan_metrics import (
 from backend.store import get_scan_store
 
 router = APIRouter()
+UNCONFIGURED_PRODUCT = "__unconfigured__"
 
 
 @dataclass
@@ -53,6 +54,7 @@ def _scan_stats_for_checker(
     fp_results: dict[int, FpReviewResult],
     scan_name: str,
     project_path: str,
+    product: str,
     agent_name: str,
     ticket_submitted_count: int,
 ) -> CheckerScanDashboardStats:
@@ -67,6 +69,7 @@ def _scan_stats_for_checker(
         project_id=scan.project_id,
         scan_name=scan_name,
         project_path=project_path,
+        product=product,
         status=scan.status,
         created_at=scan.created_at,
         username=username,
@@ -85,6 +88,7 @@ def _scan_stats_for_checker(
 
 @router.get("/api/admin/checker-dashboard", response_model=CheckerDashboardResponse)
 async def get_checker_dashboard(
+    product: str | None = None,
     _current_user: User = Depends(require_admin),
 ) -> CheckerDashboardResponse:
     """Return checker/SKILL quality and usage stats for administrators."""
@@ -101,13 +105,22 @@ async def get_checker_dashboard(
         for name, entry in registry.items()
     }
 
+    product_filter = (product or "").strip()
     all_projects: set[str] = set()
+    filtered_scan_count = 0
 
     for summary in summaries:
         loaded = store.load_scan(summary.scan_id)
         if loaded is None:
             continue
         scan, meta = loaded
+        if product_filter == UNCONFIGURED_PRODUCT:
+            if meta.product:
+                continue
+        elif product_filter and meta.product != product_filter:
+            continue
+
+        filtered_scan_count += 1
         username = summary.username
         project_label = meta.scan_name or scan.project_id
         if project_label:
@@ -143,6 +156,7 @@ async def get_checker_dashboard(
                 fp_results=fp_results,
                 scan_name=meta.scan_name,
                 project_path=meta.project_path,
+                product=meta.product,
                 agent_name=meta.agent_name,
                 ticket_submitted_count=ticket_submitted_count,
             )
@@ -192,7 +206,7 @@ async def get_checker_dashboard(
     return CheckerDashboardResponse(
         summary=CheckerDashboardSummary(
             checker_count=len(checkers),
-            scan_count=len(summaries),
+            scan_count=filtered_scan_count,
             project_count=len(all_projects),
             static_issue_count=static_issue_count,
             llm_issue_count=llm_issue_count,

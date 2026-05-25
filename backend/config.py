@@ -44,6 +44,18 @@ class StorageConfig(BaseModel):
     max_upload_size_mb: int = 2048
 
 
+class ScanConfig(BaseModel):
+    products: list[str] = [
+        "LTE",
+        "5G",
+        "MAE",
+        "微波RTN",
+        "RuralCOW",
+        "eMRU200",
+        "Lampsite",
+    ]
+
+
 class LoggingConfig(BaseModel):
     level: str = "INFO"
     file: str = "logs/opendeephole.log"
@@ -70,6 +82,7 @@ class AppConfig(BaseModel):
     opencode: OpenCodeConfig = OpenCodeConfig()
     fp_review_cli: OpenCodeConfig | None = None
     storage: StorageConfig = StorageConfig()
+    scan: ScanConfig = ScanConfig()
     logging: LoggingConfig = LoggingConfig()
     llm_api: LLMApiConfig = LLMApiConfig()
     auth: AuthConfig = AuthConfig()

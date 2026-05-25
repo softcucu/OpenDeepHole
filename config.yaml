@@ -22,6 +22,16 @@ storage:
   scans_dir: "../OpenDeepHoleData/scans"
   max_upload_size_mb: 2048
 
+scan:
+  products:
+    - "LTE"
+    - "5G"
+    - "MAE"
+    - "微波RTN"
+    - "RuralCOW"
+    - "eMRU200"
+    - "Lampsite"
+
 logging:
   level: "DEBUG"  # DEBUG, INFO, WARNING, ERROR
   file: "logs/opendeephole.log"

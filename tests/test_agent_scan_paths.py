@@ -1,5 +1,6 @@
 import tempfile
 import unittest
+import sqlite3
 from pathlib import Path
 
 from agent.scanner import (
@@ -221,6 +222,79 @@ class ScanStoreCodeScanPathTests(unittest.TestCase):
             loaded = store.load_scan("scan-1")
             self.assertIsNotNone(loaded)
             self.assertEqual(loaded[1].code_scan_path, "/repo/project/module")
+
+    def test_scan_meta_persists_and_updates_product(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = SqliteScanStore(Path(tmp) / "scans.db")
+            scan = ScanStatus(
+                scan_id="scan-1",
+                project_id="project",
+                product="LTE",
+                scan_items=["npd"],
+                created_at="2026-01-01T00:00:00+00:00",
+                status=ScanItemStatus.PENDING,
+                progress=0.0,
+                total_candidates=0,
+                processed_candidates=0,
+                vulnerabilities=[],
+            )
+            meta = ScanMeta(
+                scan_items=["npd"],
+                created_at=scan.created_at,
+                project_path="/repo/project",
+                code_scan_path="/repo/project/module",
+                scan_name="project",
+                product="LTE",
+            )
+
+            store.save_scan(scan, meta)
+            store.update_scan_product("scan-1", "5G")
+
+            loaded = store.load_scan("scan-1")
+            self.assertIsNotNone(loaded)
+            loaded_scan, loaded_meta = loaded
+            self.assertEqual(loaded_scan.product, "5G")
+            self.assertEqual(loaded_meta.product, "5G")
+
+    def test_old_scan_database_migrates_product_column(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "scans.db"
+            conn = sqlite3.connect(db_path)
+            conn.execute(
+                """\
+                CREATE TABLE scans (
+                    scan_id TEXT PRIMARY KEY,
+                    project_id TEXT NOT NULL,
+                    scan_items TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'pending',
+                    created_at TEXT NOT NULL,
+                    progress REAL DEFAULT 0.0,
+                    total_candidates INTEGER DEFAULT 0,
+                    processed_candidates INTEGER DEFAULT 0,
+                    current_candidate TEXT,
+                    error_message TEXT,
+                    feedback_ids TEXT DEFAULT '[]',
+                    workspace_path TEXT,
+                    static_total_files INTEGER DEFAULT 0,
+                    static_scanned_files INTEGER DEFAULT 0,
+                    static_analysis_done INTEGER DEFAULT 0,
+                    agent_id TEXT DEFAULT '',
+                    agent_name TEXT DEFAULT '',
+                    project_path TEXT DEFAULT '',
+                    code_scan_path TEXT DEFAULT '',
+                    scan_name TEXT DEFAULT '',
+                    user_id TEXT DEFAULT ''
+                )
+                """
+            )
+            conn.commit()
+            conn.close()
+
+            store = SqliteScanStore(db_path)
+            cur = store._conn.execute("PRAGMA table_info(scans)")
+            cols = {row[1] for row in cur.fetchall()}
+
+        self.assertIn("product", cols)
 
 
 if __name__ == "__main__":

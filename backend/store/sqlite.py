@@ -37,7 +37,8 @@ CREATE TABLE IF NOT EXISTS scans (
     current_candidate  TEXT,
     error_message      TEXT,
     feedback_ids       TEXT DEFAULT '[]',
-    workspace_path     TEXT
+    workspace_path     TEXT,
+    product            TEXT NOT NULL DEFAULT ''
 );
 
 CREATE TABLE IF NOT EXISTS vulnerabilities (
@@ -178,6 +179,8 @@ class SqliteScanStore(ScanStoreBase):
             self._conn.execute("ALTER TABLE scans ADD COLUMN scan_name TEXT DEFAULT ''")
         if "user_id" not in cols:
             self._conn.execute("ALTER TABLE scans ADD COLUMN user_id TEXT DEFAULT ''")
+        if "product" not in cols:
+            self._conn.execute("ALTER TABLE scans ADD COLUMN product TEXT NOT NULL DEFAULT ''")
         # vulnerabilities 表迁移
         vuln_cur = self._conn.execute("PRAGMA table_info(vulnerabilities)")
         vuln_cols = {r[1] for r in vuln_cur.fetchall()}
@@ -283,6 +286,7 @@ class SqliteScanStore(ScanStoreBase):
         return ScanStatus(
             scan_id=row["scan_id"],
             project_id=row["project_id"],
+            product=row["product"] if row["product"] is not None else "",
             scan_items=json.loads(row["scan_items"]),
             created_at=row["created_at"],
             status=ScanItemStatus(row["status"]),
@@ -309,6 +313,7 @@ class SqliteScanStore(ScanStoreBase):
             project_path=row["project_path"] if row["project_path"] is not None else "",
             code_scan_path=row["code_scan_path"] if row["code_scan_path"] is not None else "",
             scan_name=row["scan_name"] if row["scan_name"] is not None else "",
+            product=row["product"] if row["product"] is not None else "",
             user_id=row["user_id"] if row["user_id"] is not None else "",
         )
 
@@ -328,8 +333,9 @@ class SqliteScanStore(ScanStoreBase):
                      progress, total_candidates, processed_candidates,
                      current_candidate, error_message, feedback_ids,
                      static_total_files, static_scanned_files, static_analysis_done,
-                     user_id, agent_name, agent_id, project_path, code_scan_path, scan_name)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     user_id, agent_name, agent_id, project_path, code_scan_path, scan_name,
+                     product)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     scan.scan_id,
@@ -352,6 +358,7 @@ class SqliteScanStore(ScanStoreBase):
                     meta.project_path,
                     meta.code_scan_path,
                     meta.scan_name,
+                    meta.product,
                 ),
             )
             self._conn.commit()
@@ -371,6 +378,7 @@ class SqliteScanStore(ScanStoreBase):
             scan_id=row["scan_id"],
             project_id=row["project_id"],
             scan_name=row["scan_name"] if row["scan_name"] is not None else "",
+            product=row["product"] if row["product"] is not None else "",
             status=ScanItemStatus(row["status"]),
             created_at=row["created_at"],
             progress=row["progress"],
@@ -412,6 +420,14 @@ class SqliteScanStore(ScanStoreBase):
             (user_id,),
         )
         return [self._row_to_scan_summary(row) for row in cur.fetchall()]
+
+    def update_scan_product(self, scan_id: str, product: str) -> None:
+        with self._lock:
+            self._conn.execute(
+                "UPDATE scans SET product = ? WHERE scan_id = ?",
+                (product, scan_id),
+            )
+            self._conn.commit()
 
     def delete_scan(self, scan_id: str) -> bool:
         with self._lock:

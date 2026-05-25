@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import type { ReactNode } from "react";
-import { getCheckerDashboard } from "../api/client";
+import { getCheckerDashboard, getScanProducts } from "../api/client";
 import type { CheckerDashboardResponse, CheckerDashboardStats, CheckerScanDashboardStats, ScanItemStatus } from "../types";
 
 interface Props {
@@ -17,17 +17,21 @@ const STATUS_STYLES: Record<ScanItemStatus, { label: string; cls: string }> = {
   cancelled: { label: "已取消", cls: "bg-amber-500/20 text-amber-400 border-amber-500/30" },
 };
 
+const UNCONFIGURED_PRODUCT = "__unconfigured__";
+
 export default function AdminCheckerDashboard({ onBack, onViewScan }: Props) {
   const [data, setData] = useState<CheckerDashboardResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [activeChecker, setActiveChecker] = useState<string | null>(null);
+  const [products, setProducts] = useState<string[]>([]);
+  const [productFilter, setProductFilter] = useState("");
 
-  const refresh = async () => {
+  const refresh = async (nextProduct = productFilter) => {
     setLoading(true);
     setError("");
     try {
-      const next = await getCheckerDashboard();
+      const next = await getCheckerDashboard(nextProduct);
       setData(next);
       setActiveChecker((current) => current ?? next.checkers[0]?.checker ?? null);
     } catch (err: any) {
@@ -38,8 +42,14 @@ export default function AdminCheckerDashboard({ onBack, onViewScan }: Props) {
   };
 
   useEffect(() => {
-    refresh();
+    getScanProducts().then(setProducts).catch(() => {});
+    refresh("");
   }, []);
+
+  const handleProductFilterChange = (value: string) => {
+    setProductFilter(value);
+    refresh(value);
+  };
 
   const selected = useMemo(() => {
     if (!data || !activeChecker) return null;
@@ -64,12 +74,27 @@ export default function AdminCheckerDashboard({ onBack, onViewScan }: Props) {
               </p>
             </div>
           </div>
-          <button
-            onClick={refresh}
-            className="px-4 py-2 text-sm font-medium text-slate-300 hover:text-white bg-slate-800 hover:bg-slate-700 rounded-lg border border-slate-700 transition-colors"
-          >
-            刷新
-          </button>
+          <div className="flex items-center gap-3">
+            <select
+              value={productFilter}
+              onChange={(e) => handleProductFilterChange(e.target.value)}
+              className="bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-sm text-slate-200 focus:outline-none focus:border-blue-500"
+            >
+              <option value="">全部产品</option>
+              <option value={UNCONFIGURED_PRODUCT}>未配置</option>
+              {products.map((product) => (
+                <option key={product} value={product}>
+                  {product}
+                </option>
+              ))}
+            </select>
+            <button
+              onClick={() => refresh()}
+              className="px-4 py-2 text-sm font-medium text-slate-300 hover:text-white bg-slate-800 hover:bg-slate-700 rounded-lg border border-slate-700 transition-colors"
+            >
+              刷新
+            </button>
+          </div>
         </div>
       </div>
 
@@ -255,6 +280,7 @@ function CheckerDetail({
               <Th>扫描</Th>
               <Th className="w-24 min-w-[6rem]">状态</Th>
               <Th>项目</Th>
+              <Th>产品</Th>
               <Th>静态</Th>
               <Th>LLM 问题</Th>
               <Th>FP 真/误</Th>
@@ -266,10 +292,10 @@ function CheckerDetail({
             </tr>
           </thead>
           <tbody>
-            {checker.scans.length === 0 ? (
-              <tr>
-                <td colSpan={11} className="px-4 py-10 text-center text-sm text-slate-500">
-                  这个 SKILL 还没有扫描记录
+	            {checker.scans.length === 0 ? (
+	              <tr>
+	                <td colSpan={12} className="px-4 py-10 text-center text-sm text-slate-500">
+	                  这个 SKILL 还没有扫描记录
                 </td>
               </tr>
             ) : (
@@ -311,6 +337,7 @@ function ScanRow({
       <td className="px-4 py-3 text-xs text-slate-300 max-w-[12rem] truncate" title={scan.project_path || project}>
         {project || "-"}
       </td>
+      <td className="px-4 py-3 text-xs text-slate-300 whitespace-nowrap">{scan.product || "未配置"}</td>
       <td className="px-4 py-3 text-slate-300">{scan.static_issue_count}</td>
       <td className="px-4 py-3 text-slate-300">{scan.llm_issue_count}</td>
       <td className="px-4 py-3 text-xs">

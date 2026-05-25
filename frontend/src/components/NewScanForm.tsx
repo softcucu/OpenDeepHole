@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { getAgents, getCheckers, createScan } from "../api/client";
+import { getAgents, getCheckers, getScanProducts, createScan } from "../api/client";
 import type { AgentInfo, CheckerInfo } from "../types";
 
 interface Props {
@@ -10,6 +10,7 @@ interface Props {
 export default function NewScanForm({ onScanStarted, onBack }: Props) {
   const [agents, setAgents] = useState<AgentInfo[]>([]);
   const [checkers, setCheckers] = useState<CheckerInfo[]>([]);
+  const [products, setProducts] = useState<string[]>([]);
   const [loading, setLoading] = useState(true);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -18,14 +19,20 @@ export default function NewScanForm({ onScanStarted, onBack }: Props) {
   const [projectPath, setProjectPath] = useState<string>("");
   const [codeScanPath, setCodeScanPath] = useState<string>("");
   const [scanName, setScanName] = useState<string>("");
+  const [selectedProduct, setSelectedProduct] = useState<string>("");
   const [selectedCheckers, setSelectedCheckers] = useState<Set<string>>(new Set());
 
   useEffect(() => {
     const load = async () => {
       try {
-        const [agentList, checkerList] = await Promise.all([getAgents(), getCheckers()]);
+        const [agentList, checkerList, productList] = await Promise.all([
+          getAgents(),
+          getCheckers(),
+          getScanProducts(),
+        ]);
         setAgents(agentList);
         setCheckers(checkerList);
+        setProducts(productList);
         // Pre-select all checkers
         setSelectedCheckers(new Set(checkerList.map((c) => c.name)));
         // Pre-select first online agent
@@ -73,6 +80,7 @@ export default function NewScanForm({ onScanStarted, onBack }: Props) {
         project_path: projectPath.trim(),
         code_scan_path: codeScanPath.trim(),
         scan_name: scanName.trim(),
+        product: selectedProduct,
         checkers: Array.from(selectedCheckers),
       });
       onScanStarted(resp.scan_id);
@@ -214,6 +222,25 @@ export default function NewScanForm({ onScanStarted, onBack }: Props) {
                 placeholder="留空则使用目录名"
                 className="w-full bg-slate-900 border border-slate-600 rounded-lg px-3 py-2 text-sm text-white placeholder-slate-500 focus:outline-none focus:border-blue-500 transition-colors"
               />
+            </div>
+
+            {/* Product */}
+            <div className="bg-slate-800 border border-slate-700 rounded-xl p-5">
+              <label className="block text-sm font-medium text-slate-300 mb-3">
+                产品 <span className="text-slate-500 font-normal">（可选）</span>
+              </label>
+              <select
+                value={selectedProduct}
+                onChange={(e) => setSelectedProduct(e.target.value)}
+                className="w-full bg-slate-900 border border-slate-600 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-blue-500 transition-colors"
+              >
+                <option value="">未配置</option>
+                {products.map((product) => (
+                  <option key={product} value={product}>
+                    {product}
+                  </option>
+                ))}
+              </select>
             </div>
 
             {/* Checker selection */}

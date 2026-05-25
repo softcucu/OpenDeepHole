@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { getScans, resumeScan, deleteScan } from "../api/client";
+import { getScanProducts, getScans, resumeScan, deleteScan, updateScanProduct } from "../api/client";
 import type { ScanSummary, ScanItemStatus, User } from "../types";
 
 interface Props {
@@ -191,8 +191,10 @@ function NavButton({
 
 export default function ScanHistory({ onViewScan, onDownloadAgent, onNewScan, user, onLogout, onManageUsers, onCheckerDashboard, onCheckerCatalog }: Props) {
   const [scans, setScans] = useState<ScanSummary[]>([]);
+  const [products, setProducts] = useState<string[]>([]);
   const [loading, setLoading] = useState(true);
   const [actionLoading, setActionLoading] = useState<string | null>(null);
+  const [productSavingId, setProductSavingId] = useState<string | null>(null);
   const [deleteConfirmId, setDeleteConfirmId] = useState<string | null>(null);
   const [projectFilter, setProjectFilter] = useState(ALL_FILTER);
   const [creatorFilter, setCreatorFilter] = useState(ALL_FILTER);
@@ -211,6 +213,7 @@ export default function ScanHistory({ onViewScan, onDownloadAgent, onNewScan, us
 
   useEffect(() => {
     fetchScans();
+    getScanProducts().then(setProducts).catch(() => {});
 
     const timer = setInterval(() => {
       fetchScans();
@@ -242,6 +245,20 @@ export default function ScanHistory({ onViewScan, onDownloadAgent, onNewScan, us
       // silently fail
     } finally {
       setActionLoading(null);
+    }
+  };
+
+  const handleProductChange = async (scanId: string, product: string) => {
+    setProductSavingId(scanId);
+    try {
+      await updateScanProduct(scanId, product);
+      setScans((prev) => prev.map((scan) => (
+        scan.scan_id === scanId ? { ...scan, product } : scan
+      )));
+    } catch {
+      // silently fail
+    } finally {
+      setProductSavingId(null);
     }
   };
 
@@ -386,6 +403,7 @@ export default function ScanHistory({ onViewScan, onDownloadAgent, onNewScan, us
             <table className="w-full text-sm">
               <thead>
                 <tr className="bg-slate-800 border-b border-slate-700">
+                  <th className="text-left px-4 py-3 text-xs font-semibold text-slate-400 uppercase tracking-wider">产品</th>
                   <th className="text-left px-4 py-3 text-xs font-semibold text-slate-400 uppercase tracking-wider">
                     <HeaderFilter
                       id="project"
@@ -402,7 +420,6 @@ export default function ScanHistory({ onViewScan, onDownloadAgent, onNewScan, us
                   <th className="text-left px-4 py-3 text-xs font-semibold text-slate-400 uppercase tracking-wider">漏洞数</th>
                   <th className="text-left px-4 py-3 text-xs font-semibold text-slate-400 uppercase tracking-wider">人工确认</th>
                   <th className="text-left px-4 py-3 text-xs font-semibold text-slate-400 uppercase tracking-wider">检查项</th>
-                  <th className="text-left px-4 py-3 text-xs font-semibold text-slate-400 uppercase tracking-wider">Agent</th>
                   {user.role === "admin" && (
                     <th className="text-left px-4 py-3 text-xs font-semibold text-slate-400 uppercase tracking-wider">
                       <HeaderFilter
@@ -428,6 +445,7 @@ export default function ScanHistory({ onViewScan, onDownloadAgent, onNewScan, us
                   const canResume = scan.status === "cancelled" || scan.status === "error";
                   const canDelete = !running;
                   const isLoading = actionLoading === scan.scan_id;
+                  const isProductSaving = productSavingId === scan.scan_id;
                   const displayProjectName = projectName(scan);
 
                   return (
@@ -435,6 +453,21 @@ export default function ScanHistory({ onViewScan, onDownloadAgent, onNewScan, us
                       key={scan.scan_id}
                       className="border-b border-slate-700/50 hover:bg-slate-800/50 transition-colors"
                     >
+                      <td className="px-4 py-3">
+                        <select
+                          value={scan.product || ""}
+                          onChange={(e) => handleProductChange(scan.scan_id, e.target.value)}
+                          disabled={isProductSaving}
+                          className="max-w-[9rem] bg-slate-900 border border-slate-600 rounded-lg px-2 py-1.5 text-xs text-slate-200 focus:outline-none focus:border-blue-500 disabled:opacity-60"
+                        >
+                          <option value="">未配置</option>
+                          {products.map((product) => (
+                            <option key={product} value={product}>
+                              {product}
+                            </option>
+                          ))}
+                        </select>
+                      </td>
                       <td className="px-4 py-3 text-sm font-medium text-slate-200 max-w-[14rem] truncate" title={displayProjectName}>
                         {displayProjectName}
                       </td>
@@ -476,20 +509,6 @@ export default function ScanHistory({ onViewScan, onDownloadAgent, onNewScan, us
                             </span>
                           ))}
                         </div>
-                      </td>
-                      <td className="px-4 py-3">
-                        {scan.agent_name ? (
-                          <span className="flex items-center gap-1.5 text-xs text-slate-300">
-                            <span
-                              className={`w-2 h-2 rounded-full flex-shrink-0 ${
-                                scan.agent_online ? "bg-green-400" : "bg-slate-500"
-                              }`}
-                            />
-                            {scan.agent_name}
-                          </span>
-                        ) : (
-                          <span className="text-xs text-slate-500">-</span>
-                        )}
                       </td>
                       {user.role === "admin" && (
                         <td className="px-4 py-3 text-xs text-slate-300">

@@ -37,6 +37,29 @@ class ConfigPathTests(unittest.TestCase):
                 str((root / "OpenDeepHoleData" / "scans").resolve()),
             )
 
+    def test_default_scan_products_are_configured(self) -> None:
+        config = load_config("/path/that/does/not/exist.yaml")
+
+        self.assertEqual(
+            config.scan.products,
+            ["LTE", "5G", "MAE", "微波RTN", "RuralCOW", "eMRU200", "Lampsite"],
+        )
+
+    def test_scan_products_can_be_overridden_from_yaml(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = Path(tmp) / "config.yaml"
+            cfg.write_text(
+                "scan:\n"
+                "  products:\n"
+                "    - LTE\n"
+                "    - Custom\n",
+                encoding="utf-8",
+            )
+
+            config = load_config(str(cfg))
+
+        self.assertEqual(config.scan.products, ["LTE", "Custom"])
+
 
 if __name__ == "__main__":
     unittest.main()

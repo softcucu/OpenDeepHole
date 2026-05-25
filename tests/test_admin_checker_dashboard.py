@@ -26,6 +26,7 @@ class FakeScanStore:
             ScanSummary(
                 scan_id=self.scan.scan_id,
                 project_id=self.scan.project_id,
+                product=self.meta.product,
                 status=self.scan.status,
                 created_at=self.scan.created_at,
                 progress=self.scan.progress,
@@ -103,6 +104,7 @@ class AdminCheckerDashboardTests(unittest.TestCase):
         scan = ScanStatus(
             scan_id="scan-1",
             project_id="project-1",
+            product="LTE",
             scan_items=["npd", "oob"],
             created_at="2026-01-01T00:00:00+00:00",
             status=ScanItemStatus.COMPLETE,
@@ -164,6 +166,7 @@ class AdminCheckerDashboardTests(unittest.TestCase):
             created_at=scan.created_at,
             project_path="/repo/project",
             scan_name="Project One",
+            product="LTE",
             agent_name="agent-1",
         )
         registry = {
@@ -196,7 +199,51 @@ class AdminCheckerDashboardTests(unittest.TestCase):
         self.assertEqual(response.summary.accuracy, 1.0)
         npd = next(checker for checker in response.checkers if checker.checker == "npd")
         self.assertEqual(npd.ticket_submitted_count, 1)
+        self.assertEqual(npd.scans[0].product, "LTE")
         self.assertEqual(npd.scans[0].ticket_submitted_count, 1)
+
+    def test_product_filter_excludes_other_products(self) -> None:
+        scan = ScanStatus(
+            scan_id="scan-1",
+            project_id="project-1",
+            product="LTE",
+            scan_items=["npd"],
+            created_at="2026-01-01T00:00:00+00:00",
+            status=ScanItemStatus.COMPLETE,
+            progress=1.0,
+            total_candidates=0,
+            processed_candidates=0,
+            vulnerabilities=[],
+        )
+        meta = ScanMeta(
+            scan_items=["npd"],
+            created_at=scan.created_at,
+            project_path="/repo/project",
+            scan_name="Project One",
+            product="LTE",
+        )
+        registry = {
+            "npd": SimpleNamespace(label="NPD", description="null pointer"),
+        }
+
+        with (
+            patch("backend.api.admin.get_scan_store", return_value=FakeScanStore(scan, meta)),
+            patch("backend.api.admin.refresh_registry", return_value=registry),
+        ):
+            response = asyncio.run(
+                get_checker_dashboard(
+                    product="5G",
+                    _current_user=User(
+                        user_id="admin",
+                        username="admin",
+                        role="admin",
+                    )
+                )
+            )
+
+        self.assertEqual(response.summary.scan_count, 0)
+        npd = next(checker for checker in response.checkers if checker.checker == "npd")
+        self.assertEqual(npd.scan_count, 0)
 
 
 if __name__ == "__main__":

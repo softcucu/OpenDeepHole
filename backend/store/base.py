@@ -38,6 +38,10 @@ class ScanStoreBase(ABC):
         """Load a single scan's full state. Returns *None* if not found."""
 
     @abstractmethod
+    def update_scan_product(self, scan_id: str, product: str) -> None:
+        """Update the product associated with a scan."""
+
+    @abstractmethod
     def list_scans(self) -> list[ScanSummary]:
         """List all scans as summaries, ordered by *created_at* descending."""
 
