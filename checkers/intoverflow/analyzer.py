@@ -1,215 +1,215 @@
-"""整数翻转/溢出静态分析器 — 反向追溯策略。
+"""Integer overflow static analyzer using semgrep for high-risk candidates.
 
-流程:
-1. 加载入口点配置，构建反向调用图
-2. 遍历所有函数，找"危险使用点"（数组下标/指针偏移/内存参数/循环边界）
-3. 追溯使用的变量是否来自未守卫的加减法
-4. 追溯算术操作数来源，反向查调用链到入口函数
-5. 能追到入口函数的，组装证据，yield 候选
-
-find_candidates 是一个 generator，yield 候选后调用方可以立即启动 LLM 分析。
+This checker intentionally keeps static analysis shallow: semgrep recalls
+syntax-level overflow candidates and opencode/LLM performs the semantic audit.
 """
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+import json
 from pathlib import Path
-from typing import TYPE_CHECKING, Callable
-
-import tree_sitter_cpp
-from tree_sitter import Language, Parser
+from typing import TYPE_CHECKING, Iterator
 
 from backend.analyzers.base import BaseAnalyzer, Candidate
+from backend.analyzers.semgrep_locations import (
+    function_from_db_location,
+    relative_reported_path,
+)
+from backend.analyzers.semgrep_runner import DEFAULT_SEMGREP_TIMEOUT_SECONDS, run_semgrep
 from backend.logger import get_logger
-
-from .arith_scanner import ArithScanner
-from .call_tracer import CallTracer, build_reverse_graph
-from .entry_points import load_entry_points
-from .evidence_fmt import EvidenceFormatter
-from .models import CandidateEvidence
-from .sink_checker import SinkChecker
-from .var_tracer import VarTracer
 
 if TYPE_CHECKING:
     from code_parser import CodeDatabase
 
-_CPP_LANGUAGE = Language(tree_sitter_cpp.language())
+_log = get_logger(__name__)
 
-logger = get_logger(__name__)
+_RULE_FILE = Path(__file__).parent / "intoverflow_semgrep.yml"
+_SEMGREP_TIMEOUT_SECONDS = DEFAULT_SEMGREP_TIMEOUT_SECONDS
+_SEV_LABEL = {"ERROR": "高风险", "WARNING": "中风险", "INFO": "低风险"}
+
+
+def _clean_text(value: object) -> str:
+    if not isinstance(value, str):
+        return ""
+    return value.strip()
+
+
+def _clean_func_name(name: object) -> str:
+    name = _clean_text(name)
+    if not name or name == "unknown" or name.startswith("$"):
+        return ""
+    return name
+
+
+def _mv(metavars: dict, key: str) -> str:
+    if not isinstance(metavars, dict):
+        return ""
+    raw = metavars.get(key) or metavars.get(f"${key.lstrip('$')}") or {}
+    if isinstance(raw, dict):
+        value = raw.get("abstract_content", "")
+    else:
+        value = raw
+    return _clean_text(value)
+
+
+def _rule_source(check_id: str, metadata: dict) -> str:
+    source_kind = _clean_text(metadata.get("source_kind"))
+    if source_kind:
+        return source_kind
+    if check_id:
+        return check_id.rsplit(".", 1)[-1]
+    return "unknown"
+
+
+def _best_effort_arith_expr(metavars: dict, source: str) -> str:
+    arith = _mv(metavars, "$ARITH")
+    if arith:
+        return arith
+
+    a = _mv(metavars, "$A")
+    b = _mv(metavars, "$B")
+    size = _mv(metavars, "$SIZE")
+    count = _mv(metavars, "$COUNT")
+    len_expr = _mv(metavars, "$LEN")
+    off = _mv(metavars, "$OFF")
+
+    if a and b:
+        op = "+/-/*"
+        if "sub" in source or "subtract" in source:
+            op = "-"
+        elif "add" in source or "sum" in source:
+            op = "+"
+        elif "multiply" in source or "mul" in source:
+            op = "*"
+        return f"{a} {op} {b}"
+    if count and size:
+        return f"{count} * {size}"
+    if len_expr and off:
+        op = "-" if "sub" in source or "header" in source else "+"
+        return f"{len_expr} {op} {off}"
+    return ""
+
+
+def _best_effort_sink_expr(metavars: dict, matched_lines: str) -> str:
+    call_name = _mv(metavars, "$CALL")
+    if call_name:
+        return f"{call_name}(...)"
+
+    array_name = _mv(metavars, "$ARR") or _mv(metavars, "$BASE")
+    idx = _mv(metavars, "$IDX") or _mv(metavars, "$ARITH")
+    if array_name and idx:
+        return f"{array_name}[{idx}]"
+
+    ptr = _mv(metavars, "$PTR") or _mv(metavars, "$P")
+    off = _mv(metavars, "$OFF") or _mv(metavars, "$ARITH")
+    if ptr and off:
+        return f"*({ptr} +/- {off})"
+
+    bound = _mv(metavars, "$BOUND")
+    if bound:
+        return f"loop bound {bound}"
+
+    return matched_lines.splitlines()[0].strip() if matched_lines else ""
 
 
 class Analyzer(BaseAnalyzer):
-    """整数翻转/溢出检测器 — 基于反向追溯策略。"""
-
     vuln_type = "intoverflow"
-
-    def __init__(self) -> None:
-        self._parser = Parser(_CPP_LANGUAGE)
-        self.on_progress: Callable[[int, int], None] | None = None
 
     def find_candidates(
         self,
         project_path: Path,
         db: "CodeDatabase | None" = None,
     ) -> Iterator[Candidate]:
-        """遍历所有函数，检测整数翻转候选漏洞。
+        import shutil
 
-        这是一个 generator：发现候选即 yield，调用方可以立即处理。
-        """
-        if db is None:
+        if not shutil.which("semgrep"):
+            _log.warning("semgrep not found; intoverflow checker skipped")
             return
 
-        # ---- 预加载阶段 ----
-
-        # 1. 加载入口点配置
-        ep_config_path = Path(__file__).parent / "entry_points.yaml"
-        entry_points = load_entry_points(ep_config_path, db=db)
-        if not entry_points:
-            logger.warning("未配置入口函数，intoverflow 分析器不运行")
-            return
-
-        # 2. 构建反向调用图
-        logger.info("构建反向调用图...")
-        reverse_graph = build_reverse_graph(db)
-        logger.info(
-            "反向调用图就绪: %d 个被调函数",
-            len(reverse_graph),
+        result = run_semgrep(
+            project_path,
+            rule_file=_RULE_FILE,
+            checker_name=self.vuln_type,
+            timeout=_SEMGREP_TIMEOUT_SECONDS,
         )
+        if result is None:
+            return
 
-        # 3. 初始化各组件
-        sink_checker = SinkChecker()
-        arith_scanner = ArithScanner()
-        call_tracer = CallTracer(db, entry_points, reverse_graph)
-        formatter = EvidenceFormatter()
+        if result.returncode is not None and result.returncode > 1:
+            _log.warning("semgrep exited with rc=%s: %s", result.returncode, result.stderr[:300])
+            if not result.stdout or not result.stdout.strip():
+                return
 
-        # ---- 遍历阶段 ----
+        try:
+            data = json.loads(result.stdout)
+        except json.JSONDecodeError as exc:
+            _log.warning("semgrep output JSON parse error: %s", exc)
+            return
 
-        all_functions = db.get_all_functions()
-        total = len(all_functions)
-        logger.info("开始遍历 %d 个函数...", total)
+        seen: set[tuple[str, int, str, str, str]] = set()
 
-        # 去重：同一 (file, function, sink_var) 只报一次
-        seen: set[tuple[str, str, str]] = set()
+        for match in data.get("results", []):
+            abs_path: str = match.get("path", "")
+            start_line: int = match.get("start", {}).get("line", 0)
+            check_id: str = match.get("check_id", "")
+            extra: dict = match.get("extra", {}) or {}
+            severity: str = extra.get("severity", "WARNING")
+            message: str = _clean_text(extra.get("message"))
+            metavars: dict = extra.get("metavars", {}) or {}
+            metadata: dict = extra.get("metadata", {}) or {}
 
-        for i, func_row in enumerate(all_functions):
-            # 进度回调
-            if self.on_progress and i % 200 == 0:
-                self.on_progress(i, total)
+            raw_lines = _clean_text(extra.get("lines"))
+            matched_lines = "" if "requires login" in raw_lines else raw_lines
 
-            body: str = func_row["body"] or ""
-            if not body:
+            rel_path = relative_reported_path(project_path, abs_path)
+            source = _rule_source(check_id, metadata)
+            risk_class = _clean_text(metadata.get("risk_class")) or "high-risk integer arithmetic"
+            arith_expr = _best_effort_arith_expr(metavars, source)
+            sink_expr = _best_effort_sink_expr(metavars, matched_lines)
+
+            dedup_key = (rel_path, start_line, source, arith_expr, sink_expr)
+            if dedup_key in seen:
                 continue
+            seen.add(dedup_key)
 
-            func_name: str = func_row["name"]
-            file_path: str = func_row["file_path"]
-            start_line: int = func_row["start_line"]
-
-            # 解析函数体 AST
-            tree = self._parser.parse(body.encode("utf-8", errors="replace"))
-            root = tree.root_node
-
-            # 提取函数参数
-            params = self._extract_params_from_sig(func_row["signature"] or "")
-
-            # 4a. 找危险使用点
-            sinks = sink_checker.find_sinks(root)
-            if not sinks:
-                continue
-
-            for sink in sinks:
-                dedup_key = (file_path, func_name, sink.var_name)
-                if dedup_key in seen:
-                    continue
-
-                # 4b. 追溯 sink 变量是否来自未守卫的算术操作
-                arith = arith_scanner.find_unguarded_arith_for_var(
-                    root, sink.var_name, sink.line
+            func_name = "unknown"
+            if db is not None:
+                func_name = (
+                    function_from_db_location(
+                        db,
+                        project_path,
+                        abs_path,
+                        start_line,
+                        clean_func_name=_clean_func_name,
+                    )
+                    or "unknown"
                 )
-                if arith is None:
-                    continue
 
-                # 4c. 追溯算术操作数来源
-                var_tracer = VarTracer(params)
-                found_candidate = False
+            sev_label = _SEV_LABEL.get(severity, severity)
+            parts: list[str] = [f"[{sev_label}] {source}", message]
+            parts.append(f"风险分类: {risk_class}")
 
-                for operand in arith.operands:
-                    origin = var_tracer.trace(root, operand, arith.line)
+            details: list[str] = []
+            if arith_expr:
+                details.append(f"可疑整数运算: {arith_expr}")
+            if sink_expr:
+                details.append(f"危险使用点: {sink_expr}")
+            narrow_type = _mv(metavars, "$NARROW_T")
+            if narrow_type:
+                details.append(f"窄化类型: {narrow_type}")
+            target_var = _mv(metavars, "$VAR") or _mv(metavars, "$SIZEVAR")
+            if target_var:
+                details.append(f"中间变量: {target_var}")
+            details.append("复核重点: 确认输入是否外部可控、是否存在有效范围/溢出检查、溢出结果是否可达危险使用点")
+            parts.append("\n".join(details))
 
-                    if origin.origin_type == "literal":
-                        continue
+            if matched_lines:
+                parts.append(f"匹配代码:\n{matched_lines}")
 
-                    chain = None
-
-                    if origin.origin_type == "parameter" and origin.param_index is not None:
-                        # 4d. 反向追溯调用链
-                        chain = call_tracer.trace_to_entry(func_name, origin.param_index)
-                        if chain is None:
-                            continue
-                    elif origin.origin_type in ("call_return", "global", "unknown"):
-                        # 保守处理：尝试以 param_index（如果有）追溯
-                        if origin.param_index is not None:
-                            chain = call_tracer.trace_to_entry(func_name, origin.param_index)
-                        if chain is None:
-                            continue
-                    else:
-                        continue
-
-                    # 4e. 组装证据
-                    entry_name = chain[0].func_name if chain else ""
-                    evidence = CandidateEvidence(
-                        func_name=func_name,
-                        file_path=file_path,
-                        func_start_line=start_line,
-                        sink=sink,
-                        arith=arith,
-                        var_origin=origin,
-                        call_chain=chain,
-                        entry_point_name=entry_name,
-                    )
-                    desc = formatter.format(evidence)
-
-                    seen.add(dedup_key)
-                    found_candidate = True
-
-                    yield Candidate(
-                        file=file_path,
-                        line=start_line + arith.line,
-                        function=func_name,
-                        description=desc,
-                        vuln_type="intoverflow",
-                    )
-                    break  # 一个 sink 只需一个候选
-
-                if found_candidate:
-                    break  # 一个函数找到一个候选后继续下一个函数
-                    # （如果想找多个，去掉这个 break）
-
-        # 最终进度
-        if self.on_progress:
-            self.on_progress(total, total)
-
-    @staticmethod
-    def _extract_params_from_sig(signature: str) -> list[str]:
-        """从函数签名提取参数名列表。"""
-        import re
-
-        start = signature.find("(")
-        end = signature.rfind(")")
-        if start < 0 or end < 0 or start >= end:
-            return []
-        params_str = signature[start + 1:end].strip()
-        if not params_str or params_str == "void":
-            return []
-
-        params: list[str] = []
-        for param in params_str.split(","):
-            param = param.strip()
-            if not param:
-                continue
-            param = re.sub(r"\[.*?\]", "", param).strip()
-            parts = param.split()
-            if parts:
-                name = parts[-1].lstrip("*&")
-                if name and name != "void" and not name.startswith("..."):
-                    params.append(name)
-        return params
+            yield Candidate(
+                file=rel_path,
+                line=start_line,
+                function=func_name,
+                description="\n".join(part for part in parts if part),
+                vuln_type=self.vuln_type,
+            )

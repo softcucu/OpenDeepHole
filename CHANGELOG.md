@@ -2,6 +2,7 @@
 
 ## 2026-05-22
 
+- **优化** `intoverflow` checker 改为 Semgrep 初筛高风险整数溢出/翻转候选并交由 opencode 语义复核，覆盖加减乘、长度减 header、size 乘法和窄化转换等场景，同时移除旧 tree-sitter 调用链追溯实现以降低误报来源
 - **修复** Agent 扫描和 AI 去误报复核改为使用每任务隔离的 OpenCode 配置目录，并通过环境配置注入 MCP URL 与 SKILL 路径，避免同一项目多个任务并发时覆盖项目根 `opencode.json` 导致 MCP 端口串用
 - **修复** Windows Agent 在 opencode 超时或取消时会终止完整进程树，并限制输出读取线程的退出等待时间，避免锁屏状态下子进程占用管道导致单候选审计卡到超时后很久才结束
 

@@ -1,0 +1,428 @@
+rules:
+  - id: c-cpp.intoverflow.direct-arith-sink
+    languages: [c, cpp]
+    severity: ERROR
+    message: >
+      Function=`$FUNC`. Arithmetic expression using operands `$A` and `$B`
+      reaches a memory, allocation, or copy sink. Semgrep only found syntax; LLM must confirm
+      controllability, bounds checks, integer type width, and reachability.
+    metadata:
+      category: security
+      confidence: medium
+      precision: medium-low
+      recall: high
+      llm_audit: true
+      source_kind: direct-arith-sink
+      risk_class: "arithmetic expression directly used by dangerous sink"
+      cwe:
+        - "CWE-190: Integer Overflow or Wraparound"
+        - "CWE-191: Integer Underflow"
+        - "CWE-680: Integer Overflow to Buffer Overflow"
+    patterns:
+      - pattern-either:
+          - pattern-inside: |
+              $RET $FUNC(...) {
+                ...
+              }
+          - pattern-inside: |
+              $RET $QUAL::$FUNC(...) {
+                ...
+              }
+      - pattern-either:
+          - pattern: $CALL($DST, $SRC, $A + $B)
+          - pattern: $CALL($DST, $SRC, $A - $B)
+          - pattern: $CALL($DST, $SRC, $A * $B)
+          - pattern: $CALL($DST, $VALUE, $A + $B)
+          - pattern: $CALL($DST, $VALUE, $A - $B)
+          - pattern: $CALL($DST, $VALUE, $A * $B)
+          - pattern: $CALL($A + $B)
+          - pattern: $CALL($A - $B)
+          - pattern: $CALL($A * $B)
+          - pattern: $CALL($PTR, $A + $B)
+          - pattern: $CALL($PTR, $A - $B)
+          - pattern: $CALL($PTR, $A * $B)
+      - pattern-not-inside: |
+          if (__builtin_add_overflow(...)) {
+            ...
+          }
+      - pattern-not-inside: |
+          if (__builtin_sub_overflow(...)) {
+            ...
+          }
+      - pattern-not-inside: |
+          if (__builtin_mul_overflow(...)) {
+            ...
+          }
+      - pattern-not-inside: |
+          SafeInt<$T> $SAFE = ...;
+          ...
+      - metavariable-regex:
+          metavariable: $A
+          regex: '^[A-Za-z_][A-Za-z0-9_]*(\s*(->|\.)\s*[A-Za-z_][A-Za-z0-9_]*)*$'
+      - metavariable-regex:
+          metavariable: $CALL
+          regex: '^(malloc|realloc|kmalloc|kzalloc|vmalloc|new_array|memcpy|memmove|memset|memcpy_s|memmove_s|memset_s|strncpy|strncat|snprintf|read|recv)$'
+
+  - id: c-cpp.intoverflow.direct-arith-access-sink
+    languages: [c, cpp]
+    severity: ERROR
+    message: >
+      Function=`$FUNC`. Arithmetic expression using operands `$A` and `$B`
+      is used directly in an array, pointer, or loop sink. LLM must confirm
+      capacity, bounds checks, integer type width, and reachability.
+    metadata:
+      category: security
+      confidence: medium
+      precision: medium-low
+      recall: high
+      llm_audit: true
+      source_kind: direct-arith-access-sink
+      risk_class: "arithmetic expression directly used by memory access or loop sink"
+      cwe:
+        - "CWE-190: Integer Overflow or Wraparound"
+        - "CWE-191: Integer Underflow"
+        - "CWE-129: Improper Validation of Array Index"
+    patterns:
+      - pattern-either:
+          - pattern-inside: |
+              $RET $FUNC(...) {
+                ...
+              }
+          - pattern-inside: |
+              $RET $QUAL::$FUNC(...) {
+                ...
+              }
+      - pattern-either:
+          - pattern: $ARR[$A + $B]
+          - pattern: $ARR[$A - $B]
+          - pattern: $ARR[$A * $B]
+          - pattern: "*($PTR + ($A + $B))"
+          - pattern: "*($PTR + ($A - $B))"
+          - pattern: "*($PTR + ($A * $B))"
+          - pattern: "*($PTR - ($A + $B))"
+          - pattern: for (...; $I < $A + $B; ...) { ... }
+          - pattern: for (...; $I < $A - $B; ...) { ... }
+          - pattern: for (...; $I < $A * $B; ...) { ... }
+      - metavariable-regex:
+          metavariable: $A
+          regex: '^[A-Za-z_][A-Za-z0-9_]*(\s*(->|\.)\s*[A-Za-z_][A-Za-z0-9_]*)*$'
+
+  - id: c-cpp.intoverflow.assigned-arith-to-sink
+    languages: [c, cpp]
+    severity: ERROR
+    message: >
+      Function=`$FUNC`. Variable `$VAR` is assigned from unchecked arithmetic
+      using operands `$A` and `$B` and later reaches a dangerous sink. LLM must
+      confirm missing effective range/overflow checks and real exploitability.
+    metadata:
+      category: security
+      confidence: medium
+      precision: medium-low
+      recall: high
+      llm_audit: true
+      source_kind: assigned-arith-to-sink
+      risk_class: "arithmetic result stored before dangerous use"
+      cwe:
+        - "CWE-190: Integer Overflow or Wraparound"
+        - "CWE-191: Integer Underflow"
+        - "CWE-680: Integer Overflow to Buffer Overflow"
+    patterns:
+      - pattern-either:
+          - pattern-inside: |
+              $RET $FUNC(...) {
+                ...
+              }
+          - pattern-inside: |
+              $RET $QUAL::$FUNC(...) {
+                ...
+              }
+      - pattern-either:
+          - pattern-inside: |
+              $TYPE $VAR = $A + $B;
+              ...
+          - pattern-inside: |
+              $TYPE $VAR = $A - $B;
+              ...
+          - pattern-inside: |
+              $TYPE $VAR = $A * $B;
+              ...
+          - pattern-inside: |
+              $VAR = $A + $B;
+              ...
+          - pattern-inside: |
+              $VAR = $A - $B;
+              ...
+          - pattern-inside: |
+              $VAR = $A * $B;
+              ...
+      - pattern-either:
+          - pattern: $CALL($DST, $SRC, $VAR)
+          - pattern: $CALL($DST, $VALUE, $VAR)
+          - pattern: $CALL($VAR)
+          - pattern: $CALL($PTR, $VAR)
+      - pattern-not-inside: |
+          if ($A < $B) return ...;
+          ...
+      - pattern-not-inside: |
+          if ($A <= $B) return ...;
+          ...
+      - pattern-not-inside: |
+          if ($A > $B) return ...;
+          ...
+      - pattern-not-inside: |
+          if (__builtin_add_overflow($A, $B, &$VAR)) {
+            ...
+          }
+      - pattern-not-inside: |
+          if (__builtin_sub_overflow($A, $B, &$VAR)) {
+            ...
+          }
+      - pattern-not-inside: |
+          if (__builtin_mul_overflow($A, $B, &$VAR)) {
+            ...
+          }
+      - metavariable-regex:
+          metavariable: $A
+          regex: '^[A-Za-z_][A-Za-z0-9_]*(\s*(->|\.)\s*[A-Za-z_][A-Za-z0-9_]*)*$'
+      - metavariable-regex:
+          metavariable: $CALL
+          regex: '^(malloc|realloc|kmalloc|kzalloc|vmalloc|new_array|memcpy|memmove|memset|memcpy_s|memmove_s|memset_s|strncpy|strncat|snprintf|read|recv)$'
+
+  - id: c-cpp.intoverflow.assigned-arith-access-sink
+    languages: [c, cpp]
+    severity: ERROR
+    message: >
+      Function=`$FUNC`. Variable `$VAR` is assigned from unchecked arithmetic
+      using operands `$A` and `$B` and later used in an array, pointer, or loop
+      sink. LLM must confirm the real capacity, guard coverage, and overflow behavior.
+    metadata:
+      category: security
+      confidence: medium
+      precision: medium-low
+      recall: high
+      llm_audit: true
+      source_kind: assigned-arith-access-sink
+      risk_class: "arithmetic result stored before memory access or loop sink"
+      cwe:
+        - "CWE-190: Integer Overflow or Wraparound"
+        - "CWE-191: Integer Underflow"
+        - "CWE-129: Improper Validation of Array Index"
+    patterns:
+      - pattern-either:
+          - pattern-inside: |
+              $RET $FUNC(...) {
+                ...
+              }
+          - pattern-inside: |
+              $RET $QUAL::$FUNC(...) {
+                ...
+              }
+      - pattern-either:
+          - pattern-inside: |
+              $TYPE $VAR = $A + $B;
+              ...
+          - pattern-inside: |
+              $TYPE $VAR = $A - $B;
+              ...
+          - pattern-inside: |
+              $TYPE $VAR = $A * $B;
+              ...
+          - pattern-inside: |
+              $VAR = $A + $B;
+              ...
+          - pattern-inside: |
+              $VAR = $A - $B;
+              ...
+          - pattern-inside: |
+              $VAR = $A * $B;
+              ...
+      - pattern-either:
+          - pattern: $ARR[$VAR]
+          - pattern: "*($PTR + $VAR)"
+          - pattern: "*($PTR - $VAR)"
+          - pattern: for (...; $I < $VAR; ...) { ... }
+      - pattern-not-inside: |
+          if ($A < $B) return ...;
+          ...
+      - pattern-not-inside: |
+          if ($A <= $B) return ...;
+          ...
+      - pattern-not-inside: |
+          if ($A > $B) return ...;
+          ...
+      - metavariable-regex:
+          metavariable: $A
+          regex: '^[A-Za-z_][A-Za-z0-9_]*(\s*(->|\.)\s*[A-Za-z_][A-Za-z0-9_]*)*$'
+
+  - id: c-cpp.intoverflow.header-subtract-sink
+    languages: [c, cpp]
+    severity: ERROR
+    message: >
+      Function=`$FUNC`. Length-like value is reduced by a header/offset and
+      the result reaches a dangerous sink. LLM must verify the lower-bound
+      guard and whether unsigned underflow can expand the operation.
+    metadata:
+      category: security
+      confidence: medium
+      precision: medium-low
+      recall: high
+      llm_audit: true
+      source_kind: header-subtract-sink
+      risk_class: "length minus header or offset reaches dangerous sink"
+      cwe:
+        - "CWE-191: Integer Underflow"
+        - "CWE-680: Integer Overflow to Buffer Overflow"
+    patterns:
+      - pattern-either:
+          - pattern-inside: |
+              $RET $FUNC(...) {
+                ...
+              }
+          - pattern-inside: |
+              $RET $QUAL::$FUNC(...) {
+                ...
+              }
+      - pattern-either:
+          - pattern-inside: |
+              $TYPE $VAR = $LEN - $OFF;
+              ...
+          - pattern-inside: |
+              $VAR = $LEN - $OFF;
+              ...
+      - pattern-either:
+          - pattern: $CALL($DST, $SRC, $VAR)
+          - pattern: $CALL($DST, $VALUE, $VAR)
+          - pattern: $CALL($VAR)
+          - pattern: $ARR[$VAR]
+          - pattern: for (...; $I < $VAR; ...) { ... }
+      - pattern-not-inside: |
+          if ($LEN < $OFF) return ...;
+          ...
+      - pattern-not-inside: |
+          if ($LEN <= $OFF) return ...;
+          ...
+      - pattern-not-inside: |
+          if ($LEN >= $OFF) {
+            ...
+          }
+      - metavariable-regex:
+          metavariable: $LEN
+          regex: '^[A-Za-z_][A-Za-z0-9_]*(\s*(->|\.)\s*[A-Za-z_][A-Za-z0-9_]*)*$'
+      - metavariable-regex:
+          metavariable: $CALL
+          regex: '^(malloc|realloc|kmalloc|kzalloc|vmalloc|new_array|memcpy|memmove|memset|memcpy_s|memmove_s|memset_s|strncpy|strncat|snprintf|read|recv)$'
+
+  - id: c-cpp.intoverflow.multiply-size-to-allocation
+    languages: [c, cpp]
+    severity: ERROR
+    message: >
+      Function=`$FUNC`. Multiplication result `$SIZEVAR` is used as an
+      allocation or copy size. LLM must confirm whether count and element size
+      can overflow the destination integer type.
+    metadata:
+      category: security
+      confidence: medium
+      precision: medium-low
+      recall: high
+      llm_audit: true
+      source_kind: multiply-size-to-allocation
+      risk_class: "count times element size reaches allocation or copy size"
+      cwe:
+        - "CWE-190: Integer Overflow or Wraparound"
+        - "CWE-680: Integer Overflow to Buffer Overflow"
+    patterns:
+      - pattern-either:
+          - pattern-inside: |
+              $RET $FUNC(...) {
+                ...
+              }
+          - pattern-inside: |
+              $RET $QUAL::$FUNC(...) {
+                ...
+              }
+      - pattern-either:
+          - pattern-inside: |
+              $TYPE $SIZEVAR = $COUNT * $SIZE;
+              ...
+          - pattern-inside: |
+              $SIZEVAR = $COUNT * $SIZE;
+              ...
+      - pattern-either:
+          - pattern: $CALL($SIZEVAR)
+          - pattern: $CALL($PTR, $SIZEVAR)
+          - pattern: $CALL($DST, $SRC, $SIZEVAR)
+      - pattern-not-inside: |
+          if (__builtin_mul_overflow($COUNT, $SIZE, &$SIZEVAR)) {
+            ...
+          }
+      - metavariable-regex:
+          metavariable: $COUNT
+          regex: '^[A-Za-z_][A-Za-z0-9_]*(\s*(->|\.)\s*[A-Za-z_][A-Za-z0-9_]*)*$'
+      - metavariable-regex:
+          metavariable: $CALL
+          regex: '^(malloc|realloc|kmalloc|kzalloc|vmalloc|new_array|memcpy|memmove|memset|memcpy_s|memmove_s|memset_s|read|recv)$'
+
+  - id: c-cpp.intoverflow.narrowed-arith-to-sink
+    languages: [c, cpp]
+    severity: WARNING
+    message: >
+      Function=`$FUNC`. Arithmetic is narrowed into `$NARROW_T` and then used
+      by a dangerous sink. LLM must decide whether truncation can alter the
+      allocation, length, index, or loop bound.
+    metadata:
+      category: security
+      confidence: medium
+      precision: medium-low
+      recall: high
+      llm_audit: true
+      source_kind: narrowed-arith-to-sink
+      risk_class: "arithmetic result narrowed before dangerous use"
+      cwe:
+        - "CWE-190: Integer Overflow or Wraparound"
+        - "CWE-681: Incorrect Conversion between Numeric Types"
+      audit_focus: >
+        Confirm the source expression range, destination type width, and
+        whether truncation makes the later sink unsafe.
+    patterns:
+      - pattern-either:
+          - pattern-inside: |
+              $RET $FUNC(...) {
+                ...
+              }
+          - pattern-inside: |
+              $RET $QUAL::$FUNC(...) {
+                ...
+              }
+      - pattern-either:
+          - pattern-inside: |
+              $NARROW_T $VAR = $A + $B;
+              ...
+          - pattern-inside: |
+              $NARROW_T $VAR = $A - $B;
+              ...
+          - pattern-inside: |
+              $NARROW_T $VAR = $A * $B;
+              ...
+          - pattern-inside: |
+              $TYPE $VAR = ($NARROW_T)($A + $B);
+              ...
+          - pattern-inside: |
+              $TYPE $VAR = ($NARROW_T)($A - $B);
+              ...
+          - pattern-inside: |
+              $TYPE $VAR = ($NARROW_T)($A * $B);
+              ...
+      - pattern-either:
+          - pattern: $CALL($DST, $SRC, $VAR)
+          - pattern: $CALL($DST, $VALUE, $VAR)
+          - pattern: $CALL($VAR)
+          - pattern: $CALL($PTR, $VAR)
+      - metavariable-regex:
+          metavariable: $NARROW_T
+          regex: '^(u?int(8|16)_t|U?CHAR|U?SHORT|char|short|unsigned char|unsigned short)$'
+      - metavariable-regex:
+          metavariable: $A
+          regex: '^[A-Za-z_][A-Za-z0-9_]*(\s*(->|\.)\s*[A-Za-z_][A-Za-z0-9_]*)*$'
+      - metavariable-regex:
+          metavariable: $CALL
+          regex: '^(malloc|realloc|kmalloc|kzalloc|vmalloc|new_array|memcpy|memmove|memset|memcpy_s|memmove_s|memset_s|strncpy|strncat|snprintf|read|recv)$'
