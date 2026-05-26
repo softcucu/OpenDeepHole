@@ -41,7 +41,7 @@ from backend.models import (
     User,
 )
 from backend.opencode.feedback_format import build_feedback_section
-from backend.scan_metrics import calculate_issue_metrics
+from backend.scan_metrics import calculate_issue_metrics, is_effective_fp_review_result
 from backend.store import get_scan_store
 from backend.registry import CHECKER_VISIBILITY_ADMIN, refresh_registry
 
@@ -96,8 +96,33 @@ def _latest_fp_review_result_map(scan_id: str) -> dict[int, FpReviewResult]:
     store = get_scan_store()
     latest: dict[int, FpReviewResult] = {}
     for result in store.list_fp_review_results_by_scan(scan_id):
+        if not is_effective_fp_review_result(result):
+            continue
         latest[result.vuln_index] = result
     return latest
+
+
+def _ordered_fp_review_candidates(scan: ScanStatus, latest_fp_results: dict[int, FpReviewResult]) -> list[dict]:
+    """Return review candidates with unresolved findings first, then already-reviewed findings."""
+    unresolved: list[dict] = []
+    reviewed: list[dict] = []
+    for i, v in enumerate(scan.vulnerabilities):
+        if not v.confirmed or v.user_verdict:
+            continue
+        item = {
+            "index": i,
+            "file": v.file,
+            "line": v.line,
+            "function": v.function,
+            "vuln_type": v.vuln_type,
+            "description": v.description,
+            "ai_analysis": v.ai_analysis,
+        }
+        if i in latest_fp_results:
+            reviewed.append(item)
+        else:
+            unresolved.append(item)
+    return unresolved + reviewed
 
 
 def _merge_latest_fp_review_results(job: FpReviewJob, scan_id: str) -> FpReviewJob:
@@ -732,26 +757,7 @@ async def trigger_fp_review(
     store = get_scan_store()
     latest_fp_results = _latest_fp_review_result_map(scan_id)
 
-    confirmed = [
-        {
-            "index": i,
-            "file": v.file,
-            "line": v.line,
-            "function": v.function,
-            "vuln_type": v.vuln_type,
-            "description": v.description,
-            "ai_analysis": v.ai_analysis,
-        }
-        for i, v in enumerate(scan.vulnerabilities)
-        if (
-            v.confirmed
-            and not v.user_verdict
-            and (
-                i not in latest_fp_results
-                or latest_fp_results[i].verdict == "tp"
-            )
-        )
-    ]
+    confirmed = _ordered_fp_review_candidates(scan, latest_fp_results)
     if not confirmed:
         raise HTTPException(status_code=400, detail="No confirmed vulnerabilities to review")
 
@@ -805,6 +811,46 @@ async def trigger_fp_review(
     return {"ok": True, "review_id": review_id}
 
 
+@router.post("/api/scan/{scan_id}/fp_review/stop")
+async def stop_fp_review(
+    scan_id: str,
+    current_user: User = Depends(get_current_user),
+) -> dict:
+    """Cancel the latest running FP review job for a scan."""
+    _check_scan_owner(scan_id, current_user)
+    from backend.api.agent import send_agent_command
+
+    store = get_scan_store()
+    job = store.get_fp_review_by_scan(scan_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="No FP review found for this scan")
+    if job.status not in {FpReviewStatus.PENDING, FpReviewStatus.RUNNING}:
+        return {"ok": True, "review_id": job.review_id}
+
+    loaded = store.load_scan(scan_id)
+    if loaded is None:
+        raise HTTPException(status_code=404, detail="Scan not found")
+    _, meta = loaded
+
+    store.update_fp_review_job(
+        job.review_id,
+        status=FpReviewStatus.CANCELLED.value,
+        clear_current_vuln_index=True,
+        error_message="用户手动停止",
+    )
+
+    agent_id = _resolve_scan_agent_id(meta)
+    if agent_id is not None:
+        await send_agent_command(agent_id, {
+            "type": "fp_review_stop",
+            "scan_id": scan_id,
+            "review_id": job.review_id,
+        })
+
+    logger.info("FP review %s for scan %s cancelled by user", job.review_id, scan_id)
+    return {"ok": True, "review_id": job.review_id}
+
+
 @router.get("/api/scan/{scan_id}/fp_review", response_model=FpReviewJob)
 async def get_fp_review(
     scan_id: str,
@@ -826,7 +872,13 @@ async def agent_fp_review_progress(scan_id: str, body: AgentFpReviewProgress) ->
     job = store.get_fp_review_job(body.review_id)
     if job is None or job.scan_id != scan_id:
         raise HTTPException(status_code=404, detail="FP review not found")
-    store.update_fp_review_job(body.review_id, current_vuln_index=body.vuln_index)
+    if job.status == FpReviewStatus.CANCELLED:
+        return {"ok": True}
+    store.update_fp_review_job(
+        body.review_id,
+        current_vuln_index=body.vuln_index,
+        processed=body.processed,
+    )
     logger.debug("FP review progress for %s: vuln[%d]", scan_id, body.vuln_index)
     return {"ok": True}
 
@@ -835,6 +887,11 @@ async def agent_fp_review_progress(scan_id: str, body: AgentFpReviewProgress) ->
 async def agent_fp_review_result(scan_id: str, body: AgentFpReviewResult) -> dict:
     """Agent pushes a single FP review result."""
     store = get_scan_store()
+    job = store.get_fp_review_job(body.review_id)
+    if job is None or job.scan_id != scan_id:
+        raise HTTPException(status_code=404, detail="FP review not found")
+    if job.status == FpReviewStatus.CANCELLED:
+        return {"ok": True}
     now = datetime.now(timezone.utc).isoformat()
     severity = body.severity if body.severity in {"high", "medium", "low"} else "low"
     if body.verdict == "fp":
@@ -848,9 +905,6 @@ async def agent_fp_review_result(scan_id: str, body: AgentFpReviewResult) -> dic
         created_at=now,
     )
     store.add_fp_review_result(body.review_id, result)
-    job = store.get_fp_review_job(body.review_id)
-    if job is not None:
-        store.update_fp_review_job(body.review_id, processed=len(job.results))
     logger.debug("FP review result for %s vuln[%d]: %s", scan_id, body.vuln_index, body.verdict)
     return {"ok": True}
 
@@ -859,6 +913,11 @@ async def agent_fp_review_result(scan_id: str, body: AgentFpReviewResult) -> dic
 async def agent_fp_review_finish(scan_id: str, body: AgentFpReviewFinish) -> dict:
     """Agent signals FP review job is complete."""
     store = get_scan_store()
+    job = store.get_fp_review_job(body.review_id)
+    if job is None or job.scan_id != scan_id:
+        raise HTTPException(status_code=404, detail="FP review not found")
+    if job.status == FpReviewStatus.CANCELLED:
+        return {"ok": True}
     store.update_fp_review_job(
         body.review_id,
         status=body.status,

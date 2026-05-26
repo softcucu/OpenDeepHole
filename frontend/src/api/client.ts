@@ -294,6 +294,11 @@ export async function triggerFpReview(scanId: string): Promise<{ ok: boolean; re
   return data;
 }
 
+export async function stopFpReview(scanId: string): Promise<{ ok: boolean; review_id: string }> {
+  const { data } = await api.post(`/api/scan/${scanId}/fp_review/stop`);
+  return data;
+}
+
 export async function getFpReview(scanId: string): Promise<FpReviewJob> {
   const { data } = await api.get<FpReviewJob>(`/api/scan/${scanId}/fp_review`);
   return data;

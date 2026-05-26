@@ -427,6 +427,7 @@ class FpReviewStatus(str, Enum):
     RUNNING = "running"
     COMPLETE = "complete"
     ERROR = "error"
+    CANCELLED = "cancelled"
 
 
 class FpReviewResult(BaseModel):
@@ -471,10 +472,11 @@ class AgentFpReviewProgress(BaseModel):
     """Sent by the agent when it starts reviewing a vulnerability."""
     review_id: str
     vuln_index: int
+    processed: int | None = None
 
 
 class AgentFpReviewFinish(BaseModel):
     """Sent by the agent when the FP review job is complete."""
     review_id: str
-    status: str        # "complete" | "error"
+    status: str        # "complete" | "error" | "cancelled"
     error_message: str | None = None

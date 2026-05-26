@@ -91,6 +91,11 @@ async def _handle_command(msg: dict, config, task_manager, reporter) -> dict | N
             vulnerabilities=msg.get("vulnerabilities", []),
             feedback_entries=msg.get("feedback_entries", []),
         )
+    elif cmd_type == "fp_review_stop":
+        await agent_server.handle_fp_review_stop(
+            scan_id=msg["scan_id"],
+            review_id=msg["review_id"],
+        )
     elif cmd_type == "feedback_selection_update":
         await agent_server.handle_feedback_selection_update(
             scan_id=msg["scan_id"],

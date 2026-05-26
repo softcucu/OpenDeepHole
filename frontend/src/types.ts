@@ -197,7 +197,7 @@ export interface AgentConfigTestResult {
   message: string;
 }
 
-export type FpReviewStatus = "pending" | "running" | "complete" | "error";
+export type FpReviewStatus = "pending" | "running" | "complete" | "error" | "cancelled";
 
 export interface FpReviewResult {
   vuln_index: number;

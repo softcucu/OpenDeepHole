@@ -12,6 +12,7 @@ import asyncio
 import json
 import os
 import shutil
+import threading
 from pathlib import Path
 from typing import Optional
 from uuid import uuid4
@@ -76,6 +77,7 @@ async def run_fp_review(
     project_path: str,
     vulnerabilities: list[dict],
     feedback_entries: list[dict] | None = None,
+    cancel_event: threading.Event | None = None,
 ) -> None:
     """Run FP review for a list of confirmed vulnerabilities.
 
@@ -168,6 +170,11 @@ async def run_fp_review(
         fp_cli = effective_fp_review_cli_config(config)
 
         for position, vuln in enumerate(vulnerabilities):
+            if cancel_event is not None and cancel_event.is_set():
+                await emit("fp_review", f"FP review cancelled after reviewing {position} items")
+                await reporter.finish_fp_review(scan_id, review_id, "cancelled", "用户手动停止")
+                return
+
             vuln_index = int(vuln["index"])
             result_id = uuid4().hex
             _create_fp_workspace(
@@ -201,16 +208,10 @@ async def run_fp_review(
                 f"[{position + 1}] Reviewing {vuln['vuln_type'].upper()} "
                 f"at {vuln['file']}:{vuln['line']} ({vuln['function']})",
             )
-            await reporter.push_fp_progress(scan_id, review_id, vuln_index)
-
-            verdict = "tp"
-            severity = "low"
-            reason = "Review incomplete — no result returned"
-            vulnerability_report = ""
+            await reporter.push_fp_progress(scan_id, review_id, vuln_index, position)
+            result_submitted = False
 
             try:
-                import threading
-                cancel_event = threading.Event()
                 log_path = review_dir / f"fp_{result_id}.log"
 
                 await _invoke_opencode(
@@ -223,6 +224,10 @@ async def run_fp_review(
                     cli_config=fp_cli,
                     project_dir=project,
                 )
+                if cancel_event is not None and cancel_event.is_set():
+                    await emit("fp_review", f"FP review cancelled after reviewing {position} items")
+                    await reporter.finish_fp_review(scan_id, review_id, "cancelled", "用户手动停止")
+                    return
 
                 fake_candidate = Candidate(
                     file=vuln["file"],
@@ -246,25 +251,34 @@ async def run_fp_review(
                         "fp_review",
                         f"[{position + 1}] {'TRUE POSITIVE' if verdict == 'tp' else 'FALSE POSITIVE'} severity={severity}",
                     )
+                    await reporter.push_fp_result(
+                        scan_id,
+                        review_id,
+                        vuln_index,
+                        verdict,
+                        severity,
+                        reason,
+                        vulnerability_report,
+                    )
+                    result_submitted = True
                 else:
-                    await emit("fp_review", f"[{position + 1}] No result returned — keeping as TP")
+                    await emit("fp_review", f"[{position + 1}] No result returned — preserving any previous review result")
 
             except asyncio.CancelledError:
                 await emit("fp_review", f"FP review cancelled after reviewing {position} items")
-                await reporter.finish_fp_review(scan_id, review_id, "error", "Cancelled")
+                await reporter.finish_fp_review(scan_id, review_id, "cancelled", "用户手动停止")
                 return
             except Exception as exc:
                 await emit("fp_review", f"[{position + 1}] Review error: {exc}")
 
-            await reporter.push_fp_result(
+            await reporter.push_fp_progress(
                 scan_id,
                 review_id,
                 vuln_index,
-                verdict,
-                severity,
-                reason,
-                vulnerability_report,
+                position + 1,
             )
+            if not result_submitted:
+                await emit("fp_review", f"[{position + 1}] No FP review result saved")
 
         await reporter.finish_fp_review(scan_id, review_id, "complete", None)
         await emit("fp_review", f"FP review complete: {len(vulnerabilities)} vulnerabilities reviewed")

@@ -2,7 +2,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from backend.models import FpReviewResult
+from backend.models import FpReviewResult, FpReviewStatus
 from backend.store.sqlite import SqliteScanStore
 
 
@@ -55,6 +55,25 @@ class FpReviewStoreTests(unittest.TestCase):
             complete = store.get_fp_review_job("review")
             self.assertIsNotNone(complete)
             self.assertIsNone(complete.current_vuln_index)
+
+    def test_can_mark_fp_review_cancelled(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = SqliteScanStore(Path(tmp) / "scan.db")
+            store.create_fp_review_job("review", "scan-1", 2, "2026-01-01T00:00:00+00:00")
+            store.update_fp_review_job("review", status="running", current_vuln_index=7)
+
+            store.update_fp_review_job(
+                "review",
+                status="cancelled",
+                clear_current_vuln_index=True,
+                error_message="用户手动停止",
+            )
+
+            job = store.get_fp_review_job("review")
+            self.assertIsNotNone(job)
+            self.assertEqual(job.status, FpReviewStatus.CANCELLED)
+            self.assertIsNone(job.current_vuln_index)
+            self.assertEqual(job.error_message, "用户手动停止")
 
     def test_migrates_fp_review_severity_and_report_columns(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

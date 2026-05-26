@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { getScanStatus, stopScan, downloadScanReport, getCheckers, updateScanFeedback, getSkillContent, triggerFpReview, getFpReview, getAgentIndexStatus, getFpReviewSkill } from "../api/client";
+import { getScanStatus, stopScan, downloadScanReport, getCheckers, updateScanFeedback, getSkillContent, triggerFpReview, stopFpReview, getFpReview, getAgentIndexStatus, getFpReviewSkill } from "../api/client";
 import type { FpReviewJob, IndexStatus, ScanItemStatus, ScanStatus as ScanStatusType, ScanEvent, CheckerInfo } from "../types";
 import VulnerabilityList from "./VulnerabilityList";
 import FeedbackManager from "./FeedbackManager";
@@ -52,6 +52,7 @@ export default function ScanStatus({ scanId, onBack }: Props) {
   // FP review state
   const [fpReview, setFpReview] = useState<FpReviewJob | null>(null);
   const [fpReviewLoading, setFpReviewLoading] = useState(false);
+  const [fpReviewStopping, setFpReviewStopping] = useState(false);
 
   // Code indexing progress
   const [indexStatus, setIndexStatus] = useState<IndexStatus | null>(null);
@@ -106,12 +107,12 @@ export default function ScanStatus({ scanId, onBack }: Props) {
 
   // Poll for FP review status when a review is running
   useEffect(() => {
-    if (!fpReview || fpReview.status === "complete" || fpReview.status === "error") return;
+    if (!fpReview || fpReview.status === "complete" || fpReview.status === "error" || fpReview.status === "cancelled") return;
     const timer = setInterval(async () => {
       try {
         const job = await getFpReview(scanId);
         setFpReview(job);
-        if (job.status === "complete" || job.status === "error") {
+        if (job.status === "complete" || job.status === "error" || job.status === "cancelled") {
           clearInterval(timer);
         }
       } catch {
@@ -134,6 +135,22 @@ export default function ScanStatus({ scanId, onBack }: Props) {
       alert(`AI去误报失败：${msg || "未知错误"}`);
     } finally {
       setFpReviewLoading(false);
+    }
+  };
+
+  const handleStopFpReview = async () => {
+    setFpReviewStopping(true);
+    try {
+      await stopFpReview(scanId);
+      const job = await getFpReview(scanId);
+      setFpReview(job);
+    } catch (err: unknown) {
+      const msg = err && typeof err === "object" && "response" in err
+        ? (err as { response: { data: { detail: string } } }).response?.data?.detail
+        : "停止失败";
+      alert(`停止AI复核失败：${msg || "未知错误"}`);
+    } finally {
+      setFpReviewStopping(false);
     }
   };
 
@@ -370,34 +387,49 @@ export default function ScanStatus({ scanId, onBack }: Props) {
               const canTrigger = confirmedVulns > 0;
               const isReviewing = fpReview?.status === "running" || fpReview?.status === "pending";
               return (
-                <button
-                  onClick={handleFpReview}
-                  disabled={!canTrigger || fpReviewLoading || !!isReviewing}
-                  className="px-3 py-1.5 text-sm font-medium text-amber-400 border border-amber-500/50 rounded-lg hover:bg-amber-500/10 disabled:opacity-50 disabled:cursor-not-allowed transition-colors flex items-center gap-1.5"
-                  title={!canTrigger ? "需要存在 LLM 正报才可使用" : "使用 AI 对已确认漏洞逐条进行误报复核"}
-                >
-                  {isReviewing ? (
-                    <>
-                      <div className="w-3 h-3 border border-amber-500/30 border-t-amber-400 rounded-full animate-spin" />
-                      复核中 {fpReview!.processed}/{fpReview!.total}
-                    </>
-                  ) : fpReviewLoading ? (
-                    <>
-                      <div className="w-3 h-3 border border-amber-500/30 border-t-amber-400 rounded-full animate-spin" />
-                      启动中...
-                    </>
-                  ) : (
-                    <>
-                      <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
-                      </svg>
-                      AI去误报
-                      {fpReview?.status === "complete" && (
-                        <span className="text-xs text-green-400 ml-0.5">✓</span>
-                      )}
-                    </>
+                <>
+                  <button
+                    onClick={handleFpReview}
+                    disabled={!canTrigger || fpReviewLoading || !!isReviewing}
+                    className="px-3 py-1.5 text-sm font-medium text-amber-400 border border-amber-500/50 rounded-lg hover:bg-amber-500/10 disabled:opacity-50 disabled:cursor-not-allowed transition-colors flex items-center gap-1.5"
+                    title={!canTrigger ? "需要存在 LLM 正报才可使用" : "使用 AI 对已确认漏洞逐条进行误报复核"}
+                  >
+                    {isReviewing ? (
+                      <>
+                        <div className="w-3 h-3 border border-amber-500/30 border-t-amber-400 rounded-full animate-spin" />
+                        复核中 {fpReview!.processed}/{fpReview!.total}
+                      </>
+                    ) : fpReviewLoading ? (
+                      <>
+                        <div className="w-3 h-3 border border-amber-500/30 border-t-amber-400 rounded-full animate-spin" />
+                        启动中...
+                      </>
+                    ) : (
+                      <>
+                        <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
+                        </svg>
+                        AI去误报
+                        {fpReview?.status === "complete" && (
+                          <span className="text-xs text-green-400 ml-0.5">✓</span>
+                        )}
+                        {fpReview?.status === "cancelled" && (
+                          <span className="text-xs text-amber-300 ml-0.5">已停止</span>
+                        )}
+                      </>
+                    )}
+                  </button>
+                  {isReviewing && (
+                    <button
+                      onClick={handleStopFpReview}
+                      disabled={fpReviewStopping}
+                      className="px-3 py-1.5 text-sm font-medium text-red-400 border border-red-500/50 rounded-lg hover:bg-red-500/10 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                      title="停止当前AI去误报复核"
+                    >
+                      {fpReviewStopping ? "停止中..." : "停止复核"}
+                    </button>
                   )}
-                </button>
+                </>
               );
             })()}
             {isDone && (

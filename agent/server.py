@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 from pathlib import Path
 from typing import Optional
 
@@ -10,6 +11,8 @@ _config = None       # AgentConfig
 _reporter = None     # Reporter
 _task_manager = None  # TaskManager
 _agent_id: Optional[str] = None  # Assigned by server on WebSocket connect
+_fp_review_tasks: dict[str, asyncio.Task] = {}
+_fp_review_cancel_events: dict[str, threading.Event] = {}
 
 
 async def _run(task, is_resume: bool) -> None:
@@ -151,6 +154,12 @@ async def handle_fp_review(
     if _config is None or _reporter is None:
         print(f"Warning: agent not fully initialized, ignoring fp_review {review_id}")
         return
+    if review_id in _fp_review_tasks:
+        print(f"Warning: FP review {review_id} already exists, ignoring duplicate")
+        return
+
+    cancel_event = threading.Event()
+    _fp_review_cancel_events[review_id] = cancel_event
 
     async def _run_review() -> None:
         from agent.fp_reviewer import run_fp_review
@@ -163,12 +172,31 @@ async def handle_fp_review(
                 project_path=project_path,
                 vulnerabilities=vulnerabilities,
                 feedback_entries=feedback_entries or [],
+                cancel_event=cancel_event,
             )
         except Exception as exc:
             print(f"[fp_review] Unhandled error in review {review_id}: {exc}")
+        finally:
+            _fp_review_tasks.pop(review_id, None)
+            _fp_review_cancel_events.pop(review_id, None)
 
-    asyncio.create_task(_run_review())
+    _fp_review_tasks[review_id] = asyncio.create_task(_run_review())
     print(f"Started FP review {review_id} for scan {scan_id}")
+
+
+async def handle_fp_review_stop(scan_id: str, review_id: str) -> None:
+    """Handle an 'fp_review_stop' command — cancel a running FP review."""
+    cancel_event = _fp_review_cancel_events.get(review_id)
+    if cancel_event is not None:
+        cancel_event.set()
+        print(f"Stopping FP review {review_id} for scan {scan_id}")
+        return
+    task = _fp_review_tasks.get(review_id)
+    if task is not None:
+        task.cancel()
+        print(f"Cancelling FP review task {review_id} for scan {scan_id}")
+        return
+    print(f"Warning: FP review {review_id} not found for stop")
 
 
 async def handle_feedback_selection_update(scan_id: str, feedback_entries: list[dict]) -> None:
