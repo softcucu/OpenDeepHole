@@ -37,7 +37,7 @@ class CheckerHotReloadTests(unittest.TestCase):
                 root,
                 "admin_check",
                 visibility="admin",
-                category="infinite_loop",
+                category="auth_bypass",
                 modified_at="2026-05-20T12:00:00+08:00",
             )
             user = User(user_id="u1", username="alice", role="user")
@@ -49,8 +49,8 @@ class CheckerHotReloadTests(unittest.TestCase):
 
         self.assertEqual([item.name for item in user_items], ["public_check"])
         self.assertEqual([item.name for item in admin_items], ["admin_check", "public_check"])
-        self.assertEqual(admin_items[0].category, "infinite_loop")
-        self.assertEqual(admin_items[0].category_label, "死循环")
+        self.assertEqual(admin_items[0].category, "auth_bypass")
+        self.assertEqual(admin_items[0].category_label, "认证绕过")
         self.assertEqual(admin_items[0].modified_at, "2026-05-20T12:00:00+08:00")
 
     def test_regular_user_cannot_select_admin_only_checker(self) -> None:

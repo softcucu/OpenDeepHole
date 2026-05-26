@@ -89,6 +89,30 @@ class CheckerCatalogTests(unittest.TestCase):
         self.assertEqual(response[2].category, "illegal_memory_use")
         self.assertEqual(response[2].category_label, "非法内存使用")
 
+    def test_catalog_accepts_auth_bypass_and_other_categories(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self._write_checker(
+                root,
+                "auth_check",
+                category="auth_bypass",
+                modified_at="2026-05-20T12:00:00+08:00",
+            )
+            self._write_checker(
+                root,
+                "other_check",
+                category="other",
+                modified_at="2026-05-19T12:00:00+08:00",
+            )
+
+            response = _discover_catalog_items(root)
+
+        by_name = {item.name: item for item in response}
+        self.assertEqual(by_name["auth_check"].category, "auth_bypass")
+        self.assertEqual(by_name["auth_check"].category_label, "认证绕过")
+        self.assertEqual(by_name["other_check"].category, "other")
+        self.assertEqual(by_name["other_check"].category_label, "其他")
+
     def test_catalog_falls_back_to_description_when_intro_files_are_missing(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
