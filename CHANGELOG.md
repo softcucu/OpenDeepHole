@@ -10,6 +10,7 @@
 - **新增** `npd_funcret` checker，采用 semgrep 初筛 + tree-sitter 跨函数分析的混合方案，检测函数返回值或参数赋值给指针后未判空即解引用导致的空指针解引用（CWE-476），覆盖返回值直接赋值、带类型强转赋值、声明时赋值和传指针的指针参数赋值等场景
 - **新增** `npd_funcret` 支持递归分析被调函数是否可能返回 NULL（最多 3 层），自动过滤不可能返回 NULL 的函数以降低误报
 - **新增** `npd_funcret` 集中定义自定义空指针字面量（`VOS_NULL_PTR`、`FCA_NULL`）和自定义判空函数/宏（`CHECK_POINTER_RETURN`、`RET_IF_NULL_PTR` 等 10 个），semgrep 规则层和 analyzer 后处理层两级排除已判空的场景
+- **优化** `npd_funcret` 的 LLM 审计提示词改为围绕函数内其他判空、空返回路径到解引用的可达性、以及调用上下文非空保护三点独立复核，避免过度相信静态分析候选结论
 - **优化** 统一所有 checker 的 label 为「English Name / 中文名称」格式，便于国际化展示
 
 ## 2026-05-25
