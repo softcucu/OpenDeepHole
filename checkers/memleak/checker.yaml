@@ -1,5 +1,5 @@
 name: memleak
-label: MEMLEAK
+label: Error Path Memory Leak / 异常分支内存泄漏
 description: 异常分支内存泄漏检测（错误路径未释放 / 循环 continue 前未释放）
 enabled: true
 single_pass: true

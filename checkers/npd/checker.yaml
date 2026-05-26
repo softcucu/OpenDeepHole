@@ -1,5 +1,5 @@
 name: npd
-label: NPD
+label: Null Pointer Dereference / 空指针解引用
 description: Null Pointer Dereference
 enabled: true
 visibility: admin

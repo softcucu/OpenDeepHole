@@ -1,5 +1,5 @@
 name: npd_funcret
-label: NPD-FuncRet
+label: Null Pointer Dereference from Function Return / 函数返回值空指针解引用
 description: 函数返回值或参数赋值给指针后未判空即解引用导致的空指针解引用（CWE-476）
 enabled: true
 category: illegal_memory_use

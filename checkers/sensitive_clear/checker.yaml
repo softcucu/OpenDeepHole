@@ -1,5 +1,5 @@
 name: sensitive_clear
-label: SENSITIVE_CLEAR
+label: Sensitive Data Clear / 敏感数据清除
 description: 敏感信息使用后未清零检测（认证凭据/密钥材料/安全随机数种子）
 enabled: false
 skill_name: sensitive-variable-clear-check

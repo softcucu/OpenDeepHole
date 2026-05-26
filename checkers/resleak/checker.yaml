@@ -1,5 +1,5 @@
 name: resleak
-label: RESLEAK
+label: Resource Leak / 资源泄漏
 description: 全类型资源泄露检测（文件/套接字/锁/内存映射/数据库连接/线程句柄等异常路径未释放）
 enabled: false
 category: resource_leak

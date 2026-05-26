@@ -1,5 +1,5 @@
 name: intoverflow
-label: INTOVFL
+label: Integer Overflow / 整数溢出
 description: 整数翻转/溢出（缺少边界校验导致的整数翻转）
 enabled: true
 category: out_of_bounds

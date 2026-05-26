@@ -1,5 +1,5 @@
 name: oob
-label: OOB
+label: Out-of-Bounds Access / 数组越界访问
 description: Out-of-Bounds Access
 enabled: false
 skill_name: oob-audit
