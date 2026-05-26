@@ -83,6 +83,7 @@ def _scan_stats_for_checker(
         ticket_submitted_count=ticket_submitted_count,
         accuracy_basis_count=metrics.accuracy_basis_count,
         accuracy=metrics.accuracy,
+        ticket_accuracy=accuracy(ticket_submitted_count, metrics.accuracy_basis_count),
     )
 
 
@@ -187,6 +188,10 @@ async def get_checker_dashboard(
             ticket_submitted_count=item.ticket_submitted_count,
             accuracy_basis_count=item.accuracy_basis_count,
             accuracy=accuracy(item.human_confirmed_count, item.accuracy_basis_count),
+            ticket_accuracy=accuracy(
+                item.ticket_submitted_count,
+                item.accuracy_basis_count,
+            ),
             scans=item.scans,
         )
         for item in stats.values()
@@ -217,6 +222,7 @@ async def get_checker_dashboard(
             ticket_submitted_count=ticket_submitted_count,
             accuracy_basis_count=accuracy_basis_count,
             accuracy=accuracy(human_confirmed_count, accuracy_basis_count),
+            ticket_accuracy=accuracy(ticket_submitted_count, accuracy_basis_count),
         ),
         checkers=checkers,
     )

@@ -241,6 +241,7 @@ export interface CheckerScanDashboardStats {
   ticket_submitted_count: number;
   accuracy_basis_count: number;
   accuracy: number | null;
+  ticket_accuracy: number | null;
 }
 
 export interface CheckerDashboardStats {
@@ -259,6 +260,7 @@ export interface CheckerDashboardStats {
   ticket_submitted_count: number;
   accuracy_basis_count: number;
   accuracy: number | null;
+  ticket_accuracy: number | null;
   scans: CheckerScanDashboardStats[];
 }
 
@@ -275,6 +277,7 @@ export interface CheckerDashboardSummary {
   ticket_submitted_count: number;
   accuracy_basis_count: number;
   accuracy: number | null;
+  ticket_accuracy: number | null;
 }
 
 export interface CheckerDashboardResponse {

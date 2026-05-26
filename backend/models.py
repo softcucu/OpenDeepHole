@@ -373,6 +373,7 @@ class CheckerScanDashboardStats(BaseModel):
     ticket_submitted_count: int = 0
     accuracy_basis_count: int = 0
     accuracy: float | None = None
+    ticket_accuracy: float | None = None
 
 
 class CheckerDashboardStats(BaseModel):
@@ -392,6 +393,7 @@ class CheckerDashboardStats(BaseModel):
     ticket_submitted_count: int = 0
     accuracy_basis_count: int = 0
     accuracy: float | None = None
+    ticket_accuracy: float | None = None
     scans: list[CheckerScanDashboardStats] = []
 
 
@@ -409,6 +411,7 @@ class CheckerDashboardSummary(BaseModel):
     ticket_submitted_count: int = 0
     accuracy_basis_count: int = 0
     accuracy: float | None = None
+    ticket_accuracy: float | None = None
 
 
 class CheckerDashboardResponse(BaseModel):

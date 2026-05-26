@@ -109,7 +109,7 @@ export default function AdminCheckerDashboard({ onBack, onViewScan }: Props) {
           </div>
         ) : data ? (
           <div className="max-w-7xl mx-auto">
-            <div className="grid grid-cols-2 md:grid-cols-4 xl:grid-cols-9 gap-3 mb-6">
+            <div className="grid grid-cols-2 md:grid-cols-5 xl:grid-cols-10 gap-3 mb-6">
               <MetricTile label="SKILL" value={data.summary.checker_count} />
               <MetricTile label="扫描次数" value={data.summary.scan_count} />
               <MetricTile label="静态发现" value={data.summary.static_issue_count} />
@@ -119,10 +119,16 @@ export default function AdminCheckerDashboard({ onBack, onViewScan }: Props) {
               <MetricTile label="人工确认" value={data.summary.human_confirmed_count} />
               <MetricTile label="已提单" value={data.summary.ticket_submitted_count} />
               <MetricTile
-                label="准确率"
+                label="人工准确率"
                 value={formatAccuracy(data.summary.accuracy)}
                 sub={`${data.summary.human_confirmed_count}/${data.summary.accuracy_basis_count}`}
                 tone="emerald"
+              />
+              <MetricTile
+                label="提单准确率"
+                value={formatAccuracy(data.summary.ticket_accuracy)}
+                sub={`${data.summary.ticket_submitted_count}/${data.summary.accuracy_basis_count}`}
+                tone="blue"
               />
             </div>
 
@@ -172,9 +178,14 @@ function MetricTile({
   label: string;
   value: number | string;
   sub?: string;
-  tone?: "slate" | "emerald";
+  tone?: "slate" | "emerald" | "blue";
 }) {
-  const valueCls = tone === "emerald" ? "text-emerald-300" : "text-white";
+  const valueCls =
+    tone === "emerald"
+      ? "text-emerald-300"
+      : tone === "blue"
+        ? "text-blue-300"
+        : "text-white";
   return (
     <div className="border border-slate-800 bg-slate-900/70 rounded-lg px-4 py-3">
       <div className="text-xs text-slate-500 mb-1">{label}</div>
@@ -233,12 +244,22 @@ function CheckerDetail({
             </div>
             <p className="text-sm text-slate-400 max-w-3xl">{checker.description || "暂无描述"}</p>
           </div>
-          <div className="text-right">
-            <div className="text-3xl font-semibold text-emerald-300">
-              {formatAccuracy(checker.accuracy)}
+          <div className="flex flex-wrap justify-end gap-5 text-right">
+            <div>
+              <div className="text-3xl font-semibold text-emerald-300">
+                {formatAccuracy(checker.accuracy)}
+              </div>
+              <div className="text-xs text-slate-500">
+                人工准确率：{checker.human_confirmed_count}/{checker.accuracy_basis_count}
+              </div>
             </div>
-            <div className="text-xs text-slate-500">
-              人工确认 / 准确率分母：{checker.human_confirmed_count}/{checker.accuracy_basis_count}
+            <div>
+              <div className="text-3xl font-semibold text-blue-300">
+                {formatAccuracy(checker.ticket_accuracy)}
+              </div>
+              <div className="text-xs text-slate-500">
+                提单准确率：{checker.ticket_submitted_count}/{checker.accuracy_basis_count}
+              </div>
             </div>
           </div>
         </div>
@@ -286,16 +307,17 @@ function CheckerDetail({
               <Th>FP 真/误</Th>
               <Th>人工真/误</Th>
               <Th>已提单</Th>
-              <Th>准确率</Th>
+              <Th>人工准确率</Th>
+              <Th>提单准确率</Th>
               <Th>创建者</Th>
               <Th>时间</Th>
             </tr>
           </thead>
           <tbody>
-	            {checker.scans.length === 0 ? (
-	              <tr>
-	                <td colSpan={12} className="px-4 py-10 text-center text-sm text-slate-500">
-	                  这个 SKILL 还没有扫描记录
+            {checker.scans.length === 0 ? (
+              <tr>
+                <td colSpan={13} className="px-4 py-10 text-center text-sm text-slate-500">
+                  这个 SKILL 还没有扫描记录
                 </td>
               </tr>
             ) : (
@@ -354,6 +376,11 @@ function ScanRow({
       <td className="px-4 py-3">
         <span className={scan.accuracy === null ? "text-xs text-slate-500" : "text-xs font-semibold text-emerald-300"}>
           {formatAccuracy(scan.accuracy)}
+        </span>
+      </td>
+      <td className="px-4 py-3">
+        <span className={scan.ticket_accuracy === null ? "text-xs text-slate-500" : "text-xs font-semibold text-blue-300"}>
+          {formatAccuracy(scan.ticket_accuracy)}
         </span>
       </td>
       <td className="px-4 py-3 text-xs text-slate-400">{scan.username || "-"}</td>

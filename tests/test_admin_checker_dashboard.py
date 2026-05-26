@@ -197,10 +197,15 @@ class AdminCheckerDashboardTests(unittest.TestCase):
         self.assertEqual(response.summary.ticket_submitted_count, 1)
         self.assertEqual(response.summary.accuracy_basis_count, 2)
         self.assertEqual(response.summary.accuracy, 1.0)
+        self.assertEqual(response.summary.ticket_accuracy, 0.5)
         npd = next(checker for checker in response.checkers if checker.checker == "npd")
         self.assertEqual(npd.ticket_submitted_count, 1)
+        self.assertEqual(npd.ticket_accuracy, 1.0)
         self.assertEqual(npd.scans[0].product, "LTE")
         self.assertEqual(npd.scans[0].ticket_submitted_count, 1)
+        self.assertEqual(npd.scans[0].ticket_accuracy, 1.0)
+        oob = next(checker for checker in response.checkers if checker.checker == "oob")
+        self.assertEqual(oob.ticket_accuracy, 0.0)
 
     def test_product_filter_excludes_other_products(self) -> None:
         scan = ScanStatus(
@@ -242,8 +247,10 @@ class AdminCheckerDashboardTests(unittest.TestCase):
             )
 
         self.assertEqual(response.summary.scan_count, 0)
+        self.assertIsNone(response.summary.ticket_accuracy)
         npd = next(checker for checker in response.checkers if checker.checker == "npd")
         self.assertEqual(npd.scan_count, 0)
+        self.assertIsNone(npd.ticket_accuracy)
 
 
 if __name__ == "__main__":
