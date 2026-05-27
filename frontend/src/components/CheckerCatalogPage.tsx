@@ -282,7 +282,7 @@ function SkillCreatePage({
       </div>
 
       <div className="flex-1 px-6 py-6">
-        <div className="max-w-6xl mx-auto grid grid-cols-1 xl:grid-cols-[28rem_1fr] gap-5">
+        <div className="max-w-7xl mx-auto grid grid-cols-1 xl:grid-cols-[34rem_1fr] gap-5">
           <form onSubmit={handleSubmit} className="space-y-4">
             <Panel title="基础信息">
               <label className="block text-sm font-medium text-slate-300 mb-2">名称</label>
@@ -295,12 +295,13 @@ function SkillCreatePage({
               />
 
               <label className="block text-sm font-medium text-slate-300 mt-4 mb-2">描述</label>
-              <input
+              <textarea
                 value={description}
                 onChange={(event) => setDescription(event.target.value)}
                 disabled={creating}
-                className="w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-sm text-white placeholder-slate-500 focus:outline-none focus:border-blue-500"
-                placeholder="一句话说明这个 SKILL 要检查什么"
+                rows={3}
+                className="w-full resize-y bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-sm leading-6 text-white placeholder-slate-500 focus:outline-none focus:border-blue-500"
+                placeholder="说明这个 SKILL 要检查什么、适用对象和主要价值"
               />
 
               <label className="block text-sm font-medium text-slate-300 mt-4 mb-2">输入</label>
