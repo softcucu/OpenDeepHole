@@ -1,4 +1,7 @@
 import asyncio
+import base64
+import hashlib
+import io
 import tempfile
 import unittest
 import zipfile
@@ -26,6 +29,7 @@ class AgentRuntimePackageTests(unittest.TestCase):
         self.assertNotIn("run_agent.sh", names)
         self.assertNotIn("run_agent.bat", names)
         self.assertFalse(any(name.startswith("backend/static/") for name in names))
+        self.assertFalse(any(name.startswith("backend/system_skills/") for name in names))
 
     def test_agent_download_zip_includes_launchers_config_and_bundled_ctags(self) -> None:
         data = agent_api._build_agent_zip("http://server.example", "owner-token")
@@ -89,6 +93,26 @@ class AgentRuntimePackageTests(unittest.TestCase):
             before = compute_runtime_hash(root)
             (checker_dir / "checker.yaml").write_text(
                 "name: demo\nlabel: changed\n",
+                encoding="utf-8",
+            )
+
+            self.assertEqual(before, compute_runtime_hash(root))
+
+    def test_runtime_hash_ignores_system_skill_changes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "agent").mkdir()
+            (root / "agent" / "main.py").write_text("print('agent')\n", encoding="utf-8")
+            skill_dir = root / "backend" / "system_skills" / "deephole-skill-creator"
+            skill_dir.mkdir(parents=True)
+            (skill_dir / "SKILL.md").write_text(
+                "name: deephole-skill-creator\n",
+                encoding="utf-8",
+            )
+
+            before = compute_runtime_hash(root)
+            (skill_dir / "SKILL.md").write_text(
+                "name: deephole-skill-creator\nchanged\n",
                 encoding="utf-8",
             )
 
@@ -231,38 +255,54 @@ class AgentRuntimePackageTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             agent_server._write_skill_creator_package(
-                {
-                    "name": "skill-creator",
-                    "files": [
-                        {"path": "SKILL.md", "content": "# Creator\n"},
-                    ],
-                },
+                _skill_creator_package({"SKILL.md": "# Creator\n"}),
                 root,
             )
 
             self.assertEqual(
-                (root / "skill-creator" / "SKILL.md").read_text(encoding="utf-8"),
+                (root / "deephole-skill-creator" / "SKILL.md").read_text(encoding="utf-8"),
                 "# Creator\n",
             )
 
+    def test_skill_creator_prompt_uses_deephole_skill_creator(self) -> None:
+        self.assertIn(
+            "`deephole-skill-creator`",
+            agent_server._skill_creator_prompt("Name", "Description", "Input"),
+        )
+
     def test_skill_creator_package_writer_rejects_path_traversal(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            with self.assertRaisesRegex(RuntimeError, "Unsafe skill-creator package path"):
+            with self.assertRaisesRegex(RuntimeError, "Unsafe deephole-skill-creator package path"):
                 agent_server._write_skill_creator_package(
-                    {
-                        "name": "skill-creator",
-                        "files": [
-                            {"path": "../SKILL.md", "content": "bad"},
-                        ],
-                    },
+                    _skill_creator_package({"../SKILL.md": "bad"}),
                     Path(tmp),
                 )
+
+    def test_skill_creator_package_writer_rejects_hash_mismatch(self) -> None:
+        package = _skill_creator_package({"SKILL.md": "# Creator\n"})
+        package["sha256"] = "0" * 64
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaisesRegex(RuntimeError, "package hash mismatch"):
+                agent_server._write_skill_creator_package(package, Path(tmp))
 
 
 def _bytes_path(data: bytes):
     import io
 
     return io.BytesIO(data)
+
+
+def _skill_creator_package(files: dict[str, str]) -> dict[str, str]:
+    archive = io.BytesIO()
+    with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        for name, content in files.items():
+            zf.writestr(name, content)
+    data = archive.getvalue()
+    return {
+        "name": "deephole-skill-creator",
+        "sha256": hashlib.sha256(data).hexdigest(),
+        "archive_b64": base64.b64encode(data).decode("ascii"),
+    }
 
 
 def _runtime_manifest(files: list[tuple[str, bytes]], scope: dict | None = None) -> dict:

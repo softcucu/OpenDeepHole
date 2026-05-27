@@ -122,12 +122,18 @@ async def _handle_command(msg: dict, config, task_manager, reporter) -> dict | N
             remote_config=msg.get("config") or {},
         )
     elif cmd_type == "skill_create":
+        from agent.updater import ensure_runtime_updated
+        await ensure_runtime_updated(msg.get("agent_runtime_update"), msg)
         return await agent_server.handle_skill_create(
             request_id=msg.get("request_id", ""),
             name=msg.get("name", ""),
             description=msg.get("description", ""),
             user_input=msg.get("input", ""),
-            skill_creator_package=msg.get("skill_creator_package") or {},
+            skill_creator_package=(
+                msg.get("deephole_skill_creator_package")
+                or msg.get("skill_creator_package")
+                or {}
+            ),
         )
     else:
         print(f"Unknown command type: {cmd_type!r}")

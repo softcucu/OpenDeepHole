@@ -3,12 +3,16 @@
 from __future__ import annotations
 
 import re
+import base64
+import hashlib
+import io
 import uuid
+import zipfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import yaml
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 
 from backend.auth import get_current_user
 from backend.config import get_config
@@ -26,6 +30,7 @@ router = APIRouter()
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 _SYSTEM_SKILLS_DIR = _PROJECT_ROOT / "backend" / "system_skills"
+_SKILL_CREATOR_NAME = "deephole-skill-creator"
 _jobs: dict[str, SkillCreateJob] = {}
 _JOB_STATUSES = {"pending", "running", "completed", "error"}
 
@@ -49,6 +54,10 @@ def _skill_slug(value: str, fallback: str) -> str:
 
 def _user_skills_dir() -> Path:
     return Path(get_config().storage.user_skills_dir)
+
+
+def _server_url_from_request(request: Request) -> str:
+    return str(request.base_url).rstrip("/")
 
 
 def _strip_frontmatter(content: str) -> str:
@@ -77,36 +86,43 @@ def _find_existing_checker(skill_id: str) -> bool:
 
 
 def _skill_creator_package() -> dict:
-    skill_dir = _SYSTEM_SKILLS_DIR / "skill-creator"
+    skill_dir = _SYSTEM_SKILLS_DIR / _SKILL_CREATOR_NAME
     skill_file = skill_dir / "SKILL.md"
     if not skill_file.is_file():
-        raise HTTPException(status_code=500, detail="系统 skill-creator SKILL 缺失")
+        raise HTTPException(status_code=500, detail="系统 deephole-skill-creator SKILL 缺失")
 
-    files = []
-    for file_path in sorted(skill_dir.rglob("*")):
-        if not file_path.is_file():
-            continue
-        rel_path = file_path.relative_to(skill_dir).as_posix()
-        if rel_path.startswith("../") or rel_path.startswith("/"):
-            raise HTTPException(status_code=500, detail="系统 skill-creator SKILL 路径非法")
-        files.append({
-            "path": rel_path,
-            "content": file_path.read_text(encoding="utf-8"),
-        })
+    archive = io.BytesIO()
+    with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        for file_path in sorted(skill_dir.rglob("*")):
+            if not file_path.is_file():
+                continue
+            rel_path = file_path.relative_to(skill_dir)
+            if rel_path.is_absolute() or ".." in rel_path.parts:
+                raise HTTPException(status_code=500, detail="系统 deephole-skill-creator SKILL 路径非法")
+            zf.write(file_path, rel_path.as_posix())
+
+    data = archive.getvalue()
 
     return {
-        "name": "skill-creator",
-        "files": files,
+        "name": _SKILL_CREATOR_NAME,
+        "sha256": hashlib.sha256(data).hexdigest(),
+        "archive_b64": base64.b64encode(data).decode("ascii"),
     }
 
 
 @router.post("/api/skills/create", response_model=SkillCreateJob)
 async def create_skill(
+    request: Request,
     body: SkillCreateRequest,
     current_user: User = Depends(get_current_user),
 ) -> SkillCreateJob:
     """Start an Agent-backed SKILL creation job."""
-    from backend.api.agent import _registered_agents, _agent_ws, send_agent_command
+    from backend.api.agent import (
+        _registered_agents,
+        _agent_ws,
+        create_agent_runtime_update_payload,
+        send_agent_command,
+    )
 
     name = body.name.strip()
     description = body.description.strip()
@@ -149,7 +165,9 @@ async def create_skill(
         "name": name,
         "description": description,
         "input": user_input,
+        "deephole_skill_creator_package": skill_creator_package,
         "skill_creator_package": skill_creator_package,
+        "agent_runtime_update": create_agent_runtime_update_payload(_server_url_from_request(request)),
     })
     if not ok:
         _jobs.pop(job_id, None)

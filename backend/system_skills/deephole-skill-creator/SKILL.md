@@ -1,9 +1,9 @@
 ---
-name: skill-creator
+name: deephole-skill-creator
 description: Create concise OpenDeepHole project-level audit skills from a user-provided name, description, and task input.
 ---
 
-# Skill Creator
+# DeepHole Skill Creator
 
 Create a single OpenDeepHole project-level audit skill from the supplied name, description, and user input.
 

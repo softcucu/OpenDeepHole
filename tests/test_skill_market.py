@@ -1,6 +1,10 @@
 import asyncio
+import base64
+import hashlib
+import io
 import tempfile
 import unittest
+import zipfile
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
@@ -94,10 +98,12 @@ class SkillMarketTests(unittest.TestCase):
         with (
             patch.dict(agent_api._registered_agents, {"agent-1": agent}, clear=True),
             patch.dict(agent_api._agent_ws, {"agent-1": object()}, clear=True),
+            patch("backend.api.agent.create_agent_runtime_update_payload", return_value={"hash": "runtime"}),
             patch("backend.api.agent.send_agent_command", new=sender),
         ):
             job = asyncio.run(
                 skills.create_skill(
+                    SimpleNamespace(base_url="http://server.example/"),
                     SkillCreateRequest(
                         agent_id="agent-1",
                         name="Custom Audit",
@@ -111,11 +117,16 @@ class SkillMarketTests(unittest.TestCase):
         self.assertEqual(job.status, "running")
         payload = sender.await_args.args[1]
         self.assertEqual(payload["type"], "skill_create")
-        package = payload["skill_creator_package"]
-        self.assertEqual(package["name"], "skill-creator")
-        by_path = {item["path"]: item["content"] for item in package["files"]}
+        self.assertEqual(payload["agent_runtime_update"], {"hash": "runtime"})
+        package = payload["deephole_skill_creator_package"]
+        self.assertIs(payload["skill_creator_package"], package)
+        self.assertEqual(package["name"], "deephole-skill-creator")
+        archive = base64.b64decode(package["archive_b64"].encode("ascii"), validate=True)
+        self.assertEqual(hashlib.sha256(archive).hexdigest(), package["sha256"])
+        with zipfile.ZipFile(io.BytesIO(archive)) as zf:
+            by_path = {name: zf.read(name).decode("utf-8") for name in zf.namelist()}
         self.assertIn("SKILL.md", by_path)
-        self.assertIn("name: skill-creator", by_path["SKILL.md"])
+        self.assertIn("name: deephole-skill-creator", by_path["SKILL.md"])
 
     def test_create_skill_fails_when_system_skill_creator_is_missing(self) -> None:
         agent = AgentInfo(
@@ -135,6 +146,7 @@ class SkillMarketTests(unittest.TestCase):
                 with self.assertRaises(Exception) as ctx:
                     asyncio.run(
                         skills.create_skill(
+                            SimpleNamespace(base_url="http://server.example/"),
                             SkillCreateRequest(
                                 agent_id="agent-1",
                                 name="Custom Audit",

@@ -4,9 +4,9 @@
 
 - **新增** SKILL 市场支持在线创建纯 SKILL 项目级检查项，可选择在线 Agent 生成草稿、查看进度、编辑确认后导入市场
 - **新增** 用户导入的 SKILL 保存到独立 `user_skills_dir` 目录，导入后作为 public 检查项进入 SKILL 列表和新建扫描选择项，所有登录用户可见可用
-- **新增** Agent 支持 `skill_create` 命令，使用内置 `skill-creator` 技能生成 `SKILL.md` 与场景说明草稿并回传服务端
+- **新增** Agent 支持 `skill_create` 命令，在 Agent 侧调用 opencode 执行 `deephole-skill-creator` 技能生成 `SKILL.md` 与场景说明草稿并回传服务端
 - **优化** 新增 SKILL 页面基础信息区域更宽，描述字段改为多行输入，便于填写更完整的检查说明
-- **优化** `skill-creator` 改为服务端系统 SKILL，并在创建 SKILL 任务时随命令下发到 Agent，确保 Agent 使用服务端最新创建规则
+- **优化** `deephole-skill-creator` 改为服务端系统 SKILL，并在创建 SKILL 任务时随命令下发到 Agent；创建任务会像扫描任务一样先判断并同步 Agent runtime 更新
 
 ## 2026-05-26
 

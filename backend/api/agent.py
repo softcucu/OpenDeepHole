@@ -900,7 +900,7 @@ _AGENT_ROOT_FILES = [
     "run_agent.bat",
     "requirements-agent.txt",
 ]
-_AGENT_SKIP_DIRS = {"__pycache__", ".git", ".mypy_cache", ".pytest_cache", "static"}
+_AGENT_SKIP_DIRS = {"__pycache__", ".git", ".mypy_cache", ".pytest_cache", "static", "system_skills"}
 _AGENT_SKIP_SUFFIXES = {".pyc", ".pyo"}
 
 

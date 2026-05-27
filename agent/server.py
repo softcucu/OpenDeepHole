@@ -2,10 +2,14 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import hashlib
+import io
 import json
 import re
 import shutil
 import threading
+import zipfile
 from pathlib import Path
 from typing import Optional
 
@@ -16,6 +20,7 @@ _task_manager = None  # TaskManager
 _agent_id: Optional[str] = None  # Assigned by server on WebSocket connect
 _fp_review_tasks: dict[str, asyncio.Task] = {}
 _fp_review_cancel_events: dict[str, threading.Event] = {}
+_SKILL_CREATOR_NAME = "deephole-skill-creator"
 
 
 async def _run(task, is_resume: bool) -> None:
@@ -350,44 +355,55 @@ async def _run_skill_creator(
 
 def _write_skill_creator_package(package: dict, skills_root: Path) -> None:
     name = str(package.get("name") or "").strip()
-    if name != "skill-creator":
-        raise RuntimeError("Invalid skill-creator package name")
+    if name != _SKILL_CREATOR_NAME:
+        raise RuntimeError("Invalid deephole-skill-creator package name")
 
-    files = package.get("files")
-    if not isinstance(files, list):
-        raise RuntimeError("Invalid skill-creator package files")
+    expected_hash = str(package.get("sha256") or "").strip()
+    encoded = str(package.get("archive_b64") or "")
+    if not expected_hash or not encoded:
+        raise RuntimeError("Invalid deephole-skill-creator package metadata")
 
-    skill_dir = skills_root / "skill-creator"
+    try:
+        data = base64.b64decode(encoded.encode("ascii"), validate=True)
+    except Exception as exc:
+        raise RuntimeError("Invalid deephole-skill-creator package archive") from exc
+    actual_hash = hashlib.sha256(data).hexdigest()
+    if actual_hash != expected_hash:
+        raise RuntimeError("deephole-skill-creator package hash mismatch")
+
+    skill_dir = skills_root / _SKILL_CREATOR_NAME
+    if skill_dir.exists():
+        shutil.rmtree(skill_dir)
     skill_dir.mkdir(parents=True, exist_ok=True)
     wrote_skill = False
 
-    for item in files:
-        if not isinstance(item, dict):
-            raise RuntimeError("Invalid skill-creator package file entry")
-        rel_path = str(item.get("path") or "").strip()
-        content = item.get("content")
-        if not rel_path or not isinstance(content, str):
-            raise RuntimeError("Invalid skill-creator package file content")
-        member = Path(rel_path)
-        if member.is_absolute() or ".." in member.parts:
-            raise RuntimeError(f"Unsafe skill-creator package path: {rel_path}")
-        dest = (skill_dir / member).resolve()
-        try:
-            dest.relative_to(skill_dir.resolve())
-        except ValueError as exc:
-            raise RuntimeError(f"Unsafe skill-creator package path: {rel_path}") from exc
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        dest.write_text(content, encoding="utf-8")
-        if member.as_posix() == "SKILL.md":
-            wrote_skill = True
+    try:
+        with zipfile.ZipFile(io.BytesIO(data)) as zf:
+            for info in zf.infolist():
+                if info.is_dir():
+                    continue
+                member = Path(info.filename)
+                if member.is_absolute() or ".." in member.parts:
+                    raise RuntimeError(f"Unsafe deephole-skill-creator package path: {info.filename}")
+                dest = (skill_dir / member).resolve()
+                try:
+                    dest.relative_to(skill_dir.resolve())
+                except ValueError as exc:
+                    raise RuntimeError(f"Unsafe deephole-skill-creator package path: {info.filename}") from exc
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                dest.write_bytes(zf.read(info))
+                if member.as_posix() == "SKILL.md":
+                    wrote_skill = True
+    except zipfile.BadZipFile as exc:
+        raise RuntimeError("Invalid deephole-skill-creator package archive") from exc
 
     if not wrote_skill:
-        raise RuntimeError("skill-creator package missing SKILL.md")
+        raise RuntimeError("deephole-skill-creator package missing SKILL.md")
 
 
 def _skill_creator_prompt(name: str, description: str, user_input: str) -> str:
     return (
-        "使用 `skill-creator` 技能，为 OpenDeepHole 创建一个纯 SKILL 项目级审计检查项草稿。"
+        "使用 `deephole-skill-creator` 技能，为 OpenDeepHole 创建一个纯 SKILL 项目级审计检查项草稿。"
         "不要创建 analyzer.py、脚本或资源文件。"
         "只输出一个 JSON 对象，不要输出 Markdown 代码围栏之外的解释。"
         "JSON 字段必须包含："
