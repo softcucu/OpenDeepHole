@@ -6,6 +6,7 @@
 - **新增** 用户导入的 SKILL 保存到独立 `user_skills_dir` 目录，导入后作为 public 检查项进入 SKILL 列表和新建扫描选择项，所有登录用户可见可用
 - **新增** Agent 支持 `skill_create` 命令，使用内置 `skill-creator` 技能生成 `SKILL.md` 与场景说明草稿并回传服务端
 - **优化** 新增 SKILL 页面基础信息区域更宽，描述字段改为多行输入，便于填写更完整的检查说明
+- **优化** `skill-creator` 改为服务端系统 SKILL，并在创建 SKILL 任务时随命令下发到 Agent，确保 Agent 使用服务端最新创建规则
 
 ## 2026-05-26
 

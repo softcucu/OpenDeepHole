@@ -271,10 +271,11 @@ async def handle_skill_create(
     name: str,
     description: str,
     user_input: str,
+    skill_creator_package: dict | None = None,
 ) -> dict:
     """Create a pure project-level SKILL draft by invoking the configured AI CLI."""
     try:
-        draft = await _run_skill_creator(request_id, name, description, user_input)
+        draft = await _run_skill_creator(request_id, name, description, user_input, skill_creator_package)
         return {
             "type": "skill_create_result",
             "request_id": request_id,
@@ -295,6 +296,7 @@ async def _run_skill_creator(
     name: str,
     description: str,
     user_input: str,
+    skill_creator_package: dict | None,
 ) -> dict:
     if _config is None:
         raise RuntimeError("Agent config is not initialized")
@@ -305,13 +307,8 @@ async def _run_skill_creator(
     workspace = Path.home() / ".opendeephole" / "skill_create" / request_id
     if workspace.exists():
         shutil.rmtree(workspace, ignore_errors=True)
-    skills_dir = workspace / ".opencode" / "skills" / "skill-creator"
-    skills_dir.mkdir(parents=True, exist_ok=True)
-
-    creator_source = Path(__file__).resolve().parent / "skills" / "skill_creator.md"
-    if not creator_source.is_file():
-        raise RuntimeError("Bundled skill-creator instructions are missing")
-    (skills_dir / "SKILL.md").write_text(creator_source.read_text(encoding="utf-8"), encoding="utf-8")
+    skills_root = workspace / ".opencode" / "skills"
+    _write_skill_creator_package(skill_creator_package or {}, skills_root)
     (workspace / "opencode.json").write_text(
         json.dumps(
             {
@@ -349,6 +346,43 @@ async def _run_skill_creator(
         project_dir=workspace,
     )
     return _parse_skill_creator_output("\n".join(lines))
+
+
+def _write_skill_creator_package(package: dict, skills_root: Path) -> None:
+    name = str(package.get("name") or "").strip()
+    if name != "skill-creator":
+        raise RuntimeError("Invalid skill-creator package name")
+
+    files = package.get("files")
+    if not isinstance(files, list):
+        raise RuntimeError("Invalid skill-creator package files")
+
+    skill_dir = skills_root / "skill-creator"
+    skill_dir.mkdir(parents=True, exist_ok=True)
+    wrote_skill = False
+
+    for item in files:
+        if not isinstance(item, dict):
+            raise RuntimeError("Invalid skill-creator package file entry")
+        rel_path = str(item.get("path") or "").strip()
+        content = item.get("content")
+        if not rel_path or not isinstance(content, str):
+            raise RuntimeError("Invalid skill-creator package file content")
+        member = Path(rel_path)
+        if member.is_absolute() or ".." in member.parts:
+            raise RuntimeError(f"Unsafe skill-creator package path: {rel_path}")
+        dest = (skill_dir / member).resolve()
+        try:
+            dest.relative_to(skill_dir.resolve())
+        except ValueError as exc:
+            raise RuntimeError(f"Unsafe skill-creator package path: {rel_path}") from exc
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_text(content, encoding="utf-8")
+        if member.as_posix() == "SKILL.md":
+            wrote_skill = True
+
+    if not wrote_skill:
+        raise RuntimeError("skill-creator package missing SKILL.md")
 
 
 def _skill_creator_prompt(name: str, description: str, user_input: str) -> str:

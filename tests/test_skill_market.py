@@ -3,10 +3,11 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
+from backend.api import agent as agent_api
 from backend.api import skills
-from backend.models import SkillCreateJob, SkillImportRequest, User
+from backend.models import AgentInfo, SkillCreateJob, SkillCreateRequest, SkillImportRequest, User
 from backend.registry import refresh_registry
 
 
@@ -79,6 +80,72 @@ class SkillMarketTests(unittest.TestCase):
             )
 
         self.assertEqual(getattr(ctx.exception, "status_code", None), 400)
+
+    def test_create_skill_dispatches_skill_creator_package(self) -> None:
+        agent = AgentInfo(
+            agent_id="agent-1",
+            name="builder",
+            ip="127.0.0.1",
+            last_seen="2026-05-27T00:00:00+00:00",
+            user_id="user-1",
+        )
+        sender = AsyncMock(return_value=True)
+
+        with (
+            patch.dict(agent_api._registered_agents, {"agent-1": agent}, clear=True),
+            patch.dict(agent_api._agent_ws, {"agent-1": object()}, clear=True),
+            patch("backend.api.agent.send_agent_command", new=sender),
+        ):
+            job = asyncio.run(
+                skills.create_skill(
+                    SkillCreateRequest(
+                        agent_id="agent-1",
+                        name="Custom Audit",
+                        description="custom audit description",
+                        input="create a custom audit skill",
+                    ),
+                    current_user=User(user_id="user-1", username="alice", role="user"),
+                )
+            )
+
+        self.assertEqual(job.status, "running")
+        payload = sender.await_args.args[1]
+        self.assertEqual(payload["type"], "skill_create")
+        package = payload["skill_creator_package"]
+        self.assertEqual(package["name"], "skill-creator")
+        by_path = {item["path"]: item["content"] for item in package["files"]}
+        self.assertIn("SKILL.md", by_path)
+        self.assertIn("name: skill-creator", by_path["SKILL.md"])
+
+    def test_create_skill_fails_when_system_skill_creator_is_missing(self) -> None:
+        agent = AgentInfo(
+            agent_id="agent-1",
+            name="builder",
+            ip="127.0.0.1",
+            last_seen="2026-05-27T00:00:00+00:00",
+            user_id="user-1",
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            with (
+                patch.dict(agent_api._registered_agents, {"agent-1": agent}, clear=True),
+                patch.dict(agent_api._agent_ws, {"agent-1": object()}, clear=True),
+                patch("backend.api.skills._SYSTEM_SKILLS_DIR", Path(tmp)),
+            ):
+                with self.assertRaises(Exception) as ctx:
+                    asyncio.run(
+                        skills.create_skill(
+                            SkillCreateRequest(
+                                agent_id="agent-1",
+                                name="Custom Audit",
+                                description="custom audit description",
+                                input="create a custom audit skill",
+                            ),
+                            current_user=User(user_id="user-1", username="alice", role="user"),
+                        )
+                    )
+
+        self.assertEqual(getattr(ctx.exception, "status_code", None), 500)
 
 
 if __name__ == "__main__":

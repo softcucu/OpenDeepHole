@@ -127,6 +127,7 @@ async def _handle_command(msg: dict, config, task_manager, reporter) -> dict | N
             name=msg.get("name", ""),
             description=msg.get("description", ""),
             user_input=msg.get("input", ""),
+            skill_creator_package=msg.get("skill_creator_package") or {},
         )
     else:
         print(f"Unknown command type: {cmd_type!r}")

@@ -24,6 +24,8 @@ from backend.registry import CHECKER_CATEGORY_OTHER, CHECKER_VISIBILITY_PUBLIC, 
 
 router = APIRouter()
 
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
+_SYSTEM_SKILLS_DIR = _PROJECT_ROOT / "backend" / "system_skills"
 _jobs: dict[str, SkillCreateJob] = {}
 _JOB_STATUSES = {"pending", "running", "completed", "error"}
 
@@ -74,6 +76,30 @@ def _find_existing_checker(skill_id: str) -> bool:
     return skill_id in registry or (_user_skills_dir() / skill_id).exists()
 
 
+def _skill_creator_package() -> dict:
+    skill_dir = _SYSTEM_SKILLS_DIR / "skill-creator"
+    skill_file = skill_dir / "SKILL.md"
+    if not skill_file.is_file():
+        raise HTTPException(status_code=500, detail="系统 skill-creator SKILL 缺失")
+
+    files = []
+    for file_path in sorted(skill_dir.rglob("*")):
+        if not file_path.is_file():
+            continue
+        rel_path = file_path.relative_to(skill_dir).as_posix()
+        if rel_path.startswith("../") or rel_path.startswith("/"):
+            raise HTTPException(status_code=500, detail="系统 skill-creator SKILL 路径非法")
+        files.append({
+            "path": rel_path,
+            "content": file_path.read_text(encoding="utf-8"),
+        })
+
+    return {
+        "name": "skill-creator",
+        "files": files,
+    }
+
+
 @router.post("/api/skills/create", response_model=SkillCreateJob)
 async def create_skill(
     body: SkillCreateRequest,
@@ -99,6 +125,7 @@ async def create_skill(
         raise HTTPException(status_code=403, detail="Access denied")
     if body.agent_id not in _agent_ws:
         raise HTTPException(status_code=400, detail="Agent is offline")
+    skill_creator_package = _skill_creator_package()
 
     now = _now()
     job_id = uuid.uuid4().hex
@@ -122,6 +149,7 @@ async def create_skill(
         "name": name,
         "description": description,
         "input": user_input,
+        "skill_creator_package": skill_creator_package,
     })
     if not ok:
         _jobs.pop(job_id, None)

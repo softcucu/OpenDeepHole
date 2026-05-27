@@ -227,6 +227,37 @@ class AgentRuntimePackageTests(unittest.TestCase):
         self.assertEqual(parsed["scenarios_md"], "# 场景")
         self.assertEqual(parsed["summary"], "ok")
 
+    def test_skill_creator_package_writer_uses_dispatched_skill(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            agent_server._write_skill_creator_package(
+                {
+                    "name": "skill-creator",
+                    "files": [
+                        {"path": "SKILL.md", "content": "# Creator\n"},
+                    ],
+                },
+                root,
+            )
+
+            self.assertEqual(
+                (root / "skill-creator" / "SKILL.md").read_text(encoding="utf-8"),
+                "# Creator\n",
+            )
+
+    def test_skill_creator_package_writer_rejects_path_traversal(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaisesRegex(RuntimeError, "Unsafe skill-creator package path"):
+                agent_server._write_skill_creator_package(
+                    {
+                        "name": "skill-creator",
+                        "files": [
+                            {"path": "../SKILL.md", "content": "bad"},
+                        ],
+                    },
+                    Path(tmp),
+                )
+
 
 def _bytes_path(data: bytes):
     import io
