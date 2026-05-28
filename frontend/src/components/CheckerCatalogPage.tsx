@@ -108,7 +108,7 @@ export default function CheckerCatalogPage({ onBack }: Props) {
                 <span className="text-xs text-slate-500">共 {items.length} 个</span>
               </div>
               <div className="space-y-2">
-                {items.map((item) => (
+                {items.filter(item => !item.user_created).map((item) => (
                   <CheckerListItem
                     key={item.name}
                     item={item}
@@ -116,6 +116,23 @@ export default function CheckerCatalogPage({ onBack }: Props) {
                     onClick={() => setActiveChecker(item.name)}
                   />
                 ))}
+                {items.some(item => item.user_created) && (
+                  <>
+                    <div className="flex items-center gap-3 py-2">
+                      <div className="flex-1 border-t border-slate-700" />
+                      <span className="text-xs font-semibold text-slate-500 whitespace-nowrap">用户创建</span>
+                      <div className="flex-1 border-t border-slate-700" />
+                    </div>
+                    {items.filter(item => item.user_created).map((item) => (
+                      <CheckerListItem
+                        key={item.name}
+                        item={item}
+                        active={item.name === activeChecker}
+                        onClick={() => setActiveChecker(item.name)}
+                      />
+                    ))}
+                  </>
+                )}
               </div>
             </div>
 
@@ -490,6 +507,11 @@ function CheckerListItem({
             管理员测试
           </span>
         )}
+        {item.user_created && (
+          <span className="shrink-0 text-[11px] font-semibold text-purple-300 bg-purple-500/10 border border-purple-500/30 rounded px-1.5 py-0.5">
+            用户创建
+          </span>
+        )}
       </div>
       <div className="mb-2 flex flex-wrap items-center gap-2 text-[11px]">
         <span className="font-semibold text-cyan-200 bg-cyan-500/10 border border-cyan-500/30 rounded px-1.5 py-0.5">
@@ -525,6 +547,11 @@ function CheckerIntro({ item }: { item: CheckerCatalogItem }) {
               {item.visibility === "admin" && (
                 <span className="text-xs font-semibold text-amber-300 bg-amber-500/10 border border-amber-500/30 rounded px-2 py-0.5">
                   管理员测试
+                </span>
+              )}
+              {item.user_created && (
+                <span className="text-xs font-semibold text-purple-300 bg-purple-500/10 border border-purple-500/30 rounded px-2 py-0.5">
+                  用户创建
                 </span>
               )}
               <span className="text-xs font-semibold text-cyan-200 bg-cyan-500/10 border border-cyan-500/30 rounded px-2 py-0.5">

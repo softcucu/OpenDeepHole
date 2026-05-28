@@ -837,12 +837,21 @@ async def run_scan(
         raise
 
     finally:
-        os.environ.pop("AGENT_PROJECT_DIR", None)
         try:
             if mcp_server:
                 from agent import mcp_registry
                 mcp_registry.unregister(project_path)
                 await asyncio.to_thread(mcp_server.stop)
+        except Exception:
+            pass
+        # 清理 API runner 缓存的 DB 连接
+        try:
+            from backend.opencode.llm_api_runner import _close_db_cache
+            _close_db_cache()
+        except Exception:
+            pass
+        os.environ.pop("AGENT_PROJECT_DIR", None)
+        try:
             if workspace is not None:
                 await asyncio.to_thread(cleanup_workspace, workspace)
         finally:

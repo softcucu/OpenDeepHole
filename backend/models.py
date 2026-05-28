@@ -99,6 +99,7 @@ class CheckerInfo(BaseModel):
     category: str = "illegal_memory_use"
     category_label: str = "非法内存使用"
     modified_at: str = ""
+    user_created: bool = False
 
 
 class CheckerCatalogItem(BaseModel):
@@ -113,6 +114,7 @@ class CheckerCatalogItem(BaseModel):
     modified_at: str = ""
     introduction: str = ""
     introduction_source: str = ""
+    user_created: bool = False
 
 
 class SkillDraft(BaseModel):
@@ -434,6 +436,7 @@ class CheckerDashboardStats(BaseModel):
     accuracy: float | None = None
     ticket_accuracy: float | None = None
     scans: list[CheckerScanDashboardStats] = []
+    user_created: bool = False
 
 
 class CheckerDashboardSummary(BaseModel):

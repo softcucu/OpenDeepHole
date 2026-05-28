@@ -56,6 +56,19 @@ def _get_db(project_id: str):
     return db
 
 
+def clear_db_cache():
+    """关闭所有缓存的 DB 连接并清空缓存。
+
+    MCP server 停止时调用，防止跨扫描返回失效连接。
+    """
+    for db in _db_cache.values():
+        try:
+            db.close()
+        except Exception:
+            pass
+    _db_cache.clear()
+
+
 def _mcp_log(direction: str, tool: str, detail: str) -> None:
     print(f"  [MCP {direction}] {tool} | {detail}", flush=True)
 

@@ -29,6 +29,9 @@ class LLMApiUnavailableError(RuntimeError):
 _api_health_cache: dict[tuple[str, str, str, float], tuple[bool, str]] = {}
 _api_health_lock = threading.Lock()
 
+# 按 project 缓存 DB 连接，避免每次 _get_db() 都创建新 SQLite 连接导致 FD 泄漏
+_db_cache: dict[str, object] = {}
+
 
 def _cfg_value(obj, name: str, default):
     return getattr(obj, name, default)
@@ -395,11 +398,14 @@ def _execute_tool(
 
 
 def _get_db(project_id: str):
-    """获取项目的 CodeDatabase 实例。"""
+    """获取项目的 CodeDatabase 实例（缓存复用，避免 FD 泄漏）。"""
     from code_parser import CodeDatabase
 
     agent_dir = os.environ.get("AGENT_PROJECT_DIR")
     if agent_dir:
+        cache_key = f"agent:{agent_dir}"
+        if cache_key in _db_cache:
+            return _db_cache[cache_key]
         db_path = Path(agent_dir) / "code_index.db"
         if not db_path.exists():
             return None
@@ -407,8 +413,12 @@ def _get_db(project_id: str):
         if not db.is_index_complete():
             db.close()
             return None
+        _db_cache[cache_key] = db
         return db
 
+    cache_key = project_id
+    if cache_key in _db_cache:
+        return _db_cache[cache_key]
     config = get_config()
     db_path = Path(config.storage.projects_dir) / project_id / "code_index.db"
     if not db_path.exists():
@@ -417,7 +427,18 @@ def _get_db(project_id: str):
     if not db.is_index_complete():
         db.close()
         return None
+    _db_cache[cache_key] = db
     return db
+
+
+def _close_db_cache():
+    """关闭所有缓存的 DB 连接。扫描结束时由 scanner.py 调用。"""
+    for db in _db_cache.values():
+        try:
+            db.close()
+        except Exception:
+            pass
+    _db_cache.clear()
 
 
 def _tool_view_function(args: dict, project_id: str) -> str:

@@ -31,6 +31,7 @@ export interface CheckerInfo {
   category: string;
   category_label: string;
   modified_at: string;
+  user_created: boolean;
 }
 
 export interface CheckerCatalogItem {
@@ -44,6 +45,7 @@ export interface CheckerCatalogItem {
   modified_at: string;
   introduction: string;
   introduction_source: string;
+  user_created: boolean;
 }
 
 export interface SkillDraft {
@@ -283,6 +285,7 @@ export interface CheckerDashboardStats {
   accuracy: number | null;
   ticket_accuracy: number | null;
   scans: CheckerScanDashboardStats[];
+  user_created: boolean;
 }
 
 export interface CheckerDashboardSummary {

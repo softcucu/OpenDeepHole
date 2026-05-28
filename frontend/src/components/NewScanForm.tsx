@@ -34,7 +34,7 @@ export default function NewScanForm({ onScanStarted, onBack }: Props) {
         setCheckers(checkerList);
         setProducts(productList);
         // Pre-select all checkers
-        setSelectedCheckers(new Set(checkerList.map((c) => c.name)));
+        setSelectedCheckers(new Set(checkerList.filter((c) => !c.user_created).map((c) => c.name)));
         // Pre-select first online agent
         const onlineAgent = agentList.find((a) => a.online);
         if (onlineAgent) setSelectedAgent(onlineAgent.agent_id);
@@ -252,36 +252,21 @@ export default function NewScanForm({ onScanStarted, onBack }: Props) {
                 <p className="text-sm text-slate-500">无可用检查项</p>
               ) : (
                 <div className="space-y-2">
-                  {checkers.map((checker) => (
-                    <label
-                      key={checker.name}
-                      className="flex items-start gap-3 p-3 rounded-lg border border-slate-600 hover:border-slate-500 cursor-pointer transition-colors"
-                    >
-                      <input
-                        type="checkbox"
-                        checked={selectedCheckers.has(checker.name)}
-                        onChange={() => toggleChecker(checker.name)}
-                        className="mt-0.5 w-4 h-4 rounded border-slate-500 bg-slate-700 text-blue-500 focus:ring-blue-500 focus:ring-offset-0"
-                      />
-                      <div>
-                        <div className="flex flex-wrap items-center gap-2">
-                          <span className="text-sm font-medium text-white">{checker.label}</span>
-                          {checker.visibility === "admin" && (
-                            <span className="text-[11px] font-semibold text-amber-300 bg-amber-500/10 border border-amber-500/30 rounded px-1.5 py-0.5">
-                              管理员测试
-                            </span>
-                          )}
-                          <span className="text-[11px] font-semibold text-cyan-200 bg-cyan-500/10 border border-cyan-500/30 rounded px-1.5 py-0.5">
-                            {checker.category_label || "非法内存使用"}
-                          </span>
-                        </div>
-                        <div className="text-[11px] text-slate-500 mt-1">
-                          最后修改：{formatModifiedAt(checker.modified_at)}
-                        </div>
-                        <p className="text-xs text-slate-400 mt-0.5">{checker.description}</p>
-                      </div>
-                    </label>
+                  {checkers.filter((c) => !c.user_created).map((checker) => (
+                    <CheckerOption key={checker.name} checker={checker} selected={selectedCheckers.has(checker.name)} onToggle={() => toggleChecker(checker.name)} />
                   ))}
+                  {checkers.some((c) => c.user_created) && (
+                    <>
+                      <div className="flex items-center gap-3 py-2">
+                        <div className="flex-1 border-t border-slate-600" />
+                        <span className="text-xs font-semibold text-slate-500 whitespace-nowrap">用户创建</span>
+                        <div className="flex-1 border-t border-slate-600" />
+                      </div>
+                      {checkers.filter((c) => c.user_created).map((checker) => (
+                        <CheckerOption key={checker.name} checker={checker} selected={selectedCheckers.has(checker.name)} onToggle={() => toggleChecker(checker.name)} />
+                      ))}
+                    </>
+                  )}
                 </div>
               )}
             </div>
@@ -321,6 +306,43 @@ export default function NewScanForm({ onScanStarted, onBack }: Props) {
         )}
       </div>
     </div>
+  );
+}
+
+function CheckerOption({ checker, selected, onToggle }: { checker: CheckerInfo; selected: boolean; onToggle: () => void }) {
+  return (
+    <label
+      className="flex items-start gap-3 p-3 rounded-lg border border-slate-600 hover:border-slate-500 cursor-pointer transition-colors"
+    >
+      <input
+        type="checkbox"
+        checked={selected}
+        onChange={onToggle}
+        className="mt-0.5 w-4 h-4 rounded border-slate-500 bg-slate-700 text-blue-500 focus:ring-blue-500 focus:ring-offset-0"
+      />
+      <div>
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="text-sm font-medium text-white">{checker.label}</span>
+          {checker.visibility === "admin" && (
+            <span className="text-[11px] font-semibold text-amber-300 bg-amber-500/10 border border-amber-500/30 rounded px-1.5 py-0.5">
+              管理员测试
+            </span>
+          )}
+          {checker.user_created && (
+            <span className="text-[11px] font-semibold text-purple-300 bg-purple-500/10 border border-purple-500/30 rounded px-1.5 py-0.5">
+              用户创建
+            </span>
+          )}
+          <span className="text-[11px] font-semibold text-cyan-200 bg-cyan-500/10 border border-cyan-500/30 rounded px-1.5 py-0.5">
+            {checker.category_label || "非法内存使用"}
+          </span>
+        </div>
+        <div className="text-[11px] text-slate-500 mt-1">
+          最后修改：{formatModifiedAt(checker.modified_at)}
+        </div>
+        <p className="text-xs text-slate-400 mt-0.5">{checker.description}</p>
+      </div>
+    </label>
   );
 }
 

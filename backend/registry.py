@@ -55,6 +55,7 @@ class CheckerEntry:
     category: str = CHECKER_CATEGORY_DEFAULT
     category_label: str = CHECKER_CATEGORY_LABELS[CHECKER_CATEGORY_DEFAULT]
     modified_at: str = ""
+    user_created: bool = False
 
 
 _registry: dict[str, CheckerEntry] | None = None
@@ -106,7 +107,8 @@ def discover_checkers_from_dirs(checkers_dirs: tuple[Path, ...] | list[Path]) ->
     """Scan checker roots and merge entries by checker name."""
     registry: dict[str, CheckerEntry] = {}
     for checkers_dir in checkers_dirs:
-        for name, entry in discover_checkers(checkers_dir).items():
+        is_user_dir = checkers_dir.resolve() != CHECKERS_DIR.resolve()
+        for name, entry in discover_checkers(checkers_dir, user_created=is_user_dir).items():
             if name in registry:
                 logger.warning(
                     "Duplicate checker %s in %s; keeping first definition from %s",
@@ -120,7 +122,7 @@ def discover_checkers_from_dirs(checkers_dirs: tuple[Path, ...] | list[Path]) ->
     return registry
 
 
-def discover_checkers(checkers_dir: Path) -> dict[str, CheckerEntry]:
+def discover_checkers(checkers_dir: Path, *, user_created: bool = False) -> dict[str, CheckerEntry]:
     """Scan checkers/ directory and build the registry.
 
     Each subdirectory with a checker.yaml is registered as a checker.
@@ -141,7 +143,7 @@ def discover_checkers(checkers_dir: Path) -> dict[str, CheckerEntry]:
             continue
 
         try:
-            entry = _load_checker(checker_dir, yaml_path)
+            entry = _load_checker(checker_dir, yaml_path, user_created=user_created)
             if entry.enabled:
                 registry[entry.name] = entry
                 logger.info(
@@ -159,7 +161,7 @@ def discover_checkers(checkers_dir: Path) -> dict[str, CheckerEntry]:
     return registry
 
 
-def _load_checker(checker_dir: Path, yaml_path: Path) -> CheckerEntry:
+def _load_checker(checker_dir: Path, yaml_path: Path, *, user_created: bool = False) -> CheckerEntry:
     """Load a single checker from its directory."""
     with open(yaml_path, encoding="utf-8") as f:
         meta = yaml.safe_load(f)
@@ -199,6 +201,7 @@ def _load_checker(checker_dir: Path, yaml_path: Path) -> CheckerEntry:
         category=category,
         category_label=checker_category_label(category),
         modified_at=str(meta.get("modified_at") or "").strip(),
+        user_created=user_created,
     )
 
 

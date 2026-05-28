@@ -28,11 +28,12 @@ async def list_checkers(current_user: User = Depends(get_current_user)) -> list[
             category=e.category,
             category_label=e.category_label,
             modified_at=e.modified_at,
+            user_created=e.user_created,
         )
         for e in registry.values()
         if _is_visible_to_user(e.visibility, current_user)
     ]
-    items.sort(key=lambda item: checker_modified_sort_key(item.modified_at), reverse=True)
+    items.sort(key=lambda item: (item.user_created, -checker_modified_sort_key(item.modified_at).timestamp()))
     return items
 
 
@@ -77,6 +78,7 @@ def _discover_catalog_items(checkers_dir: Path | None = None) -> list[CheckerCat
     for root in roots:
         if not root.is_dir():
             continue
+        is_user_dir = root.resolve() != CHECKERS_DIR.resolve()
 
         for checker_dir in sorted(root.iterdir()):
             if not checker_dir.is_dir():
@@ -118,10 +120,11 @@ def _discover_catalog_items(checkers_dir: Path | None = None) -> list[CheckerCat
                     modified_at=str(meta.get("modified_at") or "").strip(),
                     introduction=introduction,
                     introduction_source=source,
+                    user_created=is_user_dir,
                 )
             )
 
-    items.sort(key=lambda item: checker_modified_sort_key(item.modified_at), reverse=True)
+    items.sort(key=lambda item: (item.user_created, -checker_modified_sort_key(item.modified_at).timestamp()))
     return items
 
 

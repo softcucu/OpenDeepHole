@@ -56,6 +56,8 @@ class LocalMCPServer:
                 time.sleep(0.1)
 
     def stop(self) -> None:
+        from mcp_server.tools import clear_db_cache
+        clear_db_cache()
         if self._server:
             self._server.should_exit = True
         if self._thread:

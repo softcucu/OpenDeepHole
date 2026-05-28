@@ -33,6 +33,7 @@ class _MutableCheckerStats:
     checker: str
     label: str
     description: str
+    user_created: bool = False
     projects: set[str] = field(default_factory=set)
     scan_count: int = 0
     static_issue_count: int = 0
@@ -102,6 +103,7 @@ async def get_checker_dashboard(
             checker=name,
             label=entry.label,
             description=entry.description,
+            user_created=entry.user_created,
         )
         for name, entry in registry.items()
     }
@@ -193,24 +195,26 @@ async def get_checker_dashboard(
                 item.accuracy_basis_count,
             ),
             scans=item.scans,
+            user_created=item.user_created,
         )
         for item in stats.values()
     ]
-    checkers.sort(key=lambda item: (item.scan_count == 0, item.checker))
+    checkers.sort(key=lambda item: (item.user_created, item.scan_count == 0, item.checker))
 
-    static_issue_count = sum(item.static_issue_count for item in checkers)
-    llm_issue_count = sum(item.llm_issue_count for item in checkers)
-    fp_review_issue_count = sum(item.fp_review_issue_count for item in checkers)
+    builtin_checkers = [item for item in checkers if not item.user_created]
+    static_issue_count = sum(item.static_issue_count for item in builtin_checkers)
+    llm_issue_count = sum(item.llm_issue_count for item in builtin_checkers)
+    fp_review_issue_count = sum(item.fp_review_issue_count for item in builtin_checkers)
     fp_review_false_positive_count = sum(
-        item.fp_review_false_positive_count for item in checkers
+        item.fp_review_false_positive_count for item in builtin_checkers
     )
-    human_confirmed_count = sum(item.human_confirmed_count for item in checkers)
-    ticket_submitted_count = sum(item.ticket_submitted_count for item in checkers)
-    accuracy_basis_count = sum(item.accuracy_basis_count for item in checkers)
+    human_confirmed_count = sum(item.human_confirmed_count for item in builtin_checkers)
+    ticket_submitted_count = sum(item.ticket_submitted_count for item in builtin_checkers)
+    accuracy_basis_count = sum(item.accuracy_basis_count for item in builtin_checkers)
 
     return CheckerDashboardResponse(
         summary=CheckerDashboardSummary(
-            checker_count=len(checkers),
+            checker_count=len(builtin_checkers),
             scan_count=filtered_scan_count,
             project_count=len(all_projects),
             static_issue_count=static_issue_count,
