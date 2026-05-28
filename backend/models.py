@@ -370,6 +370,7 @@ class ScanMeta(BaseModel):
     scan_name: str = ""
     product: str = ""
     user_id: str = ""
+    public_access_token: str = ""
 
 
 class ScanSummary(BaseModel):

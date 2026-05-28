@@ -2,6 +2,8 @@
 
 ## 2026-05-28
 
+- **新增** 外部逆向平台集成扫描接口和 `tools/external_platform_scan.py` 脚本，支持硬编码集成 token 创建扫描、按 Agent 名称下发脚本内置 LLM/opencode 配置、自动运行当前启用且公开的 checker，并返回无需登录的扫描结果链接和进度 API
+- **新增** 扫描详情页支持带 `scan_access_token` 的公开访问入口，访问者可像普通用户进入扫描详情一样查看进度、停止扫描、下载报告、确认问题、维护反馈和触发 AI 去误报
 - **修复** `opencode`/`nga` 扫描时工具自身生成的 `opencode_result-*.log` 落到目标项目根目录的问题，改为将 CLI 运行目录收敛到项目内 `.opendeephole/opencode/`，同时保留 `--dir` 指向真实项目根目录
 - **修复** 长时间扫描后 MCP 和 API 模式报"代码索引不可用"：`llm_api_runner` 每次调用 `_get_db()` 都创建新 SQLite 连接且从不关闭，导致文件描述符泄漏；改为缓存复用连接并在扫描结束时统一清理
 - **修复** MCP `_db_cache` 跨扫描未清理，重复扫描同一项目时可能返回指向已替换文件的失效连接；MCP server 停止时自动关闭并清空缓存

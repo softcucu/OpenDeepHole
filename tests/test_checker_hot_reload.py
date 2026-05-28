@@ -44,7 +44,11 @@ class CheckerHotReloadTests(unittest.TestCase):
             user = User(user_id="u1", username="alice", role="user")
             admin = User(user_id="u2", username="root", role="admin")
 
-            with patch("backend.registry.CHECKERS_DIR", root):
+            cfg = SimpleNamespace(storage=SimpleNamespace(user_skills_dir=str(root)))
+            with (
+                patch("backend.registry.CHECKERS_DIR", root),
+                patch("backend.config.get_config", return_value=cfg),
+            ):
                 user_items = asyncio.run(list_checkers(current_user=user))
                 admin_items = asyncio.run(list_checkers(current_user=admin))
 

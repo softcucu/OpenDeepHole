@@ -3,6 +3,25 @@ import type { AgentConfigTestResult, AgentInfo, AgentRemoteConfig, CheckerCatalo
 
 const api = axios.create({ baseURL: "/" });
 
+let publicScanAccess: { scanId: string; token: string } | null = null;
+
+export function setPublicScanAccess(access: { scanId: string; token: string } | null): void {
+  publicScanAccess = access;
+}
+
+function isPublicScan(scanId: string): boolean {
+  return !!publicScanAccess && publicScanAccess.scanId === scanId && !!publicScanAccess.token;
+}
+
+function publicParams(): { token: string } | undefined {
+  return publicScanAccess ? { token: publicScanAccess.token } : undefined;
+}
+
+function publicScanPath(path: string): string {
+  if (!publicScanAccess) return path;
+  return `/api/public/scans/${publicScanAccess.scanId}${path}`;
+}
+
 // Attach JWT token to all requests
 api.interceptors.request.use((config) => {
   const token = localStorage.getItem("auth_token");
@@ -84,6 +103,13 @@ export async function deleteUser(userId: string): Promise<void> {
 }
 
 export async function getCheckers(): Promise<CheckerInfo[]> {
+  if (publicScanAccess) {
+    const { data } = await api.get<CheckerInfo[]>(
+      publicScanPath("/checkers"),
+      { params: publicParams() },
+    );
+    return data;
+  }
   const { data } = await api.get<CheckerInfo[]>("/api/checkers");
   return data;
 }
@@ -130,6 +156,13 @@ export async function getIndexStatus(projectId: string): Promise<IndexStatus> {
 }
 
 export async function getAgentIndexStatus(scanId: string): Promise<IndexStatus> {
+  if (isPublicScan(scanId)) {
+    const { data } = await api.get<IndexStatus>(
+      publicScanPath("/index-status"),
+      { params: publicParams() },
+    );
+    return data;
+  }
   const { data } = await api.get<IndexStatus>(`/api/agent/scan/${scanId}/index-status`);
   return data;
 }
@@ -161,6 +194,13 @@ export async function createScan(body: {
 }
 
 export async function getScanStatus(scanId: string): Promise<ScanStatus> {
+  if (isPublicScan(scanId)) {
+    const { data } = await api.get<ScanStatus>(
+      publicScanPath(""),
+      { params: publicParams() },
+    );
+    return data;
+  }
   const { data } = await api.get<ScanStatus>(`/api/scan/${scanId}`);
   return data;
 }
@@ -175,10 +215,21 @@ export async function updateScanProduct(scanId: string, product: string): Promis
 }
 
 export async function stopScan(scanId: string): Promise<void> {
+  if (isPublicScan(scanId)) {
+    await api.post(publicScanPath("/stop"), null, { params: publicParams() });
+    return;
+  }
   await api.post(`/api/scan/${scanId}/stop`);
 }
 
 export async function downloadScanReport(scanId: string): Promise<Blob> {
+  if (isPublicScan(scanId)) {
+    const { data } = await api.get<Blob>(
+      publicScanPath("/report"),
+      { params: publicParams(), responseType: "blob" },
+    );
+    return data;
+  }
   const { data } = await api.get<Blob>(`/api/scan/${scanId}/report`, { responseType: "blob" });
   return data;
 }
@@ -191,6 +242,20 @@ export async function markVulnerability(
   ticketSubmitted = false,
   ticketId = "",
 ): Promise<{ ok: boolean; feedback_id: string }> {
+  if (isPublicScan(scanId)) {
+    const { data } = await api.post(
+      publicScanPath("/mark"),
+      {
+        index,
+        verdict,
+        reason,
+        ticket_submitted: ticketSubmitted,
+        ticket_id: ticketSubmitted ? ticketId : "",
+      },
+      { params: publicParams() },
+    );
+    return data;
+  }
   const { data } = await api.post(`/api/scan/${scanId}/mark`, {
     index,
     verdict,
@@ -205,6 +270,14 @@ export async function batchMarkVulnerabilities(
   scanId: string,
   items: Array<{ index: number; verdict: string; reason: string }>,
 ): Promise<{ ok: boolean; feedback_ids: string[] }> {
+  if (isPublicScan(scanId)) {
+    const { data } = await api.post(
+      publicScanPath("/batch-mark"),
+      { items },
+      { params: publicParams() },
+    );
+    return data;
+  }
   const { data } = await api.post(`/api/scan/${scanId}/batch-mark`, { items });
   return data;
 }
@@ -225,6 +298,14 @@ export async function listFeedback(
   const params: Record<string, string> = {};
   if (vulnType) params.vuln_type = vulnType;
   if (projectId) params.project_id = projectId;
+  if (publicScanAccess) {
+    params.token = publicScanAccess.token;
+    const { data } = await api.get<FeedbackEntry[]>(
+      publicScanPath("/feedback"),
+      { params },
+    );
+    return data;
+  }
   const { data } = await api.get<FeedbackEntry[]>("/api/feedback", { params });
   return data;
 }
@@ -244,6 +325,14 @@ export async function createFeedback(body: {
   function_start_line?: number | null;
   source_scan_id?: string;
 }): Promise<FeedbackEntry> {
+  if (publicScanAccess) {
+    const { data } = await api.post<FeedbackEntry>(
+      publicScanPath("/feedback"),
+      body,
+      { params: publicParams() },
+    );
+    return data;
+  }
   const { data } = await api.post<FeedbackEntry>("/api/feedback", body);
   return data;
 }
@@ -252,11 +341,23 @@ export async function updateFeedback(
   feedbackId: string,
   body: { verdict?: string; reason?: string; ticket_submitted?: boolean; ticket_id?: string },
 ): Promise<FeedbackEntry> {
+  if (publicScanAccess) {
+    const { data } = await api.put<FeedbackEntry>(
+      publicScanPath(`/feedback/${feedbackId}`),
+      body,
+      { params: publicParams() },
+    );
+    return data;
+  }
   const { data } = await api.put<FeedbackEntry>(`/api/feedback/${feedbackId}`, body);
   return data;
 }
 
 export async function deleteFeedback(feedbackId: string): Promise<void> {
+  if (publicScanAccess) {
+    await api.delete(publicScanPath(`/feedback/${feedbackId}`), { params: publicParams() });
+    return;
+  }
   await api.delete(`/api/feedback/${feedbackId}`);
 }
 
@@ -264,6 +365,14 @@ export async function updateScanFeedback(
   scanId: string,
   feedbackIds: string[],
 ): Promise<void> {
+  if (isPublicScan(scanId)) {
+    await api.put(
+      publicScanPath("/feedback"),
+      { feedback_ids: feedbackIds },
+      { params: publicParams() },
+    );
+    return;
+  }
   await api.put(`/api/scan/${scanId}/feedback`, { feedback_ids: feedbackIds });
 }
 
@@ -271,6 +380,13 @@ export async function getSkillContent(
   scanId: string,
   vulnType: string,
 ): Promise<string> {
+  if (isPublicScan(scanId)) {
+    const { data } = await api.get<{ vuln_type: string; content: string }>(
+      publicScanPath(`/skill/${vulnType}`),
+      { params: publicParams() },
+    );
+    return data.content;
+  }
   const { data } = await api.get<{ vuln_type: string; content: string }>(
     `/api/scan/${scanId}/skill/${vulnType}`,
   );
@@ -316,21 +432,43 @@ export async function testAgentConfig(agentId: string, config: AgentRemoteConfig
 // --- FP Review ---
 
 export async function triggerFpReview(scanId: string): Promise<{ ok: boolean; review_id: string }> {
+  if (isPublicScan(scanId)) {
+    const { data } = await api.post(publicScanPath("/fp_review"), null, { params: publicParams() });
+    return data;
+  }
   const { data } = await api.post(`/api/scan/${scanId}/fp_review`);
   return data;
 }
 
 export async function stopFpReview(scanId: string): Promise<{ ok: boolean; review_id: string }> {
+  if (isPublicScan(scanId)) {
+    const { data } = await api.post(publicScanPath("/fp_review/stop"), null, { params: publicParams() });
+    return data;
+  }
   const { data } = await api.post(`/api/scan/${scanId}/fp_review/stop`);
   return data;
 }
 
 export async function getFpReview(scanId: string): Promise<FpReviewJob> {
+  if (isPublicScan(scanId)) {
+    const { data } = await api.get<FpReviewJob>(
+      publicScanPath("/fp_review"),
+      { params: publicParams() },
+    );
+    return data;
+  }
   const { data } = await api.get<FpReviewJob>(`/api/scan/${scanId}/fp_review`);
   return data;
 }
 
 export async function getFpReviewSkill(scanId: string): Promise<string> {
+  if (isPublicScan(scanId)) {
+    const { data } = await api.get<{ content: string }>(
+      publicScanPath("/fp-review/skill"),
+      { params: publicParams() },
+    );
+    return data.content;
+  }
   const { data } = await api.get<{ content: string }>(`/api/scan/${scanId}/fp-review/skill`);
   return data.content;
 }

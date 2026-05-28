@@ -231,11 +231,14 @@ async def _push_feedback_selection_update(scan_id: str, feedback_ids: list[str])
 # ---------------------------------------------------------------------------
 
 
-@router.post("/api/scan", response_model=ScanStartResponse)
-async def create_scan(
+async def create_agent_scan(
     body: CreateScanRequest,
     request: Request,
-    current_user: User = Depends(get_current_user),
+    current_user: User,
+    *,
+    checker_names: list[str] | None = None,
+    public_access_token: str = "",
+    enforce_agent_owner: bool = True,
 ) -> ScanStartResponse:
     """Create a new scan and dispatch it to the specified agent daemon."""
     from backend.api.agent import _registered_agents
@@ -245,11 +248,12 @@ async def create_scan(
         raise HTTPException(status_code=404, detail=f"Agent '{body.agent_id}' not found or not registered")
 
     # Verify the agent belongs to this user (or user is admin)
-    if current_user.role != "admin" and agent.user_id != current_user.user_id:
+    if enforce_agent_owner and current_user.role != "admin" and agent.user_id != current_user.user_id:
         raise HTTPException(status_code=403, detail="Agent does not belong to you")
 
-    checker_names = _validated_checker_names(body.checkers, current_user)
-    checker_packages = _checker_packages_for(checker_names)
+    selected_checkers = checker_names if checker_names is not None else body.checkers
+    validated_checker_names = _validated_checker_names(selected_checkers, current_user)
+    checker_packages = _checker_packages_for(validated_checker_names)
     scan_id = uuid.uuid4().hex
     now = datetime.now(timezone.utc).isoformat()
     project_path = body.project_path.strip()
@@ -263,7 +267,7 @@ async def create_scan(
         scan_id=scan_id,
         project_id=scan_name,
         product=product,
-        scan_items=checker_names,
+        scan_items=validated_checker_names,
         created_at=now,
         status=ScanItemStatus.PENDING,
         progress=0.0,
@@ -274,7 +278,7 @@ async def create_scan(
         agent_online=True,
     )
     meta = ScanMeta(
-        scan_items=checker_names,
+        scan_items=validated_checker_names,
         created_at=now,
         feedback_ids=body.feedback_ids,
         agent_id=body.agent_id,
@@ -284,6 +288,7 @@ async def create_scan(
         scan_name=scan_name,
         product=product,
         user_id=current_user.user_id,
+        public_access_token=public_access_token,
     )
 
     store = get_scan_store()
@@ -299,7 +304,7 @@ async def create_scan(
         "scan_id": scan_id,
         "project_path": project_path,
         "code_scan_path": code_scan_path,
-        "checkers": checker_names,
+        "checkers": validated_checker_names,
         "scan_name": scan_name,
         "feedback_entries": feedback_entries,
         "checker_packages": checker_packages,
@@ -317,6 +322,16 @@ async def create_scan(
         scan_id, scan_name, body.agent_id, agent.ip,
     )
     return ScanStartResponse(scan_id=scan_id)
+
+
+@router.post("/api/scan", response_model=ScanStartResponse)
+async def create_scan(
+    body: CreateScanRequest,
+    request: Request,
+    current_user: User = Depends(get_current_user),
+) -> ScanStartResponse:
+    """Create a new scan and dispatch it to the specified agent daemon."""
+    return await create_agent_scan(body, request, current_user)
 
 
 # ---------------------------------------------------------------------------

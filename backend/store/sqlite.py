@@ -38,7 +38,8 @@ CREATE TABLE IF NOT EXISTS scans (
     error_message      TEXT,
     feedback_ids       TEXT DEFAULT '[]',
     workspace_path     TEXT,
-    product            TEXT NOT NULL DEFAULT ''
+    product            TEXT NOT NULL DEFAULT '',
+    public_access_token TEXT NOT NULL DEFAULT ''
 );
 
 CREATE TABLE IF NOT EXISTS vulnerabilities (
@@ -181,6 +182,8 @@ class SqliteScanStore(ScanStoreBase):
             self._conn.execute("ALTER TABLE scans ADD COLUMN user_id TEXT DEFAULT ''")
         if "product" not in cols:
             self._conn.execute("ALTER TABLE scans ADD COLUMN product TEXT NOT NULL DEFAULT ''")
+        if "public_access_token" not in cols:
+            self._conn.execute("ALTER TABLE scans ADD COLUMN public_access_token TEXT NOT NULL DEFAULT ''")
         # vulnerabilities 表迁移
         vuln_cur = self._conn.execute("PRAGMA table_info(vulnerabilities)")
         vuln_cols = {r[1] for r in vuln_cur.fetchall()}
@@ -315,6 +318,7 @@ class SqliteScanStore(ScanStoreBase):
             scan_name=row["scan_name"] if row["scan_name"] is not None else "",
             product=row["product"] if row["product"] is not None else "",
             user_id=row["user_id"] if row["user_id"] is not None else "",
+            public_access_token=row["public_access_token"] if row["public_access_token"] is not None else "",
         )
 
     # -- Scan lifecycle --
@@ -334,8 +338,8 @@ class SqliteScanStore(ScanStoreBase):
                      current_candidate, error_message, feedback_ids,
                      static_total_files, static_scanned_files, static_analysis_done,
                      user_id, agent_name, agent_id, project_path, code_scan_path, scan_name,
-                     product)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     product, public_access_token)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     scan.scan_id,
@@ -359,6 +363,7 @@ class SqliteScanStore(ScanStoreBase):
                     meta.code_scan_path,
                     meta.scan_name,
                     meta.product,
+                    meta.public_access_token,
                 ),
             )
             self._conn.commit()
