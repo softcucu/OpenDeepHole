@@ -89,10 +89,37 @@ if errorlevel 1 (
     exit /b 1
 )
 
-ctags --list-output-formats 2>nul | findstr /I /C:"json" >nul
+call :CTAGS_SUPPORTS_JSON_OUTPUT
 if errorlevel 1 (
     echo ctags must support JSON output.
     call :PRINT_SOURCE_TOOL_HELP
     exit /b 1
 )
+exit /b 0
+
+:CTAGS_SUPPORTS_JSON_OUTPUT
+setlocal
+set "CTAGS_PROBE_DIR=%TEMP%\opendeephole-ctags-%RANDOM%-%RANDOM%"
+mkdir "%CTAGS_PROBE_DIR%" >nul 2>nul
+if errorlevel 1 (
+    endlocal
+    exit /b 1
+)
+set "CTAGS_PROBE_SOURCE=%CTAGS_PROBE_DIR%\probe.c"
+set "CTAGS_PROBE_OUTPUT=%CTAGS_PROBE_DIR%\out.json"
+> "%CTAGS_PROBE_SOURCE%" echo int odh_ctags_json_probe(void^) { return 0; }
+ctags --output-format=json -o - "%CTAGS_PROBE_SOURCE%" > "%CTAGS_PROBE_OUTPUT%" 2>nul
+if errorlevel 1 (
+    rd /s /q "%CTAGS_PROBE_DIR%" >nul 2>nul
+    endlocal
+    exit /b 1
+)
+findstr /I /C:"_type" "%CTAGS_PROBE_OUTPUT%" >nul
+if errorlevel 1 (
+    rd /s /q "%CTAGS_PROBE_DIR%" >nul 2>nul
+    endlocal
+    exit /b 1
+)
+rd /s /q "%CTAGS_PROBE_DIR%" >nul 2>nul
+endlocal
 exit /b 0

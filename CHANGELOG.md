@@ -8,6 +8,7 @@
 - **修复** 长时间扫描后 MCP 和 API 模式报"代码索引不可用"：`llm_api_runner` 每次调用 `_get_db()` 都创建新 SQLite 连接且从不关闭，导致文件描述符泄漏；改为缓存复用连接并在扫描结束时统一清理
 - **修复** MCP `_db_cache` 跨扫描未清理，重复扫描同一项目时可能返回指向已替换文件的失效连接；MCP server 停止时自动关闭并清空缓存
 - **修复** 扫描清理阶段 `AGENT_PROJECT_DIR` 环境变量在 MCP server 停止之前被移除，可能导致仍在处理的 MCP 请求找不到索引；调整为先停 MCP 再清理环境变量
+- **修复** 旧版 Linux Universal Ctags 已编译 `+json` 但不支持 `--list-output-formats` 时被误判为不支持 JSON 输出的问题，改为用真实 `--output-format=json` 探测能力
 - **优化** 检查项列表、SKILL 概览、结果看板和新建扫描页区分内置与用户创建的 checker，用户创建项显示在独立分区并带"用户创建"标签，新建扫描默认仅勾选内置检查项
 - **优化** 结果看板汇总统计仅计算内置 checker 数据，用户创建 checker 不纳入总览指标
 

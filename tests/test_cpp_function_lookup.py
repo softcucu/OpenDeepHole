@@ -1,6 +1,8 @@
 import subprocess
 from pathlib import Path
 
+import pytest
+
 import code_parser.cpp_analyzer as cpp_analyzer
 from code_parser import CodeDatabase
 from code_parser.cpp_analyzer import CppAnalyzer
@@ -325,8 +327,13 @@ def test_tool_check_requires_ctags_but_not_cscope(monkeypatch) -> None:
     def fake_run(cmd, **_kwargs):
         if cmd == ["ctags", "--version"]:
             return subprocess.CompletedProcess(cmd, 0, stdout=b"Universal Ctags\n", stderr=b"")
-        if cmd == ["ctags", "--list-output-formats"]:
-            return subprocess.CompletedProcess(cmd, 0, stdout=b"json\n", stderr=b"")
+        if cmd[:4] == ["ctags", "--output-format=json", "-o", "-"]:
+            return subprocess.CompletedProcess(
+                cmd,
+                0,
+                stdout=b'{"_type":"tag","name":"main","kind":"function"}\n',
+                stderr=b"",
+            )
         raise AssertionError(f"unexpected command: {cmd}")
 
     monkeypatch.setattr(cpp_analyzer.shutil, "which", fake_which)
@@ -335,6 +342,29 @@ def test_tool_check_requires_ctags_but_not_cscope(monkeypatch) -> None:
     CppAnalyzer._ensure_tools_available()
 
     assert checked_tools == ["ctags"]
+
+
+def test_tool_check_rejects_ctags_without_json_output(monkeypatch) -> None:
+    def fake_which(tool: str):
+        return "/usr/bin/ctags" if tool == "ctags" else None
+
+    def fake_run(cmd, **_kwargs):
+        if cmd == ["ctags", "--version"]:
+            return subprocess.CompletedProcess(cmd, 0, stdout=b"Universal Ctags\n", stderr=b"")
+        if cmd[:4] == ["ctags", "--output-format=json", "-o", "-"]:
+            return subprocess.CompletedProcess(
+                cmd,
+                1,
+                stdout=b"",
+                stderr=b'ctags: output format "json" is not available',
+            )
+        raise AssertionError(f"unexpected command: {cmd}")
+
+    monkeypatch.setattr(cpp_analyzer.shutil, "which", fake_which)
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    with pytest.raises(CodeIndexToolError, match="JSON"):
+        CppAnalyzer._ensure_tools_available()
 
 
 def test_ctags_empty_stdout_reports_index_error(
