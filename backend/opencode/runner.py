@@ -160,8 +160,6 @@ async def _run_audit_via_opencode(
             f"详情：{candidate.description} "
             f"你的 result_id 是 `{result_id}`。"
             f"分析完成后，你**必须**使用此 result_id 调用 submit_result MCP 工具提交你的结论。"
-            f"**重要：你必须直接完成所有分析工作，禁止使用子 Agent（sub-agent）或委托任何子任务。"
-            f"所有 MCP 工具调用（包括 submit_result）必须由你自己直接执行。**"
         )
         prompt = prompt.replace('\n', ' ')
 
@@ -269,8 +267,6 @@ async def run_project_audit(
             f"并在 submit_result 参数中填写真实的 file、line、function。"
             f"如果没有发现真实问题，也必须使用此 result_id 调用一次 submit_result，confirmed=false，"
             f"file=`{candidate.file}`，line={candidate.line}，function=`{candidate.function}`。"
-            f"**重要：你必须直接完成所有分析工作，禁止使用子 Agent（sub-agent）或委托任何子任务。"
-            f"所有 MCP 工具调用（包括 submit_result）必须由你自己直接执行。**"
         ).replace("\n", " ")
         log_path = workspace / f"opencode_{result_id}.log"
 

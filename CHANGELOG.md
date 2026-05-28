@@ -11,6 +11,7 @@
 - **修复** 旧版 Linux Universal Ctags 已编译 `+json` 但不支持 `--list-output-formats` 时被误判为不支持 JSON 输出的问题，改为用真实 `--output-format=json` 探测能力
 - **优化** 检查项列表、SKILL 概览、结果看板和新建扫描页区分内置与用户创建的 checker，用户创建项显示在独立分区并带"用户创建"标签，新建扫描默认仅勾选内置检查项
 - **优化** 结果看板汇总统计仅计算内置 checker 数据，用户创建 checker 不纳入总览指标
+- **优化** 移除 opencode、API 直调和 AI 去误报复核基础提示词中禁止使用子 Agent 的限制
 
 ## 2026-05-27
 

@@ -198,8 +198,6 @@ async def run_fp_review(
                 f"有代码问题但未证明外部可触发使用 medium 或 low；误报使用 low。"
                 f"如果 severity=high，必须在 submit_result 的 vulnerability_report 参数中提交 Markdown 漏洞报告，"
                 f"包含触发入口、调用链、关键数据流、问题代码位置、利用条件和修复建议。"
-                f"**重要：你必须直接完成所有分析工作，禁止使用子 Agent（sub-agent）或委托任何子任务。"
-                f"所有 MCP 工具调用（包括 submit_result）必须由你自己直接执行。**"
             )
             prompt = prompt.replace('\n', ' ')
 
