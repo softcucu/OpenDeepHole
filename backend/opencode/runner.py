@@ -607,7 +607,13 @@ def _prepare_opencode_runtime_workspace(
     runtime_cwd: Path,
     writable_paths: list[Path] | None = None,
 ) -> Path:
-    """Mirror config/skills into the actual opencode cwd when it differs."""
+    """Mirror config/skills into the actual opencode CWD.
+
+    opencode walks up from CWD to the git worktree root looking for
+    ``.opencode/skills/``, so skills are placed under *runtime_cwd*.
+    The runtime ``opencode.json`` is also written there for the
+    ``OPENCODE_CONFIG_CONTENT`` env-var.
+    """
     if runtime_cwd == workspace:
         return workspace
 

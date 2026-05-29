@@ -109,12 +109,15 @@ def test_opencode_runtime_cwd_receives_config_and_fp_skills(tmp_path: Path) -> N
     )
 
     runtime_cwd = _select_cli_cwd(workspace, "opencode", project)
-    config_workspace = _prepare_cli_workspace(workspace, "opencode", runtime_cwd=runtime_cwd)
+    config_workspace = _prepare_cli_workspace(
+        workspace, "opencode", runtime_cwd=runtime_cwd,
+    )
     env = _build_cli_env(config_workspace, "opencode", base_env={})
     runtime_config = json.loads((runtime_cwd / "opencode.json").read_text(encoding="utf-8"))
     env_config = json.loads(env["OPENCODE_CONFIG_CONTENT"])
 
     assert config_workspace == runtime_cwd
+    # Skills should be copied to runtime CWD (opencode walks up from CWD)
     assert (runtime_cwd / ".opencode" / "skills" / "fp-review" / "SKILL.md").is_file()
     assert (runtime_cwd / ".opencode" / "skills" / "fp-review-discriminator" / "SKILL.md").is_file()
     assert runtime_config["skills"]["paths"] == [str((runtime_cwd / ".opencode" / "skills").resolve())]

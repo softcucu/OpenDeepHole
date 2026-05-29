@@ -56,6 +56,12 @@ _running_scans: dict[str, ScanStatus] = {}
 _scan_owners: dict[str, str] = {}
 
 
+def _is_agent_disconnect_error(error_message: str | None) -> bool:
+    """Check if an error message indicates an agent disconnect (not user action)."""
+    from backend.api.agent import AGENT_DISCONNECT_ERROR
+    return error_message == AGENT_DISCONNECT_ERROR
+
+
 def _configured_products() -> list[str]:
     products: list[str] = []
     seen: set[str] = set()
@@ -891,6 +897,11 @@ async def agent_fp_review_progress(scan_id: str, body: AgentFpReviewProgress) ->
         raise HTTPException(status_code=404, detail="FP review not found")
     if job.status == FpReviewStatus.CANCELLED:
         return {"ok": True}
+    # Auto-recover from agent disconnect: the agent's FP review task survived
+    # the WebSocket reconnect and is still posting progress.
+    if job.status == FpReviewStatus.ERROR and _is_agent_disconnect_error(job.error_message):
+        store.update_fp_review_job(body.review_id, status="running", error_message="")
+        logger.info("FP review %s auto-recovered from agent disconnect", body.review_id)
     store.update_fp_review_job(
         body.review_id,
         current_vuln_index=body.vuln_index,
@@ -909,6 +920,9 @@ async def agent_fp_review_result(scan_id: str, body: AgentFpReviewResult) -> dic
         raise HTTPException(status_code=404, detail="FP review not found")
     if job.status == FpReviewStatus.CANCELLED:
         return {"ok": True}
+    if job.status == FpReviewStatus.ERROR and _is_agent_disconnect_error(job.error_message):
+        store.update_fp_review_job(body.review_id, status="running", error_message="")
+        logger.info("FP review %s auto-recovered from agent disconnect", body.review_id)
     now = datetime.now(timezone.utc).isoformat()
     severity = body.severity if body.severity in {"high", "medium", "low"} else "low"
     if body.verdict == "fp":

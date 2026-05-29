@@ -29,6 +29,9 @@ Missing null check.
 ## Why It is Reachable
 No validation blocks the path.
 
+## CVSS Score
+7.5 (CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H)
+
 ## Impact
 Crash.
 

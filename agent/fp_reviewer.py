@@ -31,6 +31,7 @@ _HIGH_REPORT_HEADINGS = (
     "Full Call Stack",
     "Root Cause",
     "Why It is Reachable",
+    "CVSS Score",
     "Impact",
     "Evidence",
 )

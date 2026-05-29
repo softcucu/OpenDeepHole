@@ -90,7 +90,7 @@ _config_test_waiters: dict[str, asyncio.Future] = {}
 # In-memory index progress store: scan_id → {status, parsed_files, total_files}
 _scan_index_statuses: dict[str, dict] = {}
 
-_AGENT_DISCONNECT_ERROR = "Agent 断开连接"
+AGENT_DISCONNECT_ERROR = "Agent 断开连接"
 _SERVER_RESTART_ERROR = "Process terminated unexpectedly"
 _WEBSOCKET_AGENT_STALE_SECONDS = 120
 _AGENT_DISCONNECT_GRACE_SECONDS = 120
@@ -161,7 +161,7 @@ def _schedule_agent_disconnect_cancel(agent_id: str) -> None:
 def _is_infrastructure_interruption(scan_status: ScanItemStatus, error_message: str | None) -> bool:
     """Return True for states caused by server/connection loss, not user intent."""
     if scan_status == ScanItemStatus.CANCELLED:
-        return error_message == _AGENT_DISCONNECT_ERROR
+        return error_message == AGENT_DISCONNECT_ERROR
     if scan_status == ScanItemStatus.ERROR:
         return error_message == _SERVER_RESTART_ERROR
     return scan_status in (
@@ -199,12 +199,12 @@ def reconcile_offline_agent_scan_state(scan_id: str, scan: ScanStatus) -> ScanSt
     store.update_scan_progress(
         scan_id,
         status=ScanItemStatus.CANCELLED,
-        error_message=_AGENT_DISCONNECT_ERROR,
+        error_message=AGENT_DISCONNECT_ERROR,
         clear_current_candidate=True,
     )
-    store.mark_fp_reviews_for_scan_error(scan_id, _AGENT_DISCONNECT_ERROR)
+    store.mark_fp_reviews_for_scan_error(scan_id, AGENT_DISCONNECT_ERROR)
     scan.status = ScanItemStatus.CANCELLED
-    scan.error_message = _AGENT_DISCONNECT_ERROR
+    scan.error_message = AGENT_DISCONNECT_ERROR
     scan.current_candidate = None
     _running_scans.pop(scan_id, None)
     _scan_owners.pop(scan_id, None)
@@ -322,11 +322,11 @@ def _mark_agent_scans_cancelled(agent_id: str) -> None:
     """
     store = get_scan_store()
     cancelled_scan_ids = set(
-        store.mark_agent_scans_cancelled(agent_id, _AGENT_DISCONNECT_ERROR)
+        store.mark_agent_scans_cancelled(agent_id, AGENT_DISCONNECT_ERROR)
     )
     fp_review_count = store.mark_fp_reviews_for_agent_error(
         agent_id,
-        _AGENT_DISCONNECT_ERROR,
+        AGENT_DISCONNECT_ERROR,
     )
 
     for scan_id in list(_running_scans):
@@ -339,7 +339,7 @@ def _mark_agent_scans_cancelled(agent_id: str) -> None:
         scan = _running_scans.get(scan_id)
         if scan is not None:
             scan.status = ScanItemStatus.CANCELLED
-            scan.error_message = _AGENT_DISCONNECT_ERROR
+            scan.error_message = AGENT_DISCONNECT_ERROR
             scan.current_candidate = None
         cancelled_scan_ids.add(scan_id)
 
