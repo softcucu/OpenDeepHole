@@ -89,6 +89,8 @@ async def _handle_command(msg: dict, config, task_manager, reporter) -> dict | N
             checker_packages=msg.get("checker_packages"),
         )
     elif cmd_type == "fp_review":
+        from agent.updater import ensure_runtime_updated
+        await ensure_runtime_updated(msg.get("agent_runtime_update"), msg)
         await agent_server.handle_fp_review(
             scan_id=msg["scan_id"],
             review_id=msg["review_id"],

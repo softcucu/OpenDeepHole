@@ -762,11 +762,12 @@ async def batch_mark_vulnerabilities(
 @router.post("/api/scan/{scan_id}/fp_review", response_model=dict)
 async def trigger_fp_review(
     scan_id: str,
+    request: Request,
     current_user: User = Depends(get_current_user),
 ) -> dict:
     """Trigger AI false-positive review for all confirmed vulnerabilities in a scan."""
     _check_scan_owner(scan_id, current_user)
-    from backend.api.agent import send_agent_command
+    from backend.api.agent import create_agent_runtime_update_payload, send_agent_command
 
     scan = await get_scan_status(scan_id, current_user)
     store = get_scan_store()
@@ -816,6 +817,7 @@ async def trigger_fp_review(
         "project_path": meta.project_path,
         "vulnerabilities": confirmed,
         "feedback_entries": feedback_entries,
+        "agent_runtime_update": create_agent_runtime_update_payload(_server_url_from_request(request)),
     })
     if not ok:
         store.update_fp_review_job(review_id, status="error", error_message="Agent not connected")

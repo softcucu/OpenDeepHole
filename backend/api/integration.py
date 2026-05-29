@@ -329,9 +329,10 @@ async def get_public_fp_review_skill(
 @router.post("/api/public/scans/{scan_id}/fp_review", response_model=dict)
 async def trigger_public_fp_review(
     scan_id: str,
+    request: Request,
     current_user: User = Depends(_public_user_dependency),
 ) -> dict:
-    return await scan_api.trigger_fp_review(scan_id, current_user)
+    return await scan_api.trigger_fp_review(scan_id, request, current_user)
 
 
 @router.post("/api/public/scans/{scan_id}/fp_review/stop")

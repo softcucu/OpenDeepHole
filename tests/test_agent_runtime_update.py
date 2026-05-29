@@ -317,6 +317,33 @@ class AgentRuntimePackageTests(unittest.TestCase):
         self.assertEqual(update.await_count, 2)
         handler.assert_awaited_once()
 
+    def test_fp_review_command_checks_runtime_update_before_review(self) -> None:
+        update = AsyncMock(return_value=False)
+        handler = AsyncMock()
+
+        with (
+            patch("agent.updater.ensure_runtime_updated", new=update),
+            patch("agent.server.handle_fp_review", new=handler),
+        ):
+            asyncio.run(agent_main._handle_command(
+                {
+                    "type": "fp_review",
+                    "scan_id": "scan-1",
+                    "review_id": "review-1",
+                    "project_path": "/repo/project",
+                    "vulnerabilities": [],
+                    "feedback_entries": [],
+                    "agent_runtime_update": {"hash": "new-runtime"},
+                },
+                None,
+                None,
+                None,
+            ))
+
+        update.assert_awaited_once()
+        self.assertEqual(update.await_args.args[0], {"hash": "new-runtime"})
+        handler.assert_awaited_once()
+
 
 def _bytes_path(data: bytes):
     import io

@@ -5,6 +5,7 @@
 - **优化** AI 去误报复核改为 generator-discriminator 双阶段：先按“默认安全”先验证真实代码缺陷和可利用链，再由对抗复核专门寻找不可利用理由；只有可利用链经反驳后仍成立才保留 high
 - **优化** AI 去误报 high 结果的 Markdown 漏洞报告固定包含 Summary、Vulnerable Code、Full Call Stack、Root Cause、Why It is Reachable、Impact、Evidence，章节缺失会自动降级为 medium
 - **新增** 扫描详情页结果表支持按 AI 去误报复核严重性筛选，可单独过滤 high、medium、low 或无复核结果
+- **修复** 启动 AI 去误报复核时会像启动扫描一样下发 Agent runtime update，确保后端代码和 Agent 侧代码先同步再执行复核
 
 ## 2026-05-28
 
