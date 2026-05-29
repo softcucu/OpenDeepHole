@@ -585,10 +585,56 @@ def _merge_json_file(path: Path, data: dict) -> None:
     path.write_text(json.dumps(current, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
-def _prepare_cli_workspace(workspace: Path, tool: str) -> None:
+def _opencode_config_for_runtime(
+    workspace: Path,
+    skills_dir: Path,
+    writable_paths: list[Path] | None = None,
+) -> dict:
+    config = _with_writable_paths(_read_opencode_config(workspace), writable_paths)
+    if not config:
+        return {}
+    config["skills"] = {"paths": [str(skills_dir.resolve())]}
+    return config
+
+
+def _write_json_file(path: Path, data: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _prepare_opencode_runtime_workspace(
+    workspace: Path,
+    runtime_cwd: Path,
+    writable_paths: list[Path] | None = None,
+) -> Path:
+    """Mirror config/skills into the actual opencode cwd when it differs."""
+    if runtime_cwd == workspace:
+        return workspace
+
+    source_skills = workspace / ".opencode" / "skills"
+    runtime_skills = runtime_cwd / ".opencode" / "skills"
+    _copy_skill_tree(source_skills, runtime_skills)
+
+    runtime_config = _opencode_config_for_runtime(workspace, runtime_skills, writable_paths)
+    if runtime_config:
+        _write_json_file(runtime_cwd / "opencode.json", runtime_config)
+        return runtime_cwd
+    return workspace
+
+
+def _prepare_cli_workspace(
+    workspace: Path,
+    tool: str,
+    runtime_cwd: Path | None = None,
+    writable_paths: list[Path] | None = None,
+) -> Path:
     """Create tool-specific MCP and skill files from the canonical opencode files."""
     if tool in {"nga", "opencode"}:
-        return
+        return _prepare_opencode_runtime_workspace(
+            workspace,
+            runtime_cwd or workspace,
+            writable_paths,
+        )
 
     mcp_url = _read_mcp_url(workspace)
     opencode_skills = workspace / ".opencode" / "skills"
@@ -609,7 +655,7 @@ def _prepare_cli_workspace(workspace: Path, tool: str) -> None:
             encoding="utf-8",
         )
         _copy_skill_tree(opencode_skills, claude_dir / "skills")
-        return
+        return workspace
 
     if tool == "hac":
         gemini_dir = workspace / ".gemini"
@@ -625,6 +671,7 @@ def _prepare_cli_workspace(workspace: Path, tool: str) -> None:
             },
         )
         _copy_skill_tree(opencode_skills, gemini_dir / "skills")
+    return workspace
 
 
 def _build_cli_command(
@@ -786,13 +833,18 @@ async def _invoke_opencode(
     tool = _normalize_tool(cli_config)
     executable = _resolve_cli_executable(cli_config)
     model = str(_cfg_value(cli_config, "model", "") or "")
-    _prepare_cli_workspace(workspace, tool)
     cmd = _build_cli_command(tool, executable, workspace, prompt, model, project_dir=project_dir)
 
     logger.debug("%s command: %s", tool, " ".join(shlex.quote(part) for part in cmd))
 
-    env = _build_cli_env(workspace, tool, writable_paths=writable_paths)
     cwd = _select_cli_cwd(workspace, tool, project_dir)
+    config_workspace = _prepare_cli_workspace(
+        workspace,
+        tool,
+        runtime_cwd=cwd,
+        writable_paths=writable_paths,
+    )
+    env = _build_cli_env(config_workspace, tool, writable_paths=writable_paths)
 
     kwargs: dict = {}
     if sys.platform == "win32":

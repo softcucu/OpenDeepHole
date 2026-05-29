@@ -6,6 +6,7 @@
 - **优化** AI 去误报 high 结果的 Markdown 漏洞报告固定包含 Summary、Vulnerable Code、Full Call Stack、Root Cause、Why It is Reachable、Impact、Evidence，章节缺失会自动降级为 medium
 - **新增** 扫描详情页结果表支持按 AI 去误报复核严重性筛选，可单独过滤 high、medium、low 或无复核结果
 - **修复** 启动 AI 去误报复核时会像启动扫描一样下发 Agent runtime update，确保后端代码和 Agent 侧代码先同步再执行复核
+- **修复** AI 去误报使用 `opencode`/`nga` 时会将 FP 复核 SKILL 同步到实际运行目录，避免对抗复核阶段偶发报 `fp-review-discriminator` 不存在
 
 ## 2026-05-28
 
