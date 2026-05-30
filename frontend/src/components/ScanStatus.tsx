@@ -113,7 +113,8 @@ export default function ScanStatus({ scanId, onBack }: Props) {
     return () => clearInterval(timer);
   }, [scanId]);
 
-  // Poll for FP review status when a review is running
+  // Poll for FP review status when a review is running.
+  // Tolerate transient errors — only stop polling on terminal status.
   useEffect(() => {
     if (!fpReview || fpReview.status === "complete" || fpReview.status === "error" || fpReview.status === "cancelled") return;
     const timer = setInterval(async () => {
@@ -124,7 +125,8 @@ export default function ScanStatus({ scanId, onBack }: Props) {
           clearInterval(timer);
         }
       } catch {
-        clearInterval(timer);
+        // Transient error (network hiccup, server busy) — keep polling.
+        // The interval will retry on the next tick.
       }
     }, 2000);
     return () => clearInterval(timer);
@@ -162,17 +164,29 @@ export default function ScanStatus({ scanId, onBack }: Props) {
     }
   };
 
-  // Load existing FP review when opening a scan, even if the scan is still running.
+  // Load existing FP review when opening a scan, and keep polling periodically
+  // so we pick up reviews that start after the page loads (e.g. triggered from
+  // another tab, or if the initial load got a 404 before the job was created).
   useEffect(() => {
     let active = true;
     setFpReview(null);
-    getFpReview(scanId)
-      .then((job) => {
+
+    const refreshFpReview = async () => {
+      try {
+        const job = await getFpReview(scanId);
         if (active) setFpReview(job);
-      })
-      .catch(() => {});
+      } catch {
+        // 404 = no review yet, or transient error — keep trying
+      }
+    };
+
+    refreshFpReview();
+    // Poll every 5s as a background safety net. The faster 2s dedicated poll
+    // takes over once fpReview is set to a running state.
+    const timer = setInterval(refreshFpReview, 5000);
     return () => {
       active = false;
+      clearInterval(timer);
     };
   }, [scanId]);
 

@@ -1116,59 +1116,63 @@ class SqliteScanStore(ScanStoreBase):
     # -- FP Review jobs --
 
     def create_fp_review_job(self, review_id: str, scan_id: str, total: int, created_at: str) -> None:
-        self._conn.execute(
-            """\
-            INSERT INTO fp_review_jobs (review_id, scan_id, status, created_at, total, processed)
-            VALUES (?, ?, 'pending', ?, ?, 0)
-            """,
-            (review_id, scan_id, created_at, total),
-        )
-        self._conn.commit()
+        with self._lock:
+            self._conn.execute(
+                """\
+                INSERT INTO fp_review_jobs (review_id, scan_id, status, created_at, total, processed)
+                VALUES (?, ?, 'pending', ?, ?, 0)
+                """,
+                (review_id, scan_id, created_at, total),
+            )
+            self._conn.commit()
 
     def get_fp_review_job(self, review_id: str) -> FpReviewJob | None:
-        self._conn.row_factory = sqlite3.Row
-        cur = self._conn.execute(
-            "SELECT * FROM fp_review_jobs WHERE review_id = ?", (review_id,)
-        )
-        row = cur.fetchone()
-        if row is None:
-            return None
-        return self._row_to_fp_review_job(row)
+        with self._lock:
+            self._conn.row_factory = sqlite3.Row
+            cur = self._conn.execute(
+                "SELECT * FROM fp_review_jobs WHERE review_id = ?", (review_id,)
+            )
+            row = cur.fetchone()
+            if row is None:
+                return None
+            return self._row_to_fp_review_job(row)
 
     def get_fp_review_by_scan(self, scan_id: str) -> FpReviewJob | None:
-        self._conn.row_factory = sqlite3.Row
-        cur = self._conn.execute(
-            "SELECT * FROM fp_review_jobs WHERE scan_id = ? ORDER BY created_at DESC LIMIT 1",
-            (scan_id,),
-        )
-        row = cur.fetchone()
-        if row is None:
-            return None
-        return self._row_to_fp_review_job(row)
+        with self._lock:
+            self._conn.row_factory = sqlite3.Row
+            cur = self._conn.execute(
+                "SELECT * FROM fp_review_jobs WHERE scan_id = ? ORDER BY created_at DESC LIMIT 1",
+                (scan_id,),
+            )
+            row = cur.fetchone()
+            if row is None:
+                return None
+            return self._row_to_fp_review_job(row)
 
     def list_fp_review_results_by_scan(self, scan_id: str) -> list[FpReviewResult]:
-        self._conn.row_factory = sqlite3.Row
-        cur = self._conn.execute(
-            """\
-            SELECT r.*
-            FROM fp_review_results r
-            JOIN fp_review_jobs j ON j.review_id = r.review_id
-            WHERE j.scan_id = ?
-            ORDER BY j.created_at ASC, r.created_at ASC, r.id ASC
-            """,
-            (scan_id,),
-        )
-        return [
-            FpReviewResult(
-                vuln_index=r["vuln_index"],
-                verdict=r["verdict"],
-                severity=r["severity"] or "low",
-                reason=r["reason"],
-                vulnerability_report=r["vulnerability_report"] or "",
-                created_at=r["created_at"],
+        with self._lock:
+            self._conn.row_factory = sqlite3.Row
+            cur = self._conn.execute(
+                """\
+                SELECT r.*
+                FROM fp_review_results r
+                JOIN fp_review_jobs j ON j.review_id = r.review_id
+                WHERE j.scan_id = ?
+                ORDER BY j.created_at ASC, r.created_at ASC, r.id ASC
+                """,
+                (scan_id,),
             )
-            for r in cur.fetchall()
-        ]
+            return [
+                FpReviewResult(
+                    vuln_index=r["vuln_index"],
+                    verdict=r["verdict"],
+                    severity=r["severity"] or "low",
+                    reason=r["reason"],
+                    vulnerability_report=r["vulnerability_report"] or "",
+                    created_at=r["created_at"],
+                )
+                for r in cur.fetchall()
+            ]
 
     def _row_to_fp_review_job(self, row: sqlite3.Row) -> FpReviewJob:
         review_id = row["review_id"]
@@ -1228,31 +1232,33 @@ class SqliteScanStore(ScanStoreBase):
             params.append(error_message)
         if not updates:
             return
-        params.append(review_id)
-        self._conn.execute(
-            f"UPDATE fp_review_jobs SET {', '.join(updates)} WHERE review_id = ?",
-            params,
-        )
-        self._conn.commit()
+        with self._lock:
+            params.append(review_id)
+            self._conn.execute(
+                f"UPDATE fp_review_jobs SET {', '.join(updates)} WHERE review_id = ?",
+                params,
+            )
+            self._conn.commit()
 
     def add_fp_review_result(self, review_id: str, result: FpReviewResult) -> None:
-        self._conn.execute(
-            """\
-            INSERT OR REPLACE INTO fp_review_results
-                (review_id, vuln_index, verdict, severity, reason, vulnerability_report, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                review_id,
-                result.vuln_index,
-                result.verdict,
-                result.severity,
-                result.reason,
-                result.vulnerability_report,
-                result.created_at,
-            ),
-        )
-        self._conn.commit()
+        with self._lock:
+            self._conn.execute(
+                """\
+                INSERT OR REPLACE INTO fp_review_results
+                    (review_id, vuln_index, verdict, severity, reason, vulnerability_report, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    review_id,
+                    result.vuln_index,
+                    result.verdict,
+                    result.severity,
+                    result.reason,
+                    result.vulnerability_report,
+                    result.created_at,
+                ),
+            )
+            self._conn.commit()
 
     # -- Users --
 
