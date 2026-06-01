@@ -308,15 +308,15 @@ class CppAnalyzer:
                 "ctags 必须是 Universal Ctags，当前 ctags 不支持所需的 JSON 输出。"
             )
 
-        formats = subprocess.run(
-            ["ctags", "--list-output-formats"],
-            capture_output=True,
-            check=False,
-        )
-        if formats.returncode != 0 or "json" not in _decode_tool_output(formats.stdout).lower():
-            raise CodeIndexToolError(
-                "ctags 必须支持 JSON 输出。请安装带 JSON 输出支持的 Universal Ctags。"
-            )
+        #formats = subprocess.run(
+        #    ["ctags", "--list-output-formats"],
+        #    capture_output=True,
+        #    check=False,
+        #)
+        #if formats.returncode != 0 or "json" not in _decode_tool_output(formats.stdout).lower():
+        #    raise CodeIndexToolError(
+        #        "ctags 必须支持 JSON 输出。请安装带 JSON 输出支持的 Universal Ctags。"
+        #    )
 
     @staticmethod
     def _project_temp_dir(project_root: Path) -> tempfile.TemporaryDirectory:

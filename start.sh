@@ -23,7 +23,7 @@ echo "[3/3] 启动后端 (port 8000)..."
 echo "=== 服务已启动，Ctrl+C 停止 ==="
 WS_PING_INTERVAL="${OPENDEEPHOLE_SERVER_WS_PING_INTERVAL:-30}"
 WS_PING_TIMEOUT="${OPENDEEPHOLE_SERVER_WS_PING_TIMEOUT:-120}"
-uvicorn backend.main:app \
+python3 -m uvicorn backend.main:app \
   --host 0.0.0.0 \
   --port 8000 \
   --ws-ping-interval "$WS_PING_INTERVAL" \
