@@ -24,6 +24,7 @@ from backend.analyzers.base import BaseAnalyzer
 from backend.models import Candidate, Vulnerability
 from backend.registry import CHECKERS_DIR, CHECKERS_DIR_ENV, CheckerEntry, refresh_registry
 from code_parser import CodeDatabase, CppAnalyzer
+from agent.scanner import build_project_level_candidate, is_project_level_candidate
 
 
 _SKIP_DIRS = {"__pycache__", ".git", ".mypy_cache", ".pytest_cache"}
@@ -168,9 +169,7 @@ async def _run(args: argparse.Namespace) -> CheckerTestResult:
             entry = registry.get(args.checker)
             if entry is None:
                 raise CheckerTestError(f"checker did not load from {temp_root / args.checker}")
-            if entry.analyzer is None:
-                raise CheckerTestError(f"checker {args.checker!r} has no analyzer.py to test")
-            if not isinstance(entry.analyzer, BaseAnalyzer):
+            if entry.analyzer is not None and not isinstance(entry.analyzer, BaseAnalyzer):
                 raise CheckerTestError("Analyzer must inherit backend.analyzers.base.BaseAnalyzer")
 
             index_db = _build_index(project_path, args.index_db)
@@ -284,9 +283,13 @@ def _build_index(project_path: Path, index_db_arg: Path | None) -> Path:
 
 
 def _run_static_analysis(entry: CheckerEntry, project_path: Path, index_db: Path) -> list[Candidate]:
+    if entry.analyzer is None:
+        if entry.mode == "opencode":
+            return [build_project_level_candidate(entry, project_path, project_path)]
+        return []
+
     db = CodeDatabase(index_db)
     try:
-        assert entry.analyzer is not None
         return list(entry.analyzer.find_candidates(project_path, db=db))
     finally:
         db.close()
@@ -306,7 +309,7 @@ def _validate_candidates(checker_name: str, project_path: Path, candidates: list
             raise CheckerTestError(f"candidate #{idx} has empty function")
         if not candidate.description:
             raise CheckerTestError(f"candidate #{idx} has empty description")
-        if _resolve_candidate_file(project_path, candidate.file) is None:
+        if not is_project_level_candidate(candidate) and _resolve_candidate_file(project_path, candidate.file) is None:
             raise CheckerTestError(
                 f"candidate #{idx} file is not inside project or does not exist: {candidate.file}"
             )
@@ -355,7 +358,7 @@ async def _run_audits(
     from agent import mcp_registry
     from agent.local_mcp import LocalMCPServer
     from backend.opencode.config import cleanup_workspace, create_scan_workspace
-    from backend.opencode.runner import run_audit
+    from backend.opencode.runner import run_audit, run_project_audit
 
     agent_project_dir = _agent_project_dir_for_index(index_db)
     os.environ["AGENT_PROJECT_DIR"] = str(agent_project_dir)
@@ -371,15 +374,26 @@ async def _run_audits(
         for candidate in candidates:
             if not quiet:
                 print(f"[audit] {candidate.file}:{candidate.line} {candidate.function}", flush=True)
-            vuln = await run_audit(
-                workspace,
-                candidate,
-                scan_id,
-                on_output=None if quiet else lambda line: print(f"  {line}", flush=True),
-                cancel_event=cancel_event,
-                project_dir=project_path,
-            )
-            results.append(_audit_payload(candidate, vuln))
+            if is_project_level_candidate(candidate):
+                vulns = await run_project_audit(
+                    workspace,
+                    candidate,
+                    scan_id,
+                    on_output=None if quiet else lambda line: print(f"  {line}", flush=True),
+                    cancel_event=cancel_event,
+                    project_dir=project_path,
+                )
+                results.extend(_audit_payload(candidate, vuln) for vuln in vulns)
+            else:
+                vuln = await run_audit(
+                    workspace,
+                    candidate,
+                    scan_id,
+                    on_output=None if quiet else lambda line: print(f"  {line}", flush=True),
+                    cancel_event=cancel_event,
+                    project_dir=project_path,
+                )
+                results.append(_audit_payload(candidate, vuln))
         return results
     finally:
         mcp_registry.unregister(project_path)

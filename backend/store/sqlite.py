@@ -18,6 +18,7 @@ from backend.models import (
     ScanMeta,
     ScanStatus,
     ScanSummary,
+    SkillReport,
     UserInDB,
     Vulnerability,
 )
@@ -38,7 +39,8 @@ CREATE TABLE IF NOT EXISTS scans (
     error_message      TEXT,
     feedback_ids       TEXT DEFAULT '[]',
     workspace_path     TEXT,
-    product            TEXT NOT NULL DEFAULT ''
+    product            TEXT NOT NULL DEFAULT '',
+    public_access_token TEXT NOT NULL DEFAULT ''
 );
 
 CREATE TABLE IF NOT EXISTS vulnerabilities (
@@ -79,6 +81,19 @@ CREATE TABLE IF NOT EXISTS processed_keys (
     vuln_type TEXT NOT NULL,
     PRIMARY KEY(scan_id, file, line, function, vuln_type)
 );
+
+CREATE TABLE IF NOT EXISTS skill_reports (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    scan_id      TEXT NOT NULL REFERENCES scans(scan_id) ON DELETE CASCADE,
+    checker_name TEXT NOT NULL,
+    filename     TEXT NOT NULL,
+    title        TEXT NOT NULL DEFAULT '',
+    content      TEXT NOT NULL,
+    created_at   TEXT NOT NULL,
+    UNIQUE(scan_id, checker_name, filename)
+);
+
+CREATE INDEX IF NOT EXISTS idx_skill_reports_scan ON skill_reports(scan_id);
 
 CREATE TABLE IF NOT EXISTS feedback_entries (
     id              TEXT PRIMARY KEY,
@@ -181,6 +196,8 @@ class SqliteScanStore(ScanStoreBase):
             self._conn.execute("ALTER TABLE scans ADD COLUMN user_id TEXT DEFAULT ''")
         if "product" not in cols:
             self._conn.execute("ALTER TABLE scans ADD COLUMN product TEXT NOT NULL DEFAULT ''")
+        if "public_access_token" not in cols:
+            self._conn.execute("ALTER TABLE scans ADD COLUMN public_access_token TEXT NOT NULL DEFAULT ''")
         # vulnerabilities 表迁移
         vuln_cur = self._conn.execute("PRAGMA table_info(vulnerabilities)")
         vuln_cols = {r[1] for r in vuln_cur.fetchall()}
@@ -225,6 +242,17 @@ class SqliteScanStore(ScanStoreBase):
             )
         # Ensure users table exists
         self._conn.executescript("""\
+            CREATE TABLE IF NOT EXISTS skill_reports (
+                id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                scan_id      TEXT NOT NULL REFERENCES scans(scan_id) ON DELETE CASCADE,
+                checker_name TEXT NOT NULL,
+                filename     TEXT NOT NULL,
+                title        TEXT NOT NULL DEFAULT '',
+                content      TEXT NOT NULL,
+                created_at   TEXT NOT NULL,
+                UNIQUE(scan_id, checker_name, filename)
+            );
+            CREATE INDEX IF NOT EXISTS idx_skill_reports_scan ON skill_reports(scan_id);
             CREATE TABLE IF NOT EXISTS users (
                 user_id       TEXT PRIMARY KEY,
                 username      TEXT NOT NULL UNIQUE,
@@ -294,6 +322,7 @@ class SqliteScanStore(ScanStoreBase):
             total_candidates=row["total_candidates"],
             processed_candidates=row["processed_candidates"],
             vulnerabilities=self.get_vulnerabilities(row["scan_id"]),
+            skill_reports=self.list_skill_reports(row["scan_id"]),
             events=self.get_events(row["scan_id"]),
             current_candidate=current,
             error_message=row["error_message"],
@@ -315,6 +344,7 @@ class SqliteScanStore(ScanStoreBase):
             scan_name=row["scan_name"] if row["scan_name"] is not None else "",
             product=row["product"] if row["product"] is not None else "",
             user_id=row["user_id"] if row["user_id"] is not None else "",
+            public_access_token=row["public_access_token"] if row["public_access_token"] is not None else "",
         )
 
     # -- Scan lifecycle --
@@ -334,8 +364,8 @@ class SqliteScanStore(ScanStoreBase):
                      current_candidate, error_message, feedback_ids,
                      static_total_files, static_scanned_files, static_analysis_done,
                      user_id, agent_name, agent_id, project_path, code_scan_path, scan_name,
-                     product)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     product, public_access_token)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     scan.scan_id,
@@ -359,6 +389,7 @@ class SqliteScanStore(ScanStoreBase):
                     meta.code_scan_path,
                     meta.scan_name,
                     meta.product,
+                    meta.public_access_token,
                 ),
             )
             self._conn.commit()
@@ -590,6 +621,98 @@ class SqliteScanStore(ScanStoreBase):
             self._conn.commit()
             return next_idx
 
+    def upsert_incomplete_vulnerability(self, scan_id: str, vuln: Vulnerability) -> int:
+        """Replace an existing timeout/no-result row for this candidate, else append."""
+        with self._lock:
+            self._conn.row_factory = sqlite3.Row
+            cur = self._conn.execute(
+                """\
+                SELECT idx
+                FROM vulnerabilities
+                WHERE scan_id = ?
+                  AND file = ?
+                  AND line = ?
+                  AND function = ?
+                  AND vuln_type = ?
+                  AND COALESCE(user_verdict, '') = ''
+                  AND COALESCE(ai_verdict, '') IN ('timeout', 'no_result')
+                ORDER BY idx ASC
+                LIMIT 1
+                """,
+                (scan_id, vuln.file, vuln.line, vuln.function, vuln.vuln_type),
+            )
+            row = cur.fetchone()
+            if row is not None:
+                idx = int(row["idx"])
+                self._conn.execute(
+                    """\
+                    UPDATE vulnerabilities
+                    SET severity = ?,
+                        description = ?,
+                        ai_analysis = ?,
+                        confirmed = ?,
+                        ai_verdict = ?,
+                        user_verdict = NULL,
+                        user_verdict_reason = NULL,
+                        ticket_submitted = 0,
+                        ticket_id = '',
+                        function_source = ?,
+                        function_start_line = ?
+                    WHERE scan_id = ? AND idx = ?
+                    """,
+                    (
+                        vuln.severity,
+                        vuln.description,
+                        vuln.ai_analysis,
+                        1 if vuln.confirmed else 0,
+                        vuln.ai_verdict,
+                        vuln.function_source,
+                        vuln.function_start_line,
+                        scan_id,
+                        idx,
+                    ),
+                )
+                self._conn.commit()
+                return idx
+
+            cur = self._conn.execute(
+                "SELECT COALESCE(MAX(idx), -1) FROM vulnerabilities WHERE scan_id = ?",
+                (scan_id,),
+            )
+            next_idx = cur.fetchone()[0] + 1
+            self._conn.execute(
+                """\
+                INSERT INTO vulnerabilities
+                    (scan_id, idx, file, line, function, vuln_type,
+                     severity, description, ai_analysis, confirmed,
+                     ai_verdict, user_verdict, user_verdict_reason,
+                     ticket_submitted, ticket_id,
+                     function_source, function_start_line)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    scan_id,
+                    next_idx,
+                    vuln.file,
+                    vuln.line,
+                    vuln.function,
+                    vuln.vuln_type,
+                    vuln.severity,
+                    vuln.description,
+                    vuln.ai_analysis,
+                    1 if vuln.confirmed else 0,
+                    vuln.ai_verdict,
+                    vuln.user_verdict,
+                    vuln.user_verdict_reason,
+                    1 if vuln.ticket_submitted else 0,
+                    vuln.ticket_id if vuln.ticket_submitted else "",
+                    vuln.function_source,
+                    vuln.function_start_line,
+                ),
+            )
+            self._conn.commit()
+            return next_idx
+
     def update_vulnerability(
         self,
         scan_id: str,
@@ -647,6 +770,65 @@ class SqliteScanStore(ScanStoreBase):
                 ticket_id=r["ticket_id"] or "",
                 function_source=r["function_source"] or "",
                 function_start_line=r["function_start_line"],
+            )
+            for r in cur.fetchall()
+        ]
+
+    # -- Skill reports --
+
+    def replace_skill_reports(self, scan_id: str, checker_name: str, reports: list[SkillReport]) -> None:
+        with self._lock:
+            self._conn.execute(
+                "DELETE FROM skill_reports WHERE scan_id = ? AND checker_name = ?",
+                (scan_id, checker_name),
+            )
+            for report in reports:
+                self._conn.execute(
+                    """\
+                    INSERT INTO skill_reports
+                        (scan_id, checker_name, filename, title, content, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        scan_id,
+                        checker_name,
+                        report.filename,
+                        report.title,
+                        report.content,
+                        report.created_at,
+                    ),
+                )
+            self._conn.commit()
+
+    def list_skill_reports(self, scan_id: str, checker_name: str | None = None) -> list[SkillReport]:
+        self._conn.row_factory = sqlite3.Row
+        if checker_name:
+            cur = self._conn.execute(
+                """\
+                SELECT * FROM skill_reports
+                WHERE scan_id = ? AND checker_name = ?
+                ORDER BY checker_name, filename, id
+                """,
+                (scan_id, checker_name),
+            )
+        else:
+            cur = self._conn.execute(
+                """\
+                SELECT * FROM skill_reports
+                WHERE scan_id = ?
+                ORDER BY checker_name, filename, id
+                """,
+                (scan_id,),
+            )
+        return [
+            SkillReport(
+                id=r["id"],
+                scan_id=r["scan_id"],
+                checker_name=r["checker_name"],
+                filename=r["filename"],
+                title=r["title"],
+                content=r["content"],
+                created_at=r["created_at"],
             )
             for r in cur.fetchall()
         ]
@@ -711,6 +893,21 @@ class SqliteScanStore(ScanStoreBase):
             (scan_id,),
         )
         return {(r[0], r[1], r[2], r[3]) for r in cur.fetchall()}
+
+    def remove_processed_keys(
+        self, scan_id: str, keys: list[tuple[str, int, str, str]]
+    ) -> None:
+        if not keys:
+            return
+        with self._lock:
+            self._conn.executemany(
+                """\
+                DELETE FROM processed_keys
+                WHERE scan_id = ? AND file = ? AND line = ? AND function = ? AND vuln_type = ?
+                """,
+                [(scan_id, *key) for key in keys],
+            )
+            self._conn.commit()
 
     # -- Feedback entries --
 
@@ -1026,59 +1223,63 @@ class SqliteScanStore(ScanStoreBase):
     # -- FP Review jobs --
 
     def create_fp_review_job(self, review_id: str, scan_id: str, total: int, created_at: str) -> None:
-        self._conn.execute(
-            """\
-            INSERT INTO fp_review_jobs (review_id, scan_id, status, created_at, total, processed)
-            VALUES (?, ?, 'pending', ?, ?, 0)
-            """,
-            (review_id, scan_id, created_at, total),
-        )
-        self._conn.commit()
+        with self._lock:
+            self._conn.execute(
+                """\
+                INSERT INTO fp_review_jobs (review_id, scan_id, status, created_at, total, processed)
+                VALUES (?, ?, 'pending', ?, ?, 0)
+                """,
+                (review_id, scan_id, created_at, total),
+            )
+            self._conn.commit()
 
     def get_fp_review_job(self, review_id: str) -> FpReviewJob | None:
-        self._conn.row_factory = sqlite3.Row
-        cur = self._conn.execute(
-            "SELECT * FROM fp_review_jobs WHERE review_id = ?", (review_id,)
-        )
-        row = cur.fetchone()
-        if row is None:
-            return None
-        return self._row_to_fp_review_job(row)
+        with self._lock:
+            self._conn.row_factory = sqlite3.Row
+            cur = self._conn.execute(
+                "SELECT * FROM fp_review_jobs WHERE review_id = ?", (review_id,)
+            )
+            row = cur.fetchone()
+            if row is None:
+                return None
+            return self._row_to_fp_review_job(row)
 
     def get_fp_review_by_scan(self, scan_id: str) -> FpReviewJob | None:
-        self._conn.row_factory = sqlite3.Row
-        cur = self._conn.execute(
-            "SELECT * FROM fp_review_jobs WHERE scan_id = ? ORDER BY created_at DESC LIMIT 1",
-            (scan_id,),
-        )
-        row = cur.fetchone()
-        if row is None:
-            return None
-        return self._row_to_fp_review_job(row)
+        with self._lock:
+            self._conn.row_factory = sqlite3.Row
+            cur = self._conn.execute(
+                "SELECT * FROM fp_review_jobs WHERE scan_id = ? ORDER BY created_at DESC LIMIT 1",
+                (scan_id,),
+            )
+            row = cur.fetchone()
+            if row is None:
+                return None
+            return self._row_to_fp_review_job(row)
 
     def list_fp_review_results_by_scan(self, scan_id: str) -> list[FpReviewResult]:
-        self._conn.row_factory = sqlite3.Row
-        cur = self._conn.execute(
-            """\
-            SELECT r.*
-            FROM fp_review_results r
-            JOIN fp_review_jobs j ON j.review_id = r.review_id
-            WHERE j.scan_id = ?
-            ORDER BY j.created_at ASC, r.created_at ASC, r.id ASC
-            """,
-            (scan_id,),
-        )
-        return [
-            FpReviewResult(
-                vuln_index=r["vuln_index"],
-                verdict=r["verdict"],
-                severity=r["severity"] or "low",
-                reason=r["reason"],
-                vulnerability_report=r["vulnerability_report"] or "",
-                created_at=r["created_at"],
+        with self._lock:
+            self._conn.row_factory = sqlite3.Row
+            cur = self._conn.execute(
+                """\
+                SELECT r.*
+                FROM fp_review_results r
+                JOIN fp_review_jobs j ON j.review_id = r.review_id
+                WHERE j.scan_id = ?
+                ORDER BY j.created_at ASC, r.created_at ASC, r.id ASC
+                """,
+                (scan_id,),
             )
-            for r in cur.fetchall()
-        ]
+            return [
+                FpReviewResult(
+                    vuln_index=r["vuln_index"],
+                    verdict=r["verdict"],
+                    severity=r["severity"] or "low",
+                    reason=r["reason"],
+                    vulnerability_report=r["vulnerability_report"] or "",
+                    created_at=r["created_at"],
+                )
+                for r in cur.fetchall()
+            ]
 
     def _row_to_fp_review_job(self, row: sqlite3.Row) -> FpReviewJob:
         review_id = row["review_id"]
@@ -1138,31 +1339,33 @@ class SqliteScanStore(ScanStoreBase):
             params.append(error_message)
         if not updates:
             return
-        params.append(review_id)
-        self._conn.execute(
-            f"UPDATE fp_review_jobs SET {', '.join(updates)} WHERE review_id = ?",
-            params,
-        )
-        self._conn.commit()
+        with self._lock:
+            params.append(review_id)
+            self._conn.execute(
+                f"UPDATE fp_review_jobs SET {', '.join(updates)} WHERE review_id = ?",
+                params,
+            )
+            self._conn.commit()
 
     def add_fp_review_result(self, review_id: str, result: FpReviewResult) -> None:
-        self._conn.execute(
-            """\
-            INSERT OR REPLACE INTO fp_review_results
-                (review_id, vuln_index, verdict, severity, reason, vulnerability_report, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                review_id,
-                result.vuln_index,
-                result.verdict,
-                result.severity,
-                result.reason,
-                result.vulnerability_report,
-                result.created_at,
-            ),
-        )
-        self._conn.commit()
+        with self._lock:
+            self._conn.execute(
+                """\
+                INSERT OR REPLACE INTO fp_review_results
+                    (review_id, vuln_index, verdict, severity, reason, vulnerability_report, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    review_id,
+                    result.vuln_index,
+                    result.verdict,
+                    result.severity,
+                    result.reason,
+                    result.vulnerability_report,
+                    result.created_at,
+                ),
+            )
+            self._conn.commit()
 
     # -- Users --
 

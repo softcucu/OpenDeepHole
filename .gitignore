@@ -28,6 +28,7 @@ Thumbs.db
 
 # Project runtime
 /tmp/opendeephole/
+.opendeephole/
 *.log
 logs/
 

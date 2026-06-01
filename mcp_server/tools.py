@@ -56,6 +56,19 @@ def _get_db(project_id: str):
     return db
 
 
+def clear_db_cache():
+    """关闭所有缓存的 DB 连接并清空缓存。
+
+    MCP server 停止时调用，防止跨扫描返回失效连接。
+    """
+    for db in _db_cache.values():
+        try:
+            db.close()
+        except Exception:
+            pass
+    _db_cache.clear()
+
+
 def _mcp_log(direction: str, tool: str, detail: str) -> None:
     print(f"  [MCP {direction}] {tool} | {detail}", flush=True)
 
@@ -65,6 +78,28 @@ def _preview(text: str, max_chars: int = 120) -> str:
     if len(text) <= max_chars:
         return text
     return f"{text[:max_chars]}… ({len(text)} chars)"
+
+
+def _append_result_payload(result_path: Path, payload: dict) -> None:
+    """Append payload while preserving compatibility with old single-result files."""
+    if result_path.exists():
+        try:
+            current = json.loads(result_path.read_text(encoding="utf-8"))
+        except Exception:
+            current = None
+        if isinstance(current, dict) and isinstance(current.get("results"), list):
+            results = [item for item in current["results"] if isinstance(item, dict)]
+        elif isinstance(current, list):
+            results = [item for item in current if isinstance(item, dict)]
+        elif isinstance(current, dict):
+            results = [current]
+        else:
+            results = []
+        results.append(payload)
+        data = {"results": results}
+    else:
+        data = payload
+    result_path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
 
 
 def register_tools(mcp: FastMCP) -> None:
@@ -248,6 +283,9 @@ def register_tools(mcp: FastMCP) -> None:
         description: str,
         ai_analysis: str,
         vulnerability_report: str = "",
+        file: str = "",
+        line: int = 0,
+        function: str = "",
     ) -> str:
         """
         提交本次漏洞分析的最终结论。分析完成后必须调用此工具，否则结果将丢失。
@@ -259,6 +297,9 @@ def register_tools(mcp: FastMCP) -> None:
             description: 漏洞的一句话摘要。
             ai_analysis: 详细的分析推理过程，需包含具体的代码路径。
             vulnerability_report: 可选 Markdown 漏洞报告。外部可触发且 severity="high" 时填写。
+            file: 可选，真实问题所在文件路径。项目级审计发现问题时必须填写。
+            line: 可选，真实问题所在行号。项目级审计发现问题时必须填写。
+            function: 可选，真实问题所在函数。项目级审计发现问题时必须填写。
 
         返回：
             提交成功的确认消息。
@@ -268,12 +309,15 @@ def register_tools(mcp: FastMCP) -> None:
         scans_dir = _get_config().storage.scans_dir
         result_path = Path(scans_dir) / f"{result_id}.json"
         result_path.parent.mkdir(parents=True, exist_ok=True)
-        result_path.write_text(json.dumps({
+        _append_result_payload(result_path, {
             "confirmed": confirmed,
             "severity": severity,
             "description": description,
             "ai_analysis": ai_analysis,
             "vulnerability_report": vulnerability_report,
-        }, ensure_ascii=False), encoding="utf-8")
+            "file": file,
+            "line": line,
+            "function": function,
+        })
         _mcp_log("◀", "submit_result", f"saved → {result_path}")
         return f"结果已提交（result_id={result_id}）。"

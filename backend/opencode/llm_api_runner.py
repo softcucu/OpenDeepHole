@@ -29,6 +29,9 @@ class LLMApiUnavailableError(RuntimeError):
 _api_health_cache: dict[tuple[str, str, str, float], tuple[bool, str]] = {}
 _api_health_lock = threading.Lock()
 
+# 按 project 缓存 DB 连接，避免每次 _get_db() 都创建新 SQLite 连接导致 FD 泄漏
+_db_cache: dict[str, object] = {}
+
 
 def _cfg_value(obj, name: str, default):
     return getattr(obj, name, default)
@@ -179,8 +182,6 @@ SYSTEM_PROMPT = """\
 3. 分析完毕后，**必须**调用 submit_result 工具提交结论
 
 注意：分析完成后你 **必须** 调用 submit_result 提交结论，否则结果将丢失。
-
-**重要：你必须直接完成所有分析工作，禁止使用子 Agent（sub-agent）或委托任何子任务。所有工具调用（包括 submit_result）必须由你自己直接执行。**
 """
 
 # ---------------------------------------------------------------------------
@@ -215,6 +216,18 @@ SUBMIT_RESULT_TOOL = {
                 "vulnerability_report": {
                     "type": "string",
                     "description": "可选 Markdown 漏洞报告，外部可触发高风险漏洞时填写",
+                },
+                "file": {
+                    "type": "string",
+                    "description": "可选，真实问题所在文件路径；项目级审计发现问题时必须填写",
+                },
+                "line": {
+                    "type": "integer",
+                    "description": "可选，真实问题所在行号；项目级审计发现问题时必须填写",
+                },
+                "function": {
+                    "type": "string",
+                    "description": "可选，真实问题所在函数；项目级审计发现问题时必须填写",
                 },
             },
             "required": ["confirmed", "severity", "description", "ai_analysis"],
@@ -383,11 +396,14 @@ def _execute_tool(
 
 
 def _get_db(project_id: str):
-    """获取项目的 CodeDatabase 实例。"""
+    """获取项目的 CodeDatabase 实例（缓存复用，避免 FD 泄漏）。"""
     from code_parser import CodeDatabase
 
     agent_dir = os.environ.get("AGENT_PROJECT_DIR")
     if agent_dir:
+        cache_key = f"agent:{agent_dir}"
+        if cache_key in _db_cache:
+            return _db_cache[cache_key]
         db_path = Path(agent_dir) / "code_index.db"
         if not db_path.exists():
             return None
@@ -395,8 +411,12 @@ def _get_db(project_id: str):
         if not db.is_index_complete():
             db.close()
             return None
+        _db_cache[cache_key] = db
         return db
 
+    cache_key = project_id
+    if cache_key in _db_cache:
+        return _db_cache[cache_key]
     config = get_config()
     db_path = Path(config.storage.projects_dir) / project_id / "code_index.db"
     if not db_path.exists():
@@ -405,7 +425,18 @@ def _get_db(project_id: str):
     if not db.is_index_complete():
         db.close()
         return None
+    _db_cache[cache_key] = db
     return db
+
+
+def _close_db_cache():
+    """关闭所有缓存的 DB 连接。扫描结束时由 scanner.py 调用。"""
+    for db in _db_cache.values():
+        try:
+            db.close()
+        except Exception:
+            pass
+    _db_cache.clear()
 
 
 def _tool_view_function(args: dict, project_id: str) -> str:
@@ -463,13 +494,34 @@ def _tool_view_struct(args: dict, project_id: str) -> str:
 def _tool_submit_result(args: dict, result_id: str, scans_dir: str) -> str:
     result_path = Path(scans_dir) / f"{result_id}.json"
     result_path.parent.mkdir(parents=True, exist_ok=True)
-    result_path.write_text(json.dumps({
+    payload = {
         "confirmed": args.get("confirmed", False),
         "severity": args.get("severity", "unknown"),
         "description": args.get("description", ""),
         "ai_analysis": args.get("ai_analysis", ""),
         "vulnerability_report": args.get("vulnerability_report", ""),
-    }, ensure_ascii=False), encoding="utf-8")
+        "file": args.get("file", ""),
+        "line": args.get("line", 0),
+        "function": args.get("function", ""),
+    }
+    if result_path.exists():
+        try:
+            current = json.loads(result_path.read_text(encoding="utf-8"))
+        except Exception:
+            current = None
+        if isinstance(current, dict) and isinstance(current.get("results"), list):
+            results = [item for item in current["results"] if isinstance(item, dict)]
+        elif isinstance(current, list):
+            results = [item for item in current if isinstance(item, dict)]
+        elif isinstance(current, dict):
+            results = [current]
+        else:
+            results = []
+        results.append(payload)
+        data = {"results": results}
+    else:
+        data = payload
+    result_path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
     return f"结果已提交（result_id={result_id}）"
 
 

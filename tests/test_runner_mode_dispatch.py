@@ -78,9 +78,61 @@ def test_opencode_uses_injected_config_and_project_dir_with_isolated_workspace(t
     (workspace / "opencode.json").write_text(json.dumps(config_payload), encoding="utf-8")
     env = _build_cli_env(workspace, "opencode", base_env={})
 
-    assert _select_cli_cwd(workspace, "opencode", project) == project
+    assert _build_cli_command("opencode", "opencode", workspace, "hello", "", project)[:4] == [
+        "opencode",
+        "run",
+        "--dir",
+        str(project),
+    ]
+    assert _select_cli_cwd(workspace, "opencode", project) == project / ".opendeephole" / "opencode"
+    assert (project / ".opendeephole" / "opencode").is_dir()
     assert json.loads(env["OPENCODE_CONFIG_CONTENT"]) == config_payload
     assert env["NODE_TLS_REJECT_UNAUTHORIZED"] == "0"
+
+
+def test_opencode_runtime_cwd_receives_config_and_fp_skills(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    project = tmp_path / "project"
+    workspace.mkdir()
+    project.mkdir()
+    skills_root = workspace / ".opencode" / "skills"
+    for name in ("fp-review", "fp-review-discriminator"):
+        skill_dir = skills_root / name
+        skill_dir.mkdir(parents=True)
+        (skill_dir / "SKILL.md").write_text(name, encoding="utf-8")
+    (workspace / "opencode.json").write_text(
+        json.dumps({
+            "mcp": {"deephole-code": {"url": "http://127.0.0.1:9123/mcp"}},
+            "skills": {"paths": [str(skills_root.resolve())]},
+        }),
+        encoding="utf-8",
+    )
+
+    runtime_cwd = _select_cli_cwd(workspace, "opencode", project)
+    config_workspace = _prepare_cli_workspace(
+        workspace, "opencode", runtime_cwd=runtime_cwd,
+    )
+    env = _build_cli_env(config_workspace, "opencode", base_env={})
+    runtime_config = json.loads((runtime_cwd / "opencode.json").read_text(encoding="utf-8"))
+    env_config = json.loads(env["OPENCODE_CONFIG_CONTENT"])
+
+    assert config_workspace == runtime_cwd
+    # Skills should be copied to runtime CWD (opencode walks up from CWD)
+    assert (runtime_cwd / ".opencode" / "skills" / "fp-review" / "SKILL.md").is_file()
+    assert (runtime_cwd / ".opencode" / "skills" / "fp-review-discriminator" / "SKILL.md").is_file()
+    assert runtime_config["skills"]["paths"] == [str((runtime_cwd / ".opencode" / "skills").resolve())]
+    assert env_config["skills"]["paths"] == runtime_config["skills"]["paths"]
+
+
+def test_project_runtime_cwd_falls_back_to_workspace_when_unavailable(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    project_file = tmp_path / "project"
+    workspace.mkdir()
+    project_file.write_text("not a directory", encoding="utf-8")
+
+    assert _select_cli_cwd(workspace, "opencode", project_file) == workspace
+    assert _select_cli_cwd(workspace, "nga", project_file) == workspace
+    assert _select_cli_cwd(workspace, "claude", project_file) == workspace
 
 
 class _FakeStdout:

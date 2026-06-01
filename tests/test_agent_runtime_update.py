@@ -1,11 +1,16 @@
 import asyncio
+import base64
+import hashlib
+import io
 import tempfile
 import unittest
 import zipfile
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import agent.updater as updater
+import agent.main as agent_main
+import agent.server as agent_server
 from agent.config import AgentConfig
 from agent.updater import compute_runtime_hash
 from backend.api import agent as agent_api
@@ -25,6 +30,7 @@ class AgentRuntimePackageTests(unittest.TestCase):
         self.assertNotIn("run_agent.sh", names)
         self.assertNotIn("run_agent.bat", names)
         self.assertFalse(any(name.startswith("backend/static/") for name in names))
+        self.assertFalse(any(name.startswith("backend/system_skills/") for name in names))
 
     def test_agent_download_zip_includes_launchers_config_and_bundled_ctags(self) -> None:
         data = agent_api._build_agent_zip("http://server.example", "owner-token")
@@ -88,6 +94,26 @@ class AgentRuntimePackageTests(unittest.TestCase):
             before = compute_runtime_hash(root)
             (checker_dir / "checker.yaml").write_text(
                 "name: demo\nlabel: changed\n",
+                encoding="utf-8",
+            )
+
+            self.assertEqual(before, compute_runtime_hash(root))
+
+    def test_runtime_hash_ignores_system_skill_changes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "agent").mkdir()
+            (root / "agent" / "main.py").write_text("print('agent')\n", encoding="utf-8")
+            skill_dir = root / "backend" / "system_skills" / "deephole-skill-creator"
+            skill_dir.mkdir(parents=True)
+            (skill_dir / "SKILL.md").write_text(
+                "name: deephole-skill-creator\n",
+                encoding="utf-8",
+            )
+
+            before = compute_runtime_hash(root)
+            (skill_dir / "SKILL.md").write_text(
+                "name: deephole-skill-creator\nchanged\n",
                 encoding="utf-8",
             )
 
@@ -191,8 +217,6 @@ class AgentRuntimePackageTests(unittest.TestCase):
                     )
 
     def test_config_test_does_not_mutate_live_config(self) -> None:
-        import agent.server as agent_server
-
         live_config = AgentConfig()
         live_config.llm_api.api_key = "live-key"
         agent_server._config = live_config
@@ -216,11 +240,128 @@ class AgentRuntimePackageTests(unittest.TestCase):
         self.assertTrue(result["ok"])
         self.assertEqual(live_config.llm_api.api_key, "live-key")
 
+    def test_skill_creator_output_parser_accepts_fenced_json(self) -> None:
+        parsed = agent_server._parse_skill_creator_output(
+            "```json\n"
+            '{"skill_md":"---\\nname: demo\\ndescription: demo\\n---\\n\\n# Demo",'
+            '"scenarios_md":"# 场景","summary":"ok"}'
+            "\n```"
+        )
+
+        self.assertIn("# Demo", parsed["skill_md"])
+        self.assertEqual(parsed["scenarios_md"], "# 场景")
+        self.assertEqual(parsed["summary"], "ok")
+
+    def test_skill_creator_package_writer_uses_dispatched_skill(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            agent_server._write_skill_creator_package(
+                _skill_creator_package({"SKILL.md": "# Creator\n"}),
+                root,
+            )
+
+            self.assertEqual(
+                (root / "deephole-skill-creator" / "SKILL.md").read_text(encoding="utf-8"),
+                "# Creator\n",
+            )
+
+    def test_skill_creator_prompt_uses_deephole_skill_creator(self) -> None:
+        self.assertIn(
+            "`deephole-skill-creator`",
+            agent_server._skill_creator_prompt("Name", "Description", "Input"),
+        )
+
+    def test_skill_creator_package_writer_rejects_path_traversal(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaisesRegex(RuntimeError, "Unsafe deephole-skill-creator package path"):
+                agent_server._write_skill_creator_package(
+                    _skill_creator_package({"../SKILL.md": "bad"}),
+                    Path(tmp),
+                )
+
+    def test_skill_creator_package_writer_rejects_hash_mismatch(self) -> None:
+        package = _skill_creator_package({"SKILL.md": "# Creator\n"})
+        package["sha256"] = "0" * 64
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaisesRegex(RuntimeError, "package hash mismatch"):
+                agent_server._write_skill_creator_package(package, Path(tmp))
+
+    def test_runtime_update_only_task_runs_post_update_skill_create(self) -> None:
+        update = AsyncMock(return_value=False)
+        handler = AsyncMock(return_value={"ok": True})
+
+        with (
+            patch("agent.updater.ensure_runtime_updated", new=update),
+            patch("agent.server.handle_skill_create", new=handler),
+        ):
+            result = asyncio.run(agent_main._handle_command(
+                {
+                    "type": "task",
+                    "runtime_update_only": True,
+                    "agent_runtime_update": {"hash": "new-runtime"},
+                    "post_update_command": {
+                        "type": "skill_create",
+                        "request_id": "job-1",
+                        "name": "Name",
+                        "description": "Description",
+                        "input": "Input",
+                        "deephole_skill_creator_package": {"name": "deephole-skill-creator"},
+                    },
+                },
+                None,
+                None,
+                None,
+            ))
+
+        self.assertEqual(result, {"ok": True})
+        self.assertEqual(update.await_count, 2)
+        handler.assert_awaited_once()
+
+    def test_fp_review_command_checks_runtime_update_before_review(self) -> None:
+        update = AsyncMock(return_value=False)
+        handler = AsyncMock()
+
+        with (
+            patch("agent.updater.ensure_runtime_updated", new=update),
+            patch("agent.server.handle_fp_review", new=handler),
+        ):
+            asyncio.run(agent_main._handle_command(
+                {
+                    "type": "fp_review",
+                    "scan_id": "scan-1",
+                    "review_id": "review-1",
+                    "project_path": "/repo/project",
+                    "vulnerabilities": [],
+                    "feedback_entries": [],
+                    "agent_runtime_update": {"hash": "new-runtime"},
+                },
+                None,
+                None,
+                None,
+            ))
+
+        update.assert_awaited_once()
+        self.assertEqual(update.await_args.args[0], {"hash": "new-runtime"})
+        handler.assert_awaited_once()
+
 
 def _bytes_path(data: bytes):
     import io
 
     return io.BytesIO(data)
+
+
+def _skill_creator_package(files: dict[str, str]) -> dict[str, str]:
+    archive = io.BytesIO()
+    with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        for name, content in files.items():
+            zf.writestr(name, content)
+    data = archive.getvalue()
+    return {
+        "name": "deephole-skill-creator",
+        "sha256": hashlib.sha256(data).hexdigest(),
+        "archive_b64": base64.b64encode(data).decode("ascii"),
+    }
 
 
 def _runtime_manifest(files: list[tuple[str, bytes]], scope: dict | None = None) -> dict:

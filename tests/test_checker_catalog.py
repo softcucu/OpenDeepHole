@@ -2,6 +2,7 @@ import asyncio
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from backend.api.checkers import _discover_catalog_items, list_checker_catalog
@@ -21,7 +22,11 @@ class CheckerCatalogTests(unittest.TestCase):
             skill_path.write_text("# Skill intro\n", encoding="utf-8")
             (checker_dir / "SCENARIOS.md").write_text("# Scenario intro\n", encoding="utf-8")
 
-            with patch("backend.api.checkers.CHECKERS_DIR", Path(tmp)):
+            cfg = SimpleNamespace(storage=SimpleNamespace(user_skills_dir=str(Path(tmp))))
+            with (
+                patch("backend.registry.CHECKERS_DIR", Path(tmp)),
+                patch("backend.config.get_config", return_value=cfg),
+            ):
                 response = asyncio.run(
                     list_checker_catalog(
                         current_user=User(user_id="u1", username="alice", role="user")
@@ -88,6 +93,71 @@ class CheckerCatalogTests(unittest.TestCase):
         self.assertEqual(response[1].category_label, "资源泄露")
         self.assertEqual(response[2].category, "illegal_memory_use")
         self.assertEqual(response[2].category_label, "非法内存使用")
+
+    def test_catalog_accepts_auth_bypass_and_other_categories(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self._write_checker(
+                root,
+                "auth_check",
+                category="auth_bypass",
+                modified_at="2026-05-20T12:00:00+08:00",
+            )
+            self._write_checker(
+                root,
+                "other_check",
+                category="other",
+                modified_at="2026-05-19T12:00:00+08:00",
+            )
+
+            response = _discover_catalog_items(root)
+
+        by_name = {item.name: item for item in response}
+        self.assertEqual(by_name["auth_check"].category, "auth_bypass")
+        self.assertEqual(by_name["auth_check"].category_label, "认证绕过")
+        self.assertEqual(by_name["other_check"].category, "other")
+        self.assertEqual(by_name["other_check"].category_label, "其他")
+
+    def test_catalog_shows_user_skill_creator_and_delete_permission(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            builtins = Path(tmp) / "builtins"
+            user_skills = Path(tmp) / "user_skills"
+            builtins.mkdir()
+            self._write_checker(builtins, "builtin")
+            owned = user_skills / "owned_skill"
+            owned.mkdir(parents=True)
+            (owned / "checker.yaml").write_text(
+                "\n".join([
+                    "name: owned_skill",
+                    "label: Owned Skill",
+                    "description: description",
+                    "enabled: true",
+                    "created_by_user_id: user-1",
+                    "created_by_username: alice",
+                ])
+                + "\n",
+                encoding="utf-8",
+            )
+            (owned / "SKILL.md").write_text("# Owned\n", encoding="utf-8")
+            cfg = SimpleNamespace(storage=SimpleNamespace(user_skills_dir=str(user_skills)))
+
+            with (
+                patch("backend.registry.CHECKERS_DIR", builtins),
+                patch("backend.api.checkers.CHECKERS_DIR", builtins),
+                patch("backend.config.get_config", return_value=cfg),
+            ):
+                response = asyncio.run(
+                    list_checker_catalog(
+                        current_user=User(user_id="user-1", username="alice", role="user")
+                    )
+                )
+
+        by_name = {item.name: item for item in response}
+        self.assertFalse(by_name["builtin"].user_created)
+        self.assertFalse(by_name["builtin"].can_delete)
+        self.assertTrue(by_name["owned_skill"].user_created)
+        self.assertEqual(by_name["owned_skill"].creator_username, "alice")
+        self.assertTrue(by_name["owned_skill"].can_delete)
 
     def test_catalog_falls_back_to_description_when_intro_files_are_missing(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

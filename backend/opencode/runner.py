@@ -12,6 +12,7 @@ import sys
 import time
 from pathlib import Path
 from uuid import uuid4
+from datetime import datetime, timezone
 
 from backend.config import get_config
 from backend.logger import get_logger
@@ -160,8 +161,6 @@ async def _run_audit_via_opencode(
             f"详情：{candidate.description} "
             f"你的 result_id 是 `{result_id}`。"
             f"分析完成后，你**必须**使用此 result_id 调用 submit_result MCP 工具提交你的结论。"
-            f"**重要：你必须直接完成所有分析工作，禁止使用子 Agent（sub-agent）或委托任何子任务。"
-            f"所有 MCP 工具调用（包括 submit_result）必须由你自己直接执行。**"
         )
         prompt = prompt.replace('\n', ' ')
 
@@ -234,6 +233,239 @@ async def _run_audit_via_opencode(
     return None  # should not reach here
 
 
+async def run_project_audit(
+    workspace: Path,
+    candidate: Candidate,
+    project_id: str,
+    on_output=None,
+    cancel_event=None,
+    timeout: int | None = None,
+    project_dir: Path | None = None,
+) -> list[Vulnerability]:
+    """Run a SKILL-only checker once and collect all submitted results."""
+    config = get_config()
+    if config.opencode.mock:
+        return [_mock_result(candidate)]
+
+    effective_timeout = timeout if timeout is not None else config.opencode.timeout
+    tool = _normalize_tool(config.opencode)
+    from backend.registry import get_registry
+    checker_entry = get_registry().get(candidate.vuln_type)
+    skill_name = (
+        checker_entry.skill_name
+        if checker_entry and checker_entry.skill_name
+        else candidate.vuln_type
+    )
+    max_retries = config.opencode.max_retries
+
+    for attempt in range(1, max_retries + 2):
+        result_id = f"result-{uuid4().hex}"
+        prompt = (
+            f"使用 `{skill_name}` 技能，审计代码扫描路径 `{candidate.file}` 对应的目标代码。"
+            f"project_id 为 `{project_id}`。"
+            f"这是项目级审计任务，不是单个候选点复核。"
+            f"每发现一个真实问题，都必须使用此 result_id `{result_id}` 调用一次 submit_result MCP 工具，"
+            f"并在 submit_result 参数中填写真实的 file、line、function。"
+            f"如果没有发现真实问题，也必须使用此 result_id 调用一次 submit_result，confirmed=false，"
+            f"file=`{candidate.file}`，line={candidate.line}，function=`{candidate.function}`。"
+        ).replace("\n", " ")
+        log_path = workspace / f"opencode_{result_id}.log"
+
+        if on_output:
+            on_output(f"[{tool}] 初始提示词:\n{prompt}")
+
+        logger.info(
+            "Running %s project audit: %s (%s) result_id=%s timeout=%ds attempt=%d/%d",
+            tool, candidate.file, candidate.vuln_type, result_id,
+            effective_timeout, attempt, max_retries + 1,
+        )
+
+        try:
+            await _invoke_opencode(
+                workspace, prompt, effective_timeout,
+                log_path=log_path, on_line=on_output, cancel_event=cancel_event,
+                project_dir=project_dir,
+            )
+        except asyncio.TimeoutError:
+            logger.error("%s project audit timed out for %s (timeout=%ds)", tool, candidate.vuln_type, effective_timeout)
+            results = _read_results(result_id, candidate)
+            if results:
+                return results
+            return [
+                Vulnerability(
+                    file=candidate.file,
+                    line=candidate.line,
+                    function=candidate.function,
+                    vuln_type=candidate.vuln_type,
+                    severity="unknown",
+                    description=candidate.description,
+                    ai_analysis="Analysis timed out",
+                    confirmed=False,
+                    ai_verdict="timeout",
+                )
+            ]
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.exception("%s project audit failed for %s (attempt %d)", tool, candidate.vuln_type, attempt)
+            if attempt <= max_retries:
+                if on_output:
+                    on_output(f"[retry {attempt}/{max_retries}] {tool} error: {exc}")
+                continue
+            return []
+
+        results = _read_results(result_id, candidate)
+        if results:
+            return results
+        if attempt <= max_retries:
+            logger.warning(
+                "%s project audit did not call submit_result for %s (attempt %d), retrying...",
+                tool, candidate.vuln_type, attempt,
+            )
+            if on_output:
+                on_output(f"[retry {attempt}/{max_retries}] No result submitted, retrying...")
+            continue
+        logger.warning("%s project audit did not call submit_result for %s after %d attempts", tool, candidate.vuln_type, attempt)
+        return []
+
+    return []
+
+
+def _markdown_title(content: str, fallback: str) -> str:
+    for line in content.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("#"):
+            return stripped.lstrip("#").strip() or fallback
+    return fallback
+
+
+def _collect_markdown_reports(report_dir: Path, checker_name: str) -> list[dict]:
+    reports: list[dict] = []
+    if not report_dir.is_dir():
+        return reports
+    now = datetime.now(timezone.utc).isoformat()
+    for path in sorted(report_dir.glob("*.md")):
+        if not path.is_file():
+            continue
+        try:
+            content = path.read_text(encoding="utf-8")
+        except UnicodeDecodeError:
+            content = path.read_text(encoding="utf-8", errors="replace")
+        if not content.strip():
+            continue
+        reports.append(
+            {
+                "checker_name": checker_name,
+                "filename": path.name,
+                "title": _markdown_title(content, path.stem),
+                "content": content,
+                "created_at": now,
+            }
+        )
+    return reports
+
+
+async def run_project_report_audit(
+    workspace: Path,
+    candidate: Candidate,
+    project_id: str,
+    report_dir: Path,
+    on_output=None,
+    cancel_event=None,
+    timeout: int | None = None,
+    project_dir: Path | None = None,
+) -> list[dict]:
+    """Run a report-mode project SKILL and collect Markdown files from report_dir."""
+    config = get_config()
+    if config.opencode.mock:
+        report_dir.mkdir(parents=True, exist_ok=True)
+        mock_path = report_dir / f"{candidate.vuln_type}-mock-report.md"
+        mock_path.write_text(
+            f"# {candidate.vuln_type} mock report\n\nMock report for {candidate.file}.\n",
+            encoding="utf-8",
+        )
+        return _collect_markdown_reports(report_dir, candidate.vuln_type)
+
+    effective_timeout = timeout if timeout is not None else config.opencode.timeout
+    tool = _normalize_tool(config.opencode)
+    from backend.registry import get_registry
+    checker_entry = get_registry().get(candidate.vuln_type)
+    skill_name = (
+        checker_entry.skill_name
+        if checker_entry and checker_entry.skill_name
+        else candidate.vuln_type
+    )
+    max_retries = config.opencode.max_retries
+    report_dir.mkdir(parents=True, exist_ok=True)
+
+    for attempt in range(1, max_retries + 2):
+        result_id = f"result-{uuid4().hex}"
+        for old_report in report_dir.glob("*.md"):
+            try:
+                old_report.unlink()
+            except OSError:
+                pass
+        prompt = (
+            f"使用 `{skill_name}` 技能，审计代码扫描路径 `{candidate.file}` 对应的目标代码。"
+            f"project_id 为 `{project_id}`。"
+            f"这是用户创建的 Markdown 报告型项目级审计任务。"
+            f"你的 result_id 是 `{result_id}`。"
+            f"REPORT_DIR 为 `{report_dir.resolve()}`。"
+            f"你必须将一个或多个 Markdown 报告写入 REPORT_DIR，文件扩展名必须是 .md。"
+            f"不得修改 REPORT_DIR 之外的任何文件。"
+            f"如果没有发现问题，也要写入一个 Markdown 报告说明审计范围和未发现问题的原因。"
+        ).replace("\n", " ")
+        log_path = workspace / f"opencode_{result_id}.log"
+
+        if on_output:
+            on_output(f"[{tool}] 初始提示词:\n{prompt}")
+
+        logger.info(
+            "Running %s report audit: %s (%s) result_id=%s timeout=%ds attempt=%d/%d report_dir=%s",
+            tool, candidate.file, candidate.vuln_type, result_id, effective_timeout,
+            attempt, max_retries + 1, report_dir,
+        )
+
+        try:
+            await _invoke_opencode(
+                workspace,
+                prompt,
+                effective_timeout,
+                log_path=log_path,
+                on_line=on_output,
+                cancel_event=cancel_event,
+                project_dir=project_dir,
+                writable_paths=[report_dir],
+            )
+        except asyncio.TimeoutError:
+            logger.error(
+                "%s report audit timed out for %s (timeout=%ds)",
+                tool, candidate.vuln_type, effective_timeout,
+            )
+            return _collect_markdown_reports(report_dir, candidate.vuln_type)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.exception("%s report audit failed for %s (attempt %d)", tool, candidate.vuln_type, attempt)
+            if attempt <= max_retries:
+                if on_output:
+                    on_output(f"[retry {attempt}/{max_retries}] {tool} error: {exc}")
+                continue
+            return _collect_markdown_reports(report_dir, candidate.vuln_type)
+
+        reports = _collect_markdown_reports(report_dir, candidate.vuln_type)
+        if reports:
+            return reports
+        if attempt <= max_retries:
+            logger.warning("%s report audit produced no Markdown files for %s; retrying", tool, candidate.vuln_type)
+            if on_output:
+                on_output(f"[retry {attempt}/{max_retries}] No Markdown report written, retrying...")
+            continue
+        return []
+
+    return []
+
+
 def _cfg_value(config_obj, key: str, default=None):
     if isinstance(config_obj, dict):
         return config_obj.get(key, default)
@@ -297,6 +529,20 @@ def _read_opencode_config(workspace: Path) -> dict:
     return {}
 
 
+def _with_writable_paths(config: dict, writable_paths: list[Path] | None) -> dict:
+    if not writable_paths:
+        return config
+    next_config = json.loads(json.dumps(config))
+    permission = next_config.setdefault("permission", {})
+    edit = {"*": "deny"}
+    for path in writable_paths:
+        normalized = str(path.resolve())
+        edit[normalized] = "allow"
+        edit[f"{normalized}/**"] = "allow"
+    permission["edit"] = edit
+    return next_config
+
+
 def _read_mcp_url(workspace: Path) -> str:
     try:
         data = _read_opencode_config(workspace)
@@ -339,10 +585,62 @@ def _merge_json_file(path: Path, data: dict) -> None:
     path.write_text(json.dumps(current, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
-def _prepare_cli_workspace(workspace: Path, tool: str) -> None:
+def _opencode_config_for_runtime(
+    workspace: Path,
+    skills_dir: Path,
+    writable_paths: list[Path] | None = None,
+) -> dict:
+    config = _with_writable_paths(_read_opencode_config(workspace), writable_paths)
+    if not config:
+        return {}
+    config["skills"] = {"paths": [str(skills_dir.resolve())]}
+    return config
+
+
+def _write_json_file(path: Path, data: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _prepare_opencode_runtime_workspace(
+    workspace: Path,
+    runtime_cwd: Path,
+    writable_paths: list[Path] | None = None,
+) -> Path:
+    """Mirror config/skills into the actual opencode CWD.
+
+    opencode walks up from CWD to the git worktree root looking for
+    ``.opencode/skills/``, so skills are placed under *runtime_cwd*.
+    The runtime ``opencode.json`` is also written there for the
+    ``OPENCODE_CONFIG_CONTENT`` env-var.
+    """
+    if runtime_cwd == workspace:
+        return workspace
+
+    source_skills = workspace / ".opencode" / "skills"
+    runtime_skills = runtime_cwd / ".opencode" / "skills"
+    _copy_skill_tree(source_skills, runtime_skills)
+
+    runtime_config = _opencode_config_for_runtime(workspace, runtime_skills, writable_paths)
+    if runtime_config:
+        _write_json_file(runtime_cwd / "opencode.json", runtime_config)
+        return runtime_cwd
+    return workspace
+
+
+def _prepare_cli_workspace(
+    workspace: Path,
+    tool: str,
+    runtime_cwd: Path | None = None,
+    writable_paths: list[Path] | None = None,
+) -> Path:
     """Create tool-specific MCP and skill files from the canonical opencode files."""
     if tool in {"nga", "opencode"}:
-        return
+        return _prepare_opencode_runtime_workspace(
+            workspace,
+            runtime_cwd or workspace,
+            writable_paths,
+        )
 
     mcp_url = _read_mcp_url(workspace)
     opencode_skills = workspace / ".opencode" / "skills"
@@ -363,7 +661,7 @@ def _prepare_cli_workspace(workspace: Path, tool: str) -> None:
             encoding="utf-8",
         )
         _copy_skill_tree(opencode_skills, claude_dir / "skills")
-        return
+        return workspace
 
     if tool == "hac":
         gemini_dir = workspace / ".gemini"
@@ -379,6 +677,7 @@ def _prepare_cli_workspace(workspace: Path, tool: str) -> None:
             },
         )
         _copy_skill_tree(opencode_skills, gemini_dir / "skills")
+    return workspace
 
 
 def _build_cli_command(
@@ -414,11 +713,16 @@ def _build_cli_command(
     raise ValueError(f"Unsupported AI CLI tool: {tool}")
 
 
-def _build_cli_env(workspace: Path, tool: str, base_env: dict[str, str] | None = None) -> dict[str, str]:
+def _build_cli_env(
+    workspace: Path,
+    tool: str,
+    base_env: dict[str, str] | None = None,
+    writable_paths: list[Path] | None = None,
+) -> dict[str, str]:
     env = dict(base_env or os.environ)
     env["NODE_TLS_REJECT_UNAUTHORIZED"] = "0"
     if tool in {"nga", "opencode"}:
-        opencode_config = _read_opencode_config(workspace)
+        opencode_config = _with_writable_paths(_read_opencode_config(workspace), writable_paths)
         if opencode_config:
             env["OPENCODE_CONFIG_CONTENT"] = json.dumps(opencode_config, ensure_ascii=False)
     return env
@@ -426,7 +730,15 @@ def _build_cli_env(workspace: Path, tool: str, base_env: dict[str, str] | None =
 
 def _select_cli_cwd(workspace: Path, tool: str, project_dir: Path | None = None) -> Path:
     if tool in {"nga", "opencode"} and project_dir:
-        return project_dir
+        runtime_dir = project_dir / ".opendeephole" / "opencode"
+        try:
+            runtime_dir.mkdir(parents=True, exist_ok=True)
+            return runtime_dir
+        except Exception as exc:
+            logger.warning(
+                "Failed to create %s runtime directory %s; using workspace %s: %s",
+                tool, runtime_dir, workspace, exc,
+            )
     return workspace
 
 
@@ -513,6 +825,7 @@ async def _invoke_opencode(
     cancel_event=None,
     cli_config=None,
     project_dir: Path | None = None,
+    writable_paths: list[Path] | None = None,
 ) -> None:
     """Invoke the configured AI CLI, stream output line-by-line, write to log file.
 
@@ -526,13 +839,18 @@ async def _invoke_opencode(
     tool = _normalize_tool(cli_config)
     executable = _resolve_cli_executable(cli_config)
     model = str(_cfg_value(cli_config, "model", "") or "")
-    _prepare_cli_workspace(workspace, tool)
     cmd = _build_cli_command(tool, executable, workspace, prompt, model, project_dir=project_dir)
 
     logger.debug("%s command: %s", tool, " ".join(shlex.quote(part) for part in cmd))
 
-    env = _build_cli_env(workspace, tool)
     cwd = _select_cli_cwd(workspace, tool, project_dir)
+    config_workspace = _prepare_cli_workspace(
+        workspace,
+        tool,
+        runtime_cwd=cwd,
+        writable_paths=writable_paths,
+    )
+    env = _build_cli_env(config_workspace, tool, writable_paths=writable_paths)
 
     kwargs: dict = {}
     if sys.platform == "win32":
@@ -657,8 +975,40 @@ async def _invoke_opencode(
         raise RuntimeError(f"{tool} exited with code {proc.returncode}")
 
 
-def _read_result(result_id: str, candidate: Candidate) -> Vulnerability | None:
-    """Read the result file written by the submit_result MCP tool."""
+def _result_payloads(data) -> list[dict]:
+    if isinstance(data, dict) and isinstance(data.get("results"), list):
+        return [item for item in data["results"] if isinstance(item, dict)]
+    if isinstance(data, list):
+        return [item for item in data if isinstance(item, dict)]
+    if isinstance(data, dict):
+        return [data]
+    return []
+
+
+def _vulnerability_from_payload(data: dict, candidate: Candidate) -> Vulnerability:
+    confirmed = data.get("confirmed", False)
+    file_value = str(data.get("file") or candidate.file)
+    function_value = str(data.get("function") or candidate.function)
+    try:
+        line_value = int(data.get("line") or candidate.line)
+    except (TypeError, ValueError):
+        line_value = candidate.line
+    if line_value < 1:
+        line_value = candidate.line
+    return Vulnerability(
+        file=file_value,
+        line=line_value,
+        function=function_value,
+        vuln_type=candidate.vuln_type,
+        severity=data.get("severity", "unknown"),
+        description=data.get("description", candidate.description),
+        ai_analysis=data.get("ai_analysis", ""),
+        confirmed=confirmed,
+        ai_verdict="confirmed" if confirmed else "not_confirmed",
+    )
+
+
+def _read_result_file(result_id: str, candidate: Candidate):
     config = get_config()
     result_path = Path(config.storage.scans_dir) / f"{result_id}.json"
 
@@ -670,7 +1020,7 @@ def _read_result(result_id: str, candidate: Candidate) -> Vulnerability | None:
         return None
 
     try:
-        data = json.loads(result_path.read_text(encoding="utf-8"))
+        return json.loads(result_path.read_text(encoding="utf-8"))
     except Exception as exc:
         logger.error(
             "Failed to parse result file for result_id=%s path=%s: %s",
@@ -678,18 +1028,21 @@ def _read_result(result_id: str, candidate: Candidate) -> Vulnerability | None:
         )
         return None
 
-    confirmed = data.get("confirmed", False)
-    return Vulnerability(
-        file=candidate.file,
-        line=candidate.line,
-        function=candidate.function,
-        vuln_type=candidate.vuln_type,
-        severity=data.get("severity", "unknown"),
-        description=data.get("description", candidate.description),
-        ai_analysis=data.get("ai_analysis", ""),
-        confirmed=confirmed,
-        ai_verdict="confirmed" if confirmed else "not_confirmed",
-    )
+
+def _read_results(result_id: str, candidate: Candidate) -> list[Vulnerability]:
+    """Read all result payloads written for a project-level audit."""
+    data = _read_result_file(result_id, candidate)
+    if data is None:
+        return []
+    return [_vulnerability_from_payload(item, candidate) for item in _result_payloads(data)]
+
+
+def _read_result(result_id: str, candidate: Candidate) -> Vulnerability | None:
+    """Read one result file written by the submit_result MCP tool."""
+    results = _read_results(result_id, candidate)
+    if not results:
+        return None
+    return results[-1]
 
 
 async def run_audit_batch(

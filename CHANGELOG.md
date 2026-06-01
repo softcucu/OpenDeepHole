@@ -1,10 +1,61 @@
 # 更新日志
 
+## 2026-05-30
+
+- **新增** 扫描完成后支持对 AI 审计超时或无结果的候选点发起续扫，仅重新下发这部分候选并用新结果替换原有未完成记录
+- **新增** 用户创建 SKILL 时由用户填写唯一标识，不再自动生成 `skill-xx` 类编号；SKILL 列表、新建扫描页和市场详情展示创建者
+- **新增** 用户创建的 SKILL 支持删除，创建者可删除自己的 SKILL，管理员可删除任意用户创建的 SKILL
+- **优化** AI 去误报 SKILL 改为从攻击者角度评估漏洞和可利用性，新增 CVSS 3.1 基础评分（AV/AC/PR/UI/S/C/I/A），根据 CVSS 分数判定漏洞等级（high ≥ 7.0、medium 4.0-6.9、low < 4.0）
+- **优化** AI 去误报不再以"业务上无法触发"为由降级漏洞，只要外部输入理论上可达就按攻击者视角评估；对于代码缺陷真实存在但触发条件苛刻的情况，在理由中说明触发难度而非直接判为误报
+- **优化** AI 去误报 discriminator 阶段改为从攻击者角度验证攻击路径是否真实可行，并逐维度复核 generator 的 CVSS 评分
+- **优化** AI 去误报 high 漏洞报告新增 CVSS Score 章节，缺少该章节会自动降级为 medium
+- **修复** 页面刷新或后端重启后，Agent 仍在执行 AI 去误报但页面不显示进度和停止按钮的问题：当 Agent 断连后重连继续推送进度时，自动将因断连标记为 error 的去误报任务恢复为 running 状态
+
+## 2026-05-29
+
+- **优化** AI 去误报复核改为 generator-discriminator 双阶段：先按“默认安全”先验证真实代码缺陷和可利用链，再由对抗复核专门寻找不可利用理由；只有可利用链经反驳后仍成立才保留 high
+- **优化** AI 去误报 high 结果的 Markdown 漏洞报告固定包含 Summary、Vulnerable Code、Full Call Stack、Root Cause、Why It is Reachable、Impact、Evidence，章节缺失会自动降级为 medium
+- **新增** 扫描详情页结果表支持按 AI 去误报复核严重性筛选，可单独过滤 high、medium、low 或无复核结果
+- **修复** 启动 AI 去误报复核时会像启动扫描一样下发 Agent runtime update，确保后端代码和 Agent 侧代码先同步再执行复核
+- **修复** AI 去误报使用 `opencode`/`nga` 时会将 FP 复核 SKILL 同步到实际运行目录，避免对抗复核阶段偶发报 `fp-review-discriminator` 不存在
+
+## 2026-05-28
+
+- **新增** 用户创建 SKILL 改为服务端模板化生成，不再调用 Agent/opencode 创建草稿；`SKILL.md` 与 `SCENARIOS.md` 可编辑内容由用户维护，MCP 使用、报告保存和写权限约束由后端固定拼接
+- **新增** 用户创建 SKILL 支持 `references/`、`scripts/`、`assets/` 资源上传，并支持创建时配置独立运行超时，扫描时不再复用全局 opencode 超时
+- **新增** 用户创建 SKILL 支持 Markdown 报告型输出：运行时只开放临时报告目录写权限，Agent 完成后读取 `.md` 报告并同步到服务端，扫描详情页提供独立 SKILL 报告入口和进度提示
+- **优化** 新建扫描页将系统内置 checker 与用户新建 SKILL 分成两列展示，便于区分结构化漏洞扫描和报告型用户扫描
+- **新增** 外部逆向平台集成扫描接口和 `tools/external_platform_scan.py` 脚本，支持硬编码集成 token 创建扫描、按 Agent 名称下发脚本内置 LLM/opencode 配置、自动运行当前启用且公开的 checker，并返回无需登录的扫描结果链接和进度 API
+- **新增** 扫描详情页支持带 `scan_access_token` 的公开访问入口，访问者可像普通用户进入扫描详情一样查看进度、停止扫描、下载报告、确认问题、维护反馈和触发 AI 去误报
+- **修复** `opencode`/`nga` 扫描时工具自身生成的 `opencode_result-*.log` 落到目标项目根目录的问题，改为将 CLI 运行目录收敛到项目内 `.opendeephole/opencode/`，同时保留 `--dir` 指向真实项目根目录
+- **修复** 长时间扫描后 MCP 和 API 模式报"代码索引不可用"：`llm_api_runner` 每次调用 `_get_db()` 都创建新 SQLite 连接且从不关闭，导致文件描述符泄漏；改为缓存复用连接并在扫描结束时统一清理
+- **修复** MCP `_db_cache` 跨扫描未清理，重复扫描同一项目时可能返回指向已替换文件的失效连接；MCP server 停止时自动关闭并清空缓存
+- **修复** 扫描清理阶段 `AGENT_PROJECT_DIR` 环境变量在 MCP server 停止之前被移除，可能导致仍在处理的 MCP 请求找不到索引；调整为先停 MCP 再清理环境变量
+- **修复** 旧版 Linux Universal Ctags 已编译 `+json` 但不支持 `--list-output-formats` 时被误判为不支持 JSON 输出的问题，改为用真实 `--output-format=json` 探测能力
+- **优化** 检查项列表、SKILL 概览、结果看板和新建扫描页区分内置与用户创建的 checker，用户创建项显示在独立分区并带"用户创建"标签，新建扫描默认仅勾选内置检查项
+- **优化** 结果看板汇总统计仅计算内置 checker 数据，用户创建 checker 不纳入总览指标
+- **优化** 移除 opencode、API 直调和 AI 去误报复核基础提示词中禁止使用子 Agent 的限制
+
+## 2026-05-27
+
+- **新增** SKILL 市场支持在线创建纯 SKILL 项目级检查项，可选择在线 Agent 生成草稿、查看进度、编辑确认后导入市场
+- **新增** 用户导入的 SKILL 保存到独立 `user_skills_dir` 目录，导入后作为 public 检查项进入 SKILL 列表和新建扫描选择项，所有登录用户可见可用
+- **新增** Agent 支持 `skill_create` 命令，在 Agent 侧调用 opencode 执行 `deephole-skill-creator` 技能生成 `SKILL.md` 与场景说明草稿并回传服务端
+- **优化** 新增 SKILL 页面基础信息区域更宽，描述字段改为多行输入，便于填写更完整的检查说明
+- **优化** `deephole-skill-creator` 改为服务端系统 SKILL，并在创建 SKILL 任务时随命令下发到 Agent；创建任务会像扫描任务一样先判断并同步 Agent runtime 更新
+- **修复** 旧 Agent 不认识 `skill_create` 命令时，创建 SKILL 会先通过扫描任务更新通道完成 Agent 自更新，再继续执行创建任务，避免提示 Unknown command type
+
 ## 2026-05-26
 
+- **新增** `skill_only_project_audit` 管理员测试 checker，仅包含 `SKILL.md`，用于验证无 `analysis.py` 的项目级 opencode 审计和多结果提交链路
+- **新增** 无 `analysis.py` 的 opencode checker 会自动生成项目级候选并直接运行 `SKILL.md`，支持同一次审计通过 MCP 多次提交真实函数和行号级结果
+- **新增** SKILL 元数据支持「认证绕过」和「其他」两个漏洞维度，后续 checker 可通过 `checker.yaml` 的 `category` 字段归类展示
+- **优化** AI 去误报复核改为优先处理未产生有效复核结果的报告，再处理已有复核结论的报告；二次复核无结果时不再覆盖旧结论
+- **新增** 扫描详情页 AI 去误报复核支持停止按钮，可中断当前复核任务并保留已产生的复核结果
 - **新增** `npd_funcret` checker，采用 semgrep 初筛 + tree-sitter 跨函数分析的混合方案，检测函数返回值或参数赋值给指针后未判空即解引用导致的空指针解引用（CWE-476），覆盖返回值直接赋值、带类型强转赋值、声明时赋值和传指针的指针参数赋值等场景
 - **新增** `npd_funcret` 支持递归分析被调函数是否可能返回 NULL（最多 3 层），自动过滤不可能返回 NULL 的函数以降低误报
 - **新增** `npd_funcret` 集中定义自定义空指针字面量（`VOS_NULL_PTR`、`FCA_NULL`）和自定义判空函数/宏（`CHECK_POINTER_RETURN`、`RET_IF_NULL_PTR` 等 10 个），semgrep 规则层和 analyzer 后处理层两级排除已判空的场景
+- **优化** `npd_funcret` 的 LLM 审计提示词改为围绕函数内其他判空、空返回路径到解引用的可达性、以及调用上下文非空保护三点独立复核，避免过度相信静态分析候选结论
 - **优化** 统一所有 checker 的 label 为「English Name / 中文名称」格式，便于国际化展示
 
 ## 2026-05-25

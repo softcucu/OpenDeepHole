@@ -308,15 +308,35 @@ class CppAnalyzer:
                 "ctags 必须是 Universal Ctags，当前 ctags 不支持所需的 JSON 输出。"
             )
 
-        #formats = subprocess.run(
-        #    ["ctags", "--list-output-formats"],
-        #    capture_output=True,
-        #    check=False,
-        #)
-        #if formats.returncode != 0 or "json" not in _decode_tool_output(formats.stdout).lower():
-        #    raise CodeIndexToolError(
-        #        "ctags 必须支持 JSON 输出。请安装带 JSON 输出支持的 Universal Ctags。"
-        #    )
+        if not CppAnalyzer._ctags_supports_json_output():
+            raise CodeIndexToolError(
+                "ctags 必须支持 JSON 输出。请安装带 JSON 输出支持的 Universal Ctags。"
+            )
+
+    @staticmethod
+    def _ctags_supports_json_output() -> bool:
+        with tempfile.TemporaryDirectory(prefix="odh-ctags-probe-") as tmp:
+            source_path = Path(tmp) / "probe.c"
+            source_path.write_text(
+                "int odh_ctags_json_probe(void) { return 0; }\n",
+                encoding="utf-8",
+            )
+            proc = subprocess.run(
+                ["ctags", "--output-format=json", "-o", "-", str(source_path)],
+                capture_output=True,
+                check=False,
+            )
+
+        if proc.returncode != 0:
+            return False
+        for line in _decode_tool_output(proc.stdout).splitlines():
+            try:
+                payload = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if payload.get("_type", "tag") == "tag":
+                return True
+        return False
 
     @staticmethod
     def _project_temp_dir(project_root: Path) -> tempfile.TemporaryDirectory:

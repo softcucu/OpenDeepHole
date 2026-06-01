@@ -99,6 +99,12 @@ class CheckerInfo(BaseModel):
     category: str = "illegal_memory_use"
     category_label: str = "非法内存使用"
     modified_at: str = ""
+    user_created: bool = False
+    created_by_user_id: str = ""
+    creator_username: str = ""
+    can_delete: bool = False
+    result_mode: str = "vulnerabilities"
+    timeout_seconds: int | None = None
 
 
 class CheckerCatalogItem(BaseModel):
@@ -113,6 +119,60 @@ class CheckerCatalogItem(BaseModel):
     modified_at: str = ""
     introduction: str = ""
     introduction_source: str = ""
+    user_created: bool = False
+    created_by_user_id: str = ""
+    creator_username: str = ""
+    can_delete: bool = False
+    result_mode: str = "vulnerabilities"
+    timeout_seconds: int | None = None
+
+
+class SkillDraft(BaseModel):
+    skill_md: str = ""
+    scenarios_md: str = ""
+    summary: str = ""
+
+
+class SkillCreateRequest(BaseModel):
+    agent_id: str = ""
+    skill_id: str
+    name: str
+    description: str
+    input: str
+    timeout_seconds: int = 1200
+
+
+class SkillCreateJob(BaseModel):
+    job_id: str
+    status: str
+    skill_id: str = ""
+    name: str
+    description: str
+    input: str = ""
+    agent_id: str = ""
+    agent_name: str = ""
+    user_id: str = ""
+    created_at: str = ""
+    updated_at: str = ""
+    error_message: str = ""
+    draft: SkillDraft | None = None
+
+
+class SkillImportFile(BaseModel):
+    path: str
+    content_b64: str
+
+
+class SkillImportRequest(BaseModel):
+    skill_md: str
+    scenarios_md: str = ""
+    timeout_seconds: int = 1200
+    files: list[SkillImportFile] = []
+
+
+class SkillImportResponse(BaseModel):
+    ok: bool = True
+    name: str
 
 
 class UploadResponse(BaseModel):
@@ -218,6 +278,16 @@ class FeedbackUpdateRequest(BaseModel):
     ticket_id: str | None = None
 
 
+class SkillReport(BaseModel):
+    id: int | None = None
+    scan_id: str = ""
+    checker_name: str
+    filename: str
+    title: str = ""
+    content: str
+    created_at: str = ""
+
+
 class ScanStatus(BaseModel):
     scan_id: str
     project_id: str = ""
@@ -229,10 +299,12 @@ class ScanStatus(BaseModel):
     total_candidates: int
     processed_candidates: int
     vulnerabilities: list[Vulnerability]
+    skill_reports: list[SkillReport] = []
     events: list[ScanEvent] = []
     current_candidate: Candidate | None = None
     error_message: str | None = None
     feedback_ids: list[str] = []
+    retryable_candidates_count: int = 0
 
     # 静态分析进度（按文件计）
     static_total_files: int = 0
@@ -270,6 +342,7 @@ class AgentInfo(BaseModel):
     port: int = 0
     last_seen: str
     user_id: str = ""
+    runtime_hash: str = ""
 
 
 class AgentLLMApiConfig(BaseModel):
@@ -329,6 +402,7 @@ class ScanMeta(BaseModel):
     scan_name: str = ""
     product: str = ""
     user_id: str = ""
+    public_access_token: str = ""
 
 
 class ScanSummary(BaseModel):
@@ -344,6 +418,7 @@ class ScanSummary(BaseModel):
     processed_candidates: int
     vulnerability_count: int
     human_confirmed_count: int = 0
+    retryable_candidates_count: int = 0
     scan_items: list[str]
     user_id: str = ""
     username: str = ""
@@ -395,6 +470,7 @@ class CheckerDashboardStats(BaseModel):
     accuracy: float | None = None
     ticket_accuracy: float | None = None
     scans: list[CheckerScanDashboardStats] = []
+    user_created: bool = False
 
 
 class CheckerDashboardSummary(BaseModel):
@@ -427,6 +503,7 @@ class FpReviewStatus(str, Enum):
     RUNNING = "running"
     COMPLETE = "complete"
     ERROR = "error"
+    CANCELLED = "cancelled"
 
 
 class FpReviewResult(BaseModel):
@@ -471,10 +548,11 @@ class AgentFpReviewProgress(BaseModel):
     """Sent by the agent when it starts reviewing a vulnerability."""
     review_id: str
     vuln_index: int
+    processed: int | None = None
 
 
 class AgentFpReviewFinish(BaseModel):
     """Sent by the agent when the FP review job is complete."""
     review_id: str
-    status: str        # "complete" | "error"
+    status: str        # "complete" | "error" | "cancelled"
     error_message: str | None = None

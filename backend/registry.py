@@ -24,12 +24,16 @@ CHECKER_CATEGORY_RESOURCE_LEAK = "resource_leak"
 CHECKER_CATEGORY_INFINITE_LOOP = "infinite_loop"
 CHECKER_CATEGORY_ILLEGAL_MEMORY_USE = "illegal_memory_use"
 CHECKER_CATEGORY_OUT_OF_BOUNDS = "out_of_bounds"
+CHECKER_CATEGORY_AUTH_BYPASS = "auth_bypass"
+CHECKER_CATEGORY_OTHER = "other"
 CHECKER_CATEGORY_DEFAULT = CHECKER_CATEGORY_ILLEGAL_MEMORY_USE
 CHECKER_CATEGORY_LABELS = {
     CHECKER_CATEGORY_RESOURCE_LEAK: "资源泄露",
     CHECKER_CATEGORY_INFINITE_LOOP: "死循环",
     CHECKER_CATEGORY_ILLEGAL_MEMORY_USE: "非法内存使用",
     CHECKER_CATEGORY_OUT_OF_BOUNDS: "读写越界",
+    CHECKER_CATEGORY_AUTH_BYPASS: "认证绕过",
+    CHECKER_CATEGORY_OTHER: "其他",
 }
 
 
@@ -51,10 +55,15 @@ class CheckerEntry:
     category: str = CHECKER_CATEGORY_DEFAULT
     category_label: str = CHECKER_CATEGORY_LABELS[CHECKER_CATEGORY_DEFAULT]
     modified_at: str = ""
+    user_created: bool = False
+    created_by_user_id: str = ""
+    created_by_username: str = ""
+    result_mode: str = "vulnerabilities"  # "vulnerabilities" | "markdown_reports"
+    timeout_seconds: int | None = None
 
 
 _registry: dict[str, CheckerEntry] | None = None
-_registry_dir: Path | None = None
+_registry_dirs: tuple[Path, ...] | None = None
 
 
 def current_checkers_dir() -> Path:
@@ -65,13 +74,31 @@ def current_checkers_dir() -> Path:
     return CHECKERS_DIR
 
 
+def current_checker_dirs() -> list[Path]:
+    """Return checker roots for the current process context."""
+    override = os.environ.get(CHECKERS_DIR_ENV)
+    if override:
+        return [Path(override)]
+    roots = [CHECKERS_DIR]
+    try:
+        from backend.config import get_config
+        user_skills_dir = Path(get_config().storage.user_skills_dir)
+        if user_skills_dir != CHECKERS_DIR:
+            roots.append(user_skills_dir)
+    except Exception:
+        logger.debug("User skill directory is not available yet", exc_info=True)
+    return roots
+
+
 def get_registry(checkers_dir: Path | None = None, *, refresh: bool = False) -> dict[str, CheckerEntry]:
     """Get the checker registry singleton, optionally forcing a rescan."""
-    global _registry, _registry_dir
-    target_dir = (checkers_dir or current_checkers_dir()).resolve()
-    if refresh or _registry is None or _registry_dir != target_dir:
-        _registry = discover_checkers(target_dir)
-        _registry_dir = target_dir
+    global _registry, _registry_dirs
+    target_dirs = (checkers_dir.resolve(),) if checkers_dir else tuple(
+        root.resolve() for root in current_checker_dirs()
+    )
+    if refresh or _registry is None or _registry_dirs != target_dirs:
+        _registry = discover_checkers_from_dirs(target_dirs)
+        _registry_dirs = target_dirs
     return _registry
 
 
@@ -80,7 +107,26 @@ def refresh_registry(checkers_dir: Path | None = None) -> dict[str, CheckerEntry
     return get_registry(checkers_dir=checkers_dir, refresh=True)
 
 
-def discover_checkers(checkers_dir: Path) -> dict[str, CheckerEntry]:
+def discover_checkers_from_dirs(checkers_dirs: tuple[Path, ...] | list[Path]) -> dict[str, CheckerEntry]:
+    """Scan checker roots and merge entries by checker name."""
+    registry: dict[str, CheckerEntry] = {}
+    for checkers_dir in checkers_dirs:
+        is_user_dir = checkers_dir.resolve() != CHECKERS_DIR.resolve()
+        for name, entry in discover_checkers(checkers_dir, user_created=is_user_dir).items():
+            if name in registry:
+                logger.warning(
+                    "Duplicate checker %s in %s; keeping first definition from %s",
+                    name,
+                    entry.directory,
+                    registry[name].directory,
+                )
+                continue
+            registry[name] = entry
+    logger.info("Merged %d checkers from %d root(s)", len(registry), len(checkers_dirs))
+    return registry
+
+
+def discover_checkers(checkers_dir: Path, *, user_created: bool = False) -> dict[str, CheckerEntry]:
     """Scan checkers/ directory and build the registry.
 
     Each subdirectory with a checker.yaml is registered as a checker.
@@ -101,7 +147,7 @@ def discover_checkers(checkers_dir: Path) -> dict[str, CheckerEntry]:
             continue
 
         try:
-            entry = _load_checker(checker_dir, yaml_path)
+            entry = _load_checker(checker_dir, yaml_path, user_created=user_created)
             if entry.enabled:
                 registry[entry.name] = entry
                 logger.info(
@@ -119,7 +165,7 @@ def discover_checkers(checkers_dir: Path) -> dict[str, CheckerEntry]:
     return registry
 
 
-def _load_checker(checker_dir: Path, yaml_path: Path) -> CheckerEntry:
+def _load_checker(checker_dir: Path, yaml_path: Path, *, user_created: bool = False) -> CheckerEntry:
     """Load a single checker from its directory."""
     with open(yaml_path, encoding="utf-8") as f:
         meta = yaml.safe_load(f)
@@ -159,6 +205,11 @@ def _load_checker(checker_dir: Path, yaml_path: Path) -> CheckerEntry:
         category=category,
         category_label=checker_category_label(category),
         modified_at=str(meta.get("modified_at") or "").strip(),
+        user_created=user_created,
+        created_by_user_id=str(meta.get("created_by_user_id") or "").strip(),
+        created_by_username=str(meta.get("created_by_username") or "").strip(),
+        result_mode=_normalize_result_mode(meta.get("result_mode")),
+        timeout_seconds=_normalize_timeout_seconds(meta.get("timeout_seconds")),
     )
 
 
@@ -168,6 +219,28 @@ def _normalize_visibility(value: object) -> str:
         logger.warning("Unknown checker visibility %r, falling back to public", value)
         return CHECKER_VISIBILITY_PUBLIC
     return visibility
+
+
+def _normalize_result_mode(value: object) -> str:
+    result_mode = str(value or "vulnerabilities").strip().lower()
+    if result_mode not in {"vulnerabilities", "markdown_reports"}:
+        logger.warning("Unknown checker result_mode %r, falling back to vulnerabilities", value)
+        return "vulnerabilities"
+    return result_mode
+
+
+def _normalize_timeout_seconds(value: object) -> int | None:
+    if value in (None, ""):
+        return None
+    try:
+        timeout = int(value)
+    except (TypeError, ValueError):
+        logger.warning("Invalid checker timeout_seconds %r, ignoring", value)
+        return None
+    if timeout <= 0:
+        logger.warning("Invalid checker timeout_seconds %r, ignoring", value)
+        return None
+    return timeout
 
 
 def normalize_checker_category(value: object) -> str:

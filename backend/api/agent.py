@@ -49,6 +49,7 @@ from backend.models import (
     AgentScanFinish,
     ScanEvent,
     ScanItemStatus,
+    SkillReport,
     User,
     Vulnerability,
 )
@@ -89,7 +90,7 @@ _config_test_waiters: dict[str, asyncio.Future] = {}
 # In-memory index progress store: scan_id → {status, parsed_files, total_files}
 _scan_index_statuses: dict[str, dict] = {}
 
-_AGENT_DISCONNECT_ERROR = "Agent 断开连接"
+AGENT_DISCONNECT_ERROR = "Agent 断开连接"
 _SERVER_RESTART_ERROR = "Process terminated unexpectedly"
 _WEBSOCKET_AGENT_STALE_SECONDS = 120
 _AGENT_DISCONNECT_GRACE_SECONDS = 120
@@ -160,7 +161,7 @@ def _schedule_agent_disconnect_cancel(agent_id: str) -> None:
 def _is_infrastructure_interruption(scan_status: ScanItemStatus, error_message: str | None) -> bool:
     """Return True for states caused by server/connection loss, not user intent."""
     if scan_status == ScanItemStatus.CANCELLED:
-        return error_message == _AGENT_DISCONNECT_ERROR
+        return error_message == AGENT_DISCONNECT_ERROR
     if scan_status == ScanItemStatus.ERROR:
         return error_message == _SERVER_RESTART_ERROR
     return scan_status in (
@@ -198,12 +199,12 @@ def reconcile_offline_agent_scan_state(scan_id: str, scan: ScanStatus) -> ScanSt
     store.update_scan_progress(
         scan_id,
         status=ScanItemStatus.CANCELLED,
-        error_message=_AGENT_DISCONNECT_ERROR,
+        error_message=AGENT_DISCONNECT_ERROR,
         clear_current_candidate=True,
     )
-    store.mark_fp_reviews_for_scan_error(scan_id, _AGENT_DISCONNECT_ERROR)
+    store.mark_fp_reviews_for_scan_error(scan_id, AGENT_DISCONNECT_ERROR)
     scan.status = ScanItemStatus.CANCELLED
-    scan.error_message = _AGENT_DISCONNECT_ERROR
+    scan.error_message = AGENT_DISCONNECT_ERROR
     scan.current_candidate = None
     _running_scans.pop(scan_id, None)
     _scan_owners.pop(scan_id, None)
@@ -321,11 +322,11 @@ def _mark_agent_scans_cancelled(agent_id: str) -> None:
     """
     store = get_scan_store()
     cancelled_scan_ids = set(
-        store.mark_agent_scans_cancelled(agent_id, _AGENT_DISCONNECT_ERROR)
+        store.mark_agent_scans_cancelled(agent_id, AGENT_DISCONNECT_ERROR)
     )
     fp_review_count = store.mark_fp_reviews_for_agent_error(
         agent_id,
-        _AGENT_DISCONNECT_ERROR,
+        AGENT_DISCONNECT_ERROR,
     )
 
     for scan_id in list(_running_scans):
@@ -338,7 +339,7 @@ def _mark_agent_scans_cancelled(agent_id: str) -> None:
         scan = _running_scans.get(scan_id)
         if scan is not None:
             scan.status = ScanItemStatus.CANCELLED
-            scan.error_message = _AGENT_DISCONNECT_ERROR
+            scan.error_message = AGENT_DISCONNECT_ERROR
             scan.current_candidate = None
         cancelled_scan_ids.add(scan_id)
 
@@ -387,6 +388,7 @@ async def agent_websocket(websocket: WebSocket) -> None:
             port=0,
             last_seen=now,
             user_id=user_id,
+            runtime_hash=str(msg.get("runtime_hash") or ""),
         )
         _registered_agents[agent_id] = agent_info
         _agent_ws[agent_id] = websocket
@@ -422,6 +424,11 @@ async def agent_websocket(websocket: WebSocket) -> None:
                 waiter = _config_test_waiters.pop(request_id, None)
                 if waiter is not None and not waiter.done():
                     waiter.set_result(incoming)
+                continue
+            if isinstance(incoming, dict) and incoming.get("type") == "skill_create_result":
+                from backend.api.skills import handle_skill_create_result
+
+                handle_skill_create_result(incoming)
                 continue
 
     except WebSocketDisconnect:
@@ -665,6 +672,15 @@ async def agent_scan_event(scan_id: str, event: ScanEvent) -> dict:
     if progress_kwargs:
         store.update_scan_progress(scan_id, **progress_kwargs)
 
+    from backend.sse import publish
+    publish(scan_id, "scan_status", {
+        "status": scan.status if scan else None,
+        "progress": scan.progress if scan else None,
+        "total_candidates": scan.total_candidates if scan else None,
+        "processed_candidates": scan.processed_candidates if scan else None,
+    })
+    publish(scan_id, "scan_event", {"event": event.model_dump()})
+
     return {"ok": True}
 
 
@@ -672,17 +688,65 @@ async def agent_scan_event(scan_id: str, event: ScanEvent) -> dict:
 async def agent_report_vulnerability(scan_id: str, vuln: Vulnerability) -> dict:
     """Agent pushes a single vulnerability result immediately after auditing it."""
     store = get_scan_store()
-    store.add_vulnerability(scan_id, vuln)
+    vuln_index = store.upsert_incomplete_vulnerability(scan_id, vuln)
 
     scan = _ensure_running_scan(scan_id)
     if scan is not None:
-        scan.vulnerabilities.append(vuln)
+        if vuln_index < len(scan.vulnerabilities):
+            scan.vulnerabilities[vuln_index] = vuln
+        else:
+            scan.vulnerabilities.append(vuln)
+
+    from backend.sse import publish
+    publish(scan_id, "scan_vulnerability", {
+        "index": vuln_index,
+        "vulnerability": vuln.model_dump(),
+    })
 
     logger.debug(
         "Vulnerability reported for scan %s: %s %s:%d confirmed=%s",
         scan_id, vuln.vuln_type, vuln.file, vuln.line, vuln.confirmed,
     )
     return {"ok": True}
+
+
+@router.post("/scan/{scan_id}/skill-report")
+async def agent_replace_skill_reports(scan_id: str, body: dict) -> dict:
+    """Agent replaces Markdown reports generated by one report-mode SKILL."""
+    checker_name = str(body.get("checker_name") or "").strip()
+    if not checker_name:
+        raise HTTPException(status_code=400, detail="checker_name is required")
+    raw_reports = body.get("reports") or []
+    if not isinstance(raw_reports, list):
+        raise HTTPException(status_code=400, detail="reports must be a list")
+
+    reports = [
+        SkillReport(
+            scan_id=scan_id,
+            checker_name=checker_name,
+            filename=str(item.get("filename") or ""),
+            title=str(item.get("title") or ""),
+            content=str(item.get("content") or ""),
+            created_at=str(item.get("created_at") or datetime.now(timezone.utc).isoformat()),
+        )
+        for item in raw_reports
+        if isinstance(item, dict) and str(item.get("filename") or "").strip()
+    ]
+    store = get_scan_store()
+    store.replace_skill_reports(scan_id, checker_name, reports)
+
+    scan = _ensure_running_scan(scan_id)
+    if scan is not None:
+        scan.skill_reports = [
+            report for report in scan.skill_reports
+            if report.checker_name != checker_name
+        ] + reports
+
+    logger.info(
+        "Skill reports replaced for scan %s checker %s: %d report(s)",
+        scan_id, checker_name, len(reports),
+    )
+    return {"ok": True, "count": len(reports)}
 
 
 @router.post("/scan/{scan_id}/finish")
@@ -739,6 +803,12 @@ async def agent_finish_scan(scan_id: str, body: AgentScanFinish) -> dict:
             scan.progress = 1.0
         _running_scans.pop(scan_id, None)
         _scan_owners.pop(scan_id, None)
+
+    from backend.sse import publish
+    publish(scan_id, "scan_finish", {
+        "status": body.status,
+        "error_message": body.error_message,
+    })
 
     confirmed = sum(1 for v in body.vulnerabilities if v.confirmed)
     logger.info(
@@ -820,6 +890,9 @@ async def agent_push_index_status(scan_id: str, body: _IndexStatusBody) -> dict:
         scan.static_total_files = body.total_files
         scan.static_scanned_files = body.parsed_files
 
+    from backend.sse import publish
+    publish(scan_id, "index_status", body.model_dump())
+
     return {"ok": True}
 
 
@@ -895,7 +968,7 @@ _AGENT_ROOT_FILES = [
     "run_agent.bat",
     "requirements-agent.txt",
 ]
-_AGENT_SKIP_DIRS = {"__pycache__", ".git", ".mypy_cache", ".pytest_cache", "static"}
+_AGENT_SKIP_DIRS = {"__pycache__", ".git", ".mypy_cache", ".pytest_cache", "static", "system_skills"}
 _AGENT_SKIP_SUFFIXES = {".pyc", ".pyo"}
 
 

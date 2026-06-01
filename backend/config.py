@@ -41,6 +41,7 @@ class OpenCodeConfig(BaseModel):
 class StorageConfig(BaseModel):
     projects_dir: str = str(_DEFAULT_DATA_ROOT / "projects")
     scans_dir: str = str(_DEFAULT_DATA_ROOT / "scans")
+    user_skills_dir: str = str(_DEFAULT_DATA_ROOT / "user_skills")
     max_upload_size_mb: int = 2048
 
 
@@ -146,7 +147,7 @@ def _resolve_storage_paths(raw: dict, base_dir: Path) -> None:
     storage = raw.get("storage")
     if not isinstance(storage, dict):
         return
-    for key in ("projects_dir", "scans_dir"):
+    for key in ("projects_dir", "scans_dir", "user_skills_dir"):
         value = storage.get(key)
         if isinstance(value, str) and value and not Path(value).is_absolute():
             storage[key] = str((base_dir / value).resolve())

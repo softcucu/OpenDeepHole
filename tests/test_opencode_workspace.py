@@ -65,6 +65,7 @@ class OpencodeWorkspaceTests(unittest.TestCase):
             )
             assert_opencode_read_permissions(self, config)
             self.assertTrue((workspace / ".opencode" / "skills" / "fp-review" / "SKILL.md").is_file())
+            self.assertTrue((workspace / ".opencode" / "skills" / "fp-review-discriminator" / "SKILL.md").is_file())
 
     def test_fp_workspace_injects_only_selected_feedback_for_vuln_type(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -93,6 +94,9 @@ class OpencodeWorkspaceTests(unittest.TestCase):
             )
 
             skill = (workspace / ".opencode" / "skills" / "fp-review" / "SKILL.md").read_text(encoding="utf-8")
+            discriminator_skill = (
+                workspace / ".opencode" / "skills" / "fp-review-discriminator" / "SKILL.md"
+            ).read_text(encoding="utf-8")
             self.assertIn("历史用户经验", skill)
             self.assertIn("用户理由：npd true-positive rule", skill)
             self.assertIn("void checked(void) {}", skill)
@@ -101,21 +105,28 @@ class OpencodeWorkspaceTests(unittest.TestCase):
             self.assertNotIn("[正报]", skill)
             self.assertNotIn("[误报]", skill)
             self.assertNotIn("oob rule", skill)
+            self.assertIn("历史用户经验", discriminator_skill)
+            self.assertIn("用户理由：npd false-positive rule", discriminator_skill)
+            self.assertNotIn("oob rule", discriminator_skill)
 
     def test_fp_cleanup_only_removes_fp_review_artifacts(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workspace = Path(tmp)
             (workspace / "opencode.json").write_text("{}", encoding="utf-8")
             fp_dir = workspace / ".opencode" / "skills" / "fp-review"
+            fp_discriminator_dir = workspace / ".opencode" / "skills" / "fp-review-discriminator"
             scan_dir = workspace / ".opencode" / "skills" / "npd"
             fp_dir.mkdir(parents=True)
+            fp_discriminator_dir.mkdir(parents=True)
             scan_dir.mkdir(parents=True)
             (fp_dir / "SKILL.md").write_text("fp", encoding="utf-8")
+            (fp_discriminator_dir / "SKILL.md").write_text("fp-discriminator", encoding="utf-8")
             (scan_dir / "SKILL.md").write_text("npd", encoding="utf-8")
 
             _cleanup_fp_workspace(workspace)
 
             self.assertFalse(fp_dir.exists())
+            self.assertFalse(fp_discriminator_dir.exists())
             self.assertTrue((scan_dir / "SKILL.md").is_file())
             self.assertTrue((workspace / "opencode.json").is_file())
 

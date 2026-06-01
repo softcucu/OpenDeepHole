@@ -10,6 +10,8 @@ from agent.scanner import (
     _normalize_candidate_for_project,
     _order_candidates_for_audit,
     _resolve_scan_paths,
+    build_project_level_candidate,
+    is_project_level_candidate,
 )
 from backend.models import Candidate, ScanItemStatus, ScanMeta, ScanStatus
 from backend.store.sqlite import SqliteScanStore
@@ -88,6 +90,21 @@ class AgentScanPathTests(unittest.TestCase):
             )
 
             self.assertFalse(_candidate_in_scan_scope(candidate, project.resolve(), scan_dir.resolve()))
+
+    def test_project_level_candidate_represents_code_scan_path(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp) / "project"
+            scan_dir = project / "module"
+            scan_dir.mkdir(parents=True)
+            entry = type("Entry", (), {"name": "skillonly", "label": "Skill Only"})()
+
+            candidate = build_project_level_candidate(entry, project.resolve(), scan_dir.resolve())
+
+            self.assertEqual(candidate.file, "module")
+            self.assertEqual(candidate.line, 1)
+            self.assertEqual(candidate.function, "__project__")
+            self.assertEqual(candidate.vuln_type, "skillonly")
+            self.assertTrue(is_project_level_candidate(candidate))
 
 
 class AgentAuditOrderingTests(unittest.TestCase):

@@ -170,8 +170,8 @@ class AdminCheckerDashboardTests(unittest.TestCase):
             agent_name="agent-1",
         )
         registry = {
-            "npd": SimpleNamespace(label="NPD", description="null pointer"),
-            "oob": SimpleNamespace(label="OOB", description="out of bounds"),
+            "npd": SimpleNamespace(label="NPD", description="null pointer", user_created=False),
+            "oob": SimpleNamespace(label="OOB", description="out of bounds", user_created=False),
         }
 
         with (
@@ -228,7 +228,7 @@ class AdminCheckerDashboardTests(unittest.TestCase):
             product="LTE",
         )
         registry = {
-            "npd": SimpleNamespace(label="NPD", description="null pointer"),
+            "npd": SimpleNamespace(label="NPD", description="null pointer", user_created=False),
         }
 
         with (

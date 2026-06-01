@@ -106,8 +106,17 @@ def _link_skill_resources(entry, link_dir: Path) -> None:
             link_dest.symlink_to(src.resolve())
 
 
-def build_opencode_config(mcp_url: str, skills_paths: list[str] | None = None) -> dict:
+def build_opencode_config(
+    mcp_url: str,
+    skills_paths: list[str] | None = None,
+    writable_paths: list[str] | None = None,
+) -> dict:
     """Build the canonical opencode.json content for OpenDeepHole workspaces."""
+    edit_permissions = {"*": "deny"}
+    for path in writable_paths or []:
+        normalized = str(Path(path).resolve())
+        edit_permissions[normalized] = "allow"
+        edit_permissions[f"{normalized}/**"] = "allow"
     data = {
         "$schema": "https://opencode.ai/config.json",
         "mcp": {
@@ -123,7 +132,7 @@ def build_opencode_config(mcp_url: str, skills_paths: list[str] | None = None) -
             "glob": {"*": "allow"},
             "grep": {"*": "allow"},
             "external_directory": {"*": "allow"},
-            "edit": {"*": "deny"},
+            "edit": edit_permissions,
         },
     }
     if skills_paths:

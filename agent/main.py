@@ -60,6 +60,11 @@ async def _handle_command(msg: dict, config, task_manager, reporter) -> dict | N
     if cmd_type == "task":
         from agent.updater import ensure_runtime_updated
         await ensure_runtime_updated(msg.get("agent_runtime_update"), msg)
+        if msg.get("runtime_update_only"):
+            post_update_command = msg.get("post_update_command")
+            if isinstance(post_update_command, dict):
+                return await _handle_command(post_update_command, config, task_manager, reporter)
+            return None
         await agent_server.handle_task(
             scan_id=msg["scan_id"],
             project_path=msg["project_path"],
@@ -82,14 +87,24 @@ async def _handle_command(msg: dict, config, task_manager, reporter) -> dict | N
             scan_name=msg.get("scan_name"),
             feedback_entries=msg.get("feedback_entries"),
             checker_packages=msg.get("checker_packages"),
+            retry_candidates=msg.get("retry_candidates"),
+            retry_total_candidates=msg.get("retry_total_candidates"),
+            retry_processed_offset=int(msg.get("retry_processed_offset") or 0),
         )
     elif cmd_type == "fp_review":
+        from agent.updater import ensure_runtime_updated
+        await ensure_runtime_updated(msg.get("agent_runtime_update"), msg)
         await agent_server.handle_fp_review(
             scan_id=msg["scan_id"],
             review_id=msg["review_id"],
             project_path=msg["project_path"],
             vulnerabilities=msg.get("vulnerabilities", []),
             feedback_entries=msg.get("feedback_entries", []),
+        )
+    elif cmd_type == "fp_review_stop":
+        await agent_server.handle_fp_review_stop(
+            scan_id=msg["scan_id"],
+            review_id=msg["review_id"],
         )
     elif cmd_type == "feedback_selection_update":
         await agent_server.handle_feedback_selection_update(
@@ -115,6 +130,20 @@ async def _handle_command(msg: dict, config, task_manager, reporter) -> dict | N
         return await agent_server.handle_config_test(
             request_id=msg.get("request_id", ""),
             remote_config=msg.get("config") or {},
+        )
+    elif cmd_type == "skill_create":
+        from agent.updater import ensure_runtime_updated
+        await ensure_runtime_updated(msg.get("agent_runtime_update"), msg)
+        return await agent_server.handle_skill_create(
+            request_id=msg.get("request_id", ""),
+            name=msg.get("name", ""),
+            description=msg.get("description", ""),
+            user_input=msg.get("input", ""),
+            skill_creator_package=(
+                msg.get("deephole_skill_creator_package")
+                or msg.get("skill_creator_package")
+                or {}
+            ),
         )
     else:
         print(f"Unknown command type: {cmd_type!r}")

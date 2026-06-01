@@ -21,6 +21,8 @@ export default function NewScanForm({ onScanStarted, onBack }: Props) {
   const [scanName, setScanName] = useState<string>("");
   const [selectedProduct, setSelectedProduct] = useState<string>("");
   const [selectedCheckers, setSelectedCheckers] = useState<Set<string>>(new Set());
+  const builtinCheckers = checkers.filter((checker) => !checker.user_created);
+  const userCheckers = checkers.filter((checker) => checker.user_created);
 
   useEffect(() => {
     const load = async () => {
@@ -34,7 +36,7 @@ export default function NewScanForm({ onScanStarted, onBack }: Props) {
         setCheckers(checkerList);
         setProducts(productList);
         // Pre-select all checkers
-        setSelectedCheckers(new Set(checkerList.map((c) => c.name)));
+        setSelectedCheckers(new Set(checkerList.filter((c) => !c.user_created).map((c) => c.name)));
         // Pre-select first online agent
         const onlineAgent = agentList.find((a) => a.online);
         if (onlineAgent) setSelectedAgent(onlineAgent.agent_id);
@@ -113,7 +115,7 @@ export default function NewScanForm({ onScanStarted, onBack }: Props) {
       </div>
 
       {/* Content */}
-      <div className="flex-1 px-6 py-6 max-w-2xl mx-auto w-full">
+      <div className="flex-1 px-6 py-6 max-w-5xl mx-auto w-full">
         <h2 className="text-sm font-semibold text-slate-400 uppercase tracking-wider mb-6">
           扫描配置
         </h2>
@@ -251,37 +253,25 @@ export default function NewScanForm({ onScanStarted, onBack }: Props) {
               {checkers.length === 0 ? (
                 <p className="text-sm text-slate-500">无可用检查项</p>
               ) : (
-                <div className="space-y-2">
-                  {checkers.map((checker) => (
-                    <label
-                      key={checker.name}
-                      className="flex items-start gap-3 p-3 rounded-lg border border-slate-600 hover:border-slate-500 cursor-pointer transition-colors"
-                    >
-                      <input
-                        type="checkbox"
-                        checked={selectedCheckers.has(checker.name)}
-                        onChange={() => toggleChecker(checker.name)}
-                        className="mt-0.5 w-4 h-4 rounded border-slate-500 bg-slate-700 text-blue-500 focus:ring-blue-500 focus:ring-offset-0"
-                      />
-                      <div>
-                        <div className="flex flex-wrap items-center gap-2">
-                          <span className="text-sm font-medium text-white">{checker.label}</span>
-                          {checker.visibility === "admin" && (
-                            <span className="text-[11px] font-semibold text-amber-300 bg-amber-500/10 border border-amber-500/30 rounded px-1.5 py-0.5">
-                              管理员测试
-                            </span>
-                          )}
-                          <span className="text-[11px] font-semibold text-cyan-200 bg-cyan-500/10 border border-cyan-500/30 rounded px-1.5 py-0.5">
-                            {checker.category_label || "非法内存使用"}
-                          </span>
-                        </div>
-                        <div className="text-[11px] text-slate-500 mt-1">
-                          最后修改：{formatModifiedAt(checker.modified_at)}
-                        </div>
-                        <p className="text-xs text-slate-400 mt-0.5">{checker.description}</p>
+                <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+                  <div className="space-y-2">
+                    <div className="text-xs font-semibold text-slate-500 uppercase tracking-wider">系统内置</div>
+                    {builtinCheckers.map((checker) => (
+                      <CheckerOption key={checker.name} checker={checker} selected={selectedCheckers.has(checker.name)} onToggle={() => toggleChecker(checker.name)} />
+                    ))}
+                  </div>
+                  <div className="space-y-2">
+                    <div className="text-xs font-semibold text-slate-500 uppercase tracking-wider">用户新建</div>
+                    {userCheckers.length === 0 ? (
+                      <div className="rounded-lg border border-slate-700 bg-slate-900 px-3 py-6 text-center text-sm text-slate-500">
+                        暂无用户新建 SKILL
                       </div>
-                    </label>
-                  ))}
+                    ) : (
+                      userCheckers.map((checker) => (
+                        <CheckerOption key={checker.name} checker={checker} selected={selectedCheckers.has(checker.name)} onToggle={() => toggleChecker(checker.name)} />
+                      ))
+                    )}
+                  </div>
                 </div>
               )}
             </div>
@@ -321,6 +311,48 @@ export default function NewScanForm({ onScanStarted, onBack }: Props) {
         )}
       </div>
     </div>
+  );
+}
+
+function CheckerOption({ checker, selected, onToggle }: { checker: CheckerInfo; selected: boolean; onToggle: () => void }) {
+  return (
+    <label
+      className="flex items-start gap-3 p-3 rounded-lg border border-slate-600 hover:border-slate-500 cursor-pointer transition-colors"
+    >
+      <input
+        type="checkbox"
+        checked={selected}
+        onChange={onToggle}
+        className="mt-0.5 w-4 h-4 rounded border-slate-500 bg-slate-700 text-blue-500 focus:ring-blue-500 focus:ring-offset-0"
+      />
+      <div>
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="text-sm font-medium text-white">{checker.label}</span>
+          {checker.visibility === "admin" && (
+            <span className="text-[11px] font-semibold text-amber-300 bg-amber-500/10 border border-amber-500/30 rounded px-1.5 py-0.5">
+              管理员测试
+            </span>
+          )}
+          {checker.user_created && (
+            <span className="text-[11px] font-semibold text-purple-300 bg-purple-500/10 border border-purple-500/30 rounded px-1.5 py-0.5">
+              用户创建
+            </span>
+          )}
+          <span className="text-[11px] font-semibold text-cyan-200 bg-cyan-500/10 border border-cyan-500/30 rounded px-1.5 py-0.5">
+            {checker.category_label || "非法内存使用"}
+          </span>
+        </div>
+        <div className="text-[11px] text-slate-500 mt-1">
+          最后修改：{formatModifiedAt(checker.modified_at)}
+          {checker.user_created && (
+            <span className="ml-2">
+              创建者：{checker.creator_username || "-"}
+            </span>
+          )}
+        </div>
+        <p className="text-xs text-slate-400 mt-0.5">{checker.description}</p>
+      </div>
+    </label>
   );
 }
 

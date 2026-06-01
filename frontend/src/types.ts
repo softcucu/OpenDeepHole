@@ -31,6 +31,12 @@ export interface CheckerInfo {
   category: string;
   category_label: string;
   modified_at: string;
+  user_created: boolean;
+  created_by_user_id: string;
+  creator_username: string;
+  can_delete: boolean;
+  result_mode: string;
+  timeout_seconds?: number | null;
 }
 
 export interface CheckerCatalogItem {
@@ -44,6 +50,39 @@ export interface CheckerCatalogItem {
   modified_at: string;
   introduction: string;
   introduction_source: string;
+  user_created: boolean;
+  created_by_user_id: string;
+  creator_username: string;
+  can_delete: boolean;
+  result_mode: string;
+  timeout_seconds?: number | null;
+}
+
+export interface SkillDraft {
+  skill_md: string;
+  scenarios_md: string;
+  summary: string;
+}
+
+export interface SkillCreateJob {
+  job_id: string;
+  status: "pending" | "running" | "completed" | "error";
+  skill_id: string;
+  name: string;
+  description: string;
+  input: string;
+  agent_id: string;
+  agent_name: string;
+  user_id: string;
+  created_at: string;
+  updated_at: string;
+  error_message: string;
+  draft: SkillDraft | null;
+}
+
+export interface SkillImportFile {
+  path: string;
+  content_b64: string;
 }
 
 export interface UploadResponse {
@@ -72,6 +111,16 @@ export interface Vulnerability {
   function_start_line?: number | null;
 }
 
+export interface SkillReport {
+  id?: number | null;
+  scan_id: string;
+  checker_name: string;
+  filename: string;
+  title: string;
+  content: string;
+  created_at: string;
+}
+
 export interface Candidate {
   file: string;
   line: number;
@@ -98,10 +147,12 @@ export interface ScanStatus {
   total_candidates: number;
   processed_candidates: number;
   vulnerabilities: Vulnerability[];
+  skill_reports: SkillReport[];
   events: ScanEvent[];
   current_candidate: Candidate | null;
   error_message: string | null;
   feedback_ids: string[];
+  retryable_candidates_count: number;
 
   // 静态分析进度
   static_total_files: number;
@@ -151,6 +202,7 @@ export interface ScanSummary {
   processed_candidates: number;
   vulnerability_count: number;
   human_confirmed_count: number;
+  retryable_candidates_count: number;
   scan_items: string[];
   user_id?: string;
   username?: string;
@@ -197,7 +249,7 @@ export interface AgentConfigTestResult {
   message: string;
 }
 
-export type FpReviewStatus = "pending" | "running" | "complete" | "error";
+export type FpReviewStatus = "pending" | "running" | "complete" | "error" | "cancelled";
 
 export interface FpReviewResult {
   vuln_index: number;
@@ -262,6 +314,7 @@ export interface CheckerDashboardStats {
   accuracy: number | null;
   ticket_accuracy: number | null;
   scans: CheckerScanDashboardStats[];
+  user_created: boolean;
 }
 
 export interface CheckerDashboardSummary {

@@ -6,6 +6,8 @@ from dataclasses import dataclass
 
 from backend.models import FpReviewResult, Vulnerability
 
+FP_REVIEW_NO_RESULT_REASON = "Review incomplete"
+
 
 @dataclass(frozen=True)
 class ScanIssueMetrics:
@@ -37,8 +39,17 @@ def latest_fp_review_result_map(
 ) -> dict[int, FpReviewResult]:
     latest: dict[int, FpReviewResult] = {}
     for result in results:
+        if not is_effective_fp_review_result(result):
+            continue
         latest[result.vuln_index] = result
     return latest
+
+
+def is_effective_fp_review_result(result: FpReviewResult) -> bool:
+    """Return True for actual tp/fp conclusions, excluding legacy no-result placeholders."""
+    if result.verdict not in {"tp", "fp"}:
+        return False
+    return not (result.reason or "").startswith(FP_REVIEW_NO_RESULT_REASON)
 
 
 def calculate_issue_metrics(

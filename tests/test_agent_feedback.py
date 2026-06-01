@@ -1,11 +1,43 @@
 import tempfile
 import unittest
+from types import SimpleNamespace
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from agent import fp_reviewer
+from agent.config import AgentConfig, OpenCodeConfig
 from agent.scanner import _build_function_source_cache, _attach_function_source
 from backend.models import Candidate, Vulnerability
+
+
+def _valid_high_report() -> str:
+    return """# Vulnerability Report: NPD parse
+
+## Summary
+External input reaches a null dereference.
+
+## Vulnerable Code
+`a.c:10 parse` dereferences `ptr`.
+
+## Full Call Stack
+1. `entry` - external input enters
+2. `parse` - value is propagated
+
+## Root Cause
+Missing null check.
+
+## Why It is Reachable
+No validation blocks the path.
+
+## CVSS Score
+7.5 (CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H)
+
+## Impact
+Crash.
+
+## Evidence
+Checked `entry` and `parse`.
+"""
 
 
 class AgentFeedbackTests(unittest.TestCase):
@@ -30,6 +62,262 @@ class AgentFeedbackTests(unittest.TestCase):
         self.assertEqual(fp_reviewer._normalize_fp_severity("medium", "tp"), "medium")
         self.assertEqual(fp_reviewer._normalize_fp_severity("high", "fp"), "low")
         self.assertEqual(fp_reviewer._normalize_fp_severity("critical", "tp"), "low")
+
+    def test_fp_review_finalizes_discriminator_false_as_fp(self) -> None:
+        generator = fp_reviewer._FpStageResult(
+            result_id="gen",
+            result=Vulnerability(
+                file="a.c",
+                line=10,
+                function="parse",
+                vuln_type="npd",
+                severity="high",
+                description="generator tp",
+                ai_analysis="generator exploit chain",
+                confirmed=True,
+            ),
+            payload={"vulnerability_report": _valid_high_report()},
+        )
+        discriminator = fp_reviewer._FpStageResult(
+            result_id="disc",
+            result=Vulnerability(
+                file="a.c",
+                line=10,
+                function="parse",
+                vuln_type="npd",
+                severity="low",
+                description="discriminator fp",
+                ai_analysis="最强不可利用理由：caller checks null",
+                confirmed=False,
+            ),
+            payload={},
+        )
+
+        verdict, severity, reason, report = fp_reviewer._finalize_fp_review_result(generator, discriminator)
+
+        self.assertEqual((verdict, severity, report), ("fp", "low", ""))
+        self.assertIn("[generator]", reason)
+        self.assertIn("[discriminator]", reason)
+
+    def test_fp_review_downgrades_high_without_required_report_sections(self) -> None:
+        generator = fp_reviewer._FpStageResult(
+            result_id="gen",
+            result=Vulnerability(
+                file="a.c",
+                line=10,
+                function="parse",
+                vuln_type="npd",
+                severity="high",
+                description="generator tp",
+                ai_analysis="generator exploit chain",
+                confirmed=True,
+            ),
+            payload={"vulnerability_report": "# incomplete"},
+        )
+        discriminator = fp_reviewer._FpStageResult(
+            result_id="disc",
+            result=Vulnerability(
+                file="a.c",
+                line=10,
+                function="parse",
+                vuln_type="npd",
+                severity="high",
+                description="discriminator tp",
+                ai_analysis="仍然成立的证据：external chain remains",
+                confirmed=True,
+            ),
+            payload={},
+        )
+
+        verdict, severity, reason, report = fp_reviewer._finalize_fp_review_result(generator, discriminator)
+
+        self.assertEqual((verdict, severity, report), ("tp", "medium", ""))
+        self.assertIn("High 报告缺少必要章节", reason)
+
+    def test_fp_review_preserves_valid_high_report_after_discriminator(self) -> None:
+        generator = fp_reviewer._FpStageResult(
+            result_id="gen",
+            result=Vulnerability(
+                file="a.c",
+                line=10,
+                function="parse",
+                vuln_type="npd",
+                severity="high",
+                description="generator tp",
+                ai_analysis="generator exploit chain",
+                confirmed=True,
+            ),
+            payload={"vulnerability_report": _valid_high_report()},
+        )
+        discriminator = fp_reviewer._FpStageResult(
+            result_id="disc",
+            result=Vulnerability(
+                file="a.c",
+                line=10,
+                function="parse",
+                vuln_type="npd",
+                severity="high",
+                description="discriminator tp",
+                ai_analysis="仍然成立的证据：external chain remains",
+                confirmed=True,
+            ),
+            payload={},
+        )
+
+        verdict, severity, _, report = fp_reviewer._finalize_fp_review_result(generator, discriminator)
+
+        self.assertEqual((verdict, severity), ("tp", "high"))
+        self.assertIn("## Full Call Stack", report)
+
+    def test_fp_review_does_not_save_result_when_cli_returns_none(self) -> None:
+        class FakeReporter:
+            def __init__(self) -> None:
+                self.results: list[tuple] = []
+                self.progress: list[tuple[int, int | None]] = []
+                self.finished: tuple[str, str | None] | None = None
+
+            async def send_event(self, scan_id, event) -> None:
+                return None
+
+            async def push_fp_progress(self, scan_id, review_id, vuln_index, processed=None) -> None:
+                self.progress.append((vuln_index, processed))
+
+            async def push_fp_result(
+                self,
+                scan_id,
+                review_id,
+                vuln_index,
+                verdict,
+                severity,
+                reason,
+                vulnerability_report="",
+            ) -> None:
+                self.results.append((vuln_index, verdict, reason))
+
+            async def finish_fp_review(self, scan_id, review_id, status, error_message=None) -> None:
+                self.finished = (status, error_message)
+
+        async def _run() -> FakeReporter:
+            reporter = FakeReporter()
+            config = AgentConfig(opencode=OpenCodeConfig(timeout=1, max_retries=0))
+            with tempfile.TemporaryDirectory() as tmp:
+                workspace = Path(tmp) / "workspace"
+                with (
+                    patch("agent.fp_reviewer.Path.home", return_value=Path(tmp)),
+                    patch("agent.mcp_registry.lookup", return_value=(7000, "scan-1")),
+                    patch.object(fp_reviewer, "_create_fp_workspace", return_value=workspace),
+                    patch.object(fp_reviewer, "_cleanup_fp_workspace"),
+                    patch("backend.config.get_config", return_value=SimpleNamespace()),
+                    patch("backend.opencode.runner._invoke_opencode", new=AsyncMock()),
+                    patch("backend.opencode.runner._read_result", return_value=None),
+                ):
+                    await fp_reviewer.run_fp_review(
+                        config=config,
+                        reporter=reporter,
+                        scan_id="scan-1",
+                        review_id="review-1",
+                        project_path=str(Path(tmp)),
+                        vulnerabilities=[
+                            {
+                                "index": 3,
+                                "file": "a.c",
+                                "line": 10,
+                                "function": "parse",
+                                "vuln_type": "npd",
+                                "description": "desc",
+                                "ai_analysis": "analysis",
+                            }
+                        ],
+                    )
+            return reporter
+
+        import asyncio
+
+        reporter = asyncio.run(_run())
+        self.assertEqual(reporter.results, [])
+        self.assertEqual(reporter.progress, [(3, 0), (3, 1)])
+        self.assertEqual(reporter.finished, ("complete", None))
+
+    def test_fp_review_does_not_save_result_when_discriminator_returns_none(self) -> None:
+        class FakeReporter:
+            def __init__(self) -> None:
+                self.results: list[tuple] = []
+                self.progress: list[tuple[int, int | None]] = []
+                self.finished: tuple[str, str | None] | None = None
+
+            async def send_event(self, scan_id, event) -> None:
+                return None
+
+            async def push_fp_progress(self, scan_id, review_id, vuln_index, processed=None) -> None:
+                self.progress.append((vuln_index, processed))
+
+            async def push_fp_result(
+                self,
+                scan_id,
+                review_id,
+                vuln_index,
+                verdict,
+                severity,
+                reason,
+                vulnerability_report="",
+            ) -> None:
+                self.results.append((vuln_index, verdict, severity, reason, vulnerability_report))
+
+            async def finish_fp_review(self, scan_id, review_id, status, error_message=None) -> None:
+                self.finished = (status, error_message)
+
+        async def _run() -> tuple[FakeReporter, AsyncMock]:
+            reporter = FakeReporter()
+            config = AgentConfig(opencode=OpenCodeConfig(timeout=1, max_retries=0))
+            generator_result = Vulnerability(
+                file="a.c",
+                line=10,
+                function="parse",
+                vuln_type="npd",
+                severity="high",
+                description="generator tp",
+                ai_analysis="generator exploit chain",
+                confirmed=True,
+            )
+            invoke = AsyncMock()
+            with tempfile.TemporaryDirectory() as tmp:
+                workspace = Path(tmp) / "workspace"
+                with (
+                    patch("agent.fp_reviewer.Path.home", return_value=Path(tmp)),
+                    patch("agent.mcp_registry.lookup", return_value=(7000, "scan-1")),
+                    patch.object(fp_reviewer, "_create_fp_workspace", return_value=workspace),
+                    patch.object(fp_reviewer, "_cleanup_fp_workspace"),
+                    patch("backend.config.get_config", return_value=SimpleNamespace()),
+                    patch("backend.opencode.runner._invoke_opencode", new=invoke),
+                    patch("backend.opencode.runner._read_result", side_effect=[generator_result, None]),
+                ):
+                    await fp_reviewer.run_fp_review(
+                        config=config,
+                        reporter=reporter,
+                        scan_id="scan-1",
+                        review_id="review-1",
+                        project_path=str(Path(tmp)),
+                        vulnerabilities=[
+                            {
+                                "index": 3,
+                                "file": "a.c",
+                                "line": 10,
+                                "function": "parse",
+                                "vuln_type": "npd",
+                                "description": "desc",
+                                "ai_analysis": "analysis",
+                            }
+                        ],
+                    )
+            return reporter, invoke
+
+        import asyncio
+
+        reporter, invoke = asyncio.run(_run())
+        self.assertEqual(invoke.await_count, 2)
+        self.assertEqual(reporter.results, [])
+        self.assertEqual(reporter.progress, [(3, 0), (3, 1)])
+        self.assertEqual(reporter.finished, ("complete", None))
 
     def test_scanner_snapshots_function_source_for_vulnerability(self) -> None:
         class FakeDb:

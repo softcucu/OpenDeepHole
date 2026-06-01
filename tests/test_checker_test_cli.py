@@ -181,6 +181,97 @@ def test_checker_test_cli_audit_uses_existing_audit_path(tmp_path: Path, monkeyp
     assert payload["audits"][0]["ai_verdict"] == "confirmed"
 
 
+def test_checker_test_cli_generates_project_candidate_for_skill_only_checker(tmp_path: Path, capsys) -> None:
+    checkers_dir = tmp_path / "checkers"
+    project_dir = _write_project(tmp_path)
+    _write_checker(checkers_dir, "skillonly", with_analyzer=False)
+
+    rc = checker_test.main([
+        "skillonly",
+        str(project_dir),
+        "--checkers-dir",
+        str(checkers_dir),
+        "--json",
+    ])
+
+    payload = json.loads(capsys.readouterr().out)
+    assert rc == 0
+    assert payload["candidate_count"] == 1
+    candidate = payload["candidates"][0]
+    assert candidate["file"] == "."
+    assert candidate["line"] == 1
+    assert candidate["function"] == "__project__"
+
+
+def test_checker_test_cli_project_audit_returns_multiple_results(tmp_path: Path, monkeypatch, capsys) -> None:
+    checkers_dir = tmp_path / "checkers"
+    project_dir = _write_project(tmp_path)
+    _write_checker(checkers_dir, "skillonly", with_analyzer=False)
+
+    class DummyMCPServer:
+        def start(self) -> int:
+            return 9999
+
+        def stop(self) -> None:
+            return None
+
+    async def fake_run_project_audit(
+        workspace,
+        candidate,
+        project_id,
+        on_output=None,
+        cancel_event=None,
+        timeout=None,
+        project_dir=None,
+    ):
+        return [
+            Vulnerability(
+                file="sample.c",
+                line=2,
+                function="local_vuln",
+                vuln_type=candidate.vuln_type,
+                severity="high",
+                description="project issue",
+                ai_analysis="project analysis",
+                confirmed=True,
+                ai_verdict="confirmed",
+            ),
+            Vulnerability(
+                file=candidate.file,
+                line=candidate.line,
+                function=candidate.function,
+                vuln_type=candidate.vuln_type,
+                severity="low",
+                description="no more issues",
+                ai_analysis="done",
+                confirmed=False,
+                ai_verdict="not_confirmed",
+            ),
+        ]
+
+    monkeypatch.setattr("agent.local_mcp.LocalMCPServer", DummyMCPServer)
+    monkeypatch.setattr("agent.mcp_registry.register", lambda *args, **kwargs: None)
+    monkeypatch.setattr("agent.mcp_registry.unregister", lambda *args, **kwargs: None)
+    monkeypatch.setattr("backend.opencode.config.create_scan_workspace", lambda *args, **kwargs: project_dir)
+    monkeypatch.setattr("backend.opencode.config.cleanup_workspace", lambda *args, **kwargs: None)
+    monkeypatch.setattr("backend.opencode.runner.run_project_audit", fake_run_project_audit)
+
+    rc = checker_test.main([
+        "skillonly",
+        str(project_dir),
+        "--checkers-dir",
+        str(checkers_dir),
+        "--audit",
+        "--json",
+    ])
+
+    payload = json.loads(capsys.readouterr().out)
+    assert rc == 0
+    assert len(payload["audits"]) == 2
+    assert payload["audits"][0]["file"] == "sample.c"
+    assert payload["audits"][1]["function"] == "__project__"
+
+
 def _write_project(tmp_path: Path) -> Path:
     project_dir = tmp_path / "project"
     project_dir.mkdir()
@@ -198,6 +289,7 @@ def _write_checker(
     *,
     enabled: bool = True,
     vuln_type: str | None = None,
+    with_analyzer: bool = True,
 ) -> None:
     checker_dir = checkers_dir / name
     checker_dir.mkdir(parents=True)
@@ -215,22 +307,23 @@ def _write_checker(
         encoding="utf-8",
     )
     (checker_dir / "SKILL.md").write_text("# Local checker\n", encoding="utf-8")
-    (checker_dir / "helper.py").write_text(
-        f"VULN_TYPE = {vuln_type or name!r}\n",
-        encoding="utf-8",
-    )
-    (checker_dir / "analyzer.py").write_text(
-        "from backend.analyzers.base import BaseAnalyzer, Candidate\n"
-        "from .helper import VULN_TYPE\n\n"
-        "class Analyzer(BaseAnalyzer):\n"
-        "    vuln_type = VULN_TYPE\n\n"
-        "    def find_candidates(self, project_path, db=None):\n"
-        "        return [Candidate(\n"
-        "            file='sample.c',\n"
-        "            line=2,\n"
-        "            function='local_vuln',\n"
-        "            description='local test candidate',\n"
-        "            vuln_type=self.vuln_type,\n"
-        "        )]\n",
-        encoding="utf-8",
-    )
+    if with_analyzer:
+        (checker_dir / "helper.py").write_text(
+            f"VULN_TYPE = {vuln_type or name!r}\n",
+            encoding="utf-8",
+        )
+        (checker_dir / "analyzer.py").write_text(
+            "from backend.analyzers.base import BaseAnalyzer, Candidate\n"
+            "from .helper import VULN_TYPE\n\n"
+            "class Analyzer(BaseAnalyzer):\n"
+            "    vuln_type = VULN_TYPE\n\n"
+            "    def find_candidates(self, project_path, db=None):\n"
+            "        return [Candidate(\n"
+            "            file='sample.c',\n"
+            "            line=2,\n"
+            "            function='local_vuln',\n"
+            "            description='local test candidate',\n"
+            "            vuln_type=self.vuln_type,\n"
+            "        )]\n",
+            encoding="utf-8",
+        )

@@ -8,7 +8,7 @@ from fastapi.staticfiles import StaticFiles
 
 import uuid
 
-from backend.api import admin, agent, auth, checkers, feedback, scan
+from backend.api import admin, agent, auth, checkers, feedback, integration, scan, skills
 from backend.auth import hash_password
 from backend.config import apply_no_proxy, get_config
 from backend.logger import get_logger
@@ -27,6 +27,7 @@ async def lifespan(app: FastAPI):
     # Ensure storage directories exist
     Path(config.storage.projects_dir).mkdir(parents=True, exist_ok=True)
     Path(config.storage.scans_dir).mkdir(parents=True, exist_ok=True)
+    Path(config.storage.user_skills_dir).mkdir(parents=True, exist_ok=True)
 
     # Initialize scan store and recover from unclean shutdown
     store = get_scan_store()
@@ -72,7 +73,9 @@ app = FastAPI(
 app.include_router(auth.router)
 app.include_router(admin.router)
 app.include_router(scan.router)
+app.include_router(integration.router)
 app.include_router(checkers.router)
+app.include_router(skills.router)
 app.include_router(feedback.router)
 app.include_router(agent.router)
 app.include_router(agent.public_router)

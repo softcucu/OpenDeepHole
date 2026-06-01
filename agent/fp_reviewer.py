@@ -12,6 +12,8 @@ import asyncio
 import json
 import os
 import shutil
+import threading
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 from uuid import uuid4
@@ -22,6 +24,24 @@ from agent.config import effective_fp_review_cli_config
 
 _FP_FEEDBACK_FILE = Path.home() / ".opendeephole" / "fp_feedback.json"
 _FP_REVIEW_FEEDBACK: dict[str, list[dict]] = {}
+_FP_REVIEW_SKILLS = ("fp-review", "fp-review-discriminator")
+_HIGH_REPORT_HEADINGS = (
+    "Summary",
+    "Vulnerable Code",
+    "Full Call Stack",
+    "Root Cause",
+    "Why It is Reachable",
+    "CVSS Score",
+    "Impact",
+    "Evidence",
+)
+
+
+@dataclass(frozen=True)
+class _FpStageResult:
+    result_id: str
+    result: object
+    payload: dict
 
 
 def load_local_feedback() -> dict:
@@ -76,6 +96,7 @@ async def run_fp_review(
     project_path: str,
     vulnerabilities: list[dict],
     feedback_entries: list[dict] | None = None,
+    cancel_event: threading.Event | None = None,
 ) -> None:
     """Run FP review for a list of confirmed vulnerabilities.
 
@@ -160,16 +181,17 @@ async def run_fp_review(
         workspace = _create_fp_workspace(review_dir / "opencode_workspace", mcp_port)
         await emit("fp_review", "FP review workspace ready")
 
-        from backend.config import get_config
-        from backend.opencode.runner import _invoke_opencode, _read_result
         from backend.models import Candidate
 
-        cfg = get_config()
         fp_cli = effective_fp_review_cli_config(config)
 
         for position, vuln in enumerate(vulnerabilities):
+            if cancel_event is not None and cancel_event.is_set():
+                await emit("fp_review", f"FP review cancelled after reviewing {position} items")
+                await reporter.finish_fp_review(scan_id, review_id, "cancelled", "用户手动停止")
+                return
+
             vuln_index = int(vuln["index"])
-            result_id = uuid4().hex
             _create_fp_workspace(
                 workspace,
                 mcp_port,
@@ -177,53 +199,15 @@ async def run_fp_review(
                 feedback_entries=get_fp_review_feedback(scan_id),
             )
 
-            prompt = (
-                f"使用 `fp-review` 技能，复核位于 "
-                f"{vuln['file']}:{vuln['line']} 函数 `{vuln['function']}` 中"
-                f"已确认的 {vuln['vuln_type'].upper()} 漏洞。"
-                f"project_id 为 `{project_id_for_prompt}`。"
-                f"原始描述：{vuln['description']} "
-                f"原始 AI 分析：{vuln['ai_analysis']} "
-                f"你的 result_id 是 `{result_id}`。"
-                f"分析完成后，你**必须**使用此 result_id 调用 submit_result MCP 工具提交结论。"
-                f"真正报使用 confirmed=true，误报使用 confirmed=false。"
-                f"severity 必须按外部可触发性重新判断：外部可触发使用 high；"
-                f"有代码问题但未证明外部可触发使用 medium 或 low；误报使用 low。"
-                f"如果 severity=high，必须在 submit_result 的 vulnerability_report 参数中提交 Markdown 漏洞报告，"
-                f"包含触发入口、调用链、关键数据流、问题代码位置、利用条件和修复建议。"
-                f"**重要：你必须直接完成所有分析工作，禁止使用子 Agent（sub-agent）或委托任何子任务。"
-                f"所有 MCP 工具调用（包括 submit_result）必须由你自己直接执行。**"
-            )
-            prompt = prompt.replace('\n', ' ')
-
             await emit(
                 "fp_review",
                 f"[{position + 1}] Reviewing {vuln['vuln_type'].upper()} "
                 f"at {vuln['file']}:{vuln['line']} ({vuln['function']})",
             )
-            await reporter.push_fp_progress(scan_id, review_id, vuln_index)
-
-            verdict = "tp"
-            severity = "low"
-            reason = "Review incomplete — no result returned"
-            vulnerability_report = ""
+            await reporter.push_fp_progress(scan_id, review_id, vuln_index, position)
+            result_submitted = False
 
             try:
-                import threading
-                cancel_event = threading.Event()
-                log_path = review_dir / f"fp_{result_id}.log"
-
-                await _invoke_opencode(
-                    workspace,
-                    prompt,
-                    fp_cli.timeout,
-                    log_path=log_path,
-                    on_line=lambda line: print(f"  [fp_opencode] {line}", flush=True),
-                    cancel_event=cancel_event,
-                    cli_config=fp_cli,
-                    project_dir=project,
-                )
-
                 fake_candidate = Candidate(
                     file=vuln["file"],
                     line=vuln["line"],
@@ -231,40 +215,93 @@ async def run_fp_review(
                     vuln_type=vuln["vuln_type"],
                     description=vuln["description"],
                 )
-                result = _read_result(result_id, fake_candidate)
-                if result is not None:
-                    verdict = "tp" if result.confirmed else "fp"
-                    severity = _normalize_fp_severity(result.severity, verdict)
-                    payload = _read_fp_result_payload(result_id)
-                    vulnerability_report = str(payload.get("vulnerability_report") or "")
-                    if severity != "high":
-                        vulnerability_report = ""
-                    reason = result.ai_analysis or (
-                        "Confirmed as true positive" if result.confirmed else "Identified as false positive"
+                generator = await _run_fp_review_stage(
+                    stage="generator",
+                    workspace=workspace,
+                    review_dir=review_dir,
+                    vuln=vuln,
+                    project_id_for_prompt=project_id_for_prompt,
+                    timeout=fp_cli.timeout,
+                    cancel_event=cancel_event,
+                    cli_config=fp_cli,
+                    project=project,
+                    candidate=fake_candidate,
+                )
+                if cancel_event is not None and cancel_event.is_set():
+                    await emit("fp_review", f"FP review cancelled after reviewing {position} items")
+                    await reporter.finish_fp_review(scan_id, review_id, "cancelled", "用户手动停止")
+                    return
+
+                if generator is None:
+                    await emit("fp_review", f"[{position + 1}] Generator returned no result — preserving any previous review result")
+                elif not generator.result.confirmed:
+                    verdict, severity, reason, vulnerability_report = _finalize_fp_review_result(generator, None)
+                    await reporter.push_fp_result(
+                        scan_id,
+                        review_id,
+                        vuln_index,
+                        verdict,
+                        severity,
+                        reason,
+                        vulnerability_report,
                     )
-                    await emit(
-                        "fp_review",
-                        f"[{position + 1}] {'TRUE POSITIVE' if verdict == 'tp' else 'FALSE POSITIVE'} severity={severity}",
-                    )
+                    result_submitted = True
+                    await emit("fp_review", f"[{position + 1}] FALSE POSITIVE severity={severity}")
                 else:
-                    await emit("fp_review", f"[{position + 1}] No result returned — keeping as TP")
+                    discriminator = await _run_fp_review_stage(
+                        stage="discriminator",
+                        workspace=workspace,
+                        review_dir=review_dir,
+                        vuln=vuln,
+                        project_id_for_prompt=project_id_for_prompt,
+                        timeout=fp_cli.timeout,
+                        cancel_event=cancel_event,
+                        cli_config=fp_cli,
+                        project=project,
+                        candidate=fake_candidate,
+                        generator=generator,
+                    )
+                    if cancel_event is not None and cancel_event.is_set():
+                        await emit("fp_review", f"FP review cancelled after reviewing {position} items")
+                        await reporter.finish_fp_review(scan_id, review_id, "cancelled", "用户手动停止")
+                        return
+                    if discriminator is None:
+                        await emit("fp_review", f"[{position + 1}] Discriminator returned no result — preserving any previous review result")
+                    else:
+                        verdict, severity, reason, vulnerability_report = _finalize_fp_review_result(
+                            generator,
+                            discriminator,
+                        )
+                        await reporter.push_fp_result(
+                            scan_id,
+                            review_id,
+                            vuln_index,
+                            verdict,
+                            severity,
+                            reason,
+                            vulnerability_report,
+                        )
+                        result_submitted = True
+                        await emit(
+                            "fp_review",
+                            f"[{position + 1}] {'TRUE POSITIVE' if verdict == 'tp' else 'FALSE POSITIVE'} severity={severity}",
+                        )
 
             except asyncio.CancelledError:
                 await emit("fp_review", f"FP review cancelled after reviewing {position} items")
-                await reporter.finish_fp_review(scan_id, review_id, "error", "Cancelled")
+                await reporter.finish_fp_review(scan_id, review_id, "cancelled", "用户手动停止")
                 return
             except Exception as exc:
                 await emit("fp_review", f"[{position + 1}] Review error: {exc}")
 
-            await reporter.push_fp_result(
+            await reporter.push_fp_progress(
                 scan_id,
                 review_id,
                 vuln_index,
-                verdict,
-                severity,
-                reason,
-                vulnerability_report,
+                position + 1,
             )
+            if not result_submitted:
+                await emit("fp_review", f"[{position + 1}] No FP review result saved")
 
         await reporter.finish_fp_review(scan_id, review_id, "complete", None)
         await emit("fp_review", f"FP review complete: {len(vulnerabilities)} vulnerabilities reviewed")
@@ -298,6 +335,104 @@ async def run_fp_review(
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+async def _run_fp_review_stage(
+    *,
+    stage: str,
+    workspace: Path,
+    review_dir: Path,
+    vuln: dict,
+    project_id_for_prompt: str,
+    timeout: int,
+    cancel_event: threading.Event | None,
+    cli_config,
+    project: Path,
+    candidate,
+    generator: _FpStageResult | None = None,
+) -> _FpStageResult | None:
+    from backend.opencode.runner import _invoke_opencode, _read_result
+
+    result_id = uuid4().hex
+    prompt = _build_fp_review_prompt(
+        stage=stage,
+        vuln=vuln,
+        project_id_for_prompt=project_id_for_prompt,
+        result_id=result_id,
+        generator=generator,
+    )
+    log_path = review_dir / f"fp_{stage}_{result_id}.log"
+
+    await _invoke_opencode(
+        workspace,
+        prompt,
+        timeout,
+        log_path=log_path,
+        on_line=lambda line: print(f"  [fp_{stage}] {line}", flush=True),
+        cancel_event=cancel_event,
+        cli_config=cli_config,
+        project_dir=project,
+    )
+    result = _read_result(result_id, candidate)
+    if result is None:
+        return None
+    return _FpStageResult(
+        result_id=result_id,
+        result=result,
+        payload=_read_fp_result_payload(result_id),
+    )
+
+
+def _build_fp_review_prompt(
+    *,
+    stage: str,
+    vuln: dict,
+    project_id_for_prompt: str,
+    result_id: str,
+    generator: _FpStageResult | None = None,
+) -> str:
+    if stage == "generator":
+        prompt = (
+            f"使用 `fp-review` 技能，复核位于 "
+            f"{vuln['file']}:{vuln['line']} 函数 `{vuln['function']}` 中"
+            f"已确认的 {vuln['vuln_type'].upper()} 漏洞。"
+            f"project_id 为 `{project_id_for_prompt}`。"
+            f"原始描述：{vuln['description']} "
+            f"原始 AI 分析：{vuln['ai_analysis']} "
+            f"你的 result_id 是 `{result_id}`。"
+            f"分析完成后，你**必须**使用此 result_id 调用 submit_result MCP 工具提交结论。"
+            f"默认假设代码是安全的；只有证明真实代码缺陷时才使用 confirmed=true。"
+            f"severity 必须按外部可触发性重新判断：完整可利用链使用 high；"
+            f"有代码问题但未证明外部可触发使用 medium 或 low；误报使用 low。"
+            f"如果 severity=high，必须在 vulnerability_report 中提交 Markdown 报告，"
+            f"且必须包含 Summary、Vulnerable Code、Full Call Stack、Root Cause、"
+            f"Why It is Reachable、Impact、Evidence 七个二级标题。"
+        )
+    elif stage == "discriminator" and generator is not None:
+        gen = generator.result
+        gen_payload = generator.payload
+        prompt = (
+            f"使用 `fp-review-discriminator` 技能，对位于 "
+            f"{vuln['file']}:{vuln['line']} 函数 `{vuln['function']}` 中"
+            f"{vuln['vuln_type'].upper()} 结论做对抗式复核。"
+            f"project_id 为 `{project_id_for_prompt}`。"
+            f"原始描述：{vuln['description']} "
+            f"原始 AI 分析：{vuln['ai_analysis']} "
+            f"generator confirmed={bool(gen.confirmed)} severity={gen.severity}。"
+            f"generator description：{gen.description} "
+            f"generator ai_analysis：{gen.ai_analysis} "
+            f"generator vulnerability_report：{gen_payload.get('vulnerability_report') or ''} "
+            f"你的 result_id 是 `{result_id}`。"
+            f"分析完成后，你**必须**使用此 result_id 调用 submit_result MCP 工具提交复核结论。"
+            f"如果找到足以推翻真实代码问题的不可利用理由，使用 confirmed=false。"
+            f"如果真实代码问题存在但外部可利用链被推翻，使用 confirmed=true 且 severity=medium 或 low。"
+            f"只有 generator 的完整可利用链经反驳后仍成立，才可使用 confirmed=true 且 severity=high。"
+            f"severity=high 时 vulnerability_report 必须包含 Summary、Vulnerable Code、"
+            f"Full Call Stack、Root Cause、Why It is Reachable、Impact、Evidence 七个二级标题。"
+        )
+    else:
+        raise ValueError(f"Unknown FP review stage: {stage}")
+    return prompt.replace("\n", " ")
+
 
 def _find_db_dir(project_path: Path, scan_id: str) -> Optional[Path]:
     """Find the directory that contains code_index.db for this project.
@@ -380,6 +515,90 @@ def _normalize_fp_severity(severity: str, verdict: str) -> str:
     return normalized
 
 
+def _finalize_fp_review_result(
+    generator: _FpStageResult,
+    discriminator: _FpStageResult | None,
+) -> tuple[str, str, str, str]:
+    gen = generator.result
+    gen_verdict = "tp" if gen.confirmed else "fp"
+    gen_severity = _normalize_fp_severity(str(gen.severity), gen_verdict)
+
+    if discriminator is None:
+        verdict = gen_verdict
+        severity = gen_severity
+        report = _stage_report(generator)
+        final_note = "Generator 判定为误报，未进入对抗式复核。"
+    else:
+        disc = discriminator.result
+        verdict = "tp" if disc.confirmed else "fp"
+        severity = _normalize_fp_severity(str(disc.severity), verdict)
+        report = _stage_report(discriminator) or _stage_report(generator)
+        final_note = (
+            "Discriminator 未推翻真实代码问题。"
+            if verdict == "tp"
+            else "Discriminator 找到足以推翻真实代码问题的不可利用理由。"
+        )
+        if severity == "high" and gen_severity != "high":
+            severity = "medium"
+            final_note += " Generator 未证明完整外部可利用链，最终降级为 medium。"
+
+    if verdict == "fp":
+        severity = "low"
+        report = ""
+    elif severity == "high" and not _has_required_high_report_sections(report):
+        severity = "medium"
+        report = ""
+        final_note += " High 报告缺少必要章节或证据，最终降级为 medium。"
+    elif severity != "high":
+        report = ""
+
+    reason = _compose_fp_reason(generator, discriminator, final_note)
+    return verdict, severity, reason, report
+
+
+def _stage_report(stage_result: _FpStageResult) -> str:
+    return str(stage_result.payload.get("vulnerability_report") or "")
+
+
+def _stage_reason(stage_result: _FpStageResult) -> str:
+    result = stage_result.result
+    return str(result.ai_analysis or result.description or "").strip()
+
+
+def _compose_fp_reason(
+    generator: _FpStageResult,
+    discriminator: _FpStageResult | None,
+    final_note: str,
+) -> str:
+    parts = [
+        "[generator]",
+        _stage_reason(generator) or "未提供详细推理。",
+    ]
+    if discriminator is not None:
+        parts.extend([
+            "",
+            "[discriminator]",
+            _stage_reason(discriminator) or "未提供详细反驳推理。",
+        ])
+    parts.extend([
+        "",
+        "[final]",
+        final_note,
+    ])
+    return "\n".join(parts).strip()
+
+
+def _has_required_high_report_sections(report: str) -> bool:
+    if not report.strip():
+        return False
+    lowered_lines = [line.strip().lower() for line in report.splitlines()]
+    for heading in _HIGH_REPORT_HEADINGS:
+        expected = f"## {heading}".lower()
+        if not any(line == expected or line.startswith(expected + " ") for line in lowered_lines):
+            return False
+    return True
+
+
 def _read_fp_result_payload(result_id: str) -> dict:
     """Read optional FP review fields that are not part of Vulnerability."""
     try:
@@ -417,27 +636,39 @@ def _create_fp_workspace(
             encoding="utf-8",
         )
 
-        skills_dir = workspace / ".opencode" / "skills" / "fp-review"
-        skills_dir.mkdir(parents=True, exist_ok=True)
-        skill_src = Path(__file__).parent / "skills" / "fp_review.md"
-        content = skill_src.read_text(encoding="utf-8")
-
         matching_feedback = [
             entry for entry in feedback_entries or []
             if not vuln_type or entry.get("vuln_type") == vuln_type
         ]
         fp_section = format_feedback_experience(matching_feedback)
-        if fp_section:
-            content = content.rstrip() + (
-                "\n\n## 历史用户经验\n\n"
-                "以下是用户在审计过程中选择注入的经验，"
-                "复核时应结合这些经验校验结论：\n"
-                + fp_section
-            )
-
-        (skills_dir / "SKILL.md").write_text(content, encoding="utf-8")
+        _write_fp_skill(
+            workspace,
+            "fp-review",
+            Path(__file__).parent / "skills" / "fp_review.md",
+            fp_section,
+        )
+        _write_fp_skill(
+            workspace,
+            "fp-review-discriminator",
+            Path(__file__).parent / "skills" / "fp_review_discriminator.md",
+            fp_section,
+        )
 
     return workspace
+
+
+def _write_fp_skill(workspace: Path, skill_name: str, skill_src: Path, fp_section: str) -> None:
+    skills_dir = workspace / ".opencode" / "skills" / skill_name
+    skills_dir.mkdir(parents=True, exist_ok=True)
+    content = skill_src.read_text(encoding="utf-8")
+    if fp_section:
+        content = content.rstrip() + (
+            "\n\n## 历史用户经验\n\n"
+            "以下是用户在审计过程中选择注入的经验，"
+            "复核时应结合这些经验校验结论：\n"
+            + fp_section
+        )
+    (skills_dir / "SKILL.md").write_text(content, encoding="utf-8")
 
 
 def _cleanup_fp_workspace(workspace: Path) -> None:
@@ -450,13 +681,15 @@ def _cleanup_fp_workspace(workspace: Path) -> None:
             return
 
         try:
-            fp_skill_dir = workspace / ".opencode" / "skills" / "fp-review"
-            if fp_skill_dir.is_dir():
-                shutil.rmtree(fp_skill_dir)
+            for skill_name in _FP_REVIEW_SKILLS:
+                fp_skill_dir = workspace / ".opencode" / "skills" / skill_name
+                if fp_skill_dir.is_dir():
+                    shutil.rmtree(fp_skill_dir)
             for root in (workspace / ".claude" / "skills", workspace / ".gemini" / "skills"):
-                copied_fp_skill = root / "fp-review"
-                if copied_fp_skill.is_dir():
-                    shutil.rmtree(copied_fp_skill)
+                for skill_name in _FP_REVIEW_SKILLS:
+                    copied_fp_skill = root / skill_name
+                    if copied_fp_skill.is_dir():
+                        shutil.rmtree(copied_fp_skill)
                 if root.is_dir() and not any(root.iterdir()):
                     root.rmdir()
             claude_mcp = workspace / ".claude" / "opendeephole-mcp.json"

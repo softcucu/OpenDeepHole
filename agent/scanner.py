@@ -20,10 +20,34 @@ from backend.registry import CHECKERS_DIR_ENV
 
 
 FunctionSourceSnapshot = tuple[str, int | None]
+PROJECT_LEVEL_FUNCTION = "__project__"
 
 
 def _candidate_key(candidate: Candidate) -> tuple[str, int, str, str]:
     return (candidate.file, candidate.line, candidate.function, candidate.vuln_type)
+
+
+def is_project_level_candidate(candidate: Candidate) -> bool:
+    return candidate.function == PROJECT_LEVEL_FUNCTION
+
+
+def build_project_level_candidate(
+    entry,
+    project_root: Path,
+    scan_root: Path,
+) -> Candidate:
+    """Create one synthetic candidate for a SKILL-only checker."""
+    if scan_root == project_root:
+        file_path = "."
+    else:
+        file_path = scan_root.relative_to(project_root).as_posix()
+    return Candidate(
+        file=file_path,
+        line=1,
+        function=PROJECT_LEVEL_FUNCTION,
+        description=f"Project-level audit for {entry.label}",
+        vuln_type=entry.name,
+    )
 
 
 def _order_candidates_for_audit(
@@ -320,7 +344,7 @@ def _configure_backend(config: AgentConfig, scan_dir: Path) -> None:
     # Reset registry singleton so it re-discovers checkers
     import backend.registry as _reg
     _reg._registry = None
-    _reg._registry_dir = None
+    _reg._registry_dirs = None
 
 
 async def run_scan(
@@ -335,6 +359,9 @@ async def run_scan(
     feedback_entries: list[dict] | None = None,
     checker_packages: list[dict] | None = None,
     is_resume: bool = False,
+    retry_candidates: list[dict] | None = None,
+    retry_total_candidates: int | None = None,
+    retry_processed_offset: int = 0,
 ) -> None:
     """Orchestrate the full local pipeline: index → static analysis → AI audit → report.
 
@@ -395,7 +422,8 @@ async def run_scan(
         db = None
         db_path = index_store.db_path(project_path)
         # Only need the DB open if static analysis will run (no cached candidates yet)
-        need_db_open = not candidates_cache_path.exists()
+        retry_mode = retry_candidates is not None
+        need_db_open = not candidates_cache_path.exists() and not retry_mode
 
         def _db_is_complete(path: Path) -> bool:
             """Return True only if the DB was fully built."""
@@ -545,7 +573,23 @@ async def run_scan(
         # (written by a previous run of this scan_id).  DB existence alone does
         # NOT skip this phase.
         candidates: list[Candidate] = []
-        if candidates_cache_path.exists():
+        if retry_mode:
+            candidates = [
+                _normalize_candidate_for_project(Candidate(**d), project_path, code_scan_path)
+                for d in (retry_candidates or [])
+            ]
+            candidates = [
+                c for c in candidates
+                if _candidate_in_scan_scope(c, project_path, code_scan_path)
+            ]
+            total = retry_total_candidates or len(candidates)
+            await reporter.send_static_progress(scan_id, 0, 0, done=True)
+            await emit(
+                "static_analysis",
+                f"续扫 {len(candidates)} 个未完成候选点",
+                candidate_index=total,
+            )
+        elif candidates_cache_path.exists():
             await emit("static_analysis", "从缓存加载静态分析结果...")
             cached = json.loads(candidates_cache_path.read_text(encoding="utf-8"))
             candidates = [
@@ -567,6 +611,7 @@ async def run_scan(
                 """Run all static analyzers in a thread so the event loop stays free."""
                 result: list[Candidate] = []
                 analyzer_entries = [(n, e) for n, e in registry.items() if e.analyzer]
+                project_level_entries = [(n, e) for n, e in registry.items() if e.mode == "opencode" and not e.analyzer]
                 for idx, (_name, entry) in enumerate(analyzer_entries, 1):
                     if cancel_event.is_set():
                         return result, True
@@ -597,6 +642,11 @@ async def run_scan(
 
                     count = len(result) - count_before
                     print(f"\n  [static] [{idx}/{len(analyzer_entries)}] {entry.label}: {count} candidate(s)", flush=True)
+                for _name, entry in project_level_entries:
+                    if cancel_event.is_set():
+                        return result, True
+                    result.append(build_project_level_candidate(entry, project_path, code_scan_path))
+                    print(f"  [static] {entry.label}: generated project-level candidate", flush=True)
                 return result, False
 
             candidates, static_cancelled = await loop.run_in_executor(None, _run_static_analysis)
@@ -638,7 +688,7 @@ async def run_scan(
 
         # --- Phase 6: Load already-processed keys (resume support) ---
         processed_keys: set[tuple[str, int, str, str]] = set()
-        if is_resume:
+        if is_resume and not retry_mode:
             processed_keys = await reporter.get_processed_keys(scan_id)
             if processed_keys:
                 await emit("init", f"Resume: skipping {len(processed_keys)} already-processed candidates")
@@ -649,10 +699,11 @@ async def run_scan(
             if _candidate_key(c) not in processed_keys
         ]
         remaining = _order_candidates_for_audit(remaining, checker_names or list(registry.keys()))
-        already_done = total - len(remaining)
+        already_done = retry_processed_offset if retry_mode else total - len(remaining)
 
         # --- Phase 7: AI audit ---
         vulnerabilities: list[Vulnerability] = []
+        processed_this_run = 0
         await emit("auditing", f"Starting AI audit of {len(remaining)} candidate(s)...")
         if remaining:
             await emit("auditing", f"Audit order: {_audit_order_summary(remaining)}")
@@ -679,18 +730,70 @@ async def run_scan(
             )
 
             vuln: Optional[Vulnerability] = None
+            project_vulns: list[Vulnerability] | None = None
             try:
                 _configure_backend(config, scan_dir)
-                from backend.opencode.runner import run_audit
-                vuln = await run_audit(
-                    workspace,
-                    candidate,
-                    scan_id,
-                    on_output=lambda line: print(f"  {line}", flush=True),
-                    cancel_event=cancel_event,
-                    timeout=config.opencode.timeout,
-                    project_dir=project_path,
+                checker_entry = registry.get(candidate.vuln_type)
+                candidate_timeout = (
+                    checker_entry.timeout_seconds
+                    if checker_entry is not None and checker_entry.timeout_seconds
+                    else config.opencode.timeout
                 )
+                if is_project_level_candidate(candidate):
+                    if checker_entry is not None and checker_entry.result_mode == "markdown_reports":
+                        from backend.opencode.runner import run_project_report_audit
+                        report_dir = scan_dir / "skill_report_workspace" / candidate.vuln_type / "reports"
+                        reports = await run_project_report_audit(
+                            workspace,
+                            candidate,
+                            scan_id,
+                            report_dir,
+                            on_output=lambda line: print(f"  {line}", flush=True),
+                            cancel_event=cancel_event,
+                            timeout=candidate_timeout,
+                            project_dir=project_path,
+                        )
+                        if cancel_event.is_set():
+                            await emit(
+                                "auditing",
+                                f"Scan stopped during report-mode SKILL {global_index + 1}",
+                                candidate_index=global_index,
+                            )
+                            cancelled = True
+                            break
+                        await reporter.replace_skill_reports(scan_id, candidate.vuln_type, reports)
+                        await emit(
+                            "auditing",
+                            f"[{global_index + 1}] Markdown reports synced: {len(reports)}",
+                            candidate_index=global_index,
+                        )
+                        await reporter.report_processed_key(
+                            scan_id, candidate.file, candidate.line, candidate.function, candidate.vuln_type
+                        )
+                        processed_this_run += 1
+                        continue
+                    else:
+                        from backend.opencode.runner import run_project_audit
+                        project_vulns = await run_project_audit(
+                            workspace,
+                            candidate,
+                            scan_id,
+                            on_output=lambda line: print(f"  {line}", flush=True),
+                            cancel_event=cancel_event,
+                            timeout=candidate_timeout,
+                            project_dir=project_path,
+                        )
+                else:
+                    from backend.opencode.runner import run_audit
+                    vuln = await run_audit(
+                        workspace,
+                        candidate,
+                        scan_id,
+                        on_output=lambda line: print(f"  {line}", flush=True),
+                        cancel_event=cancel_event,
+                        timeout=candidate_timeout,
+                        project_dir=project_path,
+                    )
             except Exception as exc:
                 await emit("auditing", f"[{global_index + 1}] Analysis error: {exc}", candidate_index=global_index)
 
@@ -704,7 +807,37 @@ async def run_scan(
                 cancelled = True
                 break
 
-            if vuln is None:
+            if is_project_level_candidate(candidate):
+                project_vulns = project_vulns or [
+                    Vulnerability(
+                        file=candidate.file,
+                        line=candidate.line,
+                        function=candidate.function,
+                        vuln_type=candidate.vuln_type,
+                        severity="unknown",
+                        description=candidate.description,
+                        ai_analysis="No analysis result returned",
+                        confirmed=False,
+                        ai_verdict="no_result",
+                    )
+                ]
+                for project_vuln in project_vulns:
+                    _attach_function_source(project_vuln, candidate, function_source_cache)
+                    vulnerabilities.append(project_vuln)
+                    await reporter.report_vulnerability(scan_id, project_vuln)
+                confirmed_project = sum(1 for v in project_vulns if v.confirmed)
+                await emit(
+                    "auditing",
+                    f"[{global_index + 1}] Result: {confirmed_project} confirmed / {len(project_vulns)} submitted",
+                    candidate_index=global_index,
+                )
+                await reporter.report_processed_key(
+                    scan_id, candidate.file, candidate.line, candidate.function, candidate.vuln_type
+                )
+                processed_this_run += 1
+                continue
+
+            if vuln is None and not is_project_level_candidate(candidate):
                 vuln = Vulnerability(
                     file=candidate.file,
                     line=candidate.line,
@@ -735,11 +868,12 @@ async def run_scan(
             await reporter.report_processed_key(
                 scan_id, candidate.file, candidate.line, candidate.function, candidate.vuln_type
             )
+            processed_this_run += 1
 
         # --- Phase 8: Report results ---
         if cancelled:
             await reporter.finish_scan(
-                scan_id, [], "cancelled", total, already_done + len(vulnerabilities)
+                scan_id, [], "cancelled", total, already_done + processed_this_run
             )
             # Do NOT delete scan_dir on cancel — needed for resume
             return
@@ -765,12 +899,21 @@ async def run_scan(
         raise
 
     finally:
-        os.environ.pop("AGENT_PROJECT_DIR", None)
         try:
             if mcp_server:
                 from agent import mcp_registry
                 mcp_registry.unregister(project_path)
                 await asyncio.to_thread(mcp_server.stop)
+        except Exception:
+            pass
+        # 清理 API runner 缓存的 DB 连接
+        try:
+            from backend.opencode.llm_api_runner import _close_db_cache
+            _close_db_cache()
+        except Exception:
+            pass
+        os.environ.pop("AGENT_PROJECT_DIR", None)
+        try:
             if workspace is not None:
                 await asyncio.to_thread(cleanup_workspace, workspace)
         finally:
@@ -780,4 +923,4 @@ async def run_scan(
                 os.environ[CHECKERS_DIR_ENV] = previous_checkers_dir
             import backend.registry as _reg
             _reg._registry = None
-            _reg._registry_dir = None
+            _reg._registry_dirs = None

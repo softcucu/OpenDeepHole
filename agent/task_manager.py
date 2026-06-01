@@ -16,6 +16,9 @@ class ScanTask:
     scan_name: str
     feedback_entries: list[dict] = field(default_factory=list)
     checker_packages: list[dict] = field(default_factory=list)
+    retry_candidates: list[dict] | None = None
+    retry_total_candidates: int | None = None
+    retry_processed_offset: int = 0
     cancel_event: threading.Event = field(default_factory=threading.Event)
     asyncio_task: Optional[asyncio.Task] = None
 
@@ -33,6 +36,9 @@ class TaskManager:
         scan_name: str,
         feedback_entries: list[dict] | None = None,
         checker_packages: list[dict] | None = None,
+        retry_candidates: list[dict] | None = None,
+        retry_total_candidates: int | None = None,
+        retry_processed_offset: int = 0,
     ) -> ScanTask:
         task = ScanTask(
             scan_id=scan_id,
@@ -42,6 +48,9 @@ class TaskManager:
             scan_name=scan_name,
             feedback_entries=feedback_entries or [],
             checker_packages=checker_packages or [],
+            retry_candidates=retry_candidates,
+            retry_total_candidates=retry_total_candidates,
+            retry_processed_offset=retry_processed_offset,
         )
         self._tasks[scan_id] = task
         return task

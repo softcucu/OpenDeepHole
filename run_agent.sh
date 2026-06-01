@@ -56,6 +56,23 @@ print_source_tool_install_help() {
     esac
 }
 
+ctags_supports_json_output() {
+    local tmp_dir
+    tmp_dir="$(mktemp -d 2>/dev/null || mktemp -d -t odh-ctags)" || return 1
+    local sample_file="$tmp_dir/odh_ctags_json_probe.c"
+    local output
+
+    printf 'int odh_ctags_json_probe(void) { return 0; }\n' > "$sample_file"
+    if output="$(ctags --output-format=json -o - "$sample_file" 2>/dev/null)" \
+        && printf '%s\n' "$output" | grep -q '"_type"[[:space:]]*:[[:space:]]*"tag"'; then
+        rm -rf "$tmp_dir"
+        return 0
+    fi
+
+    rm -rf "$tmp_dir"
+    return 1
+}
+
 check_source_index_tools() {
     if ! command -v ctags >/dev/null 2>&1; then
         print_source_tool_install_help
@@ -68,7 +85,7 @@ check_source_index_tools() {
         return 1
     fi
 
-    if ! ctags --list-output-formats 2>/dev/null | grep -qi "json"; then
+    if ! ctags_supports_json_output; then
         echo "ctags must support JSON output." >&2
         print_source_tool_install_help
         return 1

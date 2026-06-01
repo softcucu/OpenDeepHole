@@ -6,6 +6,7 @@ import tempfile
 import unittest
 import zipfile
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from backend.api.checkers import list_checkers
@@ -37,20 +38,24 @@ class CheckerHotReloadTests(unittest.TestCase):
                 root,
                 "admin_check",
                 visibility="admin",
-                category="infinite_loop",
+                category="auth_bypass",
                 modified_at="2026-05-20T12:00:00+08:00",
             )
             user = User(user_id="u1", username="alice", role="user")
             admin = User(user_id="u2", username="root", role="admin")
 
-            with patch("backend.registry.CHECKERS_DIR", root):
+            cfg = SimpleNamespace(storage=SimpleNamespace(user_skills_dir=str(root)))
+            with (
+                patch("backend.registry.CHECKERS_DIR", root),
+                patch("backend.config.get_config", return_value=cfg),
+            ):
                 user_items = asyncio.run(list_checkers(current_user=user))
                 admin_items = asyncio.run(list_checkers(current_user=admin))
 
         self.assertEqual([item.name for item in user_items], ["public_check"])
         self.assertEqual([item.name for item in admin_items], ["admin_check", "public_check"])
-        self.assertEqual(admin_items[0].category, "infinite_loop")
-        self.assertEqual(admin_items[0].category_label, "死循环")
+        self.assertEqual(admin_items[0].category, "auth_bypass")
+        self.assertEqual(admin_items[0].category_label, "认证绕过")
         self.assertEqual(admin_items[0].modified_at, "2026-05-20T12:00:00+08:00")
 
     def test_regular_user_cannot_select_admin_only_checker(self) -> None:
@@ -80,6 +85,25 @@ class CheckerHotReloadTests(unittest.TestCase):
         self.assertIn("relcheck", synced_registry)
         self.assertIsNotNone(synced_registry["relcheck"].analyzer)
         self.assertEqual(getattr(synced_registry["relcheck"].analyzer, "marker", ""), "relative-ok")
+
+    def test_refresh_registry_discovers_user_skill_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            builtins_root = root / "builtins"
+            user_root = root / "user_skills"
+            self._write_checker(builtins_root, "builtin_check")
+            self._write_checker(user_root, "user_skill", category="other")
+
+            cfg = SimpleNamespace(storage=SimpleNamespace(user_skills_dir=str(user_root)))
+            with (
+                patch("backend.registry.CHECKERS_DIR", builtins_root),
+                patch("backend.config.get_config", return_value=cfg),
+            ):
+                registry = refresh_registry()
+
+        self.assertIn("builtin_check", registry)
+        self.assertIn("user_skill", registry)
+        self.assertEqual(registry["user_skill"].category, "other")
 
     def test_unpack_rejects_path_traversal(self) -> None:
         data = io.BytesIO()

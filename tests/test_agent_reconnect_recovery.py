@@ -17,6 +17,7 @@ from backend.models import (
     ScanMeta,
     ScanStatus,
     User,
+    Vulnerability,
 )
 from backend.store.sqlite import SqliteScanStore
 
@@ -113,6 +114,50 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
 
         self.assertEqual(ws.sent[0]["type"], "welcome")
         self.assertIn({"type": "heartbeat_ack"}, ws.sent)
+
+    def test_agent_websocket_stores_reported_runtime_hash(self) -> None:
+        class FakeClient:
+            host = "127.0.0.1"
+
+        class FakeWebSocket:
+            client = FakeClient()
+
+            def __init__(self) -> None:
+                self.sent: list[dict] = []
+                self.captured_runtime_hash = ""
+                self.messages = [
+                    {
+                        "type": "hello",
+                        "name": "agent-1",
+                        "runtime_hash": "old-runtime",
+                        "active_scans": [],
+                    },
+                ]
+
+            async def accept(self) -> None:
+                return None
+
+            async def receive_json(self):
+                if self.messages:
+                    return self.messages.pop(0)
+                agents = list(agent_api._registered_agents.values())
+                if agents:
+                    self.captured_runtime_hash = agents[0].runtime_hash
+                raise agent_api.WebSocketDisconnect()
+
+            async def send_json(self, payload: dict) -> None:
+                self.sent.append(payload)
+
+            async def close(self, code: int = 1000) -> None:
+                return None
+
+        ws = FakeWebSocket()
+        with tempfile.TemporaryDirectory() as tmp:
+            store = SqliteScanStore(Path(tmp) / "scans.db")
+            with patch("backend.api.agent.get_scan_store", return_value=store):
+                asyncio.run(agent_api.agent_websocket(ws))
+
+        self.assertEqual(ws.captured_runtime_hash, "old-runtime")
 
     def test_websocket_agent_online_requires_fresh_last_seen(self) -> None:
         fresh = datetime.now(timezone.utc).isoformat()
@@ -333,6 +378,125 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
             self.assertEqual(stored.total_candidates, 10)
             self.assertEqual(stored.processed_candidates, 4)
             self.assertEqual(stored.status, ScanItemStatus.PENDING)
+
+    def test_retry_incomplete_scan_dispatches_only_timeout_and_no_result_candidates(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = SqliteScanStore(Path(tmp) / "scans.db")
+            scan = _scan("scan-1", ScanItemStatus.COMPLETE, total=3, processed=3)
+            meta = _meta()
+            store.save_scan(scan, meta)
+            vulns = [
+                Vulnerability(
+                    file="ok.c",
+                    line=1,
+                    function="ok",
+                    vuln_type="npd",
+                    severity="high",
+                    description="confirmed",
+                    ai_analysis="analysis",
+                    confirmed=True,
+                    ai_verdict="confirmed",
+                ),
+                Vulnerability(
+                    file="timeout.c",
+                    line=2,
+                    function="slow",
+                    vuln_type="npd",
+                    severity="unknown",
+                    description="timed out",
+                    ai_analysis="Analysis timed out",
+                    confirmed=False,
+                    ai_verdict="timeout",
+                ),
+                Vulnerability(
+                    file="none.c",
+                    line=3,
+                    function="missing",
+                    vuln_type="npd",
+                    severity="unknown",
+                    description="no result",
+                    ai_analysis="No analysis result returned",
+                    confirmed=False,
+                    ai_verdict="no_result",
+                ),
+            ]
+            for vuln in vulns:
+                store.add_vulnerability("scan-1", vuln)
+                store.add_processed_key(
+                    "scan-1",
+                    (vuln.file, vuln.line, vuln.function, vuln.vuln_type),
+                )
+            agent = AgentInfo(
+                agent_id="agent-old",
+                name="agent-1",
+                ip="127.0.0.1",
+                last_seen="2026-01-01T00:01:00+00:00",
+                user_id="user-1",
+            )
+            user = User(user_id="user-1", username="alice", role="user")
+            sent: dict = {}
+
+            async def fake_send(_agent_id: str, payload: dict) -> bool:
+                sent.update(payload)
+                return True
+
+            with (
+                patch("backend.api.scan.get_scan_store", return_value=store),
+                patch.dict("backend.api.agent._registered_agents", {"agent-old": agent}, clear=True),
+                patch("backend.api.agent.send_agent_command", new=AsyncMock(side_effect=fake_send)),
+                patch("backend.api.agent.create_agent_runtime_update_payload", return_value=None),
+            ):
+                request = SimpleNamespace(base_url="http://testserver/")
+                asyncio.run(scan_api.retry_incomplete_scan("scan-1", request=request, current_user=user))
+
+            stored = store.load_scan("scan-1")[0]
+            self.assertEqual(stored.status, ScanItemStatus.PENDING)
+            self.assertEqual(stored.processed_candidates, 1)
+            self.assertEqual(len(store.get_processed_keys("scan-1")), 1)
+            self.assertEqual(sent["type"], "resume")
+            self.assertEqual(sent["retry_total_candidates"], 3)
+            self.assertEqual(sent["retry_processed_offset"], 1)
+            self.assertEqual(
+                [(c["file"], c["line"], c["function"]) for c in sent["retry_candidates"]],
+                [("timeout.c", 2, "slow"), ("none.c", 3, "missing")],
+            )
+
+    def test_upsert_incomplete_vulnerability_replaces_existing_result(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = SqliteScanStore(Path(tmp) / "scans.db")
+            store.save_scan(_scan("scan-1", ScanItemStatus.AUDITING, total=1), _meta())
+            timeout_vuln = Vulnerability(
+                file="a.c",
+                line=1,
+                function="a",
+                vuln_type="npd",
+                severity="unknown",
+                description="old",
+                ai_analysis="Analysis timed out",
+                confirmed=False,
+                ai_verdict="timeout",
+            )
+            store.add_vulnerability("scan-1", timeout_vuln)
+            replacement = Vulnerability(
+                file="a.c",
+                line=1,
+                function="a",
+                vuln_type="npd",
+                severity="high",
+                description="new",
+                ai_analysis="confirmed now",
+                confirmed=True,
+                ai_verdict="confirmed",
+            )
+
+            index = store.upsert_incomplete_vulnerability("scan-1", replacement)
+
+            self.assertEqual(index, 0)
+            stored = store.get_vulnerabilities("scan-1")
+            self.assertEqual(len(stored), 1)
+            self.assertEqual(stored[0].description, "new")
+            self.assertEqual(stored[0].ai_verdict, "confirmed")
+            self.assertTrue(stored[0].confirmed)
 
     def test_cancel_finish_preserves_total_but_accepts_lower_processed_count(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

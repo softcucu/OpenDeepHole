@@ -141,7 +141,7 @@ export default function AdminCheckerDashboard({ onBack, onViewScan }: Props) {
                   <span className="text-xs text-slate-500">点击查看详情</span>
                 </div>
                 <div className="space-y-2">
-                  {data.checkers.map((checker) => (
+                  {data.checkers.filter((c) => !c.user_created).map((checker) => (
                     <CheckerCard
                       key={checker.checker}
                       checker={checker}
@@ -149,6 +149,23 @@ export default function AdminCheckerDashboard({ onBack, onViewScan }: Props) {
                       onClick={() => setActiveChecker(checker.checker)}
                     />
                   ))}
+                  {data.checkers.some((c) => c.user_created) && (
+                    <>
+                      <div className="flex items-center gap-3 py-2">
+                        <div className="flex-1 border-t border-slate-700" />
+                        <span className="text-xs font-semibold text-slate-500 whitespace-nowrap">用户创建</span>
+                        <div className="flex-1 border-t border-slate-700" />
+                      </div>
+                      {data.checkers.filter((c) => c.user_created).map((checker) => (
+                        <CheckerCard
+                          key={checker.checker}
+                          checker={checker}
+                          active={checker.checker === activeChecker}
+                          onClick={() => setActiveChecker(checker.checker)}
+                        />
+                      ))}
+                    </>
+                  )}
                 </div>
               </div>
 
@@ -218,6 +235,11 @@ function CheckerCard({
         <span className="shrink-0 text-[11px] font-semibold text-slate-400 bg-slate-800 px-1.5 py-0.5 rounded">
           {checker.checker.toUpperCase()}
         </span>
+        {checker.user_created && (
+          <span className="shrink-0 text-[11px] font-semibold text-purple-300 bg-purple-500/10 border border-purple-500/30 rounded px-1.5 py-0.5">
+            用户创建
+          </span>
+        )}
       </div>
       <p className="text-xs text-slate-500 line-clamp-2 min-h-8">{checker.description || "暂无描述"}</p>
     </button>

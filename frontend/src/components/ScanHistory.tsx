@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { getScanProducts, getScans, resumeScan, deleteScan, updateScanProduct } from "../api/client";
+import { getScanProducts, getScans, resumeScan, deleteScan, updateScanProduct, retryIncompleteScan } from "../api/client";
 import type { ScanSummary, ScanItemStatus, User } from "../types";
 
 interface Props {
@@ -243,6 +243,18 @@ export default function ScanHistory({ onViewScan, onDownloadAgent, onNewScan, us
     }
   };
 
+  const handleRetryIncomplete = async (scanId: string) => {
+    setActionLoading(scanId);
+    try {
+      await retryIncompleteScan(scanId);
+      onViewScan(scanId);
+    } catch {
+      // silently fail
+    } finally {
+      setActionLoading(null);
+    }
+  };
+
   const handleDeleteConfirm = async () => {
     if (!deleteConfirmId) return;
     const scanId = deleteConfirmId;
@@ -379,7 +391,7 @@ export default function ScanHistory({ onViewScan, onDownloadAgent, onNewScan, us
               </>
             )}
             <NavButton
-              label="SKILL概览"
+              label="SKILL市场"
               description="查看各类 SKILL 的检测范围和使用说明"
               onClick={onCheckerCatalog}
             />
@@ -474,6 +486,7 @@ export default function ScanHistory({ onViewScan, onDownloadAgent, onNewScan, us
                   const pct = Math.round(scan.progress * 100);
                   const running = isRunning(scan.status);
                   const canResume = scan.status === "cancelled" || scan.status === "error";
+                  const canRetryIncomplete = !running && (scan.retryable_candidates_count ?? 0) > 0;
                   const canDelete = !running;
                   const isLoading = actionLoading === scan.scan_id;
                   const isProductSaving = productSavingId === scan.scan_id;
@@ -565,6 +578,16 @@ export default function ScanHistory({ onViewScan, onDownloadAgent, onNewScan, us
                               className="text-xs px-2 py-1 rounded text-amber-400 hover:bg-amber-500/10 disabled:opacity-50 transition-colors"
                             >
                               {isLoading ? "..." : "恢复"}
+                            </button>
+                          )}
+                          {canRetryIncomplete && (
+                            <button
+                              onClick={() => handleRetryIncomplete(scan.scan_id)}
+                              disabled={isLoading || !scan.agent_online}
+                              title={!scan.agent_online ? "Agent 离线，无法续扫" : `续扫 ${scan.retryable_candidates_count} 个未完成候选`}
+                              className="text-xs px-2 py-1 rounded text-amber-300 hover:bg-amber-500/10 disabled:opacity-50 transition-colors"
+                            >
+                              {isLoading ? "..." : "续扫"}
                             </button>
                           )}
                           {canDelete && (

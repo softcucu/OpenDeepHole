@@ -1,0 +1,10 @@
+name: skill_only_project_audit
+label: SKILL-only Project Audit / 纯 SKILL 项目级审计测试
+description: >
+  管理员测试用 checker。该 checker 不包含 analyzer.py，用于验证系统会自动生成项目级候选，
+  直接在目标代码目录运行 SKILL.md，并允许一次审计通过 submit_result 提交多条真实函数和行号级结果。
+enabled: true
+mode: opencode
+visibility: admin
+category: other
+modified_at: "2026-05-26T19:38:46+08:00"

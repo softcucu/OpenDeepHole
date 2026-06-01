@@ -2,6 +2,14 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import hashlib
+import io
+import json
+import re
+import shutil
+import threading
+import zipfile
 from pathlib import Path
 from typing import Optional
 
@@ -10,6 +18,9 @@ _config = None       # AgentConfig
 _reporter = None     # Reporter
 _task_manager = None  # TaskManager
 _agent_id: Optional[str] = None  # Assigned by server on WebSocket connect
+_fp_review_tasks: dict[str, asyncio.Task] = {}
+_fp_review_cancel_events: dict[str, threading.Event] = {}
+_SKILL_CREATOR_NAME = "deephole-skill-creator"
 
 
 async def _run(task, is_resume: bool) -> None:
@@ -38,6 +49,9 @@ async def _run(task, is_resume: bool) -> None:
             feedback_entries=task.feedback_entries,
             checker_packages=task.checker_packages,
             is_resume=is_resume,
+            retry_candidates=task.retry_candidates,
+            retry_total_candidates=task.retry_total_candidates,
+            retry_processed_offset=task.retry_processed_offset,
         )
     finally:
         _task_manager.remove(task.scan_id)
@@ -94,6 +108,9 @@ async def handle_resume(
     scan_name: Optional[str] = None,
     feedback_entries: Optional[list[dict]] = None,
     checker_packages: Optional[list[dict]] = None,
+    retry_candidates: Optional[list[dict]] = None,
+    retry_total_candidates: Optional[int] = None,
+    retry_processed_offset: int = 0,
 ) -> None:
     """Handle a 'resume' command — resume a stopped scan."""
     if _task_manager is None:
@@ -112,6 +129,9 @@ async def handle_resume(
             scan_name=scan_name or "",
             feedback_entries=feedback_entries,
             checker_packages=checker_packages,
+            retry_candidates=retry_candidates,
+            retry_total_candidates=retry_total_candidates,
+            retry_processed_offset=retry_processed_offset,
         )
     else:
         if project_path:
@@ -128,6 +148,9 @@ async def handle_resume(
             task.feedback_entries = feedback_entries
         if checker_packages is not None:
             task.checker_packages = checker_packages
+        task.retry_candidates = retry_candidates
+        task.retry_total_candidates = retry_total_candidates
+        task.retry_processed_offset = retry_processed_offset
 
     if task.asyncio_task and not task.asyncio_task.done():
         task.asyncio_task.cancel()
@@ -151,6 +174,12 @@ async def handle_fp_review(
     if _config is None or _reporter is None:
         print(f"Warning: agent not fully initialized, ignoring fp_review {review_id}")
         return
+    if review_id in _fp_review_tasks:
+        print(f"Warning: FP review {review_id} already exists, ignoring duplicate")
+        return
+
+    cancel_event = threading.Event()
+    _fp_review_cancel_events[review_id] = cancel_event
 
     async def _run_review() -> None:
         from agent.fp_reviewer import run_fp_review
@@ -163,12 +192,31 @@ async def handle_fp_review(
                 project_path=project_path,
                 vulnerabilities=vulnerabilities,
                 feedback_entries=feedback_entries or [],
+                cancel_event=cancel_event,
             )
         except Exception as exc:
             print(f"[fp_review] Unhandled error in review {review_id}: {exc}")
+        finally:
+            _fp_review_tasks.pop(review_id, None)
+            _fp_review_cancel_events.pop(review_id, None)
 
-    asyncio.create_task(_run_review())
+    _fp_review_tasks[review_id] = asyncio.create_task(_run_review())
     print(f"Started FP review {review_id} for scan {scan_id}")
+
+
+async def handle_fp_review_stop(scan_id: str, review_id: str) -> None:
+    """Handle an 'fp_review_stop' command — cancel a running FP review."""
+    cancel_event = _fp_review_cancel_events.get(review_id)
+    if cancel_event is not None:
+        cancel_event.set()
+        print(f"Stopping FP review {review_id} for scan {scan_id}")
+        return
+    task = _fp_review_tasks.get(review_id)
+    if task is not None:
+        task.cancel()
+        print(f"Cancelling FP review task {review_id} for scan {scan_id}")
+        return
+    print(f"Warning: FP review {review_id} not found for stop")
 
 
 async def handle_feedback_selection_update(scan_id: str, feedback_entries: list[dict]) -> None:
@@ -233,3 +281,174 @@ async def handle_config_test(request_id: str, remote_config: dict) -> dict:
         "ok": ok,
         "message": "API 配置可用" if ok else reason,
     }
+
+
+async def handle_skill_create(
+    request_id: str,
+    name: str,
+    description: str,
+    user_input: str,
+    skill_creator_package: dict | None = None,
+) -> dict:
+    """Create a pure project-level SKILL draft by invoking the configured AI CLI."""
+    try:
+        draft = await _run_skill_creator(request_id, name, description, user_input, skill_creator_package)
+        return {
+            "type": "skill_create_result",
+            "request_id": request_id,
+            "ok": True,
+            "draft": draft,
+        }
+    except Exception as exc:
+        return {
+            "type": "skill_create_result",
+            "request_id": request_id,
+            "ok": False,
+            "message": str(exc),
+        }
+
+
+async def _run_skill_creator(
+    request_id: str,
+    name: str,
+    description: str,
+    user_input: str,
+    skill_creator_package: dict | None,
+) -> dict:
+    if _config is None:
+        raise RuntimeError("Agent config is not initialized")
+
+    from agent.scanner import _configure_backend
+    from backend.opencode.runner import _invoke_opencode
+
+    workspace = Path.home() / ".opendeephole" / "skill_create" / request_id
+    if workspace.exists():
+        shutil.rmtree(workspace, ignore_errors=True)
+    skills_root = workspace / ".opencode" / "skills"
+    _write_skill_creator_package(skill_creator_package or {}, skills_root)
+    (workspace / "opencode.json").write_text(
+        json.dumps(
+            {
+                "$schema": "https://opencode.ai/config.json",
+                "skills": {"paths": [str((workspace / ".opencode" / "skills").resolve())]},
+                "permission": {
+                    "read": {"*": "allow"},
+                    "list": {"*": "allow"},
+                    "glob": {"*": "allow"},
+                    "grep": {"*": "allow"},
+                    "external_directory": {"*": "allow"},
+                    "edit": {"*": "deny"},
+                },
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+    _configure_backend(_config, workspace)
+    prompt = _skill_creator_prompt(name, description, user_input)
+    lines: list[str] = []
+
+    def on_output(line: str) -> None:
+        if line:
+            print(f"[skill_create] {line}", flush=True)
+            lines.append(line)
+
+    await _invoke_opencode(
+        workspace,
+        prompt,
+        timeout=_config.opencode.timeout,
+        on_line=on_output,
+        project_dir=workspace,
+    )
+    return _parse_skill_creator_output("\n".join(lines))
+
+
+def _write_skill_creator_package(package: dict, skills_root: Path) -> None:
+    name = str(package.get("name") or "").strip()
+    if name != _SKILL_CREATOR_NAME:
+        raise RuntimeError("Invalid deephole-skill-creator package name")
+
+    expected_hash = str(package.get("sha256") or "").strip()
+    encoded = str(package.get("archive_b64") or "")
+    if not expected_hash or not encoded:
+        raise RuntimeError("Invalid deephole-skill-creator package metadata")
+
+    try:
+        data = base64.b64decode(encoded.encode("ascii"), validate=True)
+    except Exception as exc:
+        raise RuntimeError("Invalid deephole-skill-creator package archive") from exc
+    actual_hash = hashlib.sha256(data).hexdigest()
+    if actual_hash != expected_hash:
+        raise RuntimeError("deephole-skill-creator package hash mismatch")
+
+    skill_dir = skills_root / _SKILL_CREATOR_NAME
+    if skill_dir.exists():
+        shutil.rmtree(skill_dir)
+    skill_dir.mkdir(parents=True, exist_ok=True)
+    wrote_skill = False
+
+    try:
+        with zipfile.ZipFile(io.BytesIO(data)) as zf:
+            for info in zf.infolist():
+                if info.is_dir():
+                    continue
+                member = Path(info.filename)
+                if member.is_absolute() or ".." in member.parts:
+                    raise RuntimeError(f"Unsafe deephole-skill-creator package path: {info.filename}")
+                dest = (skill_dir / member).resolve()
+                try:
+                    dest.relative_to(skill_dir.resolve())
+                except ValueError as exc:
+                    raise RuntimeError(f"Unsafe deephole-skill-creator package path: {info.filename}") from exc
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                dest.write_bytes(zf.read(info))
+                if member.as_posix() == "SKILL.md":
+                    wrote_skill = True
+    except zipfile.BadZipFile as exc:
+        raise RuntimeError("Invalid deephole-skill-creator package archive") from exc
+
+    if not wrote_skill:
+        raise RuntimeError("deephole-skill-creator package missing SKILL.md")
+
+
+def _skill_creator_prompt(name: str, description: str, user_input: str) -> str:
+    return (
+        "使用 `deephole-skill-creator` 技能，为 OpenDeepHole 创建一个纯 SKILL 项目级审计检查项草稿。"
+        "不要创建 analyzer.py、脚本或资源文件。"
+        "只输出一个 JSON 对象，不要输出 Markdown 代码围栏之外的解释。"
+        "JSON 字段必须包含："
+        "`skill_md`（完整 SKILL.md 内容，包含 YAML frontmatter 和项目级审计要求）、"
+        "`scenarios_md`（面向用户的适用场景说明，可为空字符串）、"
+        "`summary`（一句话说明）。"
+        "SKILL 必须要求审计者在扫描时主动阅读代码，发现每个真实问题都调用 submit_result；"
+        "未发现问题也必须调用一次 submit_result 并设置 confirmed=false。"
+        f"\n名称：{name}"
+        f"\n描述：{description}"
+        f"\n用户输入：{user_input}"
+    )
+
+
+def _parse_skill_creator_output(output: str) -> dict:
+    candidates = []
+    fenced = re.findall(r"```(?:json)?\s*(\{.*?\})\s*```", output, flags=re.DOTALL)
+    candidates.extend(fenced)
+    start = output.find("{")
+    end = output.rfind("}")
+    if start != -1 and end > start:
+        candidates.append(output[start:end + 1])
+
+    for candidate in candidates:
+        try:
+            data = json.loads(candidate)
+        except json.JSONDecodeError:
+            continue
+        skill_md = str(data.get("skill_md") or "").strip()
+        if skill_md:
+            return {
+                "skill_md": skill_md,
+                "scenarios_md": str(data.get("scenarios_md") or "").strip(),
+                "summary": str(data.get("summary") or "").strip(),
+            }
+    raise RuntimeError("Agent did not return a valid SKILL draft")
