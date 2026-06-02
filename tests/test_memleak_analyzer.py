@@ -82,8 +82,14 @@ def test_memleak_path_sensitive_cases_use_single_auditable_c_file() -> None:
         "report_branch_leak",
         "report_continue_leak",
         "report_partial_multi",
+        "report_null_initialized_before_allocation",
+        "report_cleanup_object_early_returns",
     }
     assert "异常分支" in by_function["report_return_leak"].description
     assert "异常分支" in by_function["report_branch_leak"].description
     assert "循环中 continue 前未释放" in by_function["report_continue_leak"].description
     assert "q" in by_function["report_partial_multi"].description
+    assert "p" in by_function["report_null_initialized_before_allocation"].description
+    assert "ip_data" in by_function["report_cleanup_object_early_returns"].description
+    assert by_function["report_cleanup_object_early_returns"].description.count("ip_data") >= 3
+    assert "bacfile_object_name_set" not in by_function

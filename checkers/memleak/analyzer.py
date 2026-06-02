@@ -121,7 +121,6 @@ class Issue:
 class PathState:
     freed: set[str] = field(default_factory=set)
     transferred: set[str] = field(default_factory=set)
-    initialized: set[str] = field(default_factory=set)
     null_vars: set[str] = field(default_factory=set)
     non_null_vars: set[str] = field(default_factory=set)
 
@@ -129,7 +128,6 @@ class PathState:
         return PathState(
             freed=set(self.freed),
             transferred=set(self.transferred),
-            initialized=set(self.initialized),
             null_vars=set(self.null_vars),
             non_null_vars=set(self.non_null_vars),
         )
@@ -452,32 +450,6 @@ class MemLeakDetector:
                 result.add(norm)
         return result
 
-    def _initialized_by_node(self, node) -> set[str]:
-        return set(self._initializer_map(node))
-
-    def _initializer_map(self, node) -> dict[str, str]:
-        result: dict[str, str] = {}
-        if node.type == "declaration":
-            for child in node.children:
-                if child.type == "init_declarator":
-                    decl = child.child_by_field_name("declarator") or child.children[0]
-                    value = child.child_by_field_name("value")
-                    names = self._identifier_texts(decl)
-                    if names:
-                        result[names[-1]] = self.text(value).strip() if value is not None else ""
-                elif child.type in {"identifier", "pointer_declarator", "array_declarator"}:
-                    names = self._identifier_texts(child)
-                    if names and "=" in self.text(node):
-                        result[names[-1]] = ""
-        elif node.type == "assignment_expression":
-            left = node.child_by_field_name("left")
-            right = node.child_by_field_name("right")
-            if left is not None:
-                result[self._normalize_arg(self.text(left))] = (
-                    self.text(right).strip() if right is not None else ""
-                )
-        return {name: value for name, value in result.items() if name}
-
     def _apply_statement_effects(
         self,
         node,
@@ -486,15 +458,6 @@ class MemLeakDetector:
         params: set[str],
     ) -> PathState:
         next_state = state.copy()
-        for var, value in self._initializer_map(node).items():
-            next_state.initialized.add(var)
-            next_state.freed.discard(var)
-            next_state.transferred.discard(var)
-            if is_null_literal(value) or bool(_NULL_PATTERN.search(value)):
-                next_state.null_vars.add(var)
-                next_state.non_null_vars.discard(var)
-            else:
-                next_state.null_vars.discard(var)
 
         def visit(n):
             fs = self.as_free_site(n)
@@ -510,15 +473,12 @@ class MemLeakDetector:
                     left_txt = self.text(left).strip()
                     right_txt = self.text(right).strip()
                     for var in resource_vars:
-                        if var in next_state.initialized and var in right_txt:
-                            if any(self._contains_identifier(left_txt, param) for param in params):
-                                next_state.transferred.add(var)
-                                next_state.freed.discard(var)
-                    initialized = self._normalize_arg(left_txt)
-                    if initialized:
-                        next_state.initialized.add(initialized)
-                        next_state.freed.discard(initialized)
-                        next_state.transferred.discard(initialized)
+                        if var in right_txt and any(
+                            self._contains_identifier(left_txt, param)
+                            for param in params
+                        ):
+                            next_state.transferred.add(var)
+                            next_state.freed.discard(var)
             return True
 
         self.walk(node, visit)
@@ -539,12 +499,6 @@ class MemLeakDetector:
             next_state.null_vars.discard(var)
         return next_state
 
-    def _is_initialized_for(self, var: str, state: PathState) -> bool:
-        if var in state.initialized:
-            return True
-        base = self._base_var(var)
-        return bool(base and base in state.initialized and ("->" in var or "." in var))
-
     def _is_null_for(self, var: str, state: PathState) -> bool:
         return var in state.null_vars or self._base_var(var) in state.null_vars
 
@@ -560,7 +514,6 @@ class MemLeakDetector:
         func_start_line: int,
     ) -> None:
         missing = set(resource_vars) - state.freed - state.transferred
-        missing = {v for v in missing if self._is_initialized_for(v, state)}
         missing = {v for v in missing if not self._is_null_for(v, state)}
 
         if exit_node.type == "return_statement":
@@ -783,7 +736,7 @@ class MemLeakDetector:
         fname = self.function_name(func_node)
         func_start_line = self.line(func_node)
         params = self.function_params(func_node)
-        initial = PathState(initialized=set(params))
+        initial = PathState()
         self._analyze_statement(
             body,
             [initial],
