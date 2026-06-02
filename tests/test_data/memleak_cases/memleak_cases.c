@@ -5,7 +5,12 @@
 #define INIT_FAILED 1
 #define RUNNING 2
 #define FINISHED 3
+#define WAITING 4
+#define IDLE 5
 #define MAX_BIP_MPDU 1497
+#define CASE_LEAK 1
+#define CASE_FREE 2
+#define CASE_TRANSFER 3
 
 struct Owner {
     char *buf;
@@ -42,6 +47,9 @@ extern MSGBOX_ID create_msgbox(void);
 extern void *Object_List;
 extern struct object_data *Keylist_Data(void *list, uint32_t object_instance);
 extern char *bacnet_strdup(const char *new_name);
+extern int invoke_id_free(int invoke_id);
+extern int invoke_id_failed(int invoke_id);
+extern void tsm_free_invoke_id(int invoke_id);
 
 int report_return_leak(int flag) {
     char *p = malloc(8);
@@ -221,4 +229,82 @@ bool bacfile_object_name_set(uint32_t object_instance, const char *new_name) {
     }
 
     return status;
+}
+
+int report_switch_case_split(int mode) {
+    char *p = malloc(8);
+    switch (mode) {
+        case CASE_LEAK:
+            return -1;
+        case CASE_FREE:
+            free(p);
+            break;
+        default:
+            free(p);
+            break;
+    }
+    return 0;
+}
+
+int report_state_completion_case_split(int RW_State, int Error_Detected, int Request_Invoke_ID) {
+    switch (RW_State) {
+        case WAITING:
+            if (Error_Detected) {
+                RW_State = FINISHED;
+            } else if (invoke_id_free(Request_Invoke_ID)) {
+                RW_State = FINISHED;
+            } else if (invoke_id_failed(Request_Invoke_ID)) {
+                RW_State = FINISHED;
+                tsm_free_invoke_id(Request_Invoke_ID);
+            }
+            break;
+        case FINISHED:
+            RW_State = IDLE;
+            break;
+        default:
+            break;
+    }
+    tsm_free_invoke_id(Request_Invoke_ID);
+    return (RW_State == FINISHED);
+}
+
+int report_switch_fallthrough_leak(int mode) {
+    char *p = malloc(8);
+    switch (mode) {
+        case CASE_LEAK:
+            consume(p);
+        default:
+            return -1;
+    }
+    free(p);
+    return 0;
+}
+
+int ok_switch_case_releases(int mode, char **out) {
+    char *p = malloc(8);
+    switch (mode) {
+        case CASE_FREE:
+            free(p);
+            break;
+        case CASE_TRANSFER:
+            *out = p;
+            break;
+        default:
+            free(p);
+            break;
+    }
+    return 0;
+}
+
+int ok_state_completion_after_free(int RW_State, int Request_Invoke_ID) {
+    switch (RW_State) {
+        case WAITING:
+            tsm_free_invoke_id(Request_Invoke_ID);
+            RW_State = FINISHED;
+            break;
+        default:
+            tsm_free_invoke_id(Request_Invoke_ID);
+            break;
+    }
+    return (RW_State == FINISHED);
 }

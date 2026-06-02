@@ -84,6 +84,9 @@ def test_memleak_path_sensitive_cases_use_single_auditable_c_file() -> None:
         "report_partial_multi",
         "report_null_initialized_before_allocation",
         "report_cleanup_object_early_returns",
+        "report_switch_case_split",
+        "report_state_completion_case_split",
+        "report_switch_fallthrough_leak",
     }
     assert "异常分支" in by_function["report_return_leak"].description
     assert "异常分支" in by_function["report_branch_leak"].description
@@ -92,4 +95,10 @@ def test_memleak_path_sensitive_cases_use_single_auditable_c_file() -> None:
     assert "p" in by_function["report_null_initialized_before_allocation"].description
     assert "ip_data" in by_function["report_cleanup_object_early_returns"].description
     assert by_function["report_cleanup_object_early_returns"].description.count("ip_data") >= 3
+    assert "p" in by_function["report_switch_case_split"].description
+    assert "Request_Invoke_ID" in by_function["report_state_completion_case_split"].description
+    assert "状态机完成前未释放" in by_function["report_state_completion_case_split"].description
+    assert "p" in by_function["report_switch_fallthrough_leak"].description
     assert "bacfile_object_name_set" not in by_function
+    assert "ok_switch_case_releases" not in by_function
+    assert "ok_state_completion_after_free" not in by_function

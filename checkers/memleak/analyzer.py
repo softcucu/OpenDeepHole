@@ -123,6 +123,7 @@ class PathState:
     transferred: set[str] = field(default_factory=set)
     null_vars: set[str] = field(default_factory=set)
     non_null_vars: set[str] = field(default_factory=set)
+    completed_at: list[object] = field(default_factory=list)
 
     def copy(self) -> "PathState":
         return PathState(
@@ -130,7 +131,14 @@ class PathState:
             transferred=set(self.transferred),
             null_vars=set(self.null_vars),
             non_null_vars=set(self.non_null_vars),
+            completed_at=list(self.completed_at),
         )
+
+
+@dataclass
+class FlowResult:
+    normal: list[PathState] = field(default_factory=list)
+    breaks: list[PathState] = field(default_factory=list)
 
 
 # ============================================================
@@ -450,6 +458,32 @@ class MemLeakDetector:
                 result.add(norm)
         return result
 
+    def _state_completion_assignment(self, node):
+        if node.type != "expression_statement":
+            return None
+        assignment = None
+        for child in node.children:
+            if child.type == "assignment_expression":
+                assignment = child
+                break
+        if assignment is None:
+            return None
+        left = assignment.child_by_field_name("left")
+        right = assignment.child_by_field_name("right")
+        if left is None or right is None:
+            return None
+        left_txt = self.text(left).strip()
+        left_name = self._normalize_arg(left_txt)
+        if not left_name:
+            return None
+        lower_left = left_name.lower()
+        if not (lower_left.endswith("state") or lower_left.endswith("_state")):
+            return None
+        right_txt = self.text(right).strip()
+        if re.search(r"(?i)(FINISHED|FINISH|DONE|FAILED)", right_txt):
+            return assignment
+        return None
+
     def _apply_statement_effects(
         self,
         node,
@@ -512,7 +546,7 @@ class MemLeakDetector:
         all_frees: list[FreeSite],
         func_name: str,
         func_start_line: int,
-    ) -> None:
+    ) -> bool:
         missing = set(resource_vars) - state.freed - state.transferred
         missing = {v for v in missing if not self._is_null_for(v, state)}
 
@@ -520,7 +554,7 @@ class MemLeakDetector:
             missing -= self._return_value_vars(exit_node)
 
         if not missing:
-            return
+            return False
 
         details = []
         free_funcs = set()
@@ -533,7 +567,7 @@ class MemLeakDetector:
             details.append((var, free_lines))
 
         if not details:
-            return
+            return False
 
         key = (
             kind,
@@ -541,11 +575,13 @@ class MemLeakDetector:
             tuple((var, tuple(lines)) for var, lines in details),
         )
         if key in self._issue_keys:
-            return
+            return False
         self._issue_keys.add(key)
 
         if kind == "continue_leak":
             prefix = "循环中 continue 前未释放"
+        elif kind == "state_completion_leak":
+            prefix = "状态机完成前未释放"
         else:
             exit_kind = {
                 "return_statement": "return",
@@ -567,6 +603,30 @@ class MemLeakDetector:
             hint=f"{prefix}: {hint}",
             free_func_names=free_funcs,
         ))
+        return True
+
+    def _record_pending_state_completions(
+        self,
+        state: PathState,
+        *,
+        resource_vars: set[str],
+        all_frees: list[FreeSite],
+        func_name: str,
+        func_start_line: int,
+    ) -> bool:
+        recorded = False
+        for node in state.completed_at:
+            recorded = self._record_exit_issue(
+                kind="state_completion_leak",
+                exit_node=node,
+                state=state,
+                resource_vars=resource_vars,
+                all_frees=all_frees,
+                func_name=func_name,
+                func_start_line=func_start_line,
+            ) or recorded
+        state.completed_at.clear()
+        return recorded
 
     def _analyze_statement(
         self,
@@ -579,11 +639,11 @@ class MemLeakDetector:
         func_name: str,
         func_start_line: int,
         in_loop: bool,
-    ) -> list[PathState]:
+    ) -> FlowResult:
         if not states:
-            return []
+            return FlowResult()
         if node.type in {"comment", "{", "}", ";"}:
-            return states
+            return FlowResult(normal=states)
 
         if node.type == "compound_statement":
             return self._analyze_statements(
@@ -622,7 +682,7 @@ class MemLeakDetector:
                 func_name=func_name,
                 func_start_line=func_start_line,
                 in_loop=in_loop,
-            ) if consequence is not None else then_states
+            ) if consequence is not None else FlowResult(normal=then_states)
 
             after_else = self._analyze_statement(
                 alternative,
@@ -633,9 +693,36 @@ class MemLeakDetector:
                 func_name=func_name,
                 func_start_line=func_start_line,
                 in_loop=in_loop,
-            ) if alternative is not None else else_states
+            ) if alternative is not None else FlowResult(normal=else_states)
 
-            return after_then + after_else
+            return FlowResult(
+                normal=after_then.normal + after_else.normal,
+                breaks=after_then.breaks + after_else.breaks,
+            )
+
+        if node.type == "switch_statement":
+            return self._analyze_switch(
+                node,
+                states,
+                resource_vars=resource_vars,
+                all_frees=all_frees,
+                params=params,
+                func_name=func_name,
+                func_start_line=func_start_line,
+                in_loop=in_loop,
+            )
+
+        if node.type == "case_statement":
+            return self._analyze_statements(
+                self._case_children(node),
+                states,
+                resource_vars=resource_vars,
+                all_frees=all_frees,
+                params=params,
+                func_name=func_name,
+                func_start_line=func_start_line,
+                in_loop=in_loop,
+            )
 
         if node.type in {"for_statement", "while_statement", "do_statement", "for_range_loop"}:
             loop_body = node.child_by_field_name("body") or node
@@ -658,10 +745,17 @@ class MemLeakDetector:
             for state in after_states:
                 for free_site in loop_frees:
                     state.freed.add(free_site.var_name)
-            return after_states
+            return FlowResult(normal=after_states)
 
         if node.type in {"return_statement", "goto_statement"}:
             for state in states:
+                self._record_pending_state_completions(
+                    state,
+                    resource_vars=resource_vars,
+                    all_frees=all_frees,
+                    func_name=func_name,
+                    func_start_line=func_start_line,
+                )
                 self._record_exit_issue(
                     kind="error_path_leak",
                     exit_node=node,
@@ -671,7 +765,7 @@ class MemLeakDetector:
                     func_name=func_name,
                     func_start_line=func_start_line,
                 )
-            return []
+            return FlowResult()
 
         if node.type == "continue_statement":
             if in_loop:
@@ -685,12 +779,97 @@ class MemLeakDetector:
                         func_name=func_name,
                         func_start_line=func_start_line,
                     )
-            return []
+            return FlowResult()
 
-        return [
+        if node.type == "break_statement":
+            break_states = []
+            for state in states:
+                recorded_completion = self._record_pending_state_completions(
+                    state,
+                    resource_vars=resource_vars,
+                    all_frees=all_frees,
+                    func_name=func_name,
+                    func_start_line=func_start_line,
+                )
+                if not recorded_completion:
+                    break_states.append(state.copy())
+            return FlowResult(breaks=break_states)
+
+        completion = self._state_completion_assignment(node)
+        if completion is not None:
+            states = [state.copy() for state in states]
+            for state in states:
+                state.completed_at.append(completion)
+
+        return FlowResult(normal=[
             self._apply_statement_effects(node, state, resource_vars, params)
             for state in states
+        ])
+
+    def _case_children(self, node) -> list:
+        result = []
+        after_colon = False
+        for child in node.children:
+            if child.type == ":":
+                after_colon = True
+                continue
+            if after_colon and child.type != "comment":
+                result.append(child)
+        return result
+
+    def _switch_cases(self, switch_node) -> list:
+        body = switch_node.child_by_field_name("body")
+        if body is None:
+            return []
+        return [
+            child
+            for child in body.children
+            if child.type == "case_statement"
         ]
+
+    def _case_is_default(self, case_node) -> bool:
+        return any(child.type == "default" for child in case_node.children)
+
+    def _analyze_switch(
+        self,
+        node,
+        states: list[PathState],
+        *,
+        resource_vars: set[str],
+        all_frees: list[FreeSite],
+        params: set[str],
+        func_name: str,
+        func_start_line: int,
+        in_loop: bool,
+    ) -> FlowResult:
+        after_switch: list[PathState] = []
+        fallthrough: list[PathState] = []
+        cases = self._switch_cases(node)
+        if not cases:
+            return FlowResult(normal=[state.copy() for state in states])
+        if not any(self._case_is_default(case) for case in cases):
+            after_switch.extend(state.copy() for state in states)
+
+        for case in cases:
+            case_input = [state.copy() for state in states] + fallthrough
+            fallthrough = []
+            if not case_input:
+                continue
+            result = self._analyze_statement(
+                case,
+                case_input,
+                resource_vars=resource_vars,
+                all_frees=all_frees,
+                params=params,
+                func_name=func_name,
+                func_start_line=func_start_line,
+                in_loop=in_loop,
+            )
+            after_switch.extend(result.breaks)
+            fallthrough = result.normal
+
+        after_switch.extend(fallthrough)
+        return FlowResult(normal=after_switch)
 
     def _analyze_statements(
         self,
@@ -703,10 +882,11 @@ class MemLeakDetector:
         func_name: str,
         func_start_line: int,
         in_loop: bool,
-    ) -> list[PathState]:
+    ) -> FlowResult:
         current = states
+        breaks: list[PathState] = []
         for stmt in statements:
-            current = self._analyze_statement(
+            result = self._analyze_statement(
                 stmt,
                 current,
                 resource_vars=resource_vars,
@@ -716,9 +896,11 @@ class MemLeakDetector:
                 func_start_line=func_start_line,
                 in_loop=in_loop,
             )
+            breaks.extend(result.breaks)
+            current = result.normal
             if not current:
                 break
-        return current
+        return FlowResult(normal=current, breaks=breaks)
 
     # ============================================================
     # 路径敏感规则: return / goto / continue 前未释放
@@ -790,6 +972,7 @@ def _collect_source_files(root: Path) -> list[Path]:
 KIND_DESC = {
     "error_path_leak": "异常分支 (return/goto) 前未释放",
     "continue_leak": "循环中 continue 前未释放",
+    "state_completion_leak": "状态机完成前未释放",
 }
 
 

@@ -4,4 +4,4 @@ description: 异常分支内存泄漏检测（错误路径未释放 / 循环 con
 enabled: true
 mode: opencode
 category: resource_leak
-modified_at: "2026-06-02T16:39:32+08:00"
+modified_at: "2026-06-02T19:31:52+08:00"
