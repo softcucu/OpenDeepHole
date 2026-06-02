@@ -280,6 +280,14 @@ export default function ScanStatus({ scanId, onBack }: Props) {
     await handleFeedbackChange(next);
   };
 
+  const removeSelectedFeedbackIds = async (feedbackIds: string[]) => {
+    if (feedbackIds.length === 0) return;
+    const next = new Set(selectedFeedbackIds ?? scan?.feedback_ids ?? []);
+    for (const id of feedbackIds) next.delete(id);
+    setSelectedFeedbackIds(next);
+    setScan((prev) => prev ? { ...prev, feedback_ids: [...next] } : prev);
+  };
+
   const loadSkill = async (vulnType: string) => {
     setSkillType(vulnType);
     setSkillLoading(true);
@@ -727,6 +735,7 @@ export default function ScanStatus({ scanId, onBack }: Props) {
             fpReview={fpReview}
             currentFpReviewIndex={currentFpReviewIndex}
             onFeedbackCreated={addSelectedFeedbackIds}
+            onFeedbackRemoved={removeSelectedFeedbackIds}
             onVulnMarked={() => {
               if (skillOpen && skillType) {
                 if (skillType === "__fp_review__") {

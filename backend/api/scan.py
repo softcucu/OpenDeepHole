@@ -26,6 +26,7 @@ from backend.models import (
     AgentFpReviewProgress,
     AgentFpReviewResult,
     BatchMarkRequest,
+    BatchUnmarkRequest,
     Candidate,
     CreateScanRequest,
     FeedbackEntry,
@@ -39,6 +40,7 @@ from backend.models import (
     ScanStartResponse,
     ScanStatus,
     ScanSummary,
+    UnmarkRequest,
     UpdateScanProductRequest,
     User,
 )
@@ -851,6 +853,54 @@ def _mark_single(
     return entry.id
 
 
+def _remove_feedback_ids_from_scan(scan_id: str, scan: ScanStatus, feedback_ids: list[str]) -> None:
+    if not feedback_ids:
+        return
+    removed = set(feedback_ids)
+    next_ids = [fid for fid in scan.feedback_ids if fid not in removed]
+    if next_ids == scan.feedback_ids:
+        loaded = get_scan_store().load_scan(scan_id)
+        if loaded is not None:
+            next_ids = [fid for fid in loaded[1].feedback_ids if fid not in removed]
+            if next_ids == loaded[1].feedback_ids:
+                return
+        else:
+            return
+    scan.feedback_ids = next_ids
+    if scan_id in _running_scans:
+        _running_scans[scan_id].feedback_ids = next_ids
+    get_scan_store().update_scan_feedback_ids(scan_id, next_ids)
+
+
+def _unmark_single(scan_id: str, scan: ScanStatus, store, index: int) -> list[str]:
+    """Clear a vulnerability's manual verdict and delete its same-source feedback."""
+    if index < 0 or index >= len(scan.vulnerabilities):
+        raise HTTPException(status_code=400, detail=f"Invalid vulnerability index: {index}")
+
+    if scan_id in _running_scans:
+        live = _running_scans[scan_id]
+        if index < len(live.vulnerabilities):
+            live.vulnerabilities[index].user_verdict = None
+            live.vulnerabilities[index].user_verdict_reason = None
+            live.vulnerabilities[index].ticket_submitted = False
+            live.vulnerabilities[index].ticket_id = ""
+
+    vuln = scan.vulnerabilities[index]
+    vuln.user_verdict = None
+    vuln.user_verdict_reason = None
+    vuln.ticket_submitted = False
+    vuln.ticket_id = ""
+
+    removed_feedback_ids = store.clear_vulnerability_user_verdict(scan_id, index)
+    logger.info(
+        "Scan %s: vulnerability %d manual verdict cleared, removed feedback IDs: %s",
+        scan_id,
+        index,
+        removed_feedback_ids,
+    )
+    return removed_feedback_ids
+
+
 @router.post("/api/scan/{scan_id}/mark")
 async def mark_vulnerability(
     scan_id: str,
@@ -872,6 +922,23 @@ async def mark_vulnerability(
         body.ticket_id,
     )
     return {"ok": True, "feedback_id": feedback_id}
+
+
+@router.post("/api/scan/{scan_id}/unmark")
+async def unmark_vulnerability(
+    scan_id: str,
+    body: UnmarkRequest,
+    current_user: User = Depends(get_current_user),
+) -> dict:
+    """Clear a vulnerability's manual verdict and remove its generated feedback."""
+    _check_scan_owner(scan_id, current_user)
+    scan = await get_scan_status(scan_id, current_user)
+    store = get_scan_store()
+    removed_feedback_ids = _unmark_single(scan_id, scan, store, body.index)
+    _remove_feedback_ids_from_scan(scan_id, scan, removed_feedback_ids)
+    if removed_feedback_ids:
+        await _push_feedback_selection_update(scan_id, scan.feedback_ids)
+    return {"ok": True, "removed_feedback_ids": removed_feedback_ids}
 
 
 @router.post("/api/scan/{scan_id}/batch-mark")
@@ -900,6 +967,27 @@ async def batch_mark_vulnerabilities(
         for item in body.items
     ]
     return {"ok": True, "feedback_ids": feedback_ids}
+
+
+@router.post("/api/scan/{scan_id}/batch-unmark")
+async def batch_unmark_vulnerabilities(
+    scan_id: str,
+    body: BatchUnmarkRequest,
+    current_user: User = Depends(get_current_user),
+) -> dict:
+    """Clear manual verdicts and remove generated feedback for multiple vulnerabilities."""
+    _check_scan_owner(scan_id, current_user)
+    if not body.indices:
+        raise HTTPException(status_code=400, detail="No indices provided")
+    scan = await get_scan_status(scan_id, current_user)
+    store = get_scan_store()
+    removed_feedback_ids: list[str] = []
+    for index in dict.fromkeys(body.indices):
+        removed_feedback_ids.extend(_unmark_single(scan_id, scan, store, index))
+    _remove_feedback_ids_from_scan(scan_id, scan, removed_feedback_ids)
+    if removed_feedback_ids:
+        await _push_feedback_selection_update(scan_id, scan.feedback_ids)
+    return {"ok": True, "removed_feedback_ids": removed_feedback_ids}
 
 
 # ---------------------------------------------------------------------------

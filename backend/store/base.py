@@ -100,6 +100,10 @@ class ScanStoreBase(ABC):
         """Update user verdict on a vulnerability."""
 
     @abstractmethod
+    def clear_vulnerability_user_verdict(self, scan_id: str, index: int) -> list[str]:
+        """Clear user verdict and delete same-source feedback. Returns removed feedback IDs."""
+
+    @abstractmethod
     def get_vulnerabilities(self, scan_id: str) -> list[Vulnerability]:
         """Return all vulnerabilities for a scan, ordered by index."""
 

@@ -17,6 +17,7 @@ from backend.models import (
     AgentInfo,
     AgentRemoteConfig,
     BatchMarkRequest,
+    BatchUnmarkRequest,
     CheckerInfo,
     CreateScanRequest,
     FeedbackCreateRequest,
@@ -25,6 +26,7 @@ from backend.models import (
     FpReviewJob,
     MarkRequest,
     ScanStatus,
+    UnmarkRequest,
     User,
 )
 from backend.registry import CHECKER_VISIBILITY_PUBLIC, refresh_registry
@@ -282,6 +284,15 @@ async def mark_public_vulnerability(
     return await scan_api.mark_vulnerability(scan_id, body, current_user)
 
 
+@router.post("/api/public/scans/{scan_id}/unmark")
+async def unmark_public_vulnerability(
+    scan_id: str,
+    body: UnmarkRequest,
+    current_user: User = Depends(_public_user_dependency),
+) -> dict:
+    return await scan_api.unmark_vulnerability(scan_id, body, current_user)
+
+
 @router.post("/api/public/scans/{scan_id}/batch-mark")
 async def batch_mark_public_vulnerabilities(
     scan_id: str,
@@ -289,6 +300,15 @@ async def batch_mark_public_vulnerabilities(
     current_user: User = Depends(_public_user_dependency),
 ) -> dict:
     return await scan_api.batch_mark_vulnerabilities(scan_id, body, current_user)
+
+
+@router.post("/api/public/scans/{scan_id}/batch-unmark")
+async def batch_unmark_public_vulnerabilities(
+    scan_id: str,
+    body: BatchUnmarkRequest,
+    current_user: User = Depends(_public_user_dependency),
+) -> dict:
+    return await scan_api.batch_unmark_vulnerabilities(scan_id, body, current_user)
 
 
 @router.put("/api/public/scans/{scan_id}/feedback")

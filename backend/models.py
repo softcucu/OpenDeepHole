@@ -226,6 +226,14 @@ class BatchMarkRequest(BaseModel):
     """Request to batch-mark multiple vulnerabilities."""
     items: list[BatchMarkItem]
 
+class UnmarkRequest(BaseModel):
+    """Request to clear a vulnerability's manual verdict."""
+    index: int
+
+class BatchUnmarkRequest(BaseModel):
+    """Request to clear manual verdicts for multiple vulnerabilities."""
+    indices: list[int]
+
 class SaveFalsePositiveRequest(BaseModel):
     """Request to save a false positive experience to the project SKILL."""
     index: int

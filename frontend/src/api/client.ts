@@ -293,6 +293,22 @@ export async function markVulnerability(
   return data;
 }
 
+export async function unmarkVulnerability(
+  scanId: string,
+  index: number,
+): Promise<{ ok: boolean; removed_feedback_ids: string[] }> {
+  if (isPublicScan(scanId)) {
+    const { data } = await api.post(
+      publicScanPath("/unmark"),
+      { index },
+      { params: publicParams() },
+    );
+    return data;
+  }
+  const { data } = await api.post(`/api/scan/${scanId}/unmark`, { index });
+  return data;
+}
+
 export async function batchMarkVulnerabilities(
   scanId: string,
   items: Array<{ index: number; verdict: string; reason: string }>,
@@ -306,6 +322,22 @@ export async function batchMarkVulnerabilities(
     return data;
   }
   const { data } = await api.post(`/api/scan/${scanId}/batch-mark`, { items });
+  return data;
+}
+
+export async function batchUnmarkVulnerabilities(
+  scanId: string,
+  indices: number[],
+): Promise<{ ok: boolean; removed_feedback_ids: string[] }> {
+  if (isPublicScan(scanId)) {
+    const { data } = await api.post(
+      publicScanPath("/batch-unmark"),
+      { indices },
+      { params: publicParams() },
+    );
+    return data;
+  }
+  const { data } = await api.post(`/api/scan/${scanId}/batch-unmark`, { indices });
   return data;
 }
 

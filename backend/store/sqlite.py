@@ -744,6 +744,67 @@ class SqliteScanStore(ScanStoreBase):
             )
             self._conn.commit()
 
+    def clear_vulnerability_user_verdict(self, scan_id: str, index: int) -> list[str]:
+        self._conn.row_factory = sqlite3.Row
+        with self._lock:
+            cur = self._conn.execute(
+                """\
+                SELECT s.project_id, v.vuln_type, v.file, v.line, v.function, v.description
+                FROM vulnerabilities v
+                JOIN scans s ON s.scan_id = v.scan_id
+                WHERE v.scan_id = ? AND v.idx = ?
+                """,
+                (scan_id, index),
+            )
+            row = cur.fetchone()
+            if row is None:
+                return []
+
+            feedback_cur = self._conn.execute(
+                """\
+                SELECT id
+                FROM feedback_entries
+                WHERE source_scan_id = ?
+                  AND project_id = ?
+                  AND vuln_type = ?
+                  AND file = ?
+                  AND line = ?
+                  AND function = ?
+                  AND description = ?
+                ORDER BY created_at ASC, id ASC
+                """,
+                (
+                    scan_id,
+                    row["project_id"],
+                    row["vuln_type"],
+                    row["file"],
+                    row["line"],
+                    row["function"],
+                    row["description"],
+                ),
+            )
+            removed_ids = [r["id"] for r in feedback_cur.fetchall()]
+            if removed_ids:
+                placeholders = ", ".join("?" for _ in removed_ids)
+                self._conn.execute(
+                    f"DELETE FROM feedback_entries WHERE id IN ({placeholders})",
+                    removed_ids,
+                )
+
+            self._conn.execute(
+                """\
+                UPDATE vulnerabilities
+                SET user_verdict = NULL,
+                    user_verdict_reason = NULL,
+                    ticket_submitted = 0,
+                    ticket_id = ''
+                WHERE scan_id = ? AND idx = ?
+                """,
+                (scan_id, index),
+            )
+            self._conn.commit()
+            return removed_ids
+
     def get_vulnerabilities(self, scan_id: str) -> list[Vulnerability]:
         self._conn.row_factory = sqlite3.Row
         cur = self._conn.execute(
