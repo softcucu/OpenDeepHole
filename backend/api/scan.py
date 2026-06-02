@@ -1133,12 +1133,14 @@ async def agent_fp_review_result(scan_id: str, body: AgentFpReviewResult) -> dic
     severity = body.severity if body.severity in {"high", "medium", "low"} else "low"
     if body.verdict == "fp":
         severity = "low"
+    elif severity == "low":
+        severity = "medium"
     result = FpReviewResult(
         vuln_index=body.vuln_index,
         verdict=body.verdict,
         severity=severity,
         reason=body.reason,
-        vulnerability_report=body.vulnerability_report if severity == "high" else "",
+        vulnerability_report=body.vulnerability_report if body.verdict == "tp" else "",
         created_at=now,
     )
     store.add_fp_review_result(body.review_id, result)
@@ -1146,6 +1148,7 @@ async def agent_fp_review_result(scan_id: str, body: AgentFpReviewResult) -> dic
     publish(scan_id, "fp_review_result", {
         "review_id": body.review_id, "vuln_index": body.vuln_index,
         "verdict": body.verdict, "severity": severity, "reason": body.reason,
+        "vulnerability_report": result.vulnerability_report,
     })
     logger.debug("FP review result for %s vuln[%d]: %s", scan_id, body.vuln_index, body.verdict)
     return {"ok": True}
@@ -1263,10 +1266,14 @@ async def get_fp_review_skill(
 ) -> dict:
     """Return the FP review skill content, merged with user feedback for this scan."""
     _check_scan_owner(scan_id, current_user)
-    skill_path = Path(__file__).resolve().parent.parent.parent / "agent" / "skills" / "fp_review.md"
-    if not skill_path.is_file():
-        raise HTTPException(status_code=404, detail="fp_review.md not found")
-    original = skill_path.read_text(encoding="utf-8")
+    skills_dir = Path(__file__).resolve().parent.parent.parent / "agent" / "skills"
+    skill_paths = [
+        ("prove-bug", skills_dir / "fp_review.md"),
+        ("prove-fp", skills_dir / "fp_review_discriminator.md"),
+    ]
+    missing = [path.name for _, path in skill_paths if not path.is_file()]
+    if missing:
+        raise HTTPException(status_code=404, detail=f"FP review skill not found: {', '.join(missing)}")
 
     # Merge only feedback entries selected for this scan.
     all_fb: list[FeedbackEntry] = _selected_feedback_entries(scan_id)
@@ -1283,7 +1290,11 @@ async def get_fp_review_skill(
         "以下是用户在审计过程中选择注入的经验，复核时应结合这些经验校验结论：",
     )
 
-    return {"content": original.rstrip() + fp_section}
+    content = "\n\n---\n\n".join(
+        f"# {name}\n\n{path.read_text(encoding='utf-8').rstrip()}"
+        for name, path in skill_paths
+    )
+    return {"content": content + fp_section}
 
 
 # ---------------------------------------------------------------------------

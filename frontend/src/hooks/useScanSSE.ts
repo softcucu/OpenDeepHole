@@ -53,6 +53,7 @@ interface FpReviewResultEvent {
   verdict: "tp" | "fp";
   severity: "high" | "medium" | "low";
   reason: string;
+  vulnerability_report?: string;
 }
 
 interface FpReviewFinishEvent {

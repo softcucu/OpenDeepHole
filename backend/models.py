@@ -512,7 +512,7 @@ class FpReviewResult(BaseModel):
     verdict: str              # "tp" (true positive) | "fp" (false positive)
     severity: str = "low"     # "high" | "medium" | "low"
     reason: str               # AI reasoning
-    vulnerability_report: str = ""  # Markdown report for externally triggerable issues
+    vulnerability_report: str = ""  # Markdown report for confirmed issues
     created_at: str
 
 

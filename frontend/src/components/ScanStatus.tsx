@@ -151,7 +151,7 @@ export default function ScanStatus({ scanId, onBack }: Props) {
           verdict: data.verdict,
           severity: data.severity,
           reason: data.reason,
-          vulnerability_report: "",
+          vulnerability_report: data.vulnerability_report ?? "",
           created_at: new Date().toISOString(),
         };
         return { ...prev, results: [...prev.results, newResult] };
