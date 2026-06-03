@@ -1490,6 +1490,17 @@ async def _run_scan(
         store.update_scan_workspace(scan_id, str(workspace))
         cancel_event = _scan_cancel_events[scan_id]
 
+        from backend.preprocess.memory_api_discovery import ensure_memory_api_artifact
+        await ensure_memory_api_artifact(
+            project_root=project_dir,
+            workspace=workspace,
+            scan_dir=Path(get_config().storage.scans_dir) / scan_id,
+            db=db,
+            project_id=project_id,
+            cancel_event=cancel_event,
+            emit=lambda phase, message: emit(phase, message),
+        )
+
         candidate_queue: asyncio.Queue = asyncio.Queue()
         producer_error: list[Exception] = []
         _ANALYSIS_DONE = object()  # 哨兵值：单个 checker 分析完成

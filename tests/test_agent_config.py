@@ -27,6 +27,8 @@ class AgentConfigTests(unittest.TestCase):
         self.assertEqual(cfg.opencode.timeout, 1200)
         self.assertEqual(cfg.opencode.max_retries, 2)
         self.assertIsNone(cfg.fp_review_cli)
+        self.assertTrue(cfg.memory_api_discovery.enabled)
+        self.assertEqual(cfg.memory_api_discovery.batch_size, 8)
 
     def test_apply_remote_config_overwrites_falsey_values(self) -> None:
         cfg = AgentConfig()
@@ -47,6 +49,12 @@ class AgentConfigTests(unittest.TestCase):
                     "timeout": 900,
                     "max_retries": 1,
                 },
+                "memory_api_discovery": {
+                    "enabled": False,
+                    "batch_size": 5,
+                    "timeout_seconds": 120,
+                    "max_candidates": 50,
+                },
             },
         )
 
@@ -59,6 +67,10 @@ class AgentConfigTests(unittest.TestCase):
         self.assertIsNotNone(cfg.fp_review_cli)
         self.assertEqual(cfg.fp_review_cli.tool, "claude")
         self.assertEqual(cfg.fp_review_cli.model, "sonnet")
+        self.assertFalse(cfg.memory_api_discovery.enabled)
+        self.assertEqual(cfg.memory_api_discovery.batch_size, 5)
+        self.assertEqual(cfg.memory_api_discovery.timeout_seconds, 120)
+        self.assertEqual(cfg.memory_api_discovery.max_candidates, 50)
 
     def test_remote_config_dict_exports_managed_fields(self) -> None:
         cfg = AgentConfig()
@@ -76,6 +88,8 @@ class AgentConfigTests(unittest.TestCase):
         self.assertEqual(remote["opencode"]["timeout"], 1200)
         self.assertEqual(remote["opencode"]["max_retries"], 2)
         self.assertIsNone(remote["fp_review_cli"])
+        self.assertEqual(remote["memory_api_discovery"]["batch_size"], 8)
+        self.assertEqual(remote["memory_api_discovery"]["max_candidates"], 200)
 
     def test_save_config_persists_remote_managed_fields(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -100,6 +114,7 @@ class AgentConfigTests(unittest.TestCase):
                     "llm_api": {"stream": False, "timeout": 300},
                     "opencode": {"tool": "opencode", "executable": "opencode", "timeout": 1200, "max_retries": 2},
                     "fp_review_cli": {"tool": "claude", "executable": "claude", "timeout": 900},
+                    "memory_api_discovery": {"enabled": True, "batch_size": 10, "timeout_seconds": 240},
                 },
             )
             save_config(cfg)
@@ -115,6 +130,9 @@ class AgentConfigTests(unittest.TestCase):
             self.assertEqual(raw["opencode"]["max_retries"], 2)
             self.assertEqual(raw["fp_review_cli"]["tool"], "claude")
             self.assertEqual(raw["fp_review_cli"]["timeout"], 900)
+            self.assertTrue(raw["memory_api_discovery"]["enabled"])
+            self.assertEqual(raw["memory_api_discovery"]["batch_size"], 10)
+            self.assertEqual(raw["memory_api_discovery"]["timeout_seconds"], 240)
 
     def test_legacy_executable_infers_tool_and_fp_review_inherits(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

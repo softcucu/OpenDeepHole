@@ -371,12 +371,20 @@ class AgentOpenCodeConfig(BaseModel):
     max_retries: int = 2
 
 
+class AgentMemoryApiDiscoveryConfig(BaseModel):
+    enabled: bool = True
+    batch_size: int = 8
+    timeout_seconds: int = 300
+    max_candidates: int = 200
+
+
 class AgentRemoteConfig(BaseModel):
     """Agent configuration managed from the server Web UI."""
     no_proxy: str = "10.0.0.0/8"
     llm_api: AgentLLMApiConfig = AgentLLMApiConfig()
     opencode: AgentOpenCodeConfig = AgentOpenCodeConfig()
     fp_review_cli: AgentOpenCodeConfig | None = None
+    memory_api_discovery: AgentMemoryApiDiscoveryConfig = AgentMemoryApiDiscoveryConfig()
 
 
 class CreateScanRequest(BaseModel):

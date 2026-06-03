@@ -38,6 +38,13 @@ class OpenCodeConfig(BaseModel):
     mock: bool = False  # When True, skip real opencode and return fake results
 
 
+class MemoryApiDiscoveryConfig(BaseModel):
+    enabled: bool = True
+    batch_size: int = 8
+    timeout_seconds: int = 300
+    max_candidates: int = 200
+
+
 class StorageConfig(BaseModel):
     projects_dir: str = str(_DEFAULT_DATA_ROOT / "projects")
     scans_dir: str = str(_DEFAULT_DATA_ROOT / "scans")
@@ -82,6 +89,7 @@ class AppConfig(BaseModel):
     mcp_server: MCPServerConfig = MCPServerConfig()
     opencode: OpenCodeConfig = OpenCodeConfig()
     fp_review_cli: OpenCodeConfig | None = None
+    memory_api_discovery: MemoryApiDiscoveryConfig = MemoryApiDiscoveryConfig()
     storage: StorageConfig = StorageConfig()
     scan: ScanConfig = ScanConfig()
     logging: LoggingConfig = LoggingConfig()

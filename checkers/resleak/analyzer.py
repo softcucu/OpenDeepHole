@@ -484,6 +484,28 @@ class Analyzer(BaseAnalyzer):
 
         # ---- 加载自定义分配函数配置 ----
         custom_cfg = _load_custom_config(checker_dir)
+        artifact_allocs: set[str] = set()
+        artifact_frees: set[str] = set()
+        try:
+            from backend.preprocess.memory_api_discovery import load_memory_api_artifact
+            artifact = load_memory_api_artifact(project_path)
+            for item in artifact.get("allocators") or []:
+                if isinstance(item, dict) and item.get("name"):
+                    artifact_allocs.add(str(item["name"]))
+            for item in artifact.get("deallocators") or []:
+                if isinstance(item, dict) and item.get("name"):
+                    artifact_frees.add(str(item["name"]))
+            existing_pairs = {(alloc, free_name) for alloc, frees, _ in custom_cfg["pairs"] for free_name in frees}
+            for item in artifact.get("pairs") or []:
+                if not isinstance(item, dict):
+                    continue
+                alloc = str(item.get("allocator") or "").strip()
+                free_name = str(item.get("deallocator") or "").strip()
+                if alloc and free_name and (alloc, free_name) not in existing_pairs:
+                    custom_cfg["pairs"].append((alloc, [free_name], "heap memory"))
+                    existing_pairs.add((alloc, free_name))
+        except Exception:
+            pass
 
         # 方式三：自动推断
         inferred_allocs: set[str] = set()
@@ -502,7 +524,8 @@ class Analyzer(BaseAnalyzer):
                     pattern_frees.add(name)
 
         # 合并所有额外分配函数
-        extra_allocs = inferred_allocs | pattern_allocs
+        extra_allocs = inferred_allocs | pattern_allocs | artifact_allocs
+        pattern_frees |= artifact_frees
 
         # ---- Phase 1: cppcheck ----
         cppcheck = _get_cppcheck()

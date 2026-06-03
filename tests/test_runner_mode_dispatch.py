@@ -33,6 +33,12 @@ def _candidate(line: int = 12) -> Candidate:
     )
 
 
+def _api_registry(tmp_path: Path):
+    prompt_path = tmp_path / "prompt.txt"
+    prompt_path.write_text("api prompt", encoding="utf-8")
+    return {"memleak": SimpleNamespace(mode="api", prompt_path=prompt_path)}
+
+
 def test_cli_command_builders_use_selected_tool(tmp_path: Path) -> None:
     claude = _build_cli_command("claude", "claude", tmp_path, "hello", "sonnet")
     hac = _build_cli_command("hac", "hac", tmp_path, "hello", "gemini-model")
@@ -240,6 +246,7 @@ def test_api_checker_uses_api_even_when_legacy_global_switch_is_false(tmp_path: 
 
     with (
         patch("backend.opencode.runner.get_config", return_value=config),
+        patch("backend.registry.get_registry", return_value=_api_registry(tmp_path)),
         patch("backend.opencode.llm_api_runner.ensure_llm_api_available", new=AsyncMock(return_value=None)),
         patch("backend.opencode.llm_api_runner.run_audit_via_api", new=AsyncMock(return_value=expected)) as api_audit,
     ):
@@ -259,6 +266,7 @@ def test_api_checker_falls_back_to_opencode_when_api_check_fails(tmp_path: Path)
 
     with (
         patch("backend.opencode.runner.get_config", return_value=config),
+        patch("backend.registry.get_registry", return_value=_api_registry(tmp_path)),
         patch(
             "backend.opencode.llm_api_runner.ensure_llm_api_available",
             new=AsyncMock(side_effect=LLMApiUnavailableError("bad api")),
@@ -283,6 +291,7 @@ def test_api_checker_falls_back_to_opencode_when_api_call_fails(tmp_path: Path) 
 
     with (
         patch("backend.opencode.runner.get_config", return_value=config),
+        patch("backend.registry.get_registry", return_value=_api_registry(tmp_path)),
         patch("backend.opencode.llm_api_runner.ensure_llm_api_available", new=AsyncMock(return_value=None)),
         patch(
             "backend.opencode.llm_api_runner.run_audit_via_api",
@@ -307,6 +316,7 @@ def test_api_checker_batch_uses_api_even_when_legacy_global_switch_is_false(tmp_
 
     with (
         patch("backend.opencode.runner.get_config", return_value=config),
+        patch("backend.registry.get_registry", return_value=_api_registry(tmp_path)),
         patch("backend.opencode.llm_api_runner.ensure_llm_api_available", new=AsyncMock(return_value=None)),
         patch("backend.opencode.llm_api_runner.run_batch_audit_via_api", new=AsyncMock(return_value=expected)) as api_audit,
     ):
@@ -326,6 +336,7 @@ def test_api_checker_batch_falls_back_to_opencode_when_api_check_fails(tmp_path:
 
     with (
         patch("backend.opencode.runner.get_config", return_value=config),
+        patch("backend.registry.get_registry", return_value=_api_registry(tmp_path)),
         patch(
             "backend.opencode.llm_api_runner.ensure_llm_api_available",
             new=AsyncMock(side_effect=LLMApiUnavailableError("bad api")),
@@ -350,6 +361,7 @@ def test_api_checker_batch_falls_back_to_opencode_when_api_call_fails(tmp_path: 
 
     with (
         patch("backend.opencode.runner.get_config", return_value=config),
+        patch("backend.registry.get_registry", return_value=_api_registry(tmp_path)),
         patch("backend.opencode.llm_api_runner.ensure_llm_api_available", new=AsyncMock(return_value=None)),
         patch(
             "backend.opencode.llm_api_runner.run_batch_audit_via_api",

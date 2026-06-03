@@ -39,6 +39,14 @@ class OpenCodeConfig:
     max_retries: int = 2          # retry on transient errors (not timeout)
 
 
+@dataclass
+class MemoryApiDiscoveryConfig:
+    enabled: bool = True
+    batch_size: int = 8
+    timeout_seconds: int = 300
+    max_candidates: int = 200
+
+
 def normalize_cli_config(config: OpenCodeConfig) -> OpenCodeConfig:
     """Normalize a CLI config in place while keeping legacy executable values."""
     tool = (config.tool or "").strip().lower()
@@ -73,6 +81,7 @@ class AgentConfig:
     llm_api: LLMApiConfig = field(default_factory=LLMApiConfig)
     opencode: OpenCodeConfig = field(default_factory=OpenCodeConfig)
     fp_review_cli: OpenCodeConfig | None = None
+    memory_api_discovery: MemoryApiDiscoveryConfig = field(default_factory=MemoryApiDiscoveryConfig)
     # Runtime-only: path to the loaded config file (not serialized)
     config_file: Optional[Path] = field(default=None, repr=False, compare=False)
 
@@ -104,6 +113,11 @@ def apply_remote_config(config: AgentConfig, remote: dict) -> None:
                 k: v for k, v in section.items()
                 if k in {f.name for f in dataclasses.fields(OpenCodeConfig)}
             }))
+    section = remote.get("memory_api_discovery") or {}
+    if isinstance(section, dict):
+        for f in dataclasses.fields(config.memory_api_discovery):
+            if f.name in section and section[f.name] is not None:
+                setattr(config.memory_api_discovery, f.name, section[f.name])
 
 
 def apply_network_env(config: AgentConfig) -> None:
@@ -134,6 +148,10 @@ def remote_config_dict(config: AgentConfig) -> dict:
                 for f in dataclasses.fields(config.fp_review_cli)
             }
         ),
+        "memory_api_discovery": {
+            f.name: getattr(config.memory_api_discovery, f.name)
+            for f in dataclasses.fields(config.memory_api_discovery)
+        },
     }
 
 
@@ -156,9 +174,14 @@ def load_config(path: Optional[Path] = None) -> AgentConfig:
 
     llm_fields = {f.name for f in dataclasses.fields(LLMApiConfig)}
     oc_fields = {f.name for f in dataclasses.fields(OpenCodeConfig)}
+    memory_api_fields = {f.name for f in dataclasses.fields(MemoryApiDiscoveryConfig)}
 
     llm_raw = {k: v for k, v in raw.get("llm_api", {}).items() if k in llm_fields}
     oc_raw = {k: v for k, v in raw.get("opencode", {}).items() if k in oc_fields}
+    memory_api_raw = {
+        k: v for k, v in raw.get("memory_api_discovery", {}).items()
+        if k in memory_api_fields
+    }
     if "tool" not in oc_raw and "executable" in oc_raw:
         oc_raw["tool"] = ""
     fp_raw = raw.get("fp_review_cli", None)
@@ -179,6 +202,7 @@ def load_config(path: Optional[Path] = None) -> AgentConfig:
         llm_api=LLMApiConfig(**llm_raw),
         opencode=normalize_cli_config(OpenCodeConfig(**oc_raw)),
         fp_review_cli=normalize_cli_config(fp_cfg) if fp_cfg is not None else None,
+        memory_api_discovery=MemoryApiDiscoveryConfig(**memory_api_raw),
         config_file=path,
     )
     return cfg
@@ -210,5 +234,9 @@ def save_config(config: AgentConfig) -> None:
             f.name: getattr(config.fp_review_cli, f.name)
             for f in dataclasses.fields(config.fp_review_cli)
         }
+    raw["memory_api_discovery"] = {
+        f.name: getattr(config.memory_api_discovery, f.name)
+        for f in dataclasses.fields(config.memory_api_discovery)
+    }
     with open(path, "w", encoding="utf-8") as f:
         yaml.dump(raw, f, allow_unicode=True, default_flow_style=False)

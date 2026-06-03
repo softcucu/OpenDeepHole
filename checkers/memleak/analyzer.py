@@ -146,8 +146,9 @@ class FlowResult:
 # ============================================================
 
 class MemLeakDetector:
-    def __init__(self, source: bytes):
+    def __init__(self, source: bytes, extra_free_funcs: set[str] | None = None):
         self.source = source
+        self.extra_free_funcs = extra_free_funcs or set()
         self.parser = tree_sitter.Parser(_CPP_LANGUAGE)
         self.tree = self.parser.parse(source)
         self.issues: list[Issue] = []
@@ -232,7 +233,7 @@ class MemLeakDetector:
         if func_node is None:
             return None
         fname = self._extract_callee_name(func_node)
-        if not fname or not is_free_func(fname):
+        if not fname or (not is_free_func(fname) and fname not in self.extra_free_funcs):
             return None
         args = node.child_by_field_name("arguments")
         if args is None:
@@ -992,6 +993,11 @@ class Analyzer(BaseAnalyzer):
         """逐文件扫描，按函数合并后 yield 候选漏洞点。"""
         files = _collect_source_files(project_path)
         total = len(files)
+        try:
+            from backend.preprocess.memory_api_discovery import memory_deallocator_names
+            extra_free_funcs = memory_deallocator_names(project_path)
+        except Exception:
+            extra_free_funcs = set()
 
         for idx, file_path in enumerate(files, 1):
             if self.on_file_progress and (idx % 20 == 0 or idx == total or idx == 1):
@@ -1003,7 +1009,7 @@ class Analyzer(BaseAnalyzer):
                 continue
 
             try:
-                detector = MemLeakDetector(raw)
+                detector = MemLeakDetector(raw, extra_free_funcs=extra_free_funcs)
                 issues = detector.run()
             except Exception:
                 continue

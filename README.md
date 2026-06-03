@@ -322,6 +322,12 @@ class Analyzer(BaseAnalyzer):
 - `find_candidates()` 接收项目根目录路径，返回 `Iterable[Candidate]`（列表或 generator 均可）
 - 可以 `from backend.analyzers.base import BaseAnalyzer, Candidate` 一次性导入所需类
 
+**扫描前内存 API 缓存：**
+
+扫描在 checker 静态分析开始前会检查项目根目录中的 `memory_api_pairs.json`。如果文件已存在，会直接复用；如果不存在，会先分析项目中的底层堆内存申请/释放函数和宏，批量调用 opencode 判断候选并生成该 JSON 文件，然后再开始后续扫描。该过程只读取 `code_index.db` 和源码，不修改数据库。
+
+内存类 checker 可读取该文件中的 `allocators`、`deallocators` 和 `pairs` 来识别项目自定义的 malloc/free 薄封装；结构体/对象专用 destroy/free、复杂 cleanup/refcount 生命周期函数和文件/socket/mmap 等非堆资源不会作为底层内存 API 保留。
+
 **第 4 步：本地测试 Checker（无需后端）**
 
 ```bash

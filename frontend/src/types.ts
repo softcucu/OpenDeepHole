@@ -237,11 +237,19 @@ export interface AgentOpenCodeConfig {
   max_retries: number;
 }
 
+export interface AgentMemoryApiDiscoveryConfig {
+  enabled: boolean;
+  batch_size: number;
+  timeout_seconds: number;
+  max_candidates: number;
+}
+
 export interface AgentRemoteConfig {
   no_proxy: string;
   llm_api: AgentLLMApiConfig;
   opencode: AgentOpenCodeConfig;
   fp_review_cli?: AgentOpenCodeConfig | null;
+  memory_api_discovery: AgentMemoryApiDiscoveryConfig;
 }
 
 export interface AgentConfigTestResult {

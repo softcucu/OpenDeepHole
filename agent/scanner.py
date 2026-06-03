@@ -307,6 +307,12 @@ def _configure_backend(config: AgentConfig, scan_dir: Path) -> None:
             "max_retries": config.opencode.max_retries,
             "mock": False,
         },
+        "memory_api_discovery": {
+            "enabled": config.memory_api_discovery.enabled,
+            "batch_size": config.memory_api_discovery.batch_size,
+            "timeout_seconds": config.memory_api_discovery.timeout_seconds,
+            "max_candidates": config.memory_api_discovery.max_candidates,
+        },
         # AGENT_PROJECT_DIR tells MCP to find code_index.db in the project dir.
         # Keep result JSON files isolated inside this scan's directory so the
         # MCP submit path and opencode result read path cannot cross scans.
@@ -567,6 +573,18 @@ async def run_scan(
             mcp_port,
         )
         await emit("init", "Analysis workspace ready")
+
+        # --- Phase 5: Memory allocation/free API preprocessing ---
+        from backend.preprocess.memory_api_discovery import ensure_memory_api_artifact
+        await ensure_memory_api_artifact(
+            project_root=project_path,
+            workspace=workspace,
+            scan_dir=scan_dir,
+            db=db,
+            project_id=scan_id,
+            cancel_event=cancel_event,
+            emit=lambda phase, message: emit(phase, message),
+        )
 
         # --- Phase 5: Static analysis (or load from cache) ---
         # Skip static analysis only when a candidates cache file already exists
