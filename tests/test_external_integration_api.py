@@ -18,6 +18,7 @@ from backend.models import (
     ScanItemStatus,
     ScanMeta,
     ScanStatus,
+    UnmarkRequest,
     User,
     Vulnerability,
 )
@@ -163,6 +164,66 @@ class ExternalIntegrationApiTests(unittest.TestCase):
             self.assertEqual(ctx.exception.status_code, 403)
             updated = store.get_vulnerabilities("scan-1")[0]
             self.assertEqual(updated.user_verdict, "confirmed")
+
+    def test_public_scan_token_allows_unmarking_the_scan(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = SqliteScanStore(Path(tmp) / "scans.db")
+            store.create_user("owner", "owner", "hash", "user", "owner-token")
+            scan = ScanStatus(
+                scan_id="scan-1",
+                project_id="project",
+                scan_items=["public_check"],
+                created_at="2026-01-01T00:00:00+00:00",
+                status=ScanItemStatus.COMPLETE,
+                progress=1.0,
+                total_candidates=1,
+                processed_candidates=1,
+                vulnerabilities=[],
+                feedback_ids=[],
+            )
+            meta = ScanMeta(
+                scan_items=["public_check"],
+                created_at=scan.created_at,
+                user_id="owner",
+                public_access_token="scan-token",
+            )
+            store.save_scan(scan, meta)
+            store.add_vulnerability(
+                "scan-1",
+                Vulnerability(
+                    file="a.c",
+                    line=1,
+                    function="f",
+                    vuln_type="public_check",
+                    severity="high",
+                    description="desc",
+                    ai_analysis="analysis",
+                    confirmed=True,
+                    user_verdict="confirmed",
+                    user_verdict_reason="verified",
+                ),
+            )
+
+            with (
+                patch("backend.api.integration.get_scan_store", return_value=store),
+                patch("backend.api.scan.get_scan_store", return_value=store),
+            ):
+                user = integration_api._public_user_for_scan("scan-1", "scan-token")
+                result = asyncio.run(
+                    integration_api.unmark_public_vulnerability(
+                        "scan-1",
+                        UnmarkRequest(index=0),
+                        current_user=user,
+                    )
+                )
+
+                with self.assertRaises(HTTPException) as ctx:
+                    integration_api._public_user_for_scan("scan-1", "bad-token")
+
+            self.assertTrue(result["ok"])
+            self.assertEqual(ctx.exception.status_code, 403)
+            updated = store.get_vulnerabilities("scan-1")[0]
+            self.assertIsNone(updated.user_verdict)
 
 
 if __name__ == "__main__":

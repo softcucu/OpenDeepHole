@@ -106,13 +106,6 @@ class FreeSite:
 
 
 @dataclass
-class ExitSite:
-    kind: str
-    node: object
-    line: int
-
-
-@dataclass
 class Issue:
     kind: str
     func: str
@@ -124,22 +117,41 @@ class Issue:
     free_func_names: set = field(default_factory=set)
 
 
+@dataclass
+class PathState:
+    freed: set[str] = field(default_factory=set)
+    transferred: set[str] = field(default_factory=set)
+    null_vars: set[str] = field(default_factory=set)
+    non_null_vars: set[str] = field(default_factory=set)
+    completed_at: list[object] = field(default_factory=list)
+
+    def copy(self) -> "PathState":
+        return PathState(
+            freed=set(self.freed),
+            transferred=set(self.transferred),
+            null_vars=set(self.null_vars),
+            non_null_vars=set(self.non_null_vars),
+            completed_at=list(self.completed_at),
+        )
+
+
+@dataclass
+class FlowResult:
+    normal: list[PathState] = field(default_factory=list)
+    breaks: list[PathState] = field(default_factory=list)
+
+
 # ============================================================
 # 核心检测器
 # ============================================================
 
 class MemLeakDetector:
-    CONTROL_FLOW_TYPES = {
-        "if_statement", "switch_statement",
-        "for_statement", "while_statement", "do_statement",
-        "for_range_loop",
-    }
-
     def __init__(self, source: bytes):
         self.source = source
         self.parser = tree_sitter.Parser(_CPP_LANGUAGE)
         self.tree = self.parser.parse(source)
         self.issues: list[Issue] = []
+        self._issue_keys: set[tuple] = set()
 
     def text(self, node) -> str:
         if node is None:
@@ -173,6 +185,26 @@ class MemLeakDetector:
         if m:
             s = m.group(1)
         return s
+
+    @staticmethod
+    def _base_var(raw: str) -> str:
+        s = MemLeakDetector._normalize_arg(raw)
+        return re.split(r"\s*(?:->|\.)\s*", s, maxsplit=1)[0].strip()
+
+    @staticmethod
+    def _contains_identifier(text: str, name: str) -> bool:
+        return bool(re.search(rf"(?<![A-Za-z0-9_]){re.escape(name)}(?![A-Za-z0-9_])", text))
+
+    def _identifier_texts(self, node) -> list[str]:
+        result: list[str] = []
+
+        def visit(n):
+            if n.type in ("identifier", "field_identifier"):
+                result.append(self.text(n))
+            return True
+
+        self.walk(node, visit)
+        return result
 
     # ---------- 释放调用识别 ----------
 
@@ -248,12 +280,14 @@ class MemLeakDetector:
                 return None
             left_txt = self.text(self._unwrap_parens(left)).strip()
             right_txt = self.text(self._unwrap_parens(right)).strip()
-            if is_null_literal(left_txt) and not is_null_literal(right_txt):
+            left_is_null = is_null_literal(left_txt) or bool(_NULL_PATTERN.search(left_txt))
+            right_is_null = is_null_literal(right_txt) or bool(_NULL_PATTERN.search(right_txt))
+            if left_is_null and not right_is_null:
                 var = self._normalize_arg(right_txt)
                 if not var:
                     return None
                 return (var, op == "==")
-            if is_null_literal(right_txt) and not is_null_literal(left_txt):
+            if right_is_null and not left_is_null:
                 var = self._normalize_arg(left_txt)
                 if not var:
                     return None
@@ -327,43 +361,7 @@ class MemLeakDetector:
             n = n.parent
         return False
 
-    def _vars_null_at_exit(self, exit_node, scope_node) -> set:
-        result: set = set()
-        cur = exit_node
-        while cur is not None and cur != scope_node and cur.parent is not None:
-            parent = cur.parent
-            if parent.type == "if_statement":
-                cond = parent.child_by_field_name("condition")
-                consequence = parent.child_by_field_name("consequence")
-                alternative = parent.child_by_field_name("alternative")
-                parsed = self._parse_null_check(cond)
-                if parsed is not None:
-                    checked_var, then_is_null = parsed
-                    if consequence is not None and self._contains(consequence, exit_node):
-                        if then_is_null:
-                            result.add(checked_var)
-                    elif alternative is not None and self._contains(alternative, exit_node):
-                        if not then_is_null:
-                            result.add(checked_var)
-            cur = parent
-        return result
-
-    def _return_value_vars(self, exit_node) -> set:
-        result: set = set()
-        if exit_node.type != "return_statement":
-            return result
-        for c in exit_node.children:
-            if c.type in ("return", ";"):
-                continue
-            txt = self.text(c).strip()
-            if not txt:
-                continue
-            norm = self._normalize_arg(txt)
-            if norm and re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", norm):
-                result.add(norm)
-        return result
-
-    # ---------- 收集释放 / 退出 / 函数 / 循环 ----------
+    # ---------- 收集释放 / 函数 / 参数 ----------
 
     def collect_frees_in(self, scope_node, skip_types=None):
         frees: list[FreeSite] = []
@@ -380,56 +378,6 @@ class MemLeakDetector:
         self.walk(scope_node, visit)
         return frees
 
-    def _collect_frees_into(self, node, result_set: set):
-        skip = {"function_definition", "lambda_expression"}
-
-        def visit(n):
-            if n is not node and n.type in skip:
-                return False
-            fs = self.as_free_site(n)
-            if fs and not self._is_dead_null_free(fs):
-                result_set.add(fs.var_name)
-            return True
-
-        self.walk(node, visit)
-
-    def freed_vars_before(self, exit_node, scope_node) -> set:
-        result: set = set()
-        cur = exit_node
-        while cur is not None and cur != scope_node:
-            parent = cur.parent
-            if parent is None:
-                break
-            for sibling in parent.children:
-                if sibling.start_byte >= cur.start_byte:
-                    break
-                if sibling.type in self.CONTROL_FLOW_TYPES:
-                    continue
-                self._collect_frees_into(sibling, result)
-            cur = parent
-        return result
-
-    def collect_exits(self, scope_node, kinds, stop_at_loop=False):
-        exits: list[ExitSite] = []
-        type_map = {
-            "return_statement": "return",
-            "goto_statement": "goto",
-            "continue_statement": "continue",
-        }
-        nested_loops = {"for_statement", "while_statement", "do_statement",
-                        "for_range_loop"}
-
-        def visit(n):
-            if stop_at_loop and n is not scope_node and n.type in nested_loops:
-                return False
-            if n.type in type_map and type_map[n.type] in kinds:
-                exits.append(ExitSite(kind=type_map[n.type],
-                                      node=n, line=self.line(n)))
-            return True
-
-        self.walk(scope_node, visit)
-        return exits
-
     def find_functions(self):
         funcs = []
 
@@ -440,21 +388,6 @@ class MemLeakDetector:
 
         self.walk(self.tree.root_node, visit)
         return funcs
-
-    def find_loops_in(self, scope_node):
-        loops = []
-        loop_types = {"for_statement", "while_statement",
-                      "do_statement", "for_range_loop"}
-
-        def visit(n):
-            if n is not scope_node and n.type == "function_definition":
-                return False
-            if n.type in loop_types:
-                loops.append(n)
-            return True
-
-        self.walk(scope_node, visit)
-        return loops
 
     def function_name(self, func_node) -> str:
         decl = func_node.child_by_field_name("declarator")
@@ -473,13 +406,22 @@ class MemLeakDetector:
             self.walk(decl, visit)
         return result["name"]
 
-    def _is_ancestor_of(self, maybe_ancestor, node) -> bool:
-        n = node
-        while n is not None:
-            if n == maybe_ancestor:
-                return True
-            n = n.parent
-        return False
+    def function_params(self, func_node) -> set[str]:
+        decl = func_node.child_by_field_name("declarator")
+        params = set()
+        if decl is None:
+            return params
+
+        def visit(n):
+            if n.type == "parameter_declaration":
+                names = self._identifier_texts(n)
+                if names:
+                    params.add(names[-1])
+                return False
+            return True
+
+        self.walk(decl, visit)
+        return params
 
     @staticmethod
     def _display_name(var_name: str) -> str:
@@ -487,10 +429,483 @@ class MemLeakDetector:
             return var_name[len("<no-arg>:"):] + "()"
         return var_name
 
+    def _block_children(self, node) -> list:
+        if node is None:
+            return []
+        return [c for c in node.children if c.type not in {"{", "}", ";"}]
+
+    def _else_body(self, if_node):
+        alternative = if_node.child_by_field_name("alternative")
+        if alternative is None:
+            return None
+        if alternative.type == "else_clause":
+            children = [c for c in alternative.children if c.type != "else"]
+            return children[0] if children else None
+        return alternative
+
+    def _return_value_vars(self, exit_node) -> set:
+        result: set = set()
+        if exit_node.type != "return_statement":
+            return result
+        for c in exit_node.children:
+            if c.type in ("return", ";"):
+                continue
+            txt = self.text(c).strip()
+            if not txt:
+                continue
+            norm = self._normalize_arg(txt)
+            if norm and re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", norm):
+                result.add(norm)
+        return result
+
+    def _state_completion_assignment(self, node):
+        if node.type != "expression_statement":
+            return None
+        assignment = None
+        for child in node.children:
+            if child.type == "assignment_expression":
+                assignment = child
+                break
+        if assignment is None:
+            return None
+        left = assignment.child_by_field_name("left")
+        right = assignment.child_by_field_name("right")
+        if left is None or right is None:
+            return None
+        left_txt = self.text(left).strip()
+        left_name = self._normalize_arg(left_txt)
+        if not left_name:
+            return None
+        lower_left = left_name.lower()
+        if not (lower_left.endswith("state") or lower_left.endswith("_state")):
+            return None
+        right_txt = self.text(right).strip()
+        if re.search(r"(?i)(FINISHED|FINISH|DONE|FAILED)", right_txt):
+            return assignment
+        return None
+
+    def _apply_statement_effects(
+        self,
+        node,
+        state: PathState,
+        resource_vars: set[str],
+        params: set[str],
+    ) -> PathState:
+        next_state = state.copy()
+
+        def visit(n):
+            fs = self.as_free_site(n)
+            if fs and not self._is_dead_null_free(fs):
+                next_state.freed.add(fs.var_name)
+                next_state.transferred.discard(fs.var_name)
+                return False
+
+            if n.type == "assignment_expression":
+                left = n.child_by_field_name("left")
+                right = n.child_by_field_name("right")
+                if left is not None and right is not None:
+                    left_txt = self.text(left).strip()
+                    right_txt = self.text(right).strip()
+                    for var in resource_vars:
+                        if var in right_txt and any(
+                            self._contains_identifier(left_txt, param)
+                            for param in params
+                        ):
+                            next_state.transferred.add(var)
+                            next_state.freed.discard(var)
+            return True
+
+        self.walk(node, visit)
+        return next_state
+
+    def _apply_null_fact(
+        self,
+        state: PathState,
+        var: str,
+        is_null: bool,
+    ) -> PathState:
+        next_state = state.copy()
+        if is_null:
+            next_state.null_vars.add(var)
+            next_state.non_null_vars.discard(var)
+        else:
+            next_state.non_null_vars.add(var)
+            next_state.null_vars.discard(var)
+        return next_state
+
+    def _is_null_for(self, var: str, state: PathState) -> bool:
+        return var in state.null_vars or self._base_var(var) in state.null_vars
+
+    def _record_exit_issue(
+        self,
+        *,
+        kind: str,
+        exit_node,
+        state: PathState,
+        resource_vars: set[str],
+        all_frees: list[FreeSite],
+        func_name: str,
+        func_start_line: int,
+    ) -> bool:
+        missing = set(resource_vars) - state.freed - state.transferred
+        missing = {v for v in missing if not self._is_null_for(v, state)}
+
+        if exit_node.type == "return_statement":
+            missing -= self._return_value_vars(exit_node)
+
+        if not missing:
+            return False
+
+        details = []
+        free_funcs = set()
+        for var in sorted(missing):
+            matching_frees = [f for f in all_frees if f.var_name == var]
+            free_lines = sorted({f.line for f in matching_frees})
+            if not free_lines:
+                continue
+            free_funcs.update(f.func_name for f in matching_frees)
+            details.append((var, free_lines))
+
+        if not details:
+            return False
+
+        key = (
+            kind,
+            self.line(exit_node),
+            tuple((var, tuple(lines)) for var, lines in details),
+        )
+        if key in self._issue_keys:
+            return False
+        self._issue_keys.add(key)
+
+        if kind == "continue_leak":
+            prefix = "循环中 continue 前未释放"
+        elif kind == "state_completion_leak":
+            prefix = "状态机完成前未释放"
+        else:
+            exit_kind = {
+                "return_statement": "return",
+                "goto_statement": "goto",
+            }.get(exit_node.type, "退出点")
+            prefix = f"{exit_kind} 前未释放"
+
+        hint = "; ".join(
+            f"{self._display_name(var)}（其他路径在第 {lines} 行释放）"
+            for var, lines in details
+        )
+        self.issues.append(Issue(
+            kind=kind,
+            func=func_name,
+            func_start_line=func_start_line,
+            line=self.line(exit_node),
+            leaked=[self._display_name(var) for var, _ in details],
+            free_lines={self._display_name(var): lines for var, lines in details},
+            hint=f"{prefix}: {hint}",
+            free_func_names=free_funcs,
+        ))
+        return True
+
+    def _record_pending_state_completions(
+        self,
+        state: PathState,
+        *,
+        resource_vars: set[str],
+        all_frees: list[FreeSite],
+        func_name: str,
+        func_start_line: int,
+    ) -> bool:
+        recorded = False
+        for node in state.completed_at:
+            recorded = self._record_exit_issue(
+                kind="state_completion_leak",
+                exit_node=node,
+                state=state,
+                resource_vars=resource_vars,
+                all_frees=all_frees,
+                func_name=func_name,
+                func_start_line=func_start_line,
+            ) or recorded
+        state.completed_at.clear()
+        return recorded
+
+    def _analyze_statement(
+        self,
+        node,
+        states: list[PathState],
+        *,
+        resource_vars: set[str],
+        all_frees: list[FreeSite],
+        params: set[str],
+        func_name: str,
+        func_start_line: int,
+        in_loop: bool,
+    ) -> FlowResult:
+        if not states:
+            return FlowResult()
+        if node.type in {"comment", "{", "}", ";"}:
+            return FlowResult(normal=states)
+
+        if node.type == "compound_statement":
+            return self._analyze_statements(
+                self._block_children(node),
+                states,
+                resource_vars=resource_vars,
+                all_frees=all_frees,
+                params=params,
+                func_name=func_name,
+                func_start_line=func_start_line,
+                in_loop=in_loop,
+            )
+
+        if node.type == "if_statement":
+            cond = node.child_by_field_name("condition")
+            consequence = node.child_by_field_name("consequence")
+            alternative = self._else_body(node)
+            parsed = self._parse_null_check(cond)
+            then_states: list[PathState] = []
+            else_states: list[PathState] = []
+            for state in states:
+                if parsed is None:
+                    then_states.append(state.copy())
+                    else_states.append(state.copy())
+                    continue
+                checked_var, then_is_null = parsed
+                then_states.append(self._apply_null_fact(state, checked_var, then_is_null))
+                else_states.append(self._apply_null_fact(state, checked_var, not then_is_null))
+
+            after_then = self._analyze_statement(
+                consequence,
+                then_states,
+                resource_vars=resource_vars,
+                all_frees=all_frees,
+                params=params,
+                func_name=func_name,
+                func_start_line=func_start_line,
+                in_loop=in_loop,
+            ) if consequence is not None else FlowResult(normal=then_states)
+
+            after_else = self._analyze_statement(
+                alternative,
+                else_states,
+                resource_vars=resource_vars,
+                all_frees=all_frees,
+                params=params,
+                func_name=func_name,
+                func_start_line=func_start_line,
+                in_loop=in_loop,
+            ) if alternative is not None else FlowResult(normal=else_states)
+
+            return FlowResult(
+                normal=after_then.normal + after_else.normal,
+                breaks=after_then.breaks + after_else.breaks,
+            )
+
+        if node.type == "switch_statement":
+            return self._analyze_switch(
+                node,
+                states,
+                resource_vars=resource_vars,
+                all_frees=all_frees,
+                params=params,
+                func_name=func_name,
+                func_start_line=func_start_line,
+                in_loop=in_loop,
+            )
+
+        if node.type == "case_statement":
+            return self._analyze_statements(
+                self._case_children(node),
+                states,
+                resource_vars=resource_vars,
+                all_frees=all_frees,
+                params=params,
+                func_name=func_name,
+                func_start_line=func_start_line,
+                in_loop=in_loop,
+            )
+
+        if node.type in {"for_statement", "while_statement", "do_statement", "for_range_loop"}:
+            loop_body = node.child_by_field_name("body") or node
+            loop_input = [state.copy() for state in states]
+            self._analyze_statement(
+                loop_body,
+                loop_input,
+                resource_vars=resource_vars,
+                all_frees=all_frees,
+                params=params,
+                func_name=func_name,
+                func_start_line=func_start_line,
+                in_loop=True,
+            )
+            after_states = [state.copy() for state in states]
+            loop_frees = self.collect_frees_in(
+                loop_body,
+                skip_types={"function_definition", "lambda_expression"},
+            )
+            for state in after_states:
+                for free_site in loop_frees:
+                    state.freed.add(free_site.var_name)
+            return FlowResult(normal=after_states)
+
+        if node.type in {"return_statement", "goto_statement"}:
+            for state in states:
+                self._record_pending_state_completions(
+                    state,
+                    resource_vars=resource_vars,
+                    all_frees=all_frees,
+                    func_name=func_name,
+                    func_start_line=func_start_line,
+                )
+                self._record_exit_issue(
+                    kind="error_path_leak",
+                    exit_node=node,
+                    state=state,
+                    resource_vars=resource_vars,
+                    all_frees=all_frees,
+                    func_name=func_name,
+                    func_start_line=func_start_line,
+                )
+            return FlowResult()
+
+        if node.type == "continue_statement":
+            if in_loop:
+                for state in states:
+                    self._record_exit_issue(
+                        kind="continue_leak",
+                        exit_node=node,
+                        state=state,
+                        resource_vars=resource_vars,
+                        all_frees=all_frees,
+                        func_name=func_name,
+                        func_start_line=func_start_line,
+                    )
+            return FlowResult()
+
+        if node.type == "break_statement":
+            break_states = []
+            for state in states:
+                recorded_completion = self._record_pending_state_completions(
+                    state,
+                    resource_vars=resource_vars,
+                    all_frees=all_frees,
+                    func_name=func_name,
+                    func_start_line=func_start_line,
+                )
+                if not recorded_completion:
+                    break_states.append(state.copy())
+            return FlowResult(breaks=break_states)
+
+        completion = self._state_completion_assignment(node)
+        if completion is not None:
+            states = [state.copy() for state in states]
+            for state in states:
+                state.completed_at.append(completion)
+
+        return FlowResult(normal=[
+            self._apply_statement_effects(node, state, resource_vars, params)
+            for state in states
+        ])
+
+    def _case_children(self, node) -> list:
+        result = []
+        after_colon = False
+        for child in node.children:
+            if child.type == ":":
+                after_colon = True
+                continue
+            if after_colon and child.type != "comment":
+                result.append(child)
+        return result
+
+    def _switch_cases(self, switch_node) -> list:
+        body = switch_node.child_by_field_name("body")
+        if body is None:
+            return []
+        return [
+            child
+            for child in body.children
+            if child.type == "case_statement"
+        ]
+
+    def _case_is_default(self, case_node) -> bool:
+        return any(child.type == "default" for child in case_node.children)
+
+    def _analyze_switch(
+        self,
+        node,
+        states: list[PathState],
+        *,
+        resource_vars: set[str],
+        all_frees: list[FreeSite],
+        params: set[str],
+        func_name: str,
+        func_start_line: int,
+        in_loop: bool,
+    ) -> FlowResult:
+        after_switch: list[PathState] = []
+        fallthrough: list[PathState] = []
+        cases = self._switch_cases(node)
+        if not cases:
+            return FlowResult(normal=[state.copy() for state in states])
+        if not any(self._case_is_default(case) for case in cases):
+            after_switch.extend(state.copy() for state in states)
+
+        for case in cases:
+            case_input = [state.copy() for state in states] + fallthrough
+            fallthrough = []
+            if not case_input:
+                continue
+            result = self._analyze_statement(
+                case,
+                case_input,
+                resource_vars=resource_vars,
+                all_frees=all_frees,
+                params=params,
+                func_name=func_name,
+                func_start_line=func_start_line,
+                in_loop=in_loop,
+            )
+            after_switch.extend(result.breaks)
+            fallthrough = result.normal
+
+        after_switch.extend(fallthrough)
+        return FlowResult(normal=after_switch)
+
+    def _analyze_statements(
+        self,
+        statements: list,
+        states: list[PathState],
+        *,
+        resource_vars: set[str],
+        all_frees: list[FreeSite],
+        params: set[str],
+        func_name: str,
+        func_start_line: int,
+        in_loop: bool,
+    ) -> FlowResult:
+        current = states
+        breaks: list[PathState] = []
+        for stmt in statements:
+            result = self._analyze_statement(
+                stmt,
+                current,
+                resource_vars=resource_vars,
+                all_frees=all_frees,
+                params=params,
+                func_name=func_name,
+                func_start_line=func_start_line,
+                in_loop=in_loop,
+            )
+            breaks.extend(result.breaks)
+            current = result.normal
+            if not current:
+                break
+        return FlowResult(normal=current, breaks=breaks)
+
     # ============================================================
-    # 规则 1: return / goto 前未释放
+    # 路径敏感规则: return / goto / continue 前未释放
     # ============================================================
-    def check_error_exits(self, func_node):
+    def check_function(self, func_node):
         body = func_node.child_by_field_name("body")
         if body is None:
             return
@@ -500,123 +915,24 @@ class MemLeakDetector:
         if not all_frees:
             return
 
-        should_free_vars = {f.var_name for f in all_frees}
-        exits = self.collect_exits(body, kinds={"return", "goto"})
         fname = self.function_name(func_node)
         func_start_line = self.line(func_node)
-
-        for ex in exits:
-            freed_before = self.freed_vars_before(ex.node, body)
-            missing = should_free_vars - freed_before
-            if not missing:
-                continue
-
-            null_vars = self._vars_null_at_exit(ex.node, body)
-            missing = missing - null_vars
-
-            if ex.node.type == "return_statement":
-                returned = self._return_value_vars(ex.node)
-                missing = missing - returned
-
-            if not missing:
-                continue
-
-            details = []
-            free_funcs = set()
-            for v in sorted(missing):
-                matching_frees = [f for f in all_frees if f.var_name == v]
-                free_lines = sorted({f.line for f in matching_frees})
-                free_funcs.update(f.func_name for f in matching_frees)
-                details.append((v, free_lines))
-
-            hint = "; ".join(
-                f"{self._display_name(v)}（其他路径在第 {lines} 行释放）"
-                for v, lines in details
-            )
-            self.issues.append(Issue(
-                kind="error_path_leak",
-                func=fname,
-                func_start_line=func_start_line,
-                line=ex.line,
-                leaked=[self._display_name(v) for v, _ in details],
-                free_lines={self._display_name(v): lines for v, lines in details},
-                hint=f"{ex.kind} 前未释放: {hint}",
-                free_func_names=free_funcs,
-            ))
-
-    # ============================================================
-    # 规则 2: 循环中 continue 前未释放
-    # ============================================================
-    def check_continue_in_loops(self, func_node):
-        body = func_node.child_by_field_name("body")
-        if body is None:
-            return
-
-        fname = self.function_name(func_node)
-        func_start_line = self.line(func_node)
-        loops = self.find_loops_in(body)
-        loop_types = {"for_statement", "while_statement",
-                      "do_statement", "for_range_loop"}
-
-        for loop in loops:
-            loop_body = loop.child_by_field_name("body") or loop
-            loop_frees = self.collect_frees_in(
-                loop_body,
-                skip_types={"function_definition",
-                            "lambda_expression"} | loop_types,
-            )
-            if not loop_frees:
-                continue
-
-            freed_vars_in_loop = {f.var_name for f in loop_frees}
-            continues = self.collect_exits(
-                loop_body, kinds={"continue"}, stop_at_loop=True
-            )
-
-            for cont in continues:
-                freed_before_cont = self.freed_vars_before(cont.node, loop_body)
-                leaked = freed_vars_in_loop - freed_before_cont
-                if not leaked:
-                    continue
-
-                null_vars = self._vars_null_at_exit(cont.node, loop_body)
-                leaked = leaked - null_vars
-                if not leaked:
-                    continue
-
-                truly_leaked = []
-                free_funcs = set()
-                for v in sorted(leaked):
-                    matching_frees = [
-                        f for f in loop_frees
-                        if f.var_name == v
-                        and not self._is_ancestor_of(f.node, cont.node)
-                    ]
-                    other_path_free_lines = sorted({f.line for f in matching_frees})
-                    if other_path_free_lines:
-                        free_funcs.update(f.func_name for f in matching_frees)
-                        truly_leaked.append((v, other_path_free_lines))
-
-                if truly_leaked:
-                    details = "; ".join(
-                        f"{self._display_name(v)}（其他路径在第 {lines} 行释放）"
-                        for v, lines in truly_leaked
-                    )
-                    self.issues.append(Issue(
-                        kind="continue_leak",
-                        func=fname,
-                        func_start_line=func_start_line,
-                        line=cont.line,
-                        leaked=[self._display_name(v) for v, _ in truly_leaked],
-                        free_lines={self._display_name(v): lines for v, lines in truly_leaked},
-                        hint=f"循环中 continue 前未释放: {details}",
-                        free_func_names=free_funcs,
-                    ))
+        params = self.function_params(func_node)
+        initial = PathState()
+        self._analyze_statement(
+            body,
+            [initial],
+            resource_vars={f.var_name for f in all_frees},
+            all_frees=all_frees,
+            params=params,
+            func_name=fname,
+            func_start_line=func_start_line,
+            in_loop=False,
+        )
 
     def run(self) -> list[Issue]:
         for func in self.find_functions():
-            self.check_error_exits(func)
-            self.check_continue_in_loops(func)
+            self.check_function(func)
         self.issues.sort(key=lambda x: (x.line, x.kind))
         return self.issues
 
@@ -656,6 +972,7 @@ def _collect_source_files(root: Path) -> list[Path]:
 KIND_DESC = {
     "error_path_leak": "异常分支 (return/goto) 前未释放",
     "continue_leak": "循环中 continue 前未释放",
+    "state_completion_leak": "状态机完成前未释放",
 }
 
 

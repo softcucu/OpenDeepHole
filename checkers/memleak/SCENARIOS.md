@@ -2,8 +2,8 @@
 
 ## 检测规则概述
 
-本检查器基于 tree-sitter 静态分析，检测 C/C++ 代码中异常分支（错误路径）的内存泄漏。
-核心思路：如果函数中某个变量在正常路径上被释放，但在某个异常退出点之前未被释放，则报告为候选泄漏。
+本检查器基于 tree-sitter 静态分析，检测 C/C++ 代码中异常分支（错误路径）的内存泄漏，并交由 opencode 复核。
+核心思路：如果函数中某个变量在正常路径上被释放，但在某个异常退出点或状态机完成赋值之前未被释放，则报告为候选泄漏。静态阶段会对 `if` 的 then/else 分支和 `switch/case` 分支分别传播路径状态，过滤明显判空、所有权转移和循环内正常释放后的函数尾部 return 误报；初始化是否成功由 opencode 复核阶段判断。
 
 ---
 
@@ -134,6 +134,43 @@ void bar() {
         release(r);  // ← 此 free 被识别为 dead null free，不算有效释放
     }
     // 正常路径无释放（因为 r 可能由外部管理）
+}
+```
+
+### 反例 4：赋给函数参数或参数成员（已过滤）
+
+```c
+int create_buffer(Owner *owner, char **out, int mode) {
+    char *buf = malloc(1024);
+    if (!buf)
+        return -1;
+
+    if (mode == 1) {
+        *out = buf;      // 所有权传给调用者
+        return 0;
+    }
+    if (mode == 2) {
+        owner->buf = buf;  // 所有权传给参数成员
+        return 0;
+    }
+
+    free(buf);
+    return 0;
+}
+```
+
+### 反例 5：循环内正常释放后函数返回（已过滤）
+
+```c
+int process_all(int count) {
+    for (int i = 0; i < count; i++) {
+        char *buf = malloc(128);
+        if (buf == PRODUCT_NULL)
+            continue;
+        use(buf);
+        free(buf);
+    }
+    return 0;  // 不要求再次释放循环内每轮资源
 }
 ```
 

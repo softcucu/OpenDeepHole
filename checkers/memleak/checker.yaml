@@ -2,7 +2,6 @@ name: memleak
 label: Error Path Memory Leak / 异常分支内存泄漏
 description: 异常分支内存泄漏检测（错误路径未释放 / 循环 continue 前未释放）
 enabled: true
-single_pass: true
-mode: api
+mode: opencode
 category: resource_leak
-modified_at: "2026-05-19T19:06:14+08:00"
+modified_at: "2026-06-02T19:31:52+08:00"

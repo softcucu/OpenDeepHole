@@ -86,6 +86,36 @@ def test_checker_test_cli_allows_disabled_checker(tmp_path: Path, capsys) -> Non
     assert "enabled: false" in payload["warnings"][0]
 
 
+def test_checker_test_cli_json_output_writes_pretty_unicode_file(tmp_path: Path, capsys) -> None:
+    checkers_dir = tmp_path / "checkers"
+    project_dir = _write_project(tmp_path)
+    output_path = tmp_path / "result" / "candidates.json"
+    _write_checker(
+        checkers_dir,
+        "unicodecheck",
+        candidate_description="函数 'local_vuln' 中发现 1 个疑似内存泄漏点",
+    )
+
+    rc = checker_test.main([
+        "unicodecheck",
+        str(project_dir),
+        "--checkers-dir",
+        str(checkers_dir),
+        "--json-output",
+        str(output_path),
+    ])
+
+    captured = capsys.readouterr()
+    text = output_path.read_text(encoding="utf-8")
+    payload = json.loads(text)
+    assert rc == 0
+    assert captured.out == ""
+    assert payload["candidate_count"] == 1
+    assert payload["candidates"][0]["description"].startswith("函数 'local_vuln'")
+    assert '\n  "ok": true' in text
+    assert "\\u51fd" not in text
+
+
 def test_checker_test_cli_rejects_mismatched_vuln_type(tmp_path: Path, capsys) -> None:
     checkers_dir = tmp_path / "checkers"
     project_dir = _write_project(tmp_path)
@@ -290,6 +320,7 @@ def _write_checker(
     enabled: bool = True,
     vuln_type: str | None = None,
     with_analyzer: bool = True,
+    candidate_description: str = "local test candidate",
 ) -> None:
     checker_dir = checkers_dir / name
     checker_dir.mkdir(parents=True)
@@ -322,7 +353,7 @@ def _write_checker(
             "            file='sample.c',\n"
             "            line=2,\n"
             "            function='local_vuln',\n"
-            "            description='local test candidate',\n"
+            f"            description={candidate_description!r},\n"
             "            vuln_type=self.vuln_type,\n"
             "        )]\n",
             encoding="utf-8",

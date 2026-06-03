@@ -10,7 +10,18 @@ from backend.api import agent as agent_api
 from backend.api import scan as scan_api
 from backend.store.sqlite import SqliteScanStore
 from backend.api.scan import _ordered_fp_review_candidates
-from backend.models import AgentInfo, FpReviewResult, ScanItemStatus, ScanMeta, ScanStatus, User, Vulnerability
+from backend.models import (
+    AgentInfo,
+    BatchUnmarkRequest,
+    FeedbackEntry,
+    FpReviewResult,
+    ScanItemStatus,
+    ScanMeta,
+    ScanStatus,
+    UnmarkRequest,
+    User,
+    Vulnerability,
+)
 from backend.scan_metrics import latest_fp_review_result_map
 
 
@@ -175,6 +186,154 @@ class FpReviewOrderTests(unittest.TestCase):
             command = send.await_args.args[1]
             self.assertEqual(command["type"], "fp_review")
             self.assertEqual(command["agent_runtime_update"], {"hash": "runtime-hash"})
+
+    def test_unmark_removes_generated_feedback_and_readds_fp_review_candidate(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = SqliteScanStore(Path(tmp) / "scan.db")
+            user = User(user_id="owner", username="owner", role="user")
+            now = datetime.now(timezone.utc).isoformat()
+            scan = ScanStatus(
+                scan_id="scan-1",
+                project_id="project",
+                scan_items=["npd"],
+                created_at=now,
+                status=ScanItemStatus.COMPLETE,
+                progress=1.0,
+                total_candidates=1,
+                processed_candidates=1,
+                vulnerabilities=[],
+                feedback_ids=["feedback-1", "keep"],
+            )
+            meta = ScanMeta(
+                scan_items=["npd"],
+                created_at=now,
+                feedback_ids=["feedback-1", "keep"],
+                user_id="owner",
+            )
+            store.save_scan(scan, meta)
+            store.add_vulnerability(
+                "scan-1",
+                Vulnerability(
+                    file="a.c",
+                    line=10,
+                    function="parse",
+                    vuln_type="npd",
+                    severity="high",
+                    description="desc",
+                    ai_analysis="analysis",
+                    confirmed=True,
+                    ai_verdict="confirmed",
+                    user_verdict="confirmed",
+                    user_verdict_reason="verified",
+                ),
+            )
+            store.add_feedback(
+                FeedbackEntry(
+                    id="feedback-1",
+                    project_id="project",
+                    vuln_type="npd",
+                    verdict="confirmed",
+                    file="a.c",
+                    line=10,
+                    function="parse",
+                    description="desc",
+                    reason="verified",
+                    source_scan_id="scan-1",
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
+            push = AsyncMock()
+
+            with (
+                patch("backend.api.scan.get_scan_store", return_value=store),
+                patch("backend.api.scan._push_feedback_selection_update", push),
+            ):
+                result = asyncio.run(
+                    scan_api.unmark_vulnerability("scan-1", UnmarkRequest(index=0), user)
+                )
+
+            self.assertEqual(result["removed_feedback_ids"], ["feedback-1"])
+            loaded = store.load_scan("scan-1")
+            self.assertIsNotNone(loaded)
+            updated_scan, updated_meta = loaded
+            self.assertEqual(updated_scan.feedback_ids, ["keep"])
+            self.assertEqual(updated_meta.feedback_ids, ["keep"])
+            self.assertIsNone(updated_scan.vulnerabilities[0].user_verdict)
+            self.assertEqual([item["index"] for item in _ordered_fp_review_candidates(updated_scan, {})], [0])
+            push.assert_awaited_once_with("scan-1", ["keep"])
+
+    def test_batch_unmark_clears_multiple_manual_verdicts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = SqliteScanStore(Path(tmp) / "scan.db")
+            user = User(user_id="owner", username="owner", role="user")
+            now = datetime.now(timezone.utc).isoformat()
+            scan = ScanStatus(
+                scan_id="scan-1",
+                project_id="project",
+                scan_items=["npd"],
+                created_at=now,
+                status=ScanItemStatus.COMPLETE,
+                progress=1.0,
+                total_candidates=2,
+                processed_candidates=2,
+                vulnerabilities=[],
+                feedback_ids=["feedback-1", "feedback-2"],
+            )
+            meta = ScanMeta(
+                scan_items=["npd"],
+                created_at=now,
+                feedback_ids=["feedback-1", "feedback-2"],
+                user_id="owner",
+            )
+            store.save_scan(scan, meta)
+            for index in range(2):
+                store.add_vulnerability(
+                    "scan-1",
+                    Vulnerability(
+                        file=f"a{index}.c",
+                        line=10 + index,
+                        function="parse",
+                        vuln_type="npd",
+                        severity="high",
+                        description=f"desc {index}",
+                        ai_analysis="analysis",
+                        confirmed=True,
+                        ai_verdict="confirmed",
+                        user_verdict="confirmed",
+                    ),
+                )
+                store.add_feedback(
+                    FeedbackEntry(
+                        id=f"feedback-{index + 1}",
+                        project_id="project",
+                        vuln_type="npd",
+                        verdict="confirmed",
+                        file=f"a{index}.c",
+                        line=10 + index,
+                        function="parse",
+                        description=f"desc {index}",
+                        reason="verified",
+                        source_scan_id="scan-1",
+                        created_at=now,
+                        updated_at=now,
+                    )
+                )
+
+            with patch("backend.api.scan.get_scan_store", return_value=store):
+                result = asyncio.run(
+                    scan_api.batch_unmark_vulnerabilities(
+                        "scan-1",
+                        BatchUnmarkRequest(indices=[0, 1, 1]),
+                        user,
+                    )
+                )
+
+            self.assertEqual(result["removed_feedback_ids"], ["feedback-1", "feedback-2"])
+            updated_scan, updated_meta = store.load_scan("scan-1")
+            self.assertEqual(updated_scan.feedback_ids, [])
+            self.assertEqual(updated_meta.feedback_ids, [])
+            self.assertEqual([v.user_verdict for v in updated_scan.vulnerabilities], [None, None])
 
 
 if __name__ == "__main__":

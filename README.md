@@ -34,7 +34,7 @@
 ```
 
 **源码不离开本地**：Agent 只上报漏洞分析结论，不上传源码文件。  
-**误报反馈闭环**：用户在 Web UI 标记误报后，Agent 下次扫描前自动拉取这些经验，注入 SKILL 中减少重复误报。
+**误报反馈闭环**：用户在 Web UI 标记正报或误报后，选中的经验会注入 SKILL 中减少重复误判；已标记问题也可以取消标记，取消后会移除该标记生成的经验并重新进入 AI 去误报候选。
 
 ## 快速开始
 
@@ -59,7 +59,7 @@ checkers/<name>/
 | `npd` | 空指针解引用 (NPD) | opencode | 有（tree-sitter AST 分析） |
 | `oob` | 数组/缓冲区越界 (OOB) | opencode | 有 |
 | `safe_mem_oob` | 安全内存函数越界 (SAFE_MEM_OOB) | opencode | 有（semgrep 高风险规则） |
-| `memleak` | 异常分支内存泄漏 (MEMLEAK) | api | 有（自定义解析器） |
+| `memleak` | 异常分支内存泄漏 (MEMLEAK) | opencode | 有（tree-sitter 路径分析） |
 | `intoverflow` | 整数翻转/溢出 (INTOVFL) | opencode | 有（多阶段追踪） |
 | `sensitive_clear` | 敏感信息未清零 (SENSITIVE_CLEAR) | opencode | 有 |
 | `resleak` | 全类型资源泄露 (RESLEAK) | opencode | 有 |
@@ -174,6 +174,7 @@ Agent 通过 WebSocket 保持长连接，等待服务器推送任务。
 2. 经验库中打勾的反馈会记录到本次扫描的 `feedback_ids`
 3. 已选反馈按漏洞类型注入到对应 SKILL 文件的「历史用户经验」章节
 4. LLM 在分析同类候选时参考这些经验，校验并减少重复误判
+5. 已人工标记的问题可单条或批量取消标记；取消后会删除该标记生成的反馈、从本次扫描的 `feedback_ids` 中移除，并在下次 AI 去误报时重新复核
 
 ## 插件式 Checker 架构
 
@@ -330,6 +331,9 @@ PYTHONPATH=. python3 tools/checker_test.py mycheck /path/to/source --min-candida
 # 输出 JSON，便于在脚本或 CI 中断言
 PYTHONPATH=. python3 tools/checker_test.py mycheck /path/to/source --json
 
+# 直接写入格式化 UTF-8 JSON 文件，中文 description 不会被转义成 \uXXXX
+PYTHONPATH=. python3 tools/checker_test.py mycheck /path/to/source --json-output /tmp/mycheck-candidates.json
+
 # 精确断言候选点数量
 PYTHONPATH=. python3 tools/checker_test.py mycheck /path/to/source --expect-candidates 3
 
@@ -337,7 +341,7 @@ PYTHONPATH=. python3 tools/checker_test.py mycheck /path/to/source --expect-cand
 PYTHONPATH=. python3 tools/checker_test.py mycheck /path/to/source --audit --audit-limit 1 --config agent.yaml
 ```
 
-本地测试命令不依赖后端、Web UI 或在线 Agent。默认会在被测项目目录下重建 `code_index.db`，与 Agent 扫描时的索引位置一致；如只想把索引写到临时位置，可加 `--index-db /tmp/mycheck-code_index.db`。代码索引同样需要本机已安装 Universal Ctags。
+本地测试命令不依赖后端、Web UI 或在线 Agent。默认会在被测项目目录下重建 `code_index.db`，与 Agent 扫描时的索引位置一致；如只想把索引写到临时位置，可加 `--index-db /tmp/mycheck-code_index.db`。`--json-output` 会直接生成缩进格式化的 UTF-8 JSON，避免后续 `json.tool` 把中文转义。代码索引同样需要本机已安装 Universal Ctags。
 
 开发阶段即使 `checker.yaml` 中设置了 `enabled: false`，本地测试命令也会临时启用该 checker 进行自测，并输出提示；线上扫描入口仍会遵循 `enabled` 和 `visibility` 配置。`--audit` 会实际调用模型或 opencode，请先确认 `agent.yaml` 配置可用，并用 `--audit-limit` 控制成本。
 
@@ -458,7 +462,7 @@ def find_candidates(self, project_path: Path, db=None) -> list[Candidate]:
 - Generator 模式适合耗时较长的分析器，可让 LLM 提前开始处理已发现的候选项
 - `on_file_progress` 回调用于前端进度条显示，建议在循环中定期调用
 - `description` 字段尽可能详细，它会作为 prompt 的一部分传递给 AI
-- `mode: api` 的 checker 使用 `prompt.txt` 而非 `SKILL.md`，适用于无需 MCP 工具的场景
+- `mode: api` 的 checker 使用 `prompt.txt` 而非 `SKILL.md`，适用于无需 MCP 工具的场景；需要 MCP 辅助复核的 checker 应使用 `mode: opencode`
 - 返回空列表是合法的，表示未找到候选点
 
 ### 服务端 config.yaml

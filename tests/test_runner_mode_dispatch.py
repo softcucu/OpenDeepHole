@@ -53,7 +53,7 @@ def test_prepare_cli_workspace_creates_claude_and_gemini_skill_configs(tmp_path:
         '{"mcp":{"deephole-code":{"url":"http://127.0.0.1:9123/mcp"}}}',
         encoding="utf-8",
     )
-    skill_dir = tmp_path / ".opencode" / "skills" / "fp-review"
+    skill_dir = tmp_path / ".opencode" / "skills" / "prove-bug"
     skill_dir.mkdir(parents=True)
     (skill_dir / "SKILL.md").write_text("fp skill", encoding="utf-8")
 
@@ -61,9 +61,9 @@ def test_prepare_cli_workspace_creates_claude_and_gemini_skill_configs(tmp_path:
     _prepare_cli_workspace(tmp_path, "hac")
 
     assert (tmp_path / ".claude" / "opendeephole-mcp.json").is_file()
-    assert (tmp_path / ".claude" / "skills" / "fp-review" / "SKILL.md").is_file()
+    assert (tmp_path / ".claude" / "skills" / "prove-bug" / "SKILL.md").is_file()
     assert (tmp_path / ".gemini" / "settings.json").is_file()
-    assert (tmp_path / ".gemini" / "skills" / "fp-review" / "SKILL.md").is_file()
+    assert (tmp_path / ".gemini" / "skills" / "prove-bug" / "SKILL.md").is_file()
 
 
 def test_opencode_uses_injected_config_and_project_dir_with_isolated_workspace(tmp_path: Path) -> None:
@@ -96,7 +96,7 @@ def test_opencode_runtime_cwd_receives_config_and_fp_skills(tmp_path: Path) -> N
     workspace.mkdir()
     project.mkdir()
     skills_root = workspace / ".opencode" / "skills"
-    for name in ("fp-review", "fp-review-discriminator"):
+    for name in ("prove-bug", "prove-fp"):
         skill_dir = skills_root / name
         skill_dir.mkdir(parents=True)
         (skill_dir / "SKILL.md").write_text(name, encoding="utf-8")
@@ -118,8 +118,8 @@ def test_opencode_runtime_cwd_receives_config_and_fp_skills(tmp_path: Path) -> N
 
     assert config_workspace == runtime_cwd
     # Skills should be copied to runtime CWD (opencode walks up from CWD)
-    assert (runtime_cwd / ".opencode" / "skills" / "fp-review" / "SKILL.md").is_file()
-    assert (runtime_cwd / ".opencode" / "skills" / "fp-review-discriminator" / "SKILL.md").is_file()
+    assert (runtime_cwd / ".opencode" / "skills" / "prove-bug" / "SKILL.md").is_file()
+    assert (runtime_cwd / ".opencode" / "skills" / "prove-fp" / "SKILL.md").is_file()
     assert runtime_config["skills"]["paths"] == [str((runtime_cwd / ".opencode" / "skills").resolve())]
     assert env_config["skills"]["paths"] == runtime_config["skills"]["paths"]
 

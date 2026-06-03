@@ -43,12 +43,13 @@ class CheckerTestResult:
 
 def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
-    _configure_cli_logging(json_mode=args.json, verbose=args.verbose)
+    json_mode = args.json or args.json_output is not None
+    _configure_cli_logging(json_mode=json_mode, verbose=args.verbose)
     try:
         result = asyncio.run(_run(args))
     except CheckerTestError as exc:
-        if args.json:
-            print(json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False, indent=2))
+        if json_mode:
+            _emit_json_payload({"ok": False, "error": str(exc)}, args.json_output)
         else:
             print(f"[error] {exc}", file=sys.stderr)
         return 2
@@ -56,7 +57,7 @@ def main(argv: list[str] | None = None) -> int:
         print("[error] interrupted", file=sys.stderr)
         return 130
 
-    if args.json:
+    if json_mode:
         payload = {
             "ok": True,
             "checker": result.checker,
@@ -67,7 +68,7 @@ def main(argv: list[str] | None = None) -> int:
             "warnings": result.warnings,
             "audits": result.audits,
         }
-        print(json.dumps(payload, ensure_ascii=False, indent=2))
+        _emit_json_payload(payload, args.json_output)
     else:
         _print_human_result(result, audit_requested=args.audit)
     return 0
@@ -91,6 +92,16 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         help="Optional path for the temporary code index database",
     )
     parser.add_argument("--json", action="store_true", help="Print machine-readable JSON")
+    parser.add_argument(
+        "--json-output",
+        "--output",
+        dest="json_output",
+        type=Path,
+        help=(
+            "Write formatted UTF-8 JSON to this file. Chinese text is not escaped; "
+            "this implies --json."
+        ),
+    )
     parser.add_argument("--verbose", action="store_true", help="Show OpenDeepHole internal logs")
     parser.add_argument(
         "--min-candidates",
@@ -120,6 +131,16 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         help="Agent-style config file used for --audit (default: ./agent.yaml)",
     )
     return parser.parse_args(argv)
+
+
+def _emit_json_payload(payload: dict[str, Any], output_path: Path | None) -> None:
+    text = json.dumps(payload, ensure_ascii=False, indent=2) + "\n"
+    if output_path is None:
+        print(text, end="")
+        return
+    output_path = output_path.resolve()
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(text, encoding="utf-8")
 
 
 def _configure_cli_logging(*, json_mode: bool, verbose: bool) -> None:

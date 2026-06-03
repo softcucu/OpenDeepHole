@@ -24,14 +24,14 @@ from agent.config import effective_fp_review_cli_config
 
 _FP_FEEDBACK_FILE = Path.home() / ".opendeephole" / "fp_feedback.json"
 _FP_REVIEW_FEEDBACK: dict[str, list[dict]] = {}
-_FP_REVIEW_SKILLS = ("fp-review", "fp-review-discriminator")
-_HIGH_REPORT_HEADINGS = (
+_FP_REVIEW_SKILLS = ("prove-bug", "prove-fp")
+_LEGACY_FP_REVIEW_SKILLS = ("fp-review", "fp-review-discriminator")
+_ISSUE_REPORT_HEADINGS = (
     "Summary",
     "Vulnerable Code",
     "Full Call Stack",
     "Root Cause",
     "Why It is Reachable",
-    "CVSS Score",
     "Impact",
     "Evidence",
 )
@@ -177,7 +177,7 @@ async def run_fp_review(
 
         await emit("fp_review", f"Starting FP review: {len(vulnerabilities)} confirmed vulnerabilities")
 
-        # Create an isolated config workspace with opencode.json + fp-review SKILL.
+        # Create an isolated config workspace with opencode.json + FP-review skills.
         workspace = _create_fp_workspace(review_dir / "opencode_workspace", mcp_port)
         await emit("fp_review", "FP review workspace ready")
 
@@ -215,8 +215,8 @@ async def run_fp_review(
                     vuln_type=vuln["vuln_type"],
                     description=vuln["description"],
                 )
-                generator = await _run_fp_review_stage(
-                    stage="generator",
+                prove_bug = await _run_fp_review_stage(
+                    stage="prove_bug",
                     workspace=workspace,
                     review_dir=review_dir,
                     vuln=vuln,
@@ -232,10 +232,10 @@ async def run_fp_review(
                     await reporter.finish_fp_review(scan_id, review_id, "cancelled", "用户手动停止")
                     return
 
-                if generator is None:
-                    await emit("fp_review", f"[{position + 1}] Generator returned no result — preserving any previous review result")
-                elif not generator.result.confirmed:
-                    verdict, severity, reason, vulnerability_report = _finalize_fp_review_result(generator, None)
+                if prove_bug is None:
+                    await emit("fp_review", f"[{position + 1}] Prove-bug returned no result — preserving any previous review result")
+                elif not prove_bug.result.confirmed:
+                    verdict, severity, reason, vulnerability_report = _finalize_fp_review_result(prove_bug, None)
                     await reporter.push_fp_result(
                         scan_id,
                         review_id,
@@ -248,8 +248,8 @@ async def run_fp_review(
                     result_submitted = True
                     await emit("fp_review", f"[{position + 1}] FALSE POSITIVE severity={severity}")
                 else:
-                    discriminator = await _run_fp_review_stage(
-                        stage="discriminator",
+                    prove_fp = await _run_fp_review_stage(
+                        stage="prove_fp",
                         workspace=workspace,
                         review_dir=review_dir,
                         vuln=vuln,
@@ -259,18 +259,18 @@ async def run_fp_review(
                         cli_config=fp_cli,
                         project=project,
                         candidate=fake_candidate,
-                        generator=generator,
+                        prove_bug=prove_bug,
                     )
                     if cancel_event is not None and cancel_event.is_set():
                         await emit("fp_review", f"FP review cancelled after reviewing {position} items")
                         await reporter.finish_fp_review(scan_id, review_id, "cancelled", "用户手动停止")
                         return
-                    if discriminator is None:
-                        await emit("fp_review", f"[{position + 1}] Discriminator returned no result — preserving any previous review result")
+                    if prove_fp is None:
+                        await emit("fp_review", f"[{position + 1}] Prove-fp returned no result — preserving any previous review result")
                     else:
                         verdict, severity, reason, vulnerability_report = _finalize_fp_review_result(
-                            generator,
-                            discriminator,
+                            prove_bug,
+                            prove_fp,
                         )
                         await reporter.push_fp_result(
                             scan_id,
@@ -348,7 +348,7 @@ async def _run_fp_review_stage(
     cli_config,
     project: Path,
     candidate,
-    generator: _FpStageResult | None = None,
+    prove_bug: _FpStageResult | None = None,
 ) -> _FpStageResult | None:
     from backend.opencode.runner import _invoke_opencode, _read_result
 
@@ -358,7 +358,7 @@ async def _run_fp_review_stage(
         vuln=vuln,
         project_id_for_prompt=project_id_for_prompt,
         result_id=result_id,
-        generator=generator,
+        prove_bug=prove_bug,
     )
     log_path = review_dir / f"fp_{stage}_{result_id}.log"
 
@@ -388,46 +388,47 @@ def _build_fp_review_prompt(
     vuln: dict,
     project_id_for_prompt: str,
     result_id: str,
-    generator: _FpStageResult | None = None,
+    prove_bug: _FpStageResult | None = None,
 ) -> str:
-    if stage == "generator":
+    if stage == "prove_bug":
         prompt = (
-            f"使用 `fp-review` 技能，复核位于 "
+            f"使用 `prove-bug` 技能，作为正方论证位于 "
             f"{vuln['file']}:{vuln['line']} 函数 `{vuln['function']}` 中"
-            f"已确认的 {vuln['vuln_type'].upper()} 漏洞。"
+            f"的 {vuln['vuln_type'].upper()} 候选是否是真实问题。"
             f"project_id 为 `{project_id_for_prompt}`。"
             f"原始描述：{vuln['description']} "
             f"原始 AI 分析：{vuln['ai_analysis']} "
             f"你的 result_id 是 `{result_id}`。"
             f"分析完成后，你**必须**使用此 result_id 调用 submit_result MCP 工具提交结论。"
-            f"默认假设代码是安全的；只有证明真实代码缺陷时才使用 confirmed=true。"
-            f"severity 必须按外部可触发性重新判断：完整可利用链使用 high；"
-            f"有代码问题但未证明外部可触发使用 medium 或 low；误报使用 low。"
-            f"如果 severity=high，必须在 vulnerability_report 中提交 Markdown 报告，"
-            f"且必须包含 Summary、Vulnerable Code、Full Call Stack、Root Cause、"
-            f"Why It is Reachable、Impact、Evidence 七个二级标题。"
+            f"默认假设代码是安全的；只有证明真实代码问题时才使用 confirmed=true。"
+            f"severity 必须按外部可触发性判断：外部可触发问题使用 high；"
+            f"有代码问题但未证明外部可触发使用 medium；非问题使用 low。"
+            f"只要 confirmed=true，不管 severity 是 high 还是 medium，"
+            f"都必须在 vulnerability_report 中提交 Markdown 问题报告，"
+            f"并包含 Summary、Vulnerable Code、Full Call Stack、Root Cause、"
+            f"Why It is Reachable、Impact、Evidence 七个二级标题。不要使用 CVSS 打分。"
         )
-    elif stage == "discriminator" and generator is not None:
-        gen = generator.result
-        gen_payload = generator.payload
+    elif stage == "prove_fp" and prove_bug is not None:
+        bug = prove_bug.result
+        bug_payload = prove_bug.payload
         prompt = (
-            f"使用 `fp-review-discriminator` 技能，对位于 "
+            f"使用 `prove-fp` 技能，作为反方论证位于 "
             f"{vuln['file']}:{vuln['line']} 函数 `{vuln['function']}` 中"
-            f"{vuln['vuln_type'].upper()} 结论做对抗式复核。"
+            f"的 {vuln['vuln_type'].upper()} 候选是否不是问题。"
             f"project_id 为 `{project_id_for_prompt}`。"
             f"原始描述：{vuln['description']} "
             f"原始 AI 分析：{vuln['ai_analysis']} "
-            f"generator confirmed={bool(gen.confirmed)} severity={gen.severity}。"
-            f"generator description：{gen.description} "
-            f"generator ai_analysis：{gen.ai_analysis} "
-            f"generator vulnerability_report：{gen_payload.get('vulnerability_report') or ''} "
+            f"prove-bug confirmed={bool(bug.confirmed)} severity={bug.severity}。"
+            f"prove-bug description：{bug.description} "
+            f"prove-bug ai_analysis：{bug.ai_analysis} "
+            f"prove-bug vulnerability_report：{bug_payload.get('vulnerability_report') or ''} "
             f"你的 result_id 是 `{result_id}`。"
-            f"分析完成后，你**必须**使用此 result_id 调用 submit_result MCP 工具提交复核结论。"
-            f"如果找到足以推翻真实代码问题的不可利用理由，使用 confirmed=false。"
-            f"如果真实代码问题存在但外部可利用链被推翻，使用 confirmed=true 且 severity=medium 或 low。"
-            f"只有 generator 的完整可利用链经反驳后仍成立，才可使用 confirmed=true 且 severity=high。"
-            f"severity=high 时 vulnerability_report 必须包含 Summary、Vulnerable Code、"
-            f"Full Call Stack、Root Cause、Why It is Reachable、Impact、Evidence 七个二级标题。"
+            f"分析完成后，你**必须**使用此 result_id 调用 submit_result MCP 工具提交反方结论。"
+            f"如果找到足以证明非问题的理由，使用 confirmed=false 且 severity=low。"
+            f"如果反方未能证明非问题，仍使用 confirmed=true；外部可触发为 high，"
+            f"仅代码问题或外部触发证据不足为 medium。"
+            f"只要 confirmed=true，不管 severity 是 high 还是 medium，"
+            f"都必须提交 vulnerability_report，可沿用或修正 prove-bug 的报告。不要使用 CVSS 打分。"
         )
     else:
         raise ValueError(f"Unknown FP review stage: {stage}")
@@ -508,51 +509,53 @@ def _configure_fp_backend(config, review_dir: Path) -> None:
 
 def _normalize_fp_severity(severity: str, verdict: str) -> str:
     normalized = (severity or "").strip().lower()
-    if normalized not in {"high", "medium", "low"}:
-        return "low"
     if verdict == "fp":
         return "low"
-    return normalized
+    if normalized == "high":
+        return "high"
+    if normalized in {"medium", "low"}:
+        return "medium"
+    return "medium"
 
 
 def _finalize_fp_review_result(
-    generator: _FpStageResult,
-    discriminator: _FpStageResult | None,
+    prove_bug: _FpStageResult,
+    prove_fp: _FpStageResult | None,
 ) -> tuple[str, str, str, str]:
-    gen = generator.result
-    gen_verdict = "tp" if gen.confirmed else "fp"
-    gen_severity = _normalize_fp_severity(str(gen.severity), gen_verdict)
+    bug = prove_bug.result
+    bug_verdict = "tp" if bug.confirmed else "fp"
+    bug_severity = _normalize_fp_severity(str(bug.severity), bug_verdict)
 
-    if discriminator is None:
-        verdict = gen_verdict
-        severity = gen_severity
-        report = _stage_report(generator)
-        final_note = "Generator 判定为误报，未进入对抗式复核。"
-    else:
-        disc = discriminator.result
-        verdict = "tp" if disc.confirmed else "fp"
-        severity = _normalize_fp_severity(str(disc.severity), verdict)
-        report = _stage_report(discriminator) or _stage_report(generator)
+    if prove_fp is None:
+        verdict = bug_verdict
+        severity = bug_severity
+        report = _stage_report(prove_bug)
         final_note = (
-            "Discriminator 未推翻真实代码问题。"
-            if verdict == "tp"
-            else "Discriminator 找到足以推翻真实代码问题的不可利用理由。"
+            "Prove-bug 判定为非问题，未进入反方论证。"
+            if verdict == "fp"
+            else "Prove-fp 未返回结果，沿用 prove-bug 的问题结论。"
         )
-        if severity == "high" and gen_severity != "high":
+    else:
+        fp = prove_fp.result
+        verdict = "tp" if fp.confirmed else "fp"
+        severity = _normalize_fp_severity(str(fp.severity), verdict)
+        report = _stage_report(prove_fp) or _stage_report(prove_bug)
+        final_note = (
+            "Prove-fp 未能证明非问题，保留真实代码问题结论。"
+            if verdict == "tp"
+            else "Prove-fp 找到足以证明非问题的理由。"
+        )
+        if severity == "high" and bug_severity != "high":
             severity = "medium"
-            final_note += " Generator 未证明完整外部可利用链，最终降级为 medium。"
+            final_note += " Prove-bug 未证明完整外部触发链，最终降级为 medium。"
 
     if verdict == "fp":
         severity = "low"
         report = ""
-    elif severity == "high" and not _has_required_high_report_sections(report):
-        severity = "medium"
-        report = ""
-        final_note += " High 报告缺少必要章节或证据，最终降级为 medium。"
-    elif severity != "high":
-        report = ""
+    elif not report.strip():
+        final_note += " 复核未提交问题报告。"
 
-    reason = _compose_fp_reason(generator, discriminator, final_note)
+    reason = _compose_fp_reason(prove_bug, prove_fp, final_note)
     return verdict, severity, reason, report
 
 
@@ -566,19 +569,19 @@ def _stage_reason(stage_result: _FpStageResult) -> str:
 
 
 def _compose_fp_reason(
-    generator: _FpStageResult,
-    discriminator: _FpStageResult | None,
+    prove_bug: _FpStageResult,
+    prove_fp: _FpStageResult | None,
     final_note: str,
 ) -> str:
     parts = [
-        "[generator]",
-        _stage_reason(generator) or "未提供详细推理。",
+        "[prove-bug]",
+        _stage_reason(prove_bug) or "未提供详细推理。",
     ]
-    if discriminator is not None:
+    if prove_fp is not None:
         parts.extend([
             "",
-            "[discriminator]",
-            _stage_reason(discriminator) or "未提供详细反驳推理。",
+            "[prove-fp]",
+            _stage_reason(prove_fp) or "未提供详细反驳推理。",
         ])
     parts.extend([
         "",
@@ -588,11 +591,11 @@ def _compose_fp_reason(
     return "\n".join(parts).strip()
 
 
-def _has_required_high_report_sections(report: str) -> bool:
+def _has_required_issue_report_sections(report: str) -> bool:
     if not report.strip():
         return False
     lowered_lines = [line.strip().lower() for line in report.splitlines()]
-    for heading in _HIGH_REPORT_HEADINGS:
+    for heading in _ISSUE_REPORT_HEADINGS:
         expected = f"## {heading}".lower()
         if not any(line == expected or line.startswith(expected + " ") for line in lowered_lines):
             return False
@@ -618,7 +621,7 @@ def _create_fp_workspace(
     vuln_type: str | None = None,
     feedback_entries: list[dict] | None = None,
 ) -> Path:
-    """Ensure isolated opencode config and fp-review SKILL exist."""
+    """Ensure isolated opencode config and FP-review skills exist."""
     from backend.opencode.config import build_opencode_config, get_workspace_lock
     from backend.opencode.feedback_format import format_feedback_experience
 
@@ -643,13 +646,13 @@ def _create_fp_workspace(
         fp_section = format_feedback_experience(matching_feedback)
         _write_fp_skill(
             workspace,
-            "fp-review",
+            "prove-bug",
             Path(__file__).parent / "skills" / "fp_review.md",
             fp_section,
         )
         _write_fp_skill(
             workspace,
-            "fp-review-discriminator",
+            "prove-fp",
             Path(__file__).parent / "skills" / "fp_review_discriminator.md",
             fp_section,
         )
@@ -681,12 +684,12 @@ def _cleanup_fp_workspace(workspace: Path) -> None:
             return
 
         try:
-            for skill_name in _FP_REVIEW_SKILLS:
+            for skill_name in (*_FP_REVIEW_SKILLS, *_LEGACY_FP_REVIEW_SKILLS):
                 fp_skill_dir = workspace / ".opencode" / "skills" / skill_name
                 if fp_skill_dir.is_dir():
                     shutil.rmtree(fp_skill_dir)
             for root in (workspace / ".claude" / "skills", workspace / ".gemini" / "skills"):
-                for skill_name in _FP_REVIEW_SKILLS:
+                for skill_name in (*_FP_REVIEW_SKILLS, *_LEGACY_FP_REVIEW_SKILLS):
                     copied_fp_skill = root / skill_name
                     if copied_fp_skill.is_dir():
                         shutil.rmtree(copied_fp_skill)

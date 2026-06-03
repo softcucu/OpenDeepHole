@@ -226,6 +226,14 @@ class BatchMarkRequest(BaseModel):
     """Request to batch-mark multiple vulnerabilities."""
     items: list[BatchMarkItem]
 
+class UnmarkRequest(BaseModel):
+    """Request to clear a vulnerability's manual verdict."""
+    index: int
+
+class BatchUnmarkRequest(BaseModel):
+    """Request to clear manual verdicts for multiple vulnerabilities."""
+    indices: list[int]
+
 class SaveFalsePositiveRequest(BaseModel):
     """Request to save a false positive experience to the project SKILL."""
     index: int
@@ -512,7 +520,7 @@ class FpReviewResult(BaseModel):
     verdict: str              # "tp" (true positive) | "fp" (false positive)
     severity: str = "low"     # "high" | "medium" | "low"
     reason: str               # AI reasoning
-    vulnerability_report: str = ""  # Markdown report for externally triggerable issues
+    vulnerability_report: str = ""  # Markdown report for confirmed issues
     created_at: str
 
 
