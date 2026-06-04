@@ -92,7 +92,7 @@ class MemoryApiCandidate:
 class MemoryApiDiscoveryOptions:
     enabled: bool = True
     batch_size: int = 8
-    timeout_seconds: int = 300
+    timeout_seconds: int = 1200
     max_candidates: int = 200
 
     @classmethod
@@ -103,7 +103,7 @@ class MemoryApiDiscoveryOptions:
         return cls(
             enabled=bool(getattr(section, "enabled", True)),
             batch_size=_bounded_int(getattr(section, "batch_size", 8), 5, 10, 8),
-            timeout_seconds=_bounded_int(getattr(section, "timeout_seconds", 300), 30, 3600, 300),
+            timeout_seconds=_bounded_int(getattr(section, "timeout_seconds", 1200), 30, 7200, 1200),
             max_candidates=max(0, _safe_int(getattr(section, "max_candidates", 200), 200)),
         )
 
@@ -188,6 +188,8 @@ async def ensure_memory_api_artifact(
     intermediate_dir = Path(scan_dir) / "memory_api_analysis"
     intermediate_dir.mkdir(parents=True, exist_ok=True)
 
+    on_line = (lambda line: print(f"  [memory_api] {line}", flush=True)) if emit else None
+
     batches = _chunked(candidates, opts.batch_size)
     batch_paths: list[Path] = []
     for index, batch in enumerate(batches, start=1):
@@ -209,6 +211,7 @@ async def ensure_memory_api_artifact(
                 output_path=batch_path,
                 timeout=opts.timeout_seconds,
                 cancel_event=cancel_event,
+                on_line=on_line,
             )
         except Exception as exc:
             logger.warning(
@@ -397,6 +400,7 @@ async def _run_memory_api_batch(
     output_path: Path,
     timeout: int,
     cancel_event=None,
+    on_line=None,
 ) -> None:
     config = get_config()
     if getattr(config.opencode, "mock", False):
@@ -421,6 +425,7 @@ async def _run_memory_api_batch(
         prompt,
         timeout,
         log_path=log_path,
+        on_line=on_line,
         cancel_event=cancel_event,
         project_dir=project_root,
         writable_paths=[output_path.parent],
