@@ -1,0 +1,11 @@
+name: multi_ptr_leak2
+label: Multi-Pointer Outer Release Leak / 多层指针外层释放遗漏成员
+description: >
+  检测 C/C++ 中释放结构体或对象最外层指针时，结构体内部指针成员可能未先释放的资源泄露场景。
+  静态阶段使用 tree-sitter 遍历全仓释放函数调用点，仅保留释放实参可解析为含指针成员结构体的候选，
+  再交由 opencode skill 做语义确认。
+enabled: true
+mode: opencode
+visibility: public
+category: resource_leak
+modified_at: "2026-06-03T00:00:00+08:00"
