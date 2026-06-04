@@ -93,6 +93,9 @@ export interface ScanStartResponse {
   scan_id: string;
 }
 
+export type UserFeedbackVerdict = "confirmed" | "false_positive" | "pending_analysis";
+export type FeedbackEntryVerdict = "confirmed" | "false_positive";
+
 export interface Vulnerability {
   file: string;
   line: number;
@@ -103,7 +106,7 @@ export interface Vulnerability {
   ai_analysis: string;
   confirmed: boolean;
   ai_verdict?: "confirmed" | "not_confirmed" | "timeout" | "no_result" | "";
-  user_verdict?: "confirmed" | "false_positive" | null;
+  user_verdict?: UserFeedbackVerdict | null;
   user_verdict_reason?: string | null;
   ticket_submitted?: boolean;
   ticket_id?: string;
@@ -168,7 +171,7 @@ export interface FeedbackEntry {
   id: string;
   project_id: string;
   vuln_type: string;
-  verdict: "confirmed" | "false_positive";
+  verdict: FeedbackEntryVerdict;
   file: string;
   line: number;
   function: string;

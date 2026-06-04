@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock, patch
 from backend.api import agent as agent_api
 from backend.api import scan as scan_api
 from backend.store.sqlite import SqliteScanStore
-from backend.api.scan import _ordered_fp_review_candidates
+from backend.api.scan import _ordered_fp_review_candidates, _retry_incomplete_candidates
 from backend.models import (
     AgentInfo,
     BatchUnmarkRequest,
@@ -41,8 +41,8 @@ class FpReviewOrderTests(unittest.TestCase):
             created_at="2026-01-01T00:00:00+00:00",
             status=ScanItemStatus.COMPLETE,
             progress=1.0,
-            total_candidates=3,
-            processed_candidates=3,
+            total_candidates=4,
+            processed_candidates=4,
             vulnerabilities=[
                 Vulnerability(
                     file="reviewed.c",
@@ -78,6 +78,18 @@ class FpReviewOrderTests(unittest.TestCase):
                     ai_verdict="confirmed",
                     user_verdict="confirmed",
                 ),
+                Vulnerability(
+                    file="pending.c",
+                    line=4,
+                    function="pending",
+                    vuln_type="npd",
+                    severity="high",
+                    description="pending manual analysis",
+                    ai_analysis="analysis",
+                    confirmed=True,
+                    ai_verdict="confirmed",
+                    user_verdict="pending_analysis",
+                ),
             ],
         )
         latest = latest_fp_review_result_map([
@@ -92,7 +104,49 @@ class FpReviewOrderTests(unittest.TestCase):
 
         ordered = _ordered_fp_review_candidates(scan, latest)
 
-        self.assertEqual([item["index"] for item in ordered], [1, 0])
+        self.assertEqual([item["index"] for item in ordered], [1, 3, 0])
+
+    def test_pending_analysis_does_not_block_incomplete_retry(self) -> None:
+        scan = ScanStatus(
+            scan_id="scan-1",
+            project_id="project",
+            scan_items=["npd"],
+            created_at="2026-01-01T00:00:00+00:00",
+            status=ScanItemStatus.COMPLETE,
+            progress=1.0,
+            total_candidates=2,
+            processed_candidates=2,
+            vulnerabilities=[
+                Vulnerability(
+                    file="pending.c",
+                    line=1,
+                    function="pending",
+                    vuln_type="npd",
+                    severity="unknown",
+                    description="timeout pending",
+                    ai_analysis="analysis",
+                    confirmed=False,
+                    ai_verdict="timeout",
+                    user_verdict="pending_analysis",
+                ),
+                Vulnerability(
+                    file="manual.c",
+                    line=2,
+                    function="manual",
+                    vuln_type="npd",
+                    severity="unknown",
+                    description="timeout manual",
+                    ai_analysis="analysis",
+                    confirmed=False,
+                    ai_verdict="timeout",
+                    user_verdict="false_positive",
+                ),
+            ],
+        )
+
+        candidates = _retry_incomplete_candidates(scan)
+
+        self.assertEqual([candidate.function for candidate in candidates], ["pending"])
 
     def test_legacy_no_result_placeholder_is_not_effective(self) -> None:
         latest = latest_fp_review_result_map([

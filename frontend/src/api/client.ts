@@ -1,5 +1,5 @@
 import axios from "axios";
-import type { AgentConfigTestResult, AgentInfo, AgentRemoteConfig, CheckerCatalogItem, CheckerDashboardResponse, CheckerInfo, FeedbackEntry, FpReviewJob, IndexStatus, ScanStatus, ScanStartResponse, ScanSummary, SkillCreateJob, SkillImportFile, SkillReport, TokenResponse, User } from "../types";
+import type { AgentConfigTestResult, AgentInfo, AgentRemoteConfig, CheckerCatalogItem, CheckerDashboardResponse, CheckerInfo, FeedbackEntry, FpReviewJob, IndexStatus, ScanStatus, ScanStartResponse, ScanSummary, SkillCreateJob, SkillImportFile, SkillReport, TokenResponse, User, UserFeedbackVerdict } from "../types";
 
 const api = axios.create({ baseURL: "/" });
 
@@ -264,11 +264,11 @@ export async function downloadScanReport(scanId: string): Promise<Blob> {
 export async function markVulnerability(
   scanId: string,
   index: number,
-  verdict: string,
+  verdict: UserFeedbackVerdict,
   reason: string,
   ticketSubmitted = false,
   ticketId = "",
-): Promise<{ ok: boolean; feedback_id: string }> {
+): Promise<{ ok: boolean; feedback_id: string | null; removed_feedback_ids: string[] }> {
   if (isPublicScan(scanId)) {
     const { data } = await api.post(
       publicScanPath("/mark"),
@@ -311,8 +311,8 @@ export async function unmarkVulnerability(
 
 export async function batchMarkVulnerabilities(
   scanId: string,
-  items: Array<{ index: number; verdict: string; reason: string }>,
-): Promise<{ ok: boolean; feedback_ids: string[] }> {
+  items: Array<{ index: number; verdict: UserFeedbackVerdict; reason: string }>,
+): Promise<{ ok: boolean; feedback_ids: string[]; removed_feedback_ids: string[] }> {
   if (isPublicScan(scanId)) {
     const { data } = await api.post(
       publicScanPath("/batch-mark"),

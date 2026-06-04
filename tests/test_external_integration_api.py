@@ -14,6 +14,7 @@ from backend.api import scan as scan_api
 from backend.models import (
     AgentInfo,
     AgentRemoteConfig,
+    FeedbackEntry,
     MarkRequest,
     ScanItemStatus,
     ScanMeta,
@@ -164,6 +165,80 @@ class ExternalIntegrationApiTests(unittest.TestCase):
             self.assertEqual(ctx.exception.status_code, 403)
             updated = store.get_vulnerabilities("scan-1")[0]
             self.assertEqual(updated.user_verdict, "confirmed")
+
+    def test_public_scan_pending_analysis_does_not_create_feedback_and_removes_old_feedback(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = SqliteScanStore(Path(tmp) / "scans.db")
+            store.create_user("owner", "owner", "hash", "user", "owner-token")
+            vuln = Vulnerability(
+                file="a.c",
+                line=1,
+                function="f",
+                vuln_type="public_check",
+                severity="high",
+                description="desc",
+                ai_analysis="analysis",
+                confirmed=True,
+                user_verdict="confirmed",
+                user_verdict_reason="verified",
+            )
+            scan = ScanStatus(
+                scan_id="scan-1",
+                project_id="project",
+                scan_items=["public_check"],
+                created_at="2026-01-01T00:00:00+00:00",
+                status=ScanItemStatus.COMPLETE,
+                progress=1.0,
+                total_candidates=1,
+                processed_candidates=1,
+                vulnerabilities=[],
+            )
+            meta = ScanMeta(
+                scan_items=["public_check"],
+                created_at=scan.created_at,
+                user_id="owner",
+                public_access_token="scan-token",
+                feedback_ids=["old-feedback"],
+            )
+            store.save_scan(scan, meta)
+            store.add_vulnerability("scan-1", vuln)
+            store.add_feedback(
+                FeedbackEntry(
+                    id="old-feedback",
+                    project_id="project",
+                    vuln_type="public_check",
+                    verdict="confirmed",
+                    file="a.c",
+                    line=1,
+                    function="f",
+                    description="desc",
+                    reason="verified",
+                    source_scan_id="scan-1",
+                    created_at="2026-01-01T00:00:00+00:00",
+                    updated_at="2026-01-01T00:00:00+00:00",
+                )
+            )
+
+            with (
+                patch("backend.api.integration.get_scan_store", return_value=store),
+                patch("backend.api.scan.get_scan_store", return_value=store),
+            ):
+                user = integration_api._public_user_for_scan("scan-1", "scan-token")
+                result = asyncio.run(
+                    integration_api.mark_public_vulnerability(
+                        "scan-1",
+                        MarkRequest(index=0, verdict="pending_analysis", reason="needs review"),
+                        current_user=user,
+                    )
+                )
+
+            self.assertIsNone(result["feedback_id"])
+            self.assertEqual(result["removed_feedback_ids"], ["old-feedback"])
+            self.assertEqual(store.list_feedback_by_scan("scan-1"), [])
+            updated_scan, updated_meta = store.load_scan("scan-1")
+            self.assertEqual(updated_scan.vulnerabilities[0].user_verdict, "pending_analysis")
+            self.assertEqual(updated_scan.vulnerabilities[0].user_verdict_reason, "needs review")
+            self.assertEqual(updated_meta.feedback_ids, [])
 
     def test_public_scan_token_allows_unmarking_the_scan(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

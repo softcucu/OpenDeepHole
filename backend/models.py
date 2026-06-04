@@ -80,7 +80,7 @@ class Vulnerability(BaseModel):
     ai_analysis: str
     confirmed: bool
     ai_verdict: str = ""                     # "confirmed" | "not_confirmed" | "timeout" | "no_result"
-    user_verdict: str | None = None          # "confirmed" | "false_positive" | None
+    user_verdict: str | None = None          # "confirmed" | "false_positive" | "pending_analysis" | None
     user_verdict_reason: str | None = None   # 用户填写的理由
     ticket_submitted: bool = False           # 是否已提问题单
     ticket_id: str = ""                      # 问题单号
@@ -207,9 +207,9 @@ class ScanEvent(BaseModel):
 
 
 class MarkRequest(BaseModel):
-    """Request to mark a vulnerability as confirmed or false positive."""
+    """Request to mark a vulnerability with manual triage feedback."""
     index: int
-    verdict: str        # "confirmed" | "false_positive"
+    verdict: str        # "confirmed" | "false_positive" | "pending_analysis"
     reason: str = ""
     ticket_submitted: bool = False
     ticket_id: str = ""
@@ -217,7 +217,7 @@ class MarkRequest(BaseModel):
 class BatchMarkItem(BaseModel):
     """Single item in a batch mark request."""
     index: int
-    verdict: str        # "confirmed" | "false_positive"
+    verdict: str        # "confirmed" | "false_positive" | "pending_analysis"
     reason: str = ""
     ticket_submitted: bool = False
     ticket_id: str = ""

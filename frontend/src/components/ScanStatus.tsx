@@ -10,6 +10,7 @@ import FeedbackManager from "./FeedbackManager";
 
 const MAX_LOG_LINES = 500;
 const AGENT_DISCONNECT_ERROR = "Agent 断开连接";
+const FINAL_USER_VERDICTS = new Set(["confirmed", "false_positive"]);
 
 const PHASES = [
   { key: "init", label: "初始化" },
@@ -27,6 +28,10 @@ function statusToPhaseIndex(status: ScanItemStatus): number {
 
 function isAgentDisconnectError(message: string | null | undefined): boolean {
   return !!message && message.includes(AGENT_DISCONNECT_ERROR);
+}
+
+function hasFinalUserVerdict(vuln: { user_verdict?: string | null }): boolean {
+  return FINAL_USER_VERDICTS.has(vuln.user_verdict || "");
 }
 
 interface Props {
@@ -415,7 +420,7 @@ export default function ScanStatus({ scanId, onBack }: Props) {
   const displayedReports = reports.length > 0 ? reports : (scan.skill_reports ?? []);
   const activeReport = displayedReports[activeReportIndex] ?? displayedReports[0];
   const retryableCount = scan.vulnerabilities.filter(
-    (v) => !v.user_verdict && (v.ai_verdict === "timeout" || v.ai_verdict === "no_result"),
+    (v) => !hasFinalUserVerdict(v) && (v.ai_verdict === "timeout" || v.ai_verdict === "no_result"),
   ).length || scan.retryable_candidates_count || 0;
 
   return (
@@ -499,7 +504,7 @@ export default function ScanStatus({ scanId, onBack }: Props) {
             )}
             {(() => {
               const confirmedVulns = scan.vulnerabilities.filter(
-                (v) => (v.ai_verdict === "confirmed" || (!v.ai_verdict && v.confirmed)) && !v.user_verdict
+                (v) => (v.ai_verdict === "confirmed" || (!v.ai_verdict && v.confirmed)) && !hasFinalUserVerdict(v)
               ).length;
               const canTrigger = confirmedVulns > 0;
               const isReviewing = fpReview?.status === "running" || fpReview?.status === "pending";

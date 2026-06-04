@@ -60,6 +60,13 @@ _running_scans: dict[str, ScanStatus] = {}
 # Map scan_id → user_id for ownership checks on in-memory scans
 _scan_owners: dict[str, str] = {}
 
+_FINAL_USER_VERDICTS = {"confirmed", "false_positive"}
+_MARK_VERDICTS = _FINAL_USER_VERDICTS | {"pending_analysis"}
+
+
+def _has_final_user_verdict(vuln) -> bool:
+    return vuln.user_verdict in _FINAL_USER_VERDICTS
+
 
 def _is_agent_disconnect_error(error_message: str | None) -> bool:
     """Check if an error message indicates an agent disconnect (not user action)."""
@@ -118,7 +125,7 @@ def _ordered_fp_review_candidates(scan: ScanStatus, latest_fp_results: dict[int,
     unresolved: list[dict] = []
     reviewed: list[dict] = []
     for i, v in enumerate(scan.vulnerabilities):
-        if not v.confirmed or v.user_verdict:
+        if not v.confirmed or _has_final_user_verdict(v):
             continue
         item = {
             "index": i,
@@ -228,7 +235,7 @@ def _candidate_key(candidate: Candidate) -> tuple[str, int, str, str]:
 def _retry_incomplete_candidates(scan: ScanStatus) -> list[Candidate]:
     candidates: list[Candidate] = []
     for vuln in scan.vulnerabilities:
-        if vuln.user_verdict:
+        if _has_final_user_verdict(vuln):
             continue
         if (vuln.ai_verdict or "") not in _RETRYABLE_AI_VERDICTS:
             continue
@@ -780,15 +787,19 @@ def _mark_single(
     reason: str,
     ticket_submitted: bool = False,
     ticket_id: str = "",
-) -> str:
-    """Mark a single vulnerability and create a feedback entry. Returns feedback_id."""
-    if verdict not in ("confirmed", "false_positive"):
+) -> tuple[str | None, list[str]]:
+    """Mark a vulnerability. Final verdicts create feedback; pending analysis does not."""
+    if verdict not in _MARK_VERDICTS:
         raise HTTPException(status_code=400, detail="Invalid verdict")
     if index < 0 or index >= len(scan.vulnerabilities):
         raise HTTPException(status_code=400, detail=f"Invalid vulnerability index: {index}")
 
     vuln = scan.vulnerabilities[index]
     normalized_ticket_id = ticket_id.strip() if ticket_submitted else ""
+
+    removed_feedback_ids: list[str] = []
+    if verdict == "pending_analysis":
+        removed_feedback_ids = store.clear_vulnerability_user_verdict(scan_id, index)
 
     if scan_id in _running_scans:
         live = _running_scans[scan_id]
@@ -798,6 +809,11 @@ def _mark_single(
             live.vulnerabilities[index].ticket_submitted = ticket_submitted
             live.vulnerabilities[index].ticket_id = normalized_ticket_id
 
+    vuln.user_verdict = verdict
+    vuln.user_verdict_reason = reason
+    vuln.ticket_submitted = ticket_submitted
+    vuln.ticket_id = normalized_ticket_id
+
     store.update_vulnerability(
         scan_id,
         index,
@@ -806,6 +822,15 @@ def _mark_single(
         ticket_submitted,
         normalized_ticket_id,
     )
+
+    if verdict == "pending_analysis":
+        logger.info(
+            "Scan %s: vulnerability %d marked as pending analysis, removed feedback IDs: %s",
+            scan_id,
+            index,
+            removed_feedback_ids,
+        )
+        return None, removed_feedback_ids
 
     now = datetime.now(timezone.utc).isoformat()
     entry = FeedbackEntry(
@@ -851,7 +876,7 @@ def _mark_single(
     except Exception:
         pass
 
-    return entry.id
+    return entry.id, removed_feedback_ids
 
 
 def _remove_feedback_ids_from_scan(scan_id: str, scan: ScanStatus, feedback_ids: list[str]) -> None:
@@ -908,11 +933,11 @@ async def mark_vulnerability(
     body: MarkRequest,
     current_user: User = Depends(get_current_user),
 ) -> dict:
-    """Mark a vulnerability as confirmed or false positive."""
+    """Mark a vulnerability with manual triage feedback."""
     _check_scan_owner(scan_id, current_user)
     scan = await get_scan_status(scan_id, current_user)
     store = get_scan_store()
-    feedback_id = _mark_single(
+    feedback_id, removed_feedback_ids = _mark_single(
         scan_id,
         scan,
         store,
@@ -922,7 +947,10 @@ async def mark_vulnerability(
         body.ticket_submitted,
         body.ticket_id,
     )
-    return {"ok": True, "feedback_id": feedback_id}
+    _remove_feedback_ids_from_scan(scan_id, scan, removed_feedback_ids)
+    if removed_feedback_ids:
+        await _push_feedback_selection_update(scan_id, scan.feedback_ids)
+    return {"ok": True, "feedback_id": feedback_id, "removed_feedback_ids": removed_feedback_ids}
 
 
 @router.post("/api/scan/{scan_id}/unmark")
@@ -948,14 +976,16 @@ async def batch_mark_vulnerabilities(
     body: BatchMarkRequest,
     current_user: User = Depends(get_current_user),
 ) -> dict:
-    """Batch-mark multiple vulnerabilities as confirmed or false positive."""
+    """Batch-mark multiple vulnerabilities with manual triage feedback."""
     _check_scan_owner(scan_id, current_user)
     if not body.items:
         raise HTTPException(status_code=400, detail="No items provided")
     scan = await get_scan_status(scan_id, current_user)
     store = get_scan_store()
-    feedback_ids = [
-        _mark_single(
+    feedback_ids: list[str] = []
+    removed_feedback_ids: list[str] = []
+    for item in body.items:
+        feedback_id, removed_ids = _mark_single(
             scan_id,
             scan,
             store,
@@ -965,9 +995,13 @@ async def batch_mark_vulnerabilities(
             item.ticket_submitted,
             item.ticket_id,
         )
-        for item in body.items
-    ]
-    return {"ok": True, "feedback_ids": feedback_ids}
+        if feedback_id is not None:
+            feedback_ids.append(feedback_id)
+        removed_feedback_ids.extend(removed_ids)
+    _remove_feedback_ids_from_scan(scan_id, scan, removed_feedback_ids)
+    if removed_feedback_ids:
+        await _push_feedback_selection_update(scan_id, scan.feedback_ids)
+    return {"ok": True, "feedback_ids": feedback_ids, "removed_feedback_ids": removed_feedback_ids}
 
 
 @router.post("/api/scan/{scan_id}/batch-unmark")
