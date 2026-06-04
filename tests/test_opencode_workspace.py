@@ -66,6 +66,7 @@ class OpencodeWorkspaceTests(unittest.TestCase):
             assert_opencode_read_permissions(self, config)
             self.assertTrue((workspace / ".opencode" / "skills" / "prove-bug" / "SKILL.md").is_file())
             self.assertTrue((workspace / ".opencode" / "skills" / "prove-fp" / "SKILL.md").is_file())
+            self.assertTrue((workspace / ".opencode" / "skills" / "final-judge" / "SKILL.md").is_file())
 
     def test_fp_workspace_injects_only_selected_feedback_for_vuln_type(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -115,14 +116,17 @@ class OpencodeWorkspaceTests(unittest.TestCase):
             (workspace / "opencode.json").write_text("{}", encoding="utf-8")
             fp_dir = workspace / ".opencode" / "skills" / "prove-bug"
             fp_discriminator_dir = workspace / ".opencode" / "skills" / "prove-fp"
+            fp_final_dir = workspace / ".opencode" / "skills" / "final-judge"
             legacy_fp_dir = workspace / ".opencode" / "skills" / "fp-review"
             scan_dir = workspace / ".opencode" / "skills" / "npd"
             fp_dir.mkdir(parents=True)
             fp_discriminator_dir.mkdir(parents=True)
+            fp_final_dir.mkdir(parents=True)
             legacy_fp_dir.mkdir(parents=True)
             scan_dir.mkdir(parents=True)
             (fp_dir / "SKILL.md").write_text("fp", encoding="utf-8")
             (fp_discriminator_dir / "SKILL.md").write_text("fp-discriminator", encoding="utf-8")
+            (fp_final_dir / "SKILL.md").write_text("fp-final", encoding="utf-8")
             (legacy_fp_dir / "SKILL.md").write_text("legacy-fp", encoding="utf-8")
             (scan_dir / "SKILL.md").write_text("npd", encoding="utf-8")
 
@@ -130,6 +134,7 @@ class OpencodeWorkspaceTests(unittest.TestCase):
 
             self.assertFalse(fp_dir.exists())
             self.assertFalse(fp_discriminator_dir.exists())
+            self.assertFalse(fp_final_dir.exists())
             self.assertFalse(legacy_fp_dir.exists())
             self.assertTrue((scan_dir / "SKILL.md").is_file())
             self.assertTrue((workspace / "opencode.json").is_file())

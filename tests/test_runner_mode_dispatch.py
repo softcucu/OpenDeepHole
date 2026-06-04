@@ -102,7 +102,7 @@ def test_opencode_runtime_cwd_receives_config_and_fp_skills(tmp_path: Path) -> N
     workspace.mkdir()
     project.mkdir()
     skills_root = workspace / ".opencode" / "skills"
-    for name in ("prove-bug", "prove-fp"):
+    for name in ("prove-bug", "prove-fp", "final-judge"):
         skill_dir = skills_root / name
         skill_dir.mkdir(parents=True)
         (skill_dir / "SKILL.md").write_text(name, encoding="utf-8")
@@ -126,6 +126,7 @@ def test_opencode_runtime_cwd_receives_config_and_fp_skills(tmp_path: Path) -> N
     # Skills should be copied to runtime CWD (opencode walks up from CWD)
     assert (runtime_cwd / ".opencode" / "skills" / "prove-bug" / "SKILL.md").is_file()
     assert (runtime_cwd / ".opencode" / "skills" / "prove-fp" / "SKILL.md").is_file()
+    assert (runtime_cwd / ".opencode" / "skills" / "final-judge" / "SKILL.md").is_file()
     assert runtime_config["skills"]["paths"] == [str((runtime_cwd / ".opencode" / "skills").resolve())]
     assert env_config["skills"]["paths"] == runtime_config["skills"]["paths"]
 

@@ -29,8 +29,23 @@ compatibility: opencode
 - 相关 sink，例如数组访问、指针偏移、memcpy_s、memmove_s、strncpy_s
 - 原始描述和原始 AI 分析
 - project_id 和 result_id
+- 本阶段 Markdown 输出路径
 
 你需要主动阅读代码，补齐上下文。静态分析结果只是候选线索，不是结论。
+
+## 阶段 Markdown 输出
+
+你必须将正方论证写入提示中给出的 `prove-bug.md` 路径。该文件会作为反方和最终裁决 Agent 的输入，必须包含完整代码链、关键代码片段和证据说明。输出风格参考 memleak：读者不重新查看代码也能判断是否是问题。
+
+Markdown 至少包含：
+
+- `# Prove Bug`
+- `## Verdict`
+- `## Candidate`
+- `## Code Chain`
+- `## Key Code Evidence`
+- `## Analysis`
+- `## Residual Uncertainty`
 
 ## 分析目标
 

@@ -12,6 +12,7 @@ from backend.models import (
     FeedbackEntry,
     FpReviewJob,
     FpReviewResult,
+    FpReviewStageOutput,
     FpReviewStatus,
     ScanEvent,
     ScanItemStatus,
@@ -24,6 +25,16 @@ from backend.models import (
 )
 
 from .base import ScanStoreBase
+
+
+def _json_dict(value: str | None) -> dict[str, str]:
+    try:
+        data = json.loads(value or "{}")
+    except Exception:
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    return {str(k): str(v) for k, v in data.items()}
 
 _SCHEMA = """\
 CREATE TABLE IF NOT EXISTS scans (
@@ -136,8 +147,19 @@ CREATE TABLE IF NOT EXISTS fp_review_results (
     severity    TEXT NOT NULL DEFAULT 'low',
     reason      TEXT NOT NULL,
     vulnerability_report TEXT NOT NULL DEFAULT '',
+    stage_outputs TEXT NOT NULL DEFAULT '{}',
     created_at  TEXT NOT NULL,
     UNIQUE(review_id, vuln_index)
+);
+
+CREATE TABLE IF NOT EXISTS fp_review_stage_outputs (
+    review_id   TEXT NOT NULL REFERENCES fp_review_jobs(review_id) ON DELETE CASCADE,
+    vuln_index  INTEGER NOT NULL,
+    stage       TEXT NOT NULL,
+    markdown    TEXT NOT NULL DEFAULT '',
+    created_at  TEXT NOT NULL,
+    updated_at  TEXT NOT NULL,
+    PRIMARY KEY(review_id, vuln_index, stage)
 );
 
 CREATE INDEX IF NOT EXISTS idx_fp_review_scan ON fp_review_jobs(scan_id);
@@ -282,8 +304,18 @@ class SqliteScanStore(ScanStoreBase):
                 severity    TEXT NOT NULL DEFAULT 'low',
                 reason      TEXT NOT NULL,
                 vulnerability_report TEXT NOT NULL DEFAULT '',
+                stage_outputs TEXT NOT NULL DEFAULT '{}',
                 created_at  TEXT NOT NULL,
                 UNIQUE(review_id, vuln_index)
+            );
+            CREATE TABLE IF NOT EXISTS fp_review_stage_outputs (
+                review_id   TEXT NOT NULL REFERENCES fp_review_jobs(review_id) ON DELETE CASCADE,
+                vuln_index  INTEGER NOT NULL,
+                stage       TEXT NOT NULL,
+                markdown    TEXT NOT NULL DEFAULT '',
+                created_at  TEXT NOT NULL,
+                updated_at  TEXT NOT NULL,
+                PRIMARY KEY(review_id, vuln_index, stage)
             );
             CREATE INDEX IF NOT EXISTS idx_fp_review_scan ON fp_review_jobs(scan_id);
         """)
@@ -302,6 +334,10 @@ class SqliteScanStore(ScanStoreBase):
         if "vulnerability_report" not in fp_cols:
             self._conn.execute(
                 "ALTER TABLE fp_review_results ADD COLUMN vulnerability_report TEXT NOT NULL DEFAULT ''"
+            )
+        if "stage_outputs" not in fp_cols:
+            self._conn.execute(
+                "ALTER TABLE fp_review_results ADD COLUMN stage_outputs TEXT NOT NULL DEFAULT '{}'"
             )
         self._conn.commit()
 
@@ -1330,14 +1366,50 @@ class SqliteScanStore(ScanStoreBase):
                 """,
                 (scan_id,),
             )
+            return [self._row_to_fp_review_result(r) for r in cur.fetchall()]
+
+    def upsert_fp_review_stage_output(
+        self,
+        review_id: str,
+        vuln_index: int,
+        stage: str,
+        markdown: str,
+        timestamp: str,
+    ) -> None:
+        with self._lock:
+            self._conn.execute(
+                """\
+                INSERT INTO fp_review_stage_outputs
+                    (review_id, vuln_index, stage, markdown, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(review_id, vuln_index, stage) DO UPDATE SET
+                    markdown = excluded.markdown,
+                    updated_at = excluded.updated_at
+                """,
+                (review_id, vuln_index, stage, markdown, timestamp, timestamp),
+            )
+            self._conn.commit()
+
+    def list_fp_review_stage_outputs_by_review(self, review_id: str) -> list[FpReviewStageOutput]:
+        with self._lock:
+            self._conn.row_factory = sqlite3.Row
+            cur = self._conn.execute(
+                """\
+                SELECT *
+                FROM fp_review_stage_outputs
+                WHERE review_id = ?
+                ORDER BY vuln_index ASC, stage ASC
+                """,
+                (review_id,),
+            )
             return [
-                FpReviewResult(
+                FpReviewStageOutput(
+                    review_id=r["review_id"],
                     vuln_index=r["vuln_index"],
-                    verdict=r["verdict"],
-                    severity=r["severity"] or "low",
-                    reason=r["reason"],
-                    vulnerability_report=r["vulnerability_report"] or "",
+                    stage=r["stage"],
+                    markdown=r["markdown"] or "",
                     created_at=r["created_at"],
+                    updated_at=r["updated_at"],
                 )
                 for r in cur.fetchall()
             ]
@@ -1350,14 +1422,7 @@ class SqliteScanStore(ScanStoreBase):
             (review_id,),
         )
         results = [
-            FpReviewResult(
-                vuln_index=r["vuln_index"],
-                verdict=r["verdict"],
-                severity=r["severity"] or "low",
-                reason=r["reason"],
-                vulnerability_report=r["vulnerability_report"] or "",
-                created_at=r["created_at"],
-            )
+            self._row_to_fp_review_result(r)
             for r in cur.fetchall()
         ]
         return FpReviewJob(
@@ -1371,6 +1436,31 @@ class SqliteScanStore(ScanStoreBase):
             results=results,
             error_message=row["error_message"],
         )
+
+    def _row_to_fp_review_result(self, row: sqlite3.Row) -> FpReviewResult:
+        stage_outputs = _json_dict(row["stage_outputs"] if "stage_outputs" in row.keys() else "{}")
+        if not stage_outputs:
+            stage_outputs = self._stage_outputs_for_result(row["review_id"], row["vuln_index"])
+        return FpReviewResult(
+            vuln_index=row["vuln_index"],
+            verdict=row["verdict"],
+            severity=row["severity"] or "low",
+            reason=row["reason"],
+            vulnerability_report=row["vulnerability_report"] or "",
+            stage_outputs=stage_outputs,
+            created_at=row["created_at"],
+        )
+
+    def _stage_outputs_for_result(self, review_id: str, vuln_index: int) -> dict[str, str]:
+        cur = self._conn.execute(
+            """\
+            SELECT stage, markdown
+            FROM fp_review_stage_outputs
+            WHERE review_id = ? AND vuln_index = ?
+            """,
+            (review_id, vuln_index),
+        )
+        return {str(r["stage"]): str(r["markdown"] or "") for r in cur.fetchall()}
 
     def update_fp_review_job(
         self,
@@ -1413,8 +1503,8 @@ class SqliteScanStore(ScanStoreBase):
             self._conn.execute(
                 """\
                 INSERT OR REPLACE INTO fp_review_results
-                    (review_id, vuln_index, verdict, severity, reason, vulnerability_report, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                    (review_id, vuln_index, verdict, severity, reason, vulnerability_report, stage_outputs, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     review_id,
@@ -1423,6 +1513,7 @@ class SqliteScanStore(ScanStoreBase):
                     result.severity,
                     result.reason,
                     result.vulnerability_report,
+                    json.dumps(result.stage_outputs, ensure_ascii=False),
                     result.created_at,
                 ),
             )

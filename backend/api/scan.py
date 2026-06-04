@@ -25,6 +25,7 @@ from backend.models import (
     AgentFpReviewFinish,
     AgentFpReviewProgress,
     AgentFpReviewResult,
+    AgentFpReviewStageOutput,
     BatchMarkRequest,
     BatchUnmarkRequest,
     Candidate,
@@ -1229,6 +1230,7 @@ async def agent_fp_review_result(scan_id: str, body: AgentFpReviewResult) -> dic
         severity=severity,
         reason=body.reason,
         vulnerability_report=body.vulnerability_report if body.verdict == "tp" else "",
+        stage_outputs=body.stage_outputs,
         created_at=now,
     )
     store.add_fp_review_result(body.review_id, result)
@@ -1237,8 +1239,39 @@ async def agent_fp_review_result(scan_id: str, body: AgentFpReviewResult) -> dic
         "review_id": body.review_id, "vuln_index": body.vuln_index,
         "verdict": body.verdict, "severity": severity, "reason": body.reason,
         "vulnerability_report": result.vulnerability_report,
+        "stage_outputs": result.stage_outputs,
     })
     logger.debug("FP review result for %s vuln[%d]: %s", scan_id, body.vuln_index, body.verdict)
+    return {"ok": True}
+
+
+@router.post("/api/scan/{scan_id}/fp_review/stage-output")
+async def agent_fp_review_stage_output(scan_id: str, body: AgentFpReviewStageOutput) -> dict:
+    """Agent pushes one stage's Markdown output while FP review is running."""
+    store = get_scan_store()
+    job = store.get_fp_review_job(body.review_id)
+    if job is None or job.scan_id != scan_id:
+        raise HTTPException(status_code=404, detail="FP review not found")
+    if job.status == FpReviewStatus.CANCELLED:
+        return {"ok": True}
+    if body.stage not in {"prove_bug", "prove_fp", "final_judge"}:
+        raise HTTPException(status_code=400, detail="Invalid FP review stage")
+    now = datetime.now(timezone.utc).isoformat()
+    store.upsert_fp_review_stage_output(
+        body.review_id,
+        body.vuln_index,
+        body.stage,
+        body.markdown,
+        now,
+    )
+    from backend.sse import publish
+    publish(scan_id, "fp_review_stage_output", {
+        "review_id": body.review_id,
+        "vuln_index": body.vuln_index,
+        "stage": body.stage,
+        "markdown": body.markdown,
+    })
+    logger.debug("FP review stage output for %s vuln[%d]: %s", scan_id, body.vuln_index, body.stage)
     return {"ok": True}
 
 
@@ -1358,6 +1391,7 @@ async def get_fp_review_skill(
     skill_paths = [
         ("prove-bug", skills_dir / "fp_review.md"),
         ("prove-fp", skills_dir / "fp_review_discriminator.md"),
+        ("final-judge", skills_dir / "fp_review_final.md"),
     ]
     missing = [path.name for _, path in skill_paths if not path.is_file()]
     if missing:

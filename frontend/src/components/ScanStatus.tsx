@@ -143,18 +143,57 @@ export default function ScanStatus({ scanId, onBack }: Props) {
           : prev,
       );
     },
+    onFpReviewStageOutput: (data) => {
+      setFpReview((prev) => {
+        if (!prev) return prev;
+        const results = [...prev.results];
+        const existingIndex = results.findIndex((result) => result.vuln_index === data.vuln_index);
+        if (existingIndex >= 0) {
+          const existing = results[existingIndex];
+          results[existingIndex] = {
+            ...existing,
+            stage_outputs: {
+              ...(existing.stage_outputs ?? {}),
+              [data.stage]: data.markdown,
+            },
+          };
+        } else {
+          results.push({
+            vuln_index: data.vuln_index,
+            verdict: "tp",
+            severity: "low",
+            reason: "",
+            vulnerability_report: "",
+            stage_outputs: { [data.stage]: data.markdown },
+            created_at: new Date().toISOString(),
+          });
+        }
+        return { ...prev, results };
+      });
+    },
     onFpReviewResult: (data) => {
       setFpReview((prev) => {
         if (!prev) return prev;
+        const existing = prev.results.find((result) => result.vuln_index === data.vuln_index);
         const newResult = {
           vuln_index: data.vuln_index,
           verdict: data.verdict,
           severity: data.severity,
           reason: data.reason,
           vulnerability_report: data.vulnerability_report ?? "",
+          stage_outputs: {
+            ...(existing?.stage_outputs ?? {}),
+            ...(data.stage_outputs ?? {}),
+          },
           created_at: new Date().toISOString(),
         };
-        return { ...prev, results: [...prev.results, newResult] };
+        return {
+          ...prev,
+          results: [
+            ...prev.results.filter((result) => result.vuln_index !== data.vuln_index),
+            newResult,
+          ],
+        };
       });
     },
     onFpReviewFinish: (data) => {

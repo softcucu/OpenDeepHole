@@ -216,6 +216,7 @@ class Reporter:
         severity: str,
         reason: str,
         vulnerability_report: str = "",
+        stage_outputs: dict[str, str] | None = None,
     ) -> None:
         """Push a single FP review result to the server."""
         if self.dry_run:
@@ -232,11 +233,38 @@ class Reporter:
                     "severity": severity,
                     "reason": reason,
                     "vulnerability_report": vulnerability_report,
+                    "stage_outputs": stage_outputs or {},
                 },
                 timeout=10.0,
             )
         except Exception as e:
             print(f"Warning: failed to push FP review result: {e}")
+
+    async def push_fp_stage_output(
+        self,
+        scan_id: str,
+        review_id: str,
+        vuln_index: int,
+        stage: str,
+        markdown: str,
+    ) -> None:
+        """Push one FP review stage Markdown output to the server."""
+        if self.dry_run:
+            print(f"  [fp_review] [{stage}] vuln[{vuln_index}] markdown ready ({len(markdown)} chars)")
+            return
+        try:
+            await self._client.post(
+                f"{self.server_url}/api/scan/{scan_id}/fp_review/stage-output",
+                json={
+                    "review_id": review_id,
+                    "vuln_index": vuln_index,
+                    "stage": stage,
+                    "markdown": markdown,
+                },
+                timeout=10.0,
+            )
+        except Exception as e:
+            print(f"Warning: failed to push FP review stage output: {e}")
 
     async def push_fp_progress(
         self,

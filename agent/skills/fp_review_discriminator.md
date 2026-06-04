@@ -26,11 +26,26 @@ compatibility: opencode
 - 疑似漏洞类型
 - 命中文件、函数、行号
 - 疑似 source / sink / 变量名
-- `prove-bug` 给出的漏洞成立论证
+- `prove-bug.md` 的文件路径
+- `prove-bug` 给出的结构化阶段摘要
 - 部分上下文代码
 - project_id 和 result_id
 
-你需要主动阅读代码，寻找反证。不要直接接受 `prove-bug` 的结论。
+你必须先读取提示中给出的 `prove-bug.md` 文件，再主动阅读代码寻找反证。不要直接接受 `prove-bug` 的结论。
+
+## 阶段 Markdown 输出
+
+你必须将反方论证写入提示中给出的 `prove-fp.md` 路径。该文件会作为最终裁决 Agent 的输入，必须逐条反驳或确认 `prove-bug.md` 中的关键证据，并包含完整代码链、关键代码片段和证据说明。输出风格参考 memleak：读者不重新查看代码也能判断是否是问题。
+
+Markdown 至少包含：
+
+- `# Prove False Positive`
+- `## Verdict`
+- `## Prove-Bug Evidence Review`
+- `## Rebuttal Code Chain`
+- `## Key Code Evidence`
+- `## Analysis`
+- `## Residual Risk`
 
 ## 分析目标
 

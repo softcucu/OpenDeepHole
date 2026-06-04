@@ -529,7 +529,18 @@ class FpReviewResult(BaseModel):
     severity: str = "low"     # "high" | "medium" | "low"
     reason: str               # AI reasoning
     vulnerability_report: str = ""  # Markdown report for confirmed issues
+    stage_outputs: dict[str, str] = {}
     created_at: str
+
+
+class FpReviewStageOutput(BaseModel):
+    """Markdown output produced by one FP review stage."""
+    review_id: str
+    vuln_index: int
+    stage: str
+    markdown: str
+    created_at: str
+    updated_at: str
 
 
 class FpReviewJob(BaseModel):
@@ -558,6 +569,15 @@ class AgentFpReviewResult(BaseModel):
     severity: str = "low"
     reason: str
     vulnerability_report: str = ""
+    stage_outputs: dict[str, str] = {}
+
+
+class AgentFpReviewStageOutput(BaseModel):
+    """Sent by the agent when a stage Markdown output is ready."""
+    review_id: str
+    vuln_index: int
+    stage: str
+    markdown: str
 
 
 class AgentFpReviewProgress(BaseModel):

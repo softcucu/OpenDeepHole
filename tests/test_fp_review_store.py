@@ -41,6 +41,36 @@ class FpReviewStoreTests(unittest.TestCase):
             self.assertEqual(results[1].severity, "high")
             self.assertEqual(results[1].vulnerability_report, "# report\n\ncall chain")
 
+    def test_upserts_stage_outputs_and_attaches_to_results(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = SqliteScanStore(Path(tmp) / "scan.db")
+            store.create_fp_review_job("review", "scan-1", 1, "2026-01-01T00:00:00+00:00")
+            store.upsert_fp_review_stage_output(
+                "review",
+                0,
+                "prove_bug",
+                "# Prove Bug\n\nanalysis",
+                "2026-01-01T00:00:01+00:00",
+            )
+            store.add_fp_review_result(
+                "review",
+                FpReviewResult(
+                    vuln_index=0,
+                    verdict="tp",
+                    severity="medium",
+                    reason="final",
+                    vulnerability_report="",
+                    stage_outputs={"final_judge": "# Final"},
+                    created_at="2026-01-01T00:01:00+00:00",
+                ),
+            )
+
+            outputs = store.list_fp_review_stage_outputs_by_review("review")
+            results = store.list_fp_review_results_by_scan("scan-1")
+
+            self.assertEqual(outputs[0].markdown, "# Prove Bug\n\nanalysis")
+            self.assertEqual(results[0].stage_outputs["final_judge"], "# Final")
+
     def test_tracks_current_fp_review_target(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             store = SqliteScanStore(Path(tmp) / "scan.db")
@@ -75,7 +105,7 @@ class FpReviewStoreTests(unittest.TestCase):
             self.assertIsNone(job.current_vuln_index)
             self.assertEqual(job.error_message, "用户手动停止")
 
-    def test_migrates_fp_review_severity_and_report_columns(self) -> None:
+    def test_migrates_fp_review_result_columns(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             db_path = Path(tmp) / "scan.db"
             store = SqliteScanStore(db_path)
@@ -112,6 +142,7 @@ class FpReviewStoreTests(unittest.TestCase):
 
             results = migrated.list_fp_review_results_by_scan("scan-1")
             self.assertEqual(results[0].severity, "medium")
+            self.assertEqual(results[0].stage_outputs, {})
 
     def test_migrates_fp_review_job_current_target_column(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

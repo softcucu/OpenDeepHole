@@ -54,6 +54,14 @@ interface FpReviewResultEvent {
   severity: "high" | "medium" | "low";
   reason: string;
   vulnerability_report?: string;
+  stage_outputs?: Record<string, string>;
+}
+
+interface FpReviewStageOutputEvent {
+  review_id: string;
+  vuln_index: number;
+  stage: string;
+  markdown: string;
 }
 
 interface FpReviewFinishEvent {
@@ -73,6 +81,7 @@ export interface ScanSSEHandlers {
   onScanFinish?: (data: ScanFinishEvent) => void;
   onFpReviewStarted?: (data: FpReviewStartedEvent) => void;
   onFpReviewProgress?: (data: FpReviewProgressEvent) => void;
+  onFpReviewStageOutput?: (data: FpReviewStageOutputEvent) => void;
   onFpReviewResult?: (data: FpReviewResultEvent) => void;
   onFpReviewFinish?: (data: FpReviewFinishEvent) => void;
   onIndexStatus?: (data: IndexStatus) => void;
@@ -154,6 +163,7 @@ export function useScanSSE(
     handle<ScanFinishEvent>("scan_finish", (d) => handlersRef.current.onScanFinish?.(d));
     handle<FpReviewStartedEvent>("fp_review_started", (d) => handlersRef.current.onFpReviewStarted?.(d));
     handle<FpReviewProgressEvent>("fp_review_progress", (d) => handlersRef.current.onFpReviewProgress?.(d));
+    handle<FpReviewStageOutputEvent>("fp_review_stage_output", (d) => handlersRef.current.onFpReviewStageOutput?.(d));
     handle<FpReviewResultEvent>("fp_review_result", (d) => handlersRef.current.onFpReviewResult?.(d));
     handle<FpReviewFinishEvent>("fp_review_finish", (d) => handlersRef.current.onFpReviewFinish?.(d));
     handle<IndexStatus>("index_status", (d) => handlersRef.current.onIndexStatus?.(d));

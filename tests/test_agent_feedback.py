@@ -61,133 +61,48 @@ class AgentFeedbackTests(unittest.TestCase):
         self.assertEqual(fp_reviewer._normalize_fp_severity("high", "fp"), "low")
         self.assertEqual(fp_reviewer._normalize_fp_severity("critical", "tp"), "medium")
 
-    def test_fp_review_finalizes_prove_fp_false_as_fp(self) -> None:
-        prove_bug = fp_reviewer._FpStageResult(
-            result_id="bug",
-            result=Vulnerability(
-                file="a.c",
-                line=10,
-                function="parse",
-                vuln_type="npd",
-                severity="high",
-                description="prove-bug tp",
-                ai_analysis="prove-bug exploit chain",
-                confirmed=True,
-            ),
-            payload={"vulnerability_report": _valid_issue_report()},
-        )
-        prove_fp = fp_reviewer._FpStageResult(
-            result_id="fp",
+    def test_fp_review_final_judge_false_as_fp(self) -> None:
+        final_judge = fp_reviewer._FpStageResult(
+            result_id="final",
             result=Vulnerability(
                 file="a.c",
                 line=10,
                 function="parse",
                 vuln_type="npd",
                 severity="low",
-                description="prove-fp fp",
-                ai_analysis="最强不可利用理由：caller checks null",
+                description="final fp",
+                ai_analysis="最终裁决：caller checks null",
                 confirmed=False,
             ),
             payload={},
         )
 
-        verdict, severity, reason, report = fp_reviewer._finalize_fp_review_result(prove_bug, prove_fp)
+        verdict, severity, reason, report = fp_reviewer._finalize_fp_review_result(final_judge)
 
         self.assertEqual((verdict, severity, report), ("fp", "low", ""))
-        self.assertIn("[prove-bug]", reason)
-        self.assertIn("[prove-fp]", reason)
+        self.assertIn("caller checks null", reason)
 
-    def test_fp_review_preserves_medium_issue_report(self) -> None:
-        prove_bug = fp_reviewer._FpStageResult(
-            result_id="bug",
+    def test_fp_review_final_judge_preserves_medium_issue_report(self) -> None:
+        final_judge = fp_reviewer._FpStageResult(
+            result_id="final",
             result=Vulnerability(
                 file="a.c",
                 line=10,
                 function="parse",
                 vuln_type="npd",
                 severity="medium",
-                description="prove-bug tp",
-                ai_analysis="prove-bug code issue",
+                description="final tp",
+                ai_analysis="final code chain",
                 confirmed=True,
             ),
             payload={"vulnerability_report": _valid_issue_report()},
         )
-        prove_fp = fp_reviewer._FpStageResult(
-            result_id="fp",
-            result=Vulnerability(
-                file="a.c",
-                line=10,
-                function="parse",
-                vuln_type="npd",
-                severity="low",
-                description="prove-fp tp",
-                ai_analysis="未能证明误报",
-                confirmed=True,
-            ),
-            payload={},
-        )
 
-        verdict, severity, reason, report = fp_reviewer._finalize_fp_review_result(prove_bug, prove_fp)
+        verdict, severity, reason, report = fp_reviewer._finalize_fp_review_result(final_judge)
 
         self.assertEqual((verdict, severity), ("tp", "medium"))
+        self.assertIn("final code chain", reason)
         self.assertIn("## Full Call Stack", report)
-        self.assertIn("Prove-fp 未能证明非问题", reason)
-
-    def test_fp_review_preserves_high_issue_report_after_prove_fp(self) -> None:
-        prove_bug = fp_reviewer._FpStageResult(
-            result_id="bug",
-            result=Vulnerability(
-                file="a.c",
-                line=10,
-                function="parse",
-                vuln_type="npd",
-                severity="high",
-                description="prove-bug tp",
-                ai_analysis="prove-bug exploit chain",
-                confirmed=True,
-            ),
-            payload={"vulnerability_report": _valid_issue_report()},
-        )
-        prove_fp = fp_reviewer._FpStageResult(
-            result_id="fp",
-            result=Vulnerability(
-                file="a.c",
-                line=10,
-                function="parse",
-                vuln_type="npd",
-                severity="high",
-                description="prove-fp tp",
-                ai_analysis="仍然成立的证据：external chain remains",
-                confirmed=True,
-            ),
-            payload={},
-        )
-
-        verdict, severity, _, report = fp_reviewer._finalize_fp_review_result(prove_bug, prove_fp)
-
-        self.assertEqual((verdict, severity), ("tp", "high"))
-        self.assertIn("## Full Call Stack", report)
-
-    def test_fp_review_short_circuits_when_prove_bug_reports_fp(self) -> None:
-        prove_bug = fp_reviewer._FpStageResult(
-            result_id="bug",
-            result=Vulnerability(
-                file="a.c",
-                line=10,
-                function="parse",
-                vuln_type="npd",
-                severity="low",
-                description="prove-bug fp",
-                ai_analysis="NOT_PROVEN",
-                confirmed=False,
-            ),
-            payload={"vulnerability_report": _valid_issue_report()},
-        )
-
-        verdict, severity, reason, report = fp_reviewer._finalize_fp_review_result(prove_bug, None)
-
-        self.assertEqual((verdict, severity, report), ("fp", "low", ""))
-        self.assertIn("未进入反方论证", reason)
 
     def test_fp_review_does_not_save_result_when_cli_returns_none(self) -> None:
         class FakeReporter:
@@ -205,14 +120,18 @@ class AgentFeedbackTests(unittest.TestCase):
             async def push_fp_result(
                 self,
                 scan_id,
-                review_id,
-                vuln_index,
-                verdict,
-                severity,
-                reason,
-                vulnerability_report="",
-            ) -> None:
-                self.results.append((vuln_index, verdict, reason))
+	                review_id,
+	                vuln_index,
+	                verdict,
+	                severity,
+	                reason,
+	                vulnerability_report="",
+	                stage_outputs=None,
+	            ) -> None:
+	                self.results.append((vuln_index, verdict, reason))
+
+            async def push_fp_stage_output(self, scan_id, review_id, vuln_index, stage, markdown) -> None:
+                return None
 
             async def finish_fp_review(self, scan_id, review_id, status, error_message=None) -> None:
                 self.finished = (status, error_message)
@@ -258,7 +177,7 @@ class AgentFeedbackTests(unittest.TestCase):
         self.assertEqual(reporter.progress, [(3, 0), (3, 1)])
         self.assertEqual(reporter.finished, ("complete", None))
 
-    def test_fp_review_does_not_save_result_when_prove_fp_returns_none(self) -> None:
+    def test_fp_review_does_not_save_result_when_final_judge_returns_none(self) -> None:
         class FakeReporter:
             def __init__(self) -> None:
                 self.results: list[tuple] = []
@@ -274,14 +193,18 @@ class AgentFeedbackTests(unittest.TestCase):
             async def push_fp_result(
                 self,
                 scan_id,
-                review_id,
-                vuln_index,
-                verdict,
-                severity,
-                reason,
-                vulnerability_report="",
-            ) -> None:
-                self.results.append((vuln_index, verdict, severity, reason, vulnerability_report))
+	                review_id,
+	                vuln_index,
+	                verdict,
+	                severity,
+	                reason,
+	                vulnerability_report="",
+	                stage_outputs=None,
+	            ) -> None:
+	                self.results.append((vuln_index, verdict, severity, reason, vulnerability_report))
+
+            async def push_fp_stage_output(self, scan_id, review_id, vuln_index, stage, markdown) -> None:
+                return None
 
             async def finish_fp_review(self, scan_id, review_id, status, error_message=None) -> None:
                 self.finished = (status, error_message)
@@ -309,7 +232,7 @@ class AgentFeedbackTests(unittest.TestCase):
                     patch.object(fp_reviewer, "_cleanup_fp_workspace"),
                     patch("backend.config.get_config", return_value=SimpleNamespace()),
                     patch("backend.opencode.runner._invoke_opencode", new=invoke),
-                    patch("backend.opencode.runner._read_result", side_effect=[prove_bug_result, None]),
+                    patch("backend.opencode.runner._read_result", side_effect=[prove_bug_result, None, None]),
                 ):
                     await fp_reviewer.run_fp_review(
                         config=config,
@@ -334,12 +257,12 @@ class AgentFeedbackTests(unittest.TestCase):
         import asyncio
 
         reporter, invoke = asyncio.run(_run())
-        self.assertEqual(invoke.await_count, 2)
+        self.assertEqual(invoke.await_count, 3)
         self.assertEqual(reporter.results, [])
         self.assertEqual(reporter.progress, [(3, 0), (3, 1)])
         self.assertEqual(reporter.finished, ("complete", None))
 
-    def test_fp_review_short_circuits_runtime_when_prove_bug_reports_fp(self) -> None:
+    def test_fp_review_runs_all_stages_when_prove_bug_reports_fp(self) -> None:
         class FakeReporter:
             def __init__(self) -> None:
                 self.results: list[tuple] = []
@@ -355,14 +278,18 @@ class AgentFeedbackTests(unittest.TestCase):
             async def push_fp_result(
                 self,
                 scan_id,
-                review_id,
-                vuln_index,
-                verdict,
-                severity,
-                reason,
-                vulnerability_report="",
-            ) -> None:
-                self.results.append((vuln_index, verdict, severity, reason, vulnerability_report))
+	                review_id,
+	                vuln_index,
+	                verdict,
+	                severity,
+	                reason,
+	                vulnerability_report="",
+	                stage_outputs=None,
+	            ) -> None:
+	                self.results.append((vuln_index, verdict, severity, reason, vulnerability_report))
+
+            async def push_fp_stage_output(self, scan_id, review_id, vuln_index, stage, markdown) -> None:
+                return None
 
             async def finish_fp_review(self, scan_id, review_id, status, error_message=None) -> None:
                 self.finished = (status, error_message)
@@ -415,10 +342,10 @@ class AgentFeedbackTests(unittest.TestCase):
         import asyncio
 
         reporter, invoke = asyncio.run(_run())
-        self.assertEqual(invoke.await_count, 1)
+        self.assertEqual(invoke.await_count, 3)
         self.assertEqual(reporter.results[0][0:3], (3, "fp", "low"))
         self.assertEqual(reporter.results[0][4], "")
-        self.assertIn("[prove-bug]", reporter.results[0][3])
+        self.assertIn("NOT_PROVEN", reporter.results[0][3])
         self.assertEqual(reporter.progress, [(3, 0), (3, 1)])
         self.assertEqual(reporter.finished, ("complete", None))
 

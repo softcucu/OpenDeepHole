@@ -14,6 +14,7 @@ from backend.models import (
     FeedbackEntry,
     FpReviewJob,
     FpReviewResult,
+    FpReviewStageOutput,
     ScanEvent,
     ScanItemStatus,
     ScanMeta,
@@ -227,6 +228,21 @@ class ScanStoreBase(ABC):
     @abstractmethod
     def list_fp_review_results_by_scan(self, scan_id: str) -> list[FpReviewResult]:
         """Return all FP review results for a scan, oldest first."""
+
+    @abstractmethod
+    def upsert_fp_review_stage_output(
+        self,
+        review_id: str,
+        vuln_index: int,
+        stage: str,
+        markdown: str,
+        timestamp: str,
+    ) -> None:
+        """Create or replace one FP review stage Markdown output."""
+
+    @abstractmethod
+    def list_fp_review_stage_outputs_by_review(self, review_id: str) -> list[FpReviewStageOutput]:
+        """Return all stage outputs for an FP review job."""
 
     @abstractmethod
     def update_fp_review_job(

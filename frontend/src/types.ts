@@ -265,6 +265,7 @@ export interface FpReviewResult {
   severity: "high" | "medium" | "low";
   reason: string;
   vulnerability_report: string;
+  stage_outputs?: Record<string, string>;
   created_at: string;
 }
 

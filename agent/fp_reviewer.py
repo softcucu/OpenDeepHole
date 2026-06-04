@@ -24,8 +24,13 @@ from agent.config import effective_fp_review_cli_config
 
 _FP_FEEDBACK_FILE = Path.home() / ".opendeephole" / "fp_feedback.json"
 _FP_REVIEW_FEEDBACK: dict[str, list[dict]] = {}
-_FP_REVIEW_SKILLS = ("prove-bug", "prove-fp")
+_FP_REVIEW_SKILLS = ("prove-bug", "prove-fp", "final-judge")
 _LEGACY_FP_REVIEW_SKILLS = ("fp-review", "fp-review-discriminator")
+_FP_STAGE_LABELS = {
+    "prove_bug": "正方论证",
+    "prove_fp": "反方论证",
+    "final_judge": "最终裁决",
+}
 _ISSUE_REPORT_HEADINGS = (
     "Summary",
     "Vulnerable Code",
@@ -40,8 +45,9 @@ _ISSUE_REPORT_HEADINGS = (
 @dataclass(frozen=True)
 class _FpStageResult:
     result_id: str
-    result: object
+    result: object | None
     payload: dict
+    markdown: str = ""
 
 
 def load_local_feedback() -> dict:
@@ -215,10 +221,18 @@ async def run_fp_review(
                     vuln_type=vuln["vuln_type"],
                     description=vuln["description"],
                 )
+                artifact_dir = review_dir / "artifacts" / str(vuln_index)
+                artifact_dir.mkdir(parents=True, exist_ok=True)
+                stage_outputs: dict[str, str] = {}
+
                 prove_bug = await _run_fp_review_stage(
                     stage="prove_bug",
                     workspace=workspace,
                     review_dir=review_dir,
+                    review_id=review_id,
+                    vuln_index=vuln_index,
+                    artifact_dir=artifact_dir,
+                    output_markdown_path=artifact_dir / "prove-bug.md",
                     vuln=vuln,
                     project_id_for_prompt=project_id_for_prompt,
                     timeout=fp_cli.timeout,
@@ -232,10 +246,67 @@ async def run_fp_review(
                     await reporter.finish_fp_review(scan_id, review_id, "cancelled", "用户手动停止")
                     return
 
-                if prove_bug is None:
-                    await emit("fp_review", f"[{position + 1}] Prove-bug returned no result — preserving any previous review result")
-                elif not prove_bug.result.confirmed:
-                    verdict, severity, reason, vulnerability_report = _finalize_fp_review_result(prove_bug, None)
+                stage_outputs["prove_bug"] = _stage_markdown_or_placeholder("prove_bug", prove_bug)
+                await reporter.push_fp_stage_output(scan_id, review_id, vuln_index, "prove_bug", stage_outputs["prove_bug"])
+
+                prove_fp = await _run_fp_review_stage(
+                    stage="prove_fp",
+                    workspace=workspace,
+                    review_dir=review_dir,
+                    review_id=review_id,
+                    vuln_index=vuln_index,
+                    artifact_dir=artifact_dir,
+                    output_markdown_path=artifact_dir / "prove-fp.md",
+                    input_markdown_paths=[artifact_dir / "prove-bug.md"],
+                    vuln=vuln,
+                    project_id_for_prompt=project_id_for_prompt,
+                    timeout=fp_cli.timeout,
+                    cancel_event=cancel_event,
+                    cli_config=fp_cli,
+                    project=project,
+                    candidate=fake_candidate,
+                    prove_bug=prove_bug,
+                )
+                if cancel_event is not None and cancel_event.is_set():
+                    await emit("fp_review", f"FP review cancelled after reviewing {position} items")
+                    await reporter.finish_fp_review(scan_id, review_id, "cancelled", "用户手动停止")
+                    return
+                stage_outputs["prove_fp"] = _stage_markdown_or_placeholder("prove_fp", prove_fp)
+                await reporter.push_fp_stage_output(scan_id, review_id, vuln_index, "prove_fp", stage_outputs["prove_fp"])
+
+                final_judge = await _run_fp_review_stage(
+                    stage="final_judge",
+                    workspace=workspace,
+                    review_dir=review_dir,
+                    review_id=review_id,
+                    vuln_index=vuln_index,
+                    artifact_dir=artifact_dir,
+                    output_markdown_path=artifact_dir / "final-judge.md",
+                    input_markdown_paths=[
+                        artifact_dir / "prove-bug.md",
+                        artifact_dir / "prove-fp.md",
+                    ],
+                    vuln=vuln,
+                    project_id_for_prompt=project_id_for_prompt,
+                    timeout=fp_cli.timeout,
+                    cancel_event=cancel_event,
+                    cli_config=fp_cli,
+                    project=project,
+                    candidate=fake_candidate,
+                    prove_bug=prove_bug,
+                    prove_fp=prove_fp,
+                )
+                if cancel_event is not None and cancel_event.is_set():
+                    await emit("fp_review", f"FP review cancelled after reviewing {position} items")
+                    await reporter.finish_fp_review(scan_id, review_id, "cancelled", "用户手动停止")
+                    return
+                stage_outputs["final_judge"] = _stage_markdown_or_placeholder("final_judge", final_judge)
+                await reporter.push_fp_stage_output(scan_id, review_id, vuln_index, "final_judge", stage_outputs["final_judge"])
+
+                if final_judge is None or final_judge.result is None:
+                    await emit("fp_review", f"[{position + 1}] Final-judge returned no result — preserving any previous review result")
+                else:
+                    verdict, severity, reason, vulnerability_report = _finalize_fp_review_result(final_judge)
                     await reporter.push_fp_result(
                         scan_id,
                         review_id,
@@ -244,48 +315,13 @@ async def run_fp_review(
                         severity,
                         reason,
                         vulnerability_report,
+                        stage_outputs=stage_outputs,
                     )
                     result_submitted = True
-                    await emit("fp_review", f"[{position + 1}] FALSE POSITIVE severity={severity}")
-                else:
-                    prove_fp = await _run_fp_review_stage(
-                        stage="prove_fp",
-                        workspace=workspace,
-                        review_dir=review_dir,
-                        vuln=vuln,
-                        project_id_for_prompt=project_id_for_prompt,
-                        timeout=fp_cli.timeout,
-                        cancel_event=cancel_event,
-                        cli_config=fp_cli,
-                        project=project,
-                        candidate=fake_candidate,
-                        prove_bug=prove_bug,
+                    await emit(
+                        "fp_review",
+                        f"[{position + 1}] {'TRUE POSITIVE' if verdict == 'tp' else 'FALSE POSITIVE'} severity={severity}",
                     )
-                    if cancel_event is not None and cancel_event.is_set():
-                        await emit("fp_review", f"FP review cancelled after reviewing {position} items")
-                        await reporter.finish_fp_review(scan_id, review_id, "cancelled", "用户手动停止")
-                        return
-                    if prove_fp is None:
-                        await emit("fp_review", f"[{position + 1}] Prove-fp returned no result — preserving any previous review result")
-                    else:
-                        verdict, severity, reason, vulnerability_report = _finalize_fp_review_result(
-                            prove_bug,
-                            prove_fp,
-                        )
-                        await reporter.push_fp_result(
-                            scan_id,
-                            review_id,
-                            vuln_index,
-                            verdict,
-                            severity,
-                            reason,
-                            vulnerability_report,
-                        )
-                        result_submitted = True
-                        await emit(
-                            "fp_review",
-                            f"[{position + 1}] {'TRUE POSITIVE' if verdict == 'tp' else 'FALSE POSITIVE'} severity={severity}",
-                        )
 
             except asyncio.CancelledError:
                 await emit("fp_review", f"FP review cancelled after reviewing {position} items")
@@ -341,6 +377,11 @@ async def _run_fp_review_stage(
     stage: str,
     workspace: Path,
     review_dir: Path,
+    review_id: str,
+    vuln_index: int,
+    artifact_dir: Path,
+    output_markdown_path: Path,
+    input_markdown_paths: list[Path] | None = None,
     vuln: dict,
     project_id_for_prompt: str,
     timeout: int,
@@ -349,6 +390,7 @@ async def _run_fp_review_stage(
     project: Path,
     candidate,
     prove_bug: _FpStageResult | None = None,
+    prove_fp: _FpStageResult | None = None,
 ) -> _FpStageResult | None:
     from backend.opencode.runner import _invoke_opencode, _read_result
 
@@ -358,7 +400,12 @@ async def _run_fp_review_stage(
         vuln=vuln,
         project_id_for_prompt=project_id_for_prompt,
         result_id=result_id,
+        review_id=review_id,
+        vuln_index=vuln_index,
+        output_markdown_path=output_markdown_path,
+        input_markdown_paths=input_markdown_paths or [],
         prove_bug=prove_bug,
+        prove_fp=prove_fp,
     )
     log_path = review_dir / f"fp_{stage}_{result_id}.log"
 
@@ -371,14 +418,22 @@ async def _run_fp_review_stage(
         cancel_event=cancel_event,
         cli_config=cli_config,
         project_dir=project,
+        writable_paths=[artifact_dir],
     )
+    markdown = _read_stage_markdown(output_markdown_path)
     result = _read_result(result_id, candidate)
     if result is None:
-        return None
+        return _FpStageResult(
+            result_id=result_id,
+            result=None,
+            payload=_read_fp_result_payload(result_id),
+            markdown=markdown,
+        )
     return _FpStageResult(
         result_id=result_id,
         result=result,
         payload=_read_fp_result_payload(result_id),
+        markdown=markdown,
     )
 
 
@@ -388,18 +443,27 @@ def _build_fp_review_prompt(
     vuln: dict,
     project_id_for_prompt: str,
     result_id: str,
+    review_id: str = "",
+    vuln_index: int = 0,
+    output_markdown_path: Path | None = None,
+    input_markdown_paths: list[Path] | None = None,
     prove_bug: _FpStageResult | None = None,
+    prove_fp: _FpStageResult | None = None,
 ) -> str:
+    output_path = str(output_markdown_path.resolve()) if output_markdown_path else ""
+    input_paths = [str(path.resolve()) for path in input_markdown_paths or []]
     if stage == "prove_bug":
         prompt = (
             f"使用 `prove-bug` 技能，作为正方论证位于 "
             f"{vuln['file']}:{vuln['line']} 函数 `{vuln['function']}` 中"
             f"的 {vuln['vuln_type'].upper()} 候选是否是真实问题。"
             f"project_id 为 `{project_id_for_prompt}`。"
+            f"review_id 为 `{review_id}`，vuln_index 为 `{vuln_index}`。"
             f"原始描述：{vuln['description']} "
             f"原始 AI 分析：{vuln['ai_analysis']} "
+            f"你必须将本阶段 Markdown 论证写入 `{output_path}`，不得写入其它路径。"
             f"你的 result_id 是 `{result_id}`。"
-            f"分析完成后，你**必须**使用此 result_id 调用 submit_result MCP 工具提交结论。"
+            f"分析完成后，你**必须**使用此 result_id 调用 submit_result MCP 工具提交阶段结论。"
             f"默认假设代码是安全的；只有证明真实代码问题时才使用 confirmed=true。"
             f"severity 必须按外部可触发性判断：外部可触发问题使用 high；"
             f"有代码问题但未证明外部可触发使用 medium；非问题使用 low。"
@@ -408,27 +472,55 @@ def _build_fp_review_prompt(
             f"并包含 Summary、Vulnerable Code、Full Call Stack、Root Cause、"
             f"Why It is Reachable、Impact、Evidence 七个二级标题。不要使用 CVSS 打分。"
         )
-    elif stage == "prove_fp" and prove_bug is not None:
-        bug = prove_bug.result
-        bug_payload = prove_bug.payload
+    elif stage == "prove_fp":
+        bug_summary = _stage_result_summary(prove_bug)
+        prove_bug_path = input_paths[0] if input_paths else ""
         prompt = (
             f"使用 `prove-fp` 技能，作为反方论证位于 "
             f"{vuln['file']}:{vuln['line']} 函数 `{vuln['function']}` 中"
             f"的 {vuln['vuln_type'].upper()} 候选是否不是问题。"
             f"project_id 为 `{project_id_for_prompt}`。"
+            f"review_id 为 `{review_id}`，vuln_index 为 `{vuln_index}`。"
             f"原始描述：{vuln['description']} "
             f"原始 AI 分析：{vuln['ai_analysis']} "
-            f"prove-bug confirmed={bool(bug.confirmed)} severity={bug.severity}。"
-            f"prove-bug description：{bug.description} "
-            f"prove-bug ai_analysis：{bug.ai_analysis} "
-            f"prove-bug vulnerability_report：{bug_payload.get('vulnerability_report') or ''} "
+            f"正方阶段结构化摘要：{bug_summary} "
+            f"你必须先读取正方 Markdown 文件 `{prove_bug_path}`，再进行反方论证。"
+            f"你必须将本阶段 Markdown 论证写入 `{output_path}`，不得写入其它路径。"
             f"你的 result_id 是 `{result_id}`。"
-            f"分析完成后，你**必须**使用此 result_id 调用 submit_result MCP 工具提交反方结论。"
+            f"分析完成后，你**必须**使用此 result_id 调用 submit_result MCP 工具提交阶段结论。"
             f"如果找到足以证明非问题的理由，使用 confirmed=false 且 severity=low。"
             f"如果反方未能证明非问题，仍使用 confirmed=true；外部可触发为 high，"
             f"仅代码问题或外部触发证据不足为 medium。"
             f"只要 confirmed=true，不管 severity 是 high 还是 medium，"
             f"都必须提交 vulnerability_report，可沿用或修正 prove-bug 的报告。不要使用 CVSS 打分。"
+        )
+    elif stage == "final_judge":
+        bug_summary = _stage_result_summary(prove_bug)
+        fp_summary = _stage_result_summary(prove_fp)
+        bug_path = input_paths[0] if input_paths else ""
+        fp_path = input_paths[1] if len(input_paths) > 1 else ""
+        prompt = (
+            f"使用 `final-judge` 技能，作为最终裁决 Agent，汇总位于 "
+            f"{vuln['file']}:{vuln['line']} 函数 `{vuln['function']}` 中"
+            f"的 {vuln['vuln_type'].upper()} 候选。"
+            f"project_id 为 `{project_id_for_prompt}`。"
+            f"review_id 为 `{review_id}`，vuln_index 为 `{vuln_index}`。"
+            f"原始描述：{vuln['description']} "
+            f"原始 AI 分析：{vuln['ai_analysis']} "
+            f"正方阶段结构化摘要：{bug_summary} "
+            f"反方阶段结构化摘要：{fp_summary} "
+            f"你必须读取正方 Markdown 文件 `{bug_path}` 和反方 Markdown 文件 `{fp_path}`。"
+            f"你必须将最终裁决 Markdown 写入 `{output_path}`，不得写入其它路径。"
+            f"你的 result_id 是 `{result_id}`。"
+            f"分析完成后，你**必须**使用此 result_id 调用 submit_result MCP 工具提交最终结论。"
+            f"最终 confirmed=false 表示误报；confirmed=true 表示真实问题。"
+            f"severity 必须按外部可触发性判断：外部可触发问题使用 high；"
+            f"有代码问题但未证明外部可触发使用 medium；非问题使用 low。"
+            f"最终 ai_analysis 必须像 memleak 输出一样包含完整代码链、关键代码片段和说明，"
+            f"让读者不重新查看代码也能判断结论。"
+            f"只要 confirmed=true，不管 severity 是 high 还是 medium，"
+            f"都必须提交 vulnerability_report，包含 Summary、Vulnerable Code、Full Call Stack、Root Cause、"
+            f"Why It is Reachable、Impact、Evidence 七个二级标题。不要使用 CVSS 打分。"
         )
     else:
         raise ValueError(f"Unknown FP review stage: {stage}")
@@ -518,44 +610,17 @@ def _normalize_fp_severity(severity: str, verdict: str) -> str:
     return "medium"
 
 
-def _finalize_fp_review_result(
-    prove_bug: _FpStageResult,
-    prove_fp: _FpStageResult | None,
-) -> tuple[str, str, str, str]:
-    bug = prove_bug.result
-    bug_verdict = "tp" if bug.confirmed else "fp"
-    bug_severity = _normalize_fp_severity(str(bug.severity), bug_verdict)
-
-    if prove_fp is None:
-        verdict = bug_verdict
-        severity = bug_severity
-        report = _stage_report(prove_bug)
-        final_note = (
-            "Prove-bug 判定为非问题，未进入反方论证。"
-            if verdict == "fp"
-            else "Prove-fp 未返回结果，沿用 prove-bug 的问题结论。"
-        )
-    else:
-        fp = prove_fp.result
-        verdict = "tp" if fp.confirmed else "fp"
-        severity = _normalize_fp_severity(str(fp.severity), verdict)
-        report = _stage_report(prove_fp) or _stage_report(prove_bug)
-        final_note = (
-            "Prove-fp 未能证明非问题，保留真实代码问题结论。"
-            if verdict == "tp"
-            else "Prove-fp 找到足以证明非问题的理由。"
-        )
-        if severity == "high" and bug_severity != "high":
-            severity = "medium"
-            final_note += " Prove-bug 未证明完整外部触发链，最终降级为 medium。"
-
+def _finalize_fp_review_result(final_judge: _FpStageResult) -> tuple[str, str, str, str]:
+    if final_judge.result is None:
+        raise ValueError("Final-judge returned no submit_result")
+    result = final_judge.result
+    verdict = "tp" if result.confirmed else "fp"
+    severity = _normalize_fp_severity(str(result.severity), verdict)
+    report = _stage_report(final_judge)
     if verdict == "fp":
         severity = "low"
         report = ""
-    elif not report.strip():
-        final_note += " 复核未提交问题报告。"
-
-    reason = _compose_fp_reason(prove_bug, prove_fp, final_note)
+    reason = _stage_reason(final_judge) or result.description or "Final-judge 未提供详细推理。"
     return verdict, severity, reason, report
 
 
@@ -564,31 +629,41 @@ def _stage_report(stage_result: _FpStageResult) -> str:
 
 
 def _stage_reason(stage_result: _FpStageResult) -> str:
+    if stage_result.result is None:
+        return ""
     result = stage_result.result
     return str(result.ai_analysis or result.description or "").strip()
 
 
-def _compose_fp_reason(
-    prove_bug: _FpStageResult,
-    prove_fp: _FpStageResult | None,
-    final_note: str,
-) -> str:
-    parts = [
-        "[prove-bug]",
-        _stage_reason(prove_bug) or "未提供详细推理。",
-    ]
-    if prove_fp is not None:
-        parts.extend([
-            "",
-            "[prove-fp]",
-            _stage_reason(prove_fp) or "未提供详细反驳推理。",
-        ])
-    parts.extend([
-        "",
-        "[final]",
-        final_note,
-    ])
-    return "\n".join(parts).strip()
+def _stage_result_summary(stage_result: _FpStageResult | None) -> str:
+    if stage_result is None or stage_result.result is None:
+        return "未提交结构化阶段结论。"
+    result = stage_result.result
+    verdict = "confirmed=true" if result.confirmed else "confirmed=false"
+    description = str(result.description or "").replace("\n", " ")[:800]
+    return f"{verdict}, severity={result.severity}, description={description}"
+
+
+def _read_stage_markdown(path: Path) -> str:
+    try:
+        if path.is_file():
+            return path.read_text(encoding="utf-8")
+    except Exception:
+        pass
+    return ""
+
+
+def _stage_markdown_or_placeholder(stage: str, stage_result: _FpStageResult | None) -> str:
+    markdown = stage_result.markdown if stage_result is not None else ""
+    if markdown.strip():
+        return markdown
+    label = _FP_STAGE_LABELS.get(stage, stage)
+    return (
+        f"# {label}\n\n"
+        "本阶段未生成 Markdown 输出。\n\n"
+        "## 状态\n\n"
+        "阶段进程已结束，但未在指定 artifact 文件中写入内容。\n"
+    )
 
 
 def _has_required_issue_report_sections(report: str) -> bool:
@@ -654,6 +729,12 @@ def _create_fp_workspace(
             workspace,
             "prove-fp",
             Path(__file__).parent / "skills" / "fp_review_discriminator.md",
+            fp_section,
+        )
+        _write_fp_skill(
+            workspace,
+            "final-judge",
+            Path(__file__).parent / "skills" / "fp_review_final.md",
             fp_section,
         )
 
