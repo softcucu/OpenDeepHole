@@ -1,13 +1,13 @@
 import json
 import tempfile
 import unittest
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from types import SimpleNamespace
 from unittest.mock import patch
 
 from agent.fp_reviewer import _cleanup_fp_workspace, _create_fp_workspace
 from backend.models import FeedbackEntry
-from backend.opencode.config import cleanup_workspace, create_scan_workspace
+from backend.opencode.config import build_opencode_config, cleanup_workspace, create_scan_workspace, writable_edit_patterns
 from backend.registry import CheckerEntry
 
 
@@ -19,6 +19,26 @@ def assert_opencode_read_permissions(testcase: unittest.TestCase, config: dict) 
 
 
 class OpencodeWorkspaceTests(unittest.TestCase):
+    def test_writable_edit_patterns_include_windows_slash_variants(self) -> None:
+        path = PureWindowsPath("C:/Users/26388/.opendeephole/fp_reviews/review/artifacts/1")
+
+        patterns = writable_edit_patterns(path)
+
+        self.assertIn(r"C:\Users\26388\.opendeephole\fp_reviews\review\artifacts\1", patterns)
+        self.assertIn(r"C:\Users\26388\.opendeephole\fp_reviews\review\artifacts\1/**", patterns)
+        self.assertIn("C:/Users/26388/.opendeephole/fp_reviews/review/artifacts/1", patterns)
+        self.assertIn("C:/Users/26388/.opendeephole/fp_reviews/review/artifacts/1/**", patterns)
+
+    def test_build_opencode_config_allows_windows_slash_variants(self) -> None:
+        path = PureWindowsPath("C:/Users/26388/.opendeephole/fp_reviews/review/artifacts/1")
+
+        config = build_opencode_config("http://127.0.0.1:9123/mcp", writable_paths=[str(path)])
+        edit = config["permission"]["edit"]
+
+        self.assertEqual(edit["*"], "deny")
+        self.assertEqual(edit["C:/Users/26388/.opendeephole/fp_reviews/review/artifacts/1/**"], "allow")
+        self.assertEqual(edit[r"C:\Users\26388\.opendeephole\fp_reviews\review\artifacts\1/**"], "allow")
+
     def test_scan_cleanup_preserves_fp_review_skill_and_config(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workspace = Path(tmp)

@@ -532,13 +532,19 @@ def _read_opencode_config(workspace: Path) -> dict:
 def _with_writable_paths(config: dict, writable_paths: list[Path] | None) -> dict:
     if not writable_paths:
         return config
+    from backend.opencode.config import writable_edit_patterns
+
     next_config = json.loads(json.dumps(config))
     permission = next_config.setdefault("permission", {})
     edit = {"*": "deny"}
     for path in writable_paths:
-        normalized = str(path.resolve())
-        edit[normalized] = "allow"
-        edit[f"{normalized}/**"] = "allow"
+        raw = str(path)
+        try:
+            normalized = str(path.resolve())
+        except Exception:
+            normalized = str(Path(raw).resolve())
+        for pattern in writable_edit_patterns(raw) + writable_edit_patterns(normalized):
+            edit[pattern] = "allow"
     permission["edit"] = edit
     return next_config
 

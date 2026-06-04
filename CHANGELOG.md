@@ -4,6 +4,7 @@
 
 - **修复** AI 去误报三阶段复核在长 prompt 场景下可能把空任务传给 CLI，导致阶段进程结束但未写入指定 Markdown artifact；长 prompt 现在改为文件引用方式传递
 - **修复** AI 去误报阶段缺失 Markdown artifact 或 `submit_result` 时不再继续推进后续阶段，会按 `fp_review_cli.max_retries` 重试并在页面展示明确失败原因和 artifact/log 路径
+- **修复** Windows Agent 上 OpenCode 写入 FP 复核 artifact 时因 `C:\...` 与 `C:/...` 路径分隔符不一致被权限规则误拒绝的问题
 - **新增** 用户反馈新增“待分析”状态；该状态只保存为漏洞人工处理状态，不进入误报屏蔽规则经验库，也不会阻止 AI 去误报复核或超时/无结果续扫继续处理该问题
 - **新增** 扫描前内存申请/释放函数分析：索引完成后先检查项目根目录 `memory_api_pairs.json`，不存在时批量调用 opencode 识别底层堆内存申请/释放函数和宏，合并中间 JSON 后再开始 checker 静态分析；该过程不修改 `code_index.db`
 - **优化** 本地 checker 测试命令新增 `--json-output/--output`，可直接生成缩进格式化的 UTF-8 JSON 结果文件，避免中文候选描述被后处理转义成 `\uXXXX`

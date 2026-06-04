@@ -2,7 +2,7 @@ import asyncio
 import json
 import time
 import sys
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from types import ModuleType, SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
@@ -18,6 +18,7 @@ from backend.opencode.runner import (
     _prompt_file_message,
     _prepare_cli_workspace,
     _select_cli_cwd,
+    _with_writable_paths,
     _write_prompt_file,
     _terminate_process_tree,
     _wait_for_stream_exit_after_termination,
@@ -109,6 +110,17 @@ def test_opencode_uses_injected_config_and_project_dir_with_isolated_workspace(t
     assert (project / ".opendeephole" / "opencode").is_dir()
     assert json.loads(env["OPENCODE_CONFIG_CONTENT"]) == config_payload
     assert env["NODE_TLS_REJECT_UNAUTHORIZED"] == "0"
+
+
+def test_runtime_writable_paths_include_windows_slash_variants() -> None:
+    path = PureWindowsPath("C:/Users/26388/.opendeephole/fp_reviews/review/artifacts/1")
+
+    config = _with_writable_paths({}, [path])
+    edit = config["permission"]["edit"]
+
+    assert edit["*"] == "deny"
+    assert edit["C:/Users/26388/.opendeephole/fp_reviews/review/artifacts/1/**"] == "allow"
+    assert edit[r"C:\Users\26388\.opendeephole\fp_reviews\review\artifacts\1/**"] == "allow"
 
 
 def test_opencode_runtime_cwd_receives_config_and_fp_skills(tmp_path: Path) -> None:

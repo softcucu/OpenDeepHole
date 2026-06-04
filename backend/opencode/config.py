@@ -6,7 +6,7 @@ import json
 import os
 import shutil
 import threading
-from pathlib import Path
+from pathlib import Path, PurePath
 
 from backend.config import get_config
 from backend.logger import get_logger
@@ -106,6 +106,23 @@ def _link_skill_resources(entry, link_dir: Path) -> None:
             link_dest.symlink_to(src.resolve())
 
 
+def writable_edit_patterns(path: str | os.PathLike[str]) -> list[str]:
+    normalized = str(PurePath(path))
+    variants = [normalized]
+    slash_normalized = normalized.replace("\\", "/")
+    if slash_normalized not in variants:
+        variants.append(slash_normalized)
+    backslash_normalized = normalized.replace("/", "\\")
+    if backslash_normalized not in variants:
+        variants.append(backslash_normalized)
+
+    patterns: list[str] = []
+    for variant in variants:
+        patterns.append(variant)
+        patterns.append(f"{variant}/**")
+    return patterns
+
+
 def build_opencode_config(
     mcp_url: str,
     skills_paths: list[str] | None = None,
@@ -115,8 +132,8 @@ def build_opencode_config(
     edit_permissions = {"*": "deny"}
     for path in writable_paths or []:
         normalized = str(Path(path).resolve())
-        edit_permissions[normalized] = "allow"
-        edit_permissions[f"{normalized}/**"] = "allow"
+        for pattern in writable_edit_patterns(path) + writable_edit_patterns(normalized):
+            edit_permissions[pattern] = "allow"
     data = {
         "$schema": "https://opencode.ai/config.json",
         "mcp": {
