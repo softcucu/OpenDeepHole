@@ -58,6 +58,22 @@ export default function NewScanForm({ onScanStarted, onBack }: Props) {
     });
   };
 
+  const selectAllInGroup = (group: CheckerInfo[]) => {
+    setSelectedCheckers((prev) => {
+      const next = new Set(prev);
+      group.forEach((c) => next.add(c.name));
+      return next;
+    });
+  };
+
+  const deselectAllInGroup = (group: CheckerInfo[]) => {
+    setSelectedCheckers((prev) => {
+      const next = new Set(prev);
+      group.forEach((c) => next.delete(c.name));
+      return next;
+    });
+  };
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError(null);
@@ -255,13 +271,41 @@ export default function NewScanForm({ onScanStarted, onBack }: Props) {
               ) : (
                 <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
                   <div className="space-y-2">
-                    <div className="text-xs font-semibold text-slate-500 uppercase tracking-wider">系统内置</div>
+                    <div className="flex items-center justify-between">
+                      <div className="text-xs font-semibold text-slate-500 uppercase tracking-wider">系统内置</div>
+                      <button
+                        type="button"
+                        className="text-xs text-blue-400 hover:text-blue-300"
+                        onClick={() => {
+                          builtinCheckers.every((c) => selectedCheckers.has(c.name))
+                            ? deselectAllInGroup(builtinCheckers)
+                            : selectAllInGroup(builtinCheckers);
+                        }}
+                      >
+                        {builtinCheckers.every((c) => selectedCheckers.has(c.name)) ? "全不选" : "全选"}
+                      </button>
+                    </div>
                     {builtinCheckers.map((checker) => (
                       <CheckerOption key={checker.name} checker={checker} selected={selectedCheckers.has(checker.name)} onToggle={() => toggleChecker(checker.name)} />
                     ))}
                   </div>
                   <div className="space-y-2">
-                    <div className="text-xs font-semibold text-slate-500 uppercase tracking-wider">用户新建</div>
+                    <div className="flex items-center justify-between">
+                      <div className="text-xs font-semibold text-slate-500 uppercase tracking-wider">用户新建</div>
+                      {userCheckers.length > 0 && (
+                        <button
+                          type="button"
+                          className="text-xs text-blue-400 hover:text-blue-300"
+                          onClick={() => {
+                            userCheckers.every((c) => selectedCheckers.has(c.name))
+                              ? deselectAllInGroup(userCheckers)
+                              : selectAllInGroup(userCheckers);
+                          }}
+                        >
+                          {userCheckers.every((c) => selectedCheckers.has(c.name)) ? "全不选" : "全选"}
+                        </button>
+                      )}
+                    </div>
                     {userCheckers.length === 0 ? (
                       <div className="rounded-lg border border-slate-700 bg-slate-900 px-3 py-6 text-center text-sm text-slate-500">
                         暂无用户新建 SKILL

@@ -1,0 +1,10 @@
+name: chain_npd
+label: Chain Pointer Null Dereference / 链式指针空指针解引用
+description: >
+  基于 tree-sitter 检测 C/C++ 链式指针解引用（arr[i]->field、ctx->a->b->c->d 等）
+  中间层指针未判空导致的空指针解引用（CWE-476）
+enabled: true
+mode: opencode
+visibility: public
+category: illegal_memory_use
+modified_at: "2026-06-08T00:00:00+08:00"
