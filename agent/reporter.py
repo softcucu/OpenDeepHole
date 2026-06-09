@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from typing import Optional
 
 import httpx
@@ -17,6 +18,7 @@ class Reporter:
         self.server_url = server_url.rstrip("/")
         self.dry_run = dry_run
         self._client = httpx.AsyncClient(timeout=30.0)
+        self._static_progress_warning_at: dict[str, float] = {}
 
     # ---------------------------------------------------------------------------
     # Config fetch (used before each scan to get latest server-managed settings)
@@ -159,7 +161,35 @@ class Reporter:
             )
             resp.raise_for_status()
         except Exception as e:
-            print(f"Warning: failed to push static analysis progress: {e}")
+            self._warn_static_progress_failure(scan_id, scanned, total, done, e)
+
+    def _warn_static_progress_failure(
+        self,
+        scan_id: str,
+        scanned: int,
+        total: int,
+        done: bool,
+        error: Exception,
+    ) -> None:
+        status = ""
+        response_text = ""
+        if isinstance(error, httpx.HTTPStatusError):
+            status = f" status={error.response.status_code}"
+            response_text = (error.response.text or "").strip()
+            if response_text:
+                response_text = f" response={response_text[:200]!r}"
+        key = f"{type(error).__name__}:{status}"
+        now = time.monotonic()
+        last = self._static_progress_warning_at.get(key, 0.0)
+        if now - last < 30.0:
+            return
+        self._static_progress_warning_at[key] = now
+        print(
+            "Warning: failed to push static analysis progress "
+            f"scan_id={scan_id} progress={scanned}/{total} done={done} "
+            f"error_type={type(error).__name__}{status} error={error!r}{response_text}",
+            flush=True,
+        )
 
     async def report_processed_key(
         self, scan_id: str, file: str, line: int, function: str, vuln_type: str

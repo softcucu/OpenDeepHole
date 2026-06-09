@@ -4,6 +4,8 @@ import sqlite3
 from pathlib import Path
 
 from agent.scanner import (
+    STATIC_PROGRESS_MIN_INTERVAL_SECONDS,
+    _StaticProgressGate,
     _audit_order_summary,
     _candidate_in_scan_scope,
     _candidate_key,
@@ -312,6 +314,38 @@ class ScanStoreCodeScanPathTests(unittest.TestCase):
             cols = {row[1] for row in cur.fetchall()}
 
         self.assertIn("product", cols)
+
+
+class StaticProgressGateTests(unittest.TestCase):
+    def test_static_progress_gate_limits_large_function_scans(self) -> None:
+        now = [0.0]
+        gate = _StaticProgressGate(now=lambda: now[0])
+        sent: list[int] = []
+
+        for scanned in range(1, 8754):
+            if gate.should_send(scanned, 8753):
+                sent.append(scanned)
+            now[0] += 0.001
+
+        self.assertLess(len(sent), 150)
+        self.assertIn(1, sent)
+        self.assertIn(8753, sent)
+
+    def test_static_progress_gate_sends_after_time_interval(self) -> None:
+        now = [0.0]
+        gate = _StaticProgressGate(now=lambda: now[0])
+
+        self.assertTrue(gate.should_send(1, 8753))
+        self.assertFalse(gate.should_send(2, 8753))
+        now[0] = STATIC_PROGRESS_MIN_INTERVAL_SECONDS + 0.01
+        self.assertTrue(gate.should_send(3, 8753))
+
+    def test_static_progress_gate_force_sends_latest_value(self) -> None:
+        gate = _StaticProgressGate(now=lambda: 0.0)
+
+        self.assertTrue(gate.should_send(1, 8753))
+        self.assertFalse(gate.should_send(2, 8753))
+        self.assertTrue(gate.should_send(2, 8753, force=True))
 
 
 if __name__ == "__main__":

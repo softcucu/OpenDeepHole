@@ -7,8 +7,9 @@ import json
 import os
 import shutil
 import threading
+import time
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 import yaml
 
@@ -21,6 +22,32 @@ from backend.registry import CHECKERS_DIR_ENV
 
 FunctionSourceSnapshot = tuple[str, int | None]
 PROJECT_LEVEL_FUNCTION = "__project__"
+STATIC_PROGRESS_MIN_INTERVAL_SECONDS = 0.5
+STATIC_PROGRESS_MIN_PERCENT_DELTA = 1.0
+
+
+class _StaticProgressGate:
+    """Rate-limit noisy static analyzer callbacks while preserving milestones."""
+
+    def __init__(self, now: Callable[[], float] = time.monotonic) -> None:
+        self._now = now
+        self._last_sent_at: float | None = None
+        self._last_percent: float | None = None
+
+    def should_send(self, scanned: int, total: int, *, force: bool = False) -> bool:
+        now = self._now()
+        percent = (scanned / total * 100.0) if total > 0 else 0.0
+        if (
+            force
+            or self._last_sent_at is None
+            or (total > 0 and scanned >= total)
+            or abs(percent - (self._last_percent or 0.0)) >= STATIC_PROGRESS_MIN_PERCENT_DELTA
+            or now - self._last_sent_at >= STATIC_PROGRESS_MIN_INTERVAL_SECONDS
+        ):
+            self._last_sent_at = now
+            self._last_percent = percent
+            return True
+        return False
 
 
 def _candidate_key(candidate: Candidate) -> tuple[str, int, str, str]:
@@ -625,6 +652,8 @@ async def run_scan(
 
             loop = asyncio.get_running_loop()
             pending_static_progress = []
+            static_progress_gates: dict[str, _StaticProgressGate] = {}
+            latest_static_progress: dict[str, tuple[int, int]] = {}
 
             async def _drain_static_progress(timeout: float = 5.0) -> None:
                 pending = [asyncio.wrap_future(future) for future in pending_static_progress if not future.done()]
@@ -636,6 +665,17 @@ async def run_scan(
                         f"Warning: {len(still_pending)} static analysis progress update(s) still pending",
                         flush=True,
                     )
+
+            def _queue_static_progress(label: str, scanned: int, total: int, *, force: bool = False) -> None:
+                latest_static_progress[label] = (scanned, total)
+                gate = static_progress_gates.setdefault(label, _StaticProgressGate())
+                if not gate.should_send(scanned, total, force=force):
+                    return
+                future = asyncio.run_coroutine_threadsafe(
+                    reporter.send_static_progress(scan_id, scanned, total),
+                    loop,
+                )
+                pending_static_progress.append(future)
 
             def _run_static_analysis() -> tuple[list[Candidate], bool]:
                 """Run all static analyzers in a thread so the event loop stays free."""
@@ -650,11 +690,7 @@ async def run_scan(
                     # Set file-level progress callback
                     def _on_progress(scanned: int, total: int, label: str = entry.label) -> None:
                         print(f"\r  [static] {label}: {scanned}/{total}", end="", flush=True)
-                        future = asyncio.run_coroutine_threadsafe(
-                            reporter.send_static_progress(scan_id, scanned, total),
-                            loop,
-                        )
-                        pending_static_progress.append(future)
+                        _queue_static_progress(label, scanned, total)
 
                     if hasattr(entry.analyzer, "on_file_progress"):
                         entry.analyzer.on_file_progress = _on_progress
@@ -670,6 +706,9 @@ async def run_scan(
 
                     if hasattr(entry.analyzer, "on_file_progress"):
                         entry.analyzer.on_file_progress = None
+                    progress = latest_static_progress.get(entry.label)
+                    if progress is not None:
+                        _queue_static_progress(entry.label, progress[0], progress[1], force=True)
 
                     count = len(result) - count_before
                     print(f"\n  [static] [{idx}/{len(analyzer_entries)}] {entry.label}: {count} candidate(s)", flush=True)
