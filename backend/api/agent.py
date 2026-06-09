@@ -916,23 +916,34 @@ class _StaticProgressBody(BaseModel):
 @router.post("/scan/{scan_id}/static-progress")
 async def agent_push_static_progress(scan_id: str, body: _StaticProgressBody) -> dict:
     """Agent pushes static analysis progress (function/file counts)."""
+    store = get_scan_store()
     scan = _ensure_running_scan(scan_id)
+    loaded = store.load_scan(scan_id)
+    stored_scan = loaded[0] if loaded is not None else None
+    current_status = scan.status if scan is not None else (stored_scan.status if stored_scan is not None else None)
+    effective_done = body.done or (scan.static_analysis_done if scan is not None else False)
+    if not effective_done and stored_scan is not None:
+        effective_done = stored_scan.static_analysis_done
+
     status = None
+    if body.done and current_status in (ScanItemStatus.PENDING, ScanItemStatus.ANALYZING):
+        status = ScanItemStatus.AUDITING
+    elif not body.done and current_status == ScanItemStatus.PENDING:
+        status = ScanItemStatus.ANALYZING
+
     if scan is not None:
         scan.static_total_files = body.total
         scan.static_scanned_files = body.scanned
-        scan.static_analysis_done = body.done
-        if body.done and scan.status in (ScanItemStatus.PENDING, ScanItemStatus.ANALYZING):
-            scan.status = ScanItemStatus.AUDITING
-            status = ScanItemStatus.AUDITING
+        scan.static_analysis_done = effective_done
+        if status is not None:
+            scan.status = status
 
-    store = get_scan_store()
     store.update_scan_progress(
         scan_id,
         status=status,
         static_total_files=body.total,
         static_scanned_files=body.scanned,
-        static_analysis_done=body.done,
+        static_analysis_done=effective_done,
     )
     if scan is not None:
         from backend.sse import publish

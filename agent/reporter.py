@@ -152,13 +152,14 @@ class Reporter:
         if self.dry_run:
             return
         try:
-            await self._client.post(
+            resp = await self._client.post(
                 f"{self.server_url}/api/agent/scan/{scan_id}/static-progress",
                 json={"scanned": scanned, "total": total, "done": done},
                 timeout=5.0,
             )
-        except Exception:
-            pass
+            resp.raise_for_status()
+        except Exception as e:
+            print(f"Warning: failed to push static analysis progress: {e}")
 
     async def report_processed_key(
         self, scan_id: str, file: str, line: int, function: str, vuln_type: str

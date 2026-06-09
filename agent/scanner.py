@@ -624,6 +624,18 @@ async def run_scan(
             await emit("static_analysis", "Running static analyzers...")
 
             loop = asyncio.get_running_loop()
+            pending_static_progress = []
+
+            async def _drain_static_progress(timeout: float = 5.0) -> None:
+                pending = [asyncio.wrap_future(future) for future in pending_static_progress if not future.done()]
+                if not pending:
+                    return
+                _done, still_pending = await asyncio.wait(pending, timeout=timeout)
+                if still_pending:
+                    print(
+                        f"Warning: {len(still_pending)} static analysis progress update(s) still pending",
+                        flush=True,
+                    )
 
             def _run_static_analysis() -> tuple[list[Candidate], bool]:
                 """Run all static analyzers in a thread so the event loop stays free."""
@@ -638,10 +650,11 @@ async def run_scan(
                     # Set file-level progress callback
                     def _on_progress(scanned: int, total: int, label: str = entry.label) -> None:
                         print(f"\r  [static] {label}: {scanned}/{total}", end="", flush=True)
-                        asyncio.run_coroutine_threadsafe(
+                        future = asyncio.run_coroutine_threadsafe(
                             reporter.send_static_progress(scan_id, scanned, total),
                             loop,
                         )
+                        pending_static_progress.append(future)
 
                     if hasattr(entry.analyzer, "on_file_progress"):
                         entry.analyzer.on_file_progress = _on_progress
@@ -668,6 +681,7 @@ async def run_scan(
                 return result, False
 
             candidates, static_cancelled = await loop.run_in_executor(None, _run_static_analysis)
+            await _drain_static_progress()
 
             # Mark static analysis as done on the server
             await reporter.send_static_progress(scan_id, 0, 0, done=True)
