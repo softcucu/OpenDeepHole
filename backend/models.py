@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from enum import Enum
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class ScanItemStatus(str, Enum):
@@ -67,6 +67,7 @@ class Candidate(BaseModel):
     description: str
     vuln_type: str
     related_functions: list[str] = []
+    metadata: dict = Field(default_factory=dict)
 
 
 class Vulnerability(BaseModel):

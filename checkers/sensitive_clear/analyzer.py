@@ -1,8 +1,10 @@
-"""敏感信息未清零检测 — 静态分析器。
+"""敏感信息未清零检测 — 分组静态分析器。
 
-遍历项目中所有函数，提取每个函数的所有局部变量，
-为每个 (函数, 变量) 对生成一个候选项交由 AI 判断。
+本分析器只枚举函数名与变量名，不做敏感关键词或清零启发式过滤。
+按函数长度将 10-20 个函数组成一个审计分组，每组交由一次 Agent 调用处理。
 """
+
+from __future__ import annotations
 
 from pathlib import Path
 
@@ -14,51 +16,183 @@ from code_parser.code_utils import find_nodes_by_type
 
 CPP_LANGUAGE = Language(tree_sitter_cpp.language())
 
+TARGET_GROUP_LINES = 800
+MAX_GROUP_LINES = 1200
+MIN_FUNCTIONS_PER_GROUP = 10
+MAX_FUNCTIONS_PER_GROUP = 20
 
-def _extract_local_variables(body_source: str) -> list[str]:
-    """从函数体源码中提取所有局部变量名。"""
+
+def _node_text(node) -> str:
+    return node.text.decode("utf-8", errors="replace")
+
+
+def _identifier_name(node) -> str:
+    ids = find_nodes_by_type(node, "identifier")
+    if not ids:
+        return ""
+    return _node_text(ids[-1]).strip()
+
+
+def _declarator_name(node) -> str:
+    ids = find_nodes_by_type(node, "identifier")
+    if not ids:
+        return ""
+    return _node_text(ids[0]).strip()
+
+
+def _extract_parameters(root) -> list[dict]:
+    variables: list[dict] = []
+    for node_type in ("parameter_declaration", "optional_parameter_declaration"):
+        for param in find_nodes_by_type(root, node_type):
+            name = _identifier_name(param)
+            if not name:
+                continue
+            variables.append(
+                {
+                    "name": name,
+                    "kind": "parameter",
+                    "line": param.start_point[0] + 1,
+                }
+            )
+    return variables
+
+
+def _extract_local_variables(root) -> list[dict]:
+    variables: list[dict] = []
+    for decl in find_nodes_by_type(root, "declaration"):
+        if any(c.type == "function_declarator" for c in decl.children):
+            continue
+        for child in decl.children:
+            if child.type in {
+                "init_declarator",
+                "pointer_declarator",
+                "array_declarator",
+                "reference_declarator",
+                "identifier",
+            }:
+                name = _declarator_name(child)
+                if not name:
+                    continue
+                variables.append(
+                    {
+                        "name": name,
+                        "kind": "local",
+                        "line": child.start_point[0] + 1,
+                    }
+                )
+
+    for decl in find_nodes_by_type(root, "for_range_declaration"):
+        name = _identifier_name(decl)
+        if name:
+            variables.append(
+                {
+                    "name": name,
+                    "kind": "local",
+                    "line": decl.start_point[0] + 1,
+                }
+            )
+    return variables
+
+
+def _extract_variables(body_source: str) -> list[dict]:
     parser = Parser(CPP_LANGUAGE)
     tree = parser.parse(body_source.encode("utf-8"))
     root = tree.root_node
 
-    var_names: list[str] = []
-
-    # 查找所有 declaration 节点
-    decl_nodes = find_nodes_by_type(root, "declaration")
-    for decl in decl_nodes:
-        # 跳过函数声明（含 function_declarator）
-        if any(
-            c.type == "function_declarator"
-            for c in decl.children
-        ):
+    variables: list[dict] = []
+    seen: set[tuple[str, str]] = set()
+    for item in _extract_parameters(root) + _extract_local_variables(root):
+        key = (item["kind"], item["name"])
+        if key in seen:
             continue
+        seen.add(key)
+        variables.append(item)
+    return variables
 
-        # 从 declarator 中提取标识符
-        for child in decl.children:
-            if child.type in (
-                "init_declarator",
-                "pointer_declarator",
-                "array_declarator",
-                "identifier",
-            ):
-                ids = find_nodes_by_type(child, "identifier")
-                if ids:
-                    name = ids[0].text.decode("utf-8", errors="replace")
-                    var_names.append(name)
 
-    # 也查找 for 循环中的变量声明
-    for_decls = find_nodes_by_type(root, "for_range_declaration")
-    for decl in for_decls:
-        ids = find_nodes_by_type(decl, "identifier")
-        if ids:
-            name = ids[-1].text.decode("utf-8", errors="replace")
-            var_names.append(name)
+def _row_value(row, key: str, default=None):
+    try:
+        value = row[key]
+    except (KeyError, IndexError, TypeError):
+        value = getattr(row, key, default)
+    return default if value is None else value
 
-    return list(dict.fromkeys(var_names))  # 去重保序
+
+def _function_line_count(func: dict) -> int:
+    try:
+        start = int(_row_value(func, "start_line", 0) or 0)
+        end = int(_row_value(func, "end_line", start) or start)
+    except (TypeError, ValueError):
+        body = str(_row_value(func, "body", "") or "")
+        return max(1, body.count("\n") + 1)
+    return max(1, end - start + 1)
+
+
+def _should_flush_group(group: list[dict], next_func: dict) -> bool:
+    if not group:
+        return False
+    group_lines = sum(int(item["line_count"]) for item in group)
+    next_lines = int(next_func["line_count"])
+    if len(group) >= MAX_FUNCTIONS_PER_GROUP:
+        return True
+    if len(group) >= MIN_FUNCTIONS_PER_GROUP and group_lines + next_lines > TARGET_GROUP_LINES:
+        return True
+    if group_lines + next_lines > MAX_GROUP_LINES:
+        return True
+    return False
+
+
+def _build_group_candidate(group: list[dict], group_index: int) -> Candidate:
+    first = group[0]
+    group_id = f"sensitive-clear-group-{group_index:04d}"
+    pairs: list[dict] = []
+    functions: list[dict] = []
+    for func_idx, func in enumerate(group, 1):
+        functions.append(
+            {
+                "function_name": func["function_name"],
+                "file": func["file"],
+                "start_line": func["start_line"],
+                "end_line": func["end_line"],
+                "line_count": func["line_count"],
+            }
+        )
+        for var_idx, variable in enumerate(func["variables"], 1):
+            pair_id = f"{group_id}-f{func_idx:02d}-v{var_idx:03d}"
+            pairs.append(
+                {
+                    "pair_id": pair_id,
+                    "function_name": func["function_name"],
+                    "variable_name": variable["name"],
+                    "variable_kind": variable["kind"],
+                    "file": func["file"],
+                    "function_start_line": func["start_line"],
+                    "variable_line": variable["line"],
+                }
+            )
+
+    metadata = {
+        "kind": "sensitive_clear_group",
+        "group_id": group_id,
+        "functions": functions,
+        "pairs": pairs,
+    }
+    description = (
+        f"敏感信息未清零分组审计 {group_id}: "
+        f"{len(functions)} 个函数, {len(pairs)} 个变量。"
+    )
+    return Candidate(
+        file=str(first["file"]),
+        line=int(first["start_line"]),
+        function="__project__",
+        description=description,
+        vuln_type="sensitive_clear",
+        metadata=metadata,
+    )
 
 
 class Analyzer(BaseAnalyzer):
-    """为每个函数中的每个局部变量生成候选项。"""
+    """按函数组生成敏感信息未清零审计候选。"""
 
     vuln_type = "sensitive_clear"
 
@@ -68,28 +202,37 @@ class Analyzer(BaseAnalyzer):
 
         candidates: list[Candidate] = []
         functions = db.get_all_functions()
+        group: list[dict] = []
+        group_index = 1
 
         total = len(functions)
         for idx, func in enumerate(functions):
             if self.on_file_progress:
                 self.on_file_progress(idx + 1, total)
 
-            func_name = func["name"]
-            body = func["body"]
-            file_path = func["file_path"]
-            start_line = func["start_line"]
-
+            body = func["body"] or ""
             if not body:
                 continue
 
-            local_vars = _extract_local_variables(body)
-            for var_name in local_vars:
-                candidates.append(Candidate(
-                    file=file_path,
-                    line=start_line,
-                    function=func_name,
-                    description=f"分析函数{func_name}中变量{var_name}是否存在敏感信息未清0问题",
-                    vuln_type=self.vuln_type,
-                ))
+            variables = _extract_variables(body)
+            if not variables:
+                continue
+
+            item = {
+                "function_name": func["name"],
+                "file": func["file_path"],
+                "start_line": int(func["start_line"]),
+                "end_line": int(func["end_line"]),
+                "line_count": _function_line_count(func),
+                "variables": variables,
+            }
+            if _should_flush_group(group, item):
+                candidates.append(_build_group_candidate(group, group_index))
+                group_index += 1
+                group = []
+            group.append(item)
+
+        if group:
+            candidates.append(_build_group_candidate(group, group_index))
 
         return candidates

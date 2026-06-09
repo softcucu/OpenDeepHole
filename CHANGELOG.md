@@ -2,6 +2,7 @@
 
 ## 2026-06-02
 
+- **优化** `sensitive_clear` 改为按函数长度分组审计：每组函数只启动一次 Agent，初始提示词仅包含函数名和变量名，Agent 对组内每个变量分别提交 `submit_result`，完整变量级 JSON 保存为检查项报告，只有确认未清零问题进入漏洞列表
 - **新增** 启用 `sensitive_clear` 检查项，敏感信息未清零规则进入扫描选择与运行时 registry
 - **修复** AI 去误报三阶段复核在长 prompt 场景下可能把空任务传给 CLI，导致阶段进程结束但未写入指定 Markdown artifact；长 prompt 现在改为文件引用方式传递
 - **修复** AI 去误报阶段缺失 Markdown artifact 或 `submit_result` 时不再继续推进后续阶段，会按 `fp_review_cli.max_retries` 重试并在页面展示明确失败原因和 artifact/log 路径

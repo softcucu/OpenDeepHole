@@ -10,6 +10,7 @@ import shutil
 import subprocess
 import sys
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from uuid import uuid4
 from datetime import datetime, timezone
@@ -30,6 +31,13 @@ _DEFAULT_EXECUTABLES = {
     "hac": "hac",
     "claude": "claude",
 }
+
+
+@dataclass
+class SensitiveClearAuditResult:
+    vulnerabilities: list[Vulnerability]
+    reports: list[dict]
+    complete: bool
 
 # Regex to strip ANSI escape sequences from CLI output
 _ANSI_RE = re.compile(
@@ -329,6 +337,290 @@ async def run_project_audit(
         return []
 
     return []
+
+
+def _sensitive_clear_group(candidate: Candidate) -> dict:
+    metadata = candidate.metadata if isinstance(candidate.metadata, dict) else {}
+    if metadata.get("kind") != "sensitive_clear_group":
+        return {}
+    pairs = metadata.get("pairs")
+    if not isinstance(pairs, list) or not pairs:
+        return {}
+    return metadata
+
+
+def _sensitive_clear_prompt(skill_name: str, candidate: Candidate, project_id: str, result_id: str) -> str:
+    group = _sensitive_clear_group(candidate)
+    group_id = str(group.get("group_id") or "sensitive-clear-group")
+    pairs = [
+        {
+            "pair_id": str(item.get("pair_id") or ""),
+            "function_name": str(item.get("function_name") or ""),
+            "variable_name": str(item.get("variable_name") or ""),
+        }
+        for item in group.get("pairs", [])
+        if isinstance(item, dict)
+    ]
+    return (
+        f"使用 `{skill_name}` 技能，审计敏感信息未清零分组 `{group_id}`。"
+        f"project_id 为 `{project_id}`。"
+        f"你的 result_id 是 `{result_id}`。"
+        f"初始提示词只提供函数名和变量名，不包含函数体。"
+        f"你必须自行按需查看代码，判断每个变量是否保存敏感信息以及最后一次敏感使用后是否显式清零。"
+        f"下面 JSON 数组是必须覆盖的变量清单，每个元素都必须调用一次 submit_result，使用同一个 result_id；"
+        f"ai_analysis 必须是包含 pair_id、function_name、variable_name、is_sensitive、cleared_after_last_use、confirmed、evidence、reason 的 JSON 字符串。"
+        f"变量清单：{json.dumps(pairs, ensure_ascii=False)}"
+    ).replace("\n", " ")
+
+
+def _extract_json_object(text: str) -> dict | None:
+    stripped = (text or "").strip()
+    if not stripped:
+        return None
+    if stripped.startswith("```"):
+        lines = stripped.splitlines()
+        if lines and lines[0].startswith("```"):
+            lines = lines[1:]
+        if lines and lines[-1].strip().startswith("```"):
+            lines = lines[:-1]
+        stripped = "\n".join(lines).strip()
+    try:
+        data = json.loads(stripped)
+    except json.JSONDecodeError:
+        start = stripped.find("{")
+        end = stripped.rfind("}")
+        if start < 0 or end <= start:
+            return None
+        try:
+            data = json.loads(stripped[start:end + 1])
+        except json.JSONDecodeError:
+            return None
+    return data if isinstance(data, dict) else None
+
+
+def _safe_int(value, default: int) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return default
+    return parsed if parsed > 0 else default
+
+
+def _read_sensitive_clear_audit_result(result_id: str, candidate: Candidate) -> SensitiveClearAuditResult | None:
+    group = _sensitive_clear_group(candidate)
+    if not group:
+        return None
+    payload_data = _read_result_file(result_id, candidate)
+    if payload_data is None:
+        return None
+    payloads = _result_payloads(payload_data)
+    expected_pairs = {
+        str(item.get("pair_id")): item
+        for item in group.get("pairs", [])
+        if isinstance(item, dict) and item.get("pair_id")
+    }
+    if not expected_pairs:
+        return None
+
+    seen: set[str] = set()
+    normalized_results: list[dict] = []
+    vulnerabilities: list[Vulnerability] = []
+    for payload in payloads:
+        analysis = _extract_json_object(str(payload.get("ai_analysis") or ""))
+        if analysis is None:
+            logger.warning("Invalid sensitive_clear ai_analysis JSON for result_id=%s", result_id)
+            return None
+        pair_id = str(analysis.get("pair_id") or "")
+        if pair_id not in expected_pairs or pair_id in seen:
+            logger.warning("Unexpected or duplicate sensitive_clear pair_id=%s result_id=%s", pair_id, result_id)
+            return None
+        seen.add(pair_id)
+        pair = expected_pairs[pair_id]
+        function_name = str(analysis.get("function_name") or pair.get("function_name") or "")
+        variable_name = str(analysis.get("variable_name") or pair.get("variable_name") or "")
+        confirmed = bool(payload.get("confirmed", False))
+        analysis_confirmed = bool(analysis.get("confirmed", confirmed))
+        if analysis_confirmed != confirmed:
+            logger.warning("Mismatched sensitive_clear confirmed value for pair_id=%s", pair_id)
+            return None
+
+        normalized = {
+            "pair_id": pair_id,
+            "function_name": function_name,
+            "variable_name": variable_name,
+            "is_sensitive": bool(analysis.get("is_sensitive", False)),
+            "cleared_after_last_use": bool(analysis.get("cleared_after_last_use", False)),
+            "confirmed": confirmed,
+            "severity": str(payload.get("severity") or ("high" if confirmed else "low")),
+            "file": str(payload.get("file") or pair.get("file") or candidate.file),
+            "line": _safe_int(
+                payload.get("line"),
+                _safe_int(pair.get("function_start_line"), candidate.line),
+            ),
+            "evidence": str(analysis.get("evidence") or ""),
+            "reason": str(analysis.get("reason") or ""),
+            "description": str(payload.get("description") or ""),
+        }
+        normalized_results.append(normalized)
+        if confirmed:
+            vulnerabilities.append(
+                Vulnerability(
+                    file=normalized["file"],
+                    line=normalized["line"],
+                    function=function_name,
+                    vuln_type=candidate.vuln_type,
+                    severity=normalized["severity"] or "high",
+                    description=normalized["description"] or f"{function_name} 中变量 {variable_name} 保存敏感信息后未清零",
+                    ai_analysis=json.dumps(normalized, ensure_ascii=False, indent=2),
+                    confirmed=True,
+                    ai_verdict="confirmed",
+                )
+            )
+
+    missing = set(expected_pairs) - seen
+    if missing:
+        logger.warning("Missing sensitive_clear pair results for result_id=%s: %s", result_id, sorted(missing)[:10])
+        return None
+
+    group_id = str(group.get("group_id") or "sensitive-clear-group")
+    report_data = {
+        "group_id": group_id,
+        "result_id": result_id,
+        "total_pairs": len(expected_pairs),
+        "confirmed_count": len(vulnerabilities),
+        "results": sorted(normalized_results, key=lambda item: item["pair_id"]),
+    }
+    content = json.dumps(report_data, ensure_ascii=False, indent=2)
+    now = datetime.now(timezone.utc).isoformat()
+    reports = [
+        {
+            "checker_name": candidate.vuln_type,
+            "filename": f"{group_id}.json",
+            "title": f"Sensitive clear results {group_id}",
+            "content": content,
+            "created_at": now,
+        }
+    ]
+    return SensitiveClearAuditResult(vulnerabilities=vulnerabilities, reports=reports, complete=True)
+
+
+async def run_sensitive_clear_audit(
+    workspace: Path,
+    candidate: Candidate,
+    project_id: str,
+    on_output=None,
+    cancel_event=None,
+    timeout: int | None = None,
+    project_dir: Path | None = None,
+) -> SensitiveClearAuditResult:
+    """Run one sensitive_clear grouped audit and collect variable-level JSON results."""
+    config = get_config()
+    if config.opencode.mock:
+        return SensitiveClearAuditResult(
+            vulnerabilities=[],
+            reports=[
+                {
+                    "checker_name": candidate.vuln_type,
+                    "filename": f"{candidate.metadata.get('group_id', 'sensitive-clear-group')}.json",
+                    "title": "Sensitive clear mock results",
+                    "content": json.dumps({"results": []}, ensure_ascii=False, indent=2),
+                    "created_at": datetime.now(timezone.utc).isoformat(),
+                }
+            ],
+            complete=True,
+        )
+
+    effective_timeout = timeout if timeout is not None else config.opencode.timeout
+    tool = _normalize_tool(config.opencode)
+    from backend.registry import get_registry
+    checker_entry = get_registry().get(candidate.vuln_type)
+    skill_name = (
+        checker_entry.skill_name
+        if checker_entry and checker_entry.skill_name
+        else candidate.vuln_type
+    )
+    max_retries = config.opencode.max_retries
+
+    for attempt in range(1, max_retries + 2):
+        result_id = f"result-{uuid4().hex}"
+        prompt = _sensitive_clear_prompt(skill_name, candidate, project_id, result_id)
+        log_path = workspace / f"opencode_{result_id}.log"
+        if on_output:
+            on_output(f"[{tool}] 初始提示词:\n{prompt}")
+        logger.info(
+            "Running %s sensitive_clear grouped audit: %s result_id=%s timeout=%ds attempt=%d/%d",
+            tool, candidate.file, result_id, effective_timeout, attempt, max_retries + 1,
+        )
+
+        try:
+            await _invoke_opencode(
+                workspace,
+                prompt,
+                effective_timeout,
+                log_path=log_path,
+                on_line=on_output,
+                cancel_event=cancel_event,
+                project_dir=project_dir,
+            )
+        except asyncio.TimeoutError:
+            logger.error("%s sensitive_clear audit timed out for %s", tool, candidate.file)
+            parsed = _read_sensitive_clear_audit_result(result_id, candidate)
+            if parsed is not None:
+                return parsed
+            return SensitiveClearAuditResult(
+                vulnerabilities=[
+                    Vulnerability(
+                        file=candidate.file,
+                        line=candidate.line,
+                        function=candidate.function,
+                        vuln_type=candidate.vuln_type,
+                        severity="unknown",
+                        description=candidate.description,
+                        ai_analysis="Analysis timed out",
+                        confirmed=False,
+                        ai_verdict="timeout",
+                    )
+                ],
+                reports=[],
+                complete=False,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.exception("%s sensitive_clear audit failed for %s (attempt %d)", tool, candidate.file, attempt)
+            if attempt <= max_retries:
+                if on_output:
+                    on_output(f"[retry {attempt}/{max_retries}] {tool} error: {exc}")
+                continue
+            return SensitiveClearAuditResult(vulnerabilities=[], reports=[], complete=False)
+
+        parsed = _read_sensitive_clear_audit_result(result_id, candidate)
+        if parsed is not None:
+            return parsed
+        if attempt <= max_retries:
+            logger.warning("%s sensitive_clear audit produced invalid/incomplete results; retrying", tool)
+            if on_output:
+                on_output(f"[retry {attempt}/{max_retries}] Incomplete sensitive_clear JSON results, retrying...")
+            continue
+        return SensitiveClearAuditResult(
+            vulnerabilities=[
+                Vulnerability(
+                    file=candidate.file,
+                    line=candidate.line,
+                    function=candidate.function,
+                    vuln_type=candidate.vuln_type,
+                    severity="unknown",
+                    description=candidate.description,
+                    ai_analysis="No complete variable-level result returned",
+                    confirmed=False,
+                    ai_verdict="no_result",
+                )
+            ],
+            reports=[],
+            complete=False,
+        )
+
+    return SensitiveClearAuditResult(vulnerabilities=[], reports=[], complete=False)
 
 
 def _markdown_title(content: str, fallback: str) -> str:

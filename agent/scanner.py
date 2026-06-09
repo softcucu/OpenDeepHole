@@ -721,6 +721,7 @@ async def run_scan(
 
         # --- Phase 7: AI audit ---
         vulnerabilities: list[Vulnerability] = []
+        skill_report_accumulator: dict[str, list[dict]] = {}
         processed_this_run = 0
         await emit("auditing", f"Starting AI audit of {len(remaining)} candidate(s)...")
         if remaining:
@@ -791,16 +792,49 @@ async def run_scan(
                         processed_this_run += 1
                         continue
                     else:
-                        from backend.opencode.runner import run_project_audit
-                        project_vulns = await run_project_audit(
-                            workspace,
-                            candidate,
-                            scan_id,
-                            on_output=lambda line: print(f"  {line}", flush=True),
-                            cancel_event=cancel_event,
-                            timeout=candidate_timeout,
-                            project_dir=project_path,
-                        )
+                        if (
+                            candidate.vuln_type == "sensitive_clear"
+                            and isinstance(candidate.metadata, dict)
+                            and candidate.metadata.get("kind") == "sensitive_clear_group"
+                        ):
+                            from backend.opencode.runner import run_sensitive_clear_audit
+                            sensitive_result = await run_sensitive_clear_audit(
+                                workspace,
+                                candidate,
+                                scan_id,
+                                on_output=lambda line: print(f"  {line}", flush=True),
+                                cancel_event=cancel_event,
+                                timeout=candidate_timeout,
+                                project_dir=project_path,
+                            )
+                            project_vulns = sensitive_result.vulnerabilities
+                            if sensitive_result.reports:
+                                existing = skill_report_accumulator.setdefault(candidate.vuln_type, [])
+                                report_names = {str(report.get("filename") or "") for report in sensitive_result.reports}
+                                existing[:] = [
+                                    report for report in existing
+                                    if str(report.get("filename") or "") not in report_names
+                                ] + sensitive_result.reports
+                                await reporter.replace_skill_reports(
+                                    scan_id,
+                                    candidate.vuln_type,
+                                    existing,
+                                )
+                            if sensitive_result.complete and not project_vulns:
+                                project_vulns = []
+                            elif not sensitive_result.complete and not project_vulns:
+                                project_vulns = None
+                        else:
+                            from backend.opencode.runner import run_project_audit
+                            project_vulns = await run_project_audit(
+                                workspace,
+                                candidate,
+                                scan_id,
+                                on_output=lambda line: print(f"  {line}", flush=True),
+                                cancel_event=cancel_event,
+                                timeout=candidate_timeout,
+                                project_dir=project_path,
+                            )
                 else:
                     from backend.opencode.runner import run_audit
                     vuln = await run_audit(
@@ -826,7 +860,7 @@ async def run_scan(
                 break
 
             if is_project_level_candidate(candidate):
-                project_vulns = project_vulns or [
+                project_vulns = project_vulns if project_vulns is not None else [
                     Vulnerability(
                         file=candidate.file,
                         line=candidate.line,

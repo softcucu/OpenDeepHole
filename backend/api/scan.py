@@ -41,6 +41,7 @@ from backend.models import (
     ScanStartResponse,
     ScanStatus,
     ScanSummary,
+    SkillReport,
     UnmarkRequest,
     UpdateScanProductRequest,
     User,
@@ -1557,7 +1558,12 @@ async def _run_scan(
         store.update_scan_progress(scan_id, status=ScanItemStatus.ANALYZING)
 
         from backend.opencode.config import create_scan_workspace
-        from backend.opencode.runner import run_audit, run_audit_batch, run_project_audit
+        from backend.opencode.runner import (
+            run_audit,
+            run_audit_batch,
+            run_project_audit,
+            run_sensitive_clear_audit,
+        )
 
         workspace = create_scan_workspace(scan_id, project_dir=project_dir, feedback_entries=feedback_entries)
         _scan_workspaces[scan_id] = workspace
@@ -1742,13 +1748,48 @@ async def _run_scan(
                             if line.strip():
                                 emit("opencode_output", line, candidate_index=idx)
 
+                        project_audit_complete = False
                         if candidate.function == "__project__":
-                            project_vulns = await run_project_audit(
-                                workspace, candidate, project_id,
-                                on_output=on_output,
-                                cancel_event=cancel_event,
-                                project_dir=project_dir,
-                            )
+                            if (
+                                candidate.vuln_type == "sensitive_clear"
+                                and isinstance(candidate.metadata, dict)
+                                and candidate.metadata.get("kind") == "sensitive_clear_group"
+                            ):
+                                sensitive_result = await run_sensitive_clear_audit(
+                                    workspace, candidate, project_id,
+                                    on_output=on_output,
+                                    cancel_event=cancel_event,
+                                    project_dir=project_dir,
+                                )
+                                project_vulns = sensitive_result.vulnerabilities
+                                project_audit_complete = sensitive_result.complete
+                                if sensitive_result.reports:
+                                    reports = [
+                                        SkillReport(scan_id=scan_id, **report)
+                                        for report in sensitive_result.reports
+                                    ]
+                                    report_names = {report.filename for report in reports}
+                                    existing_reports = [
+                                        report for report in scan.skill_reports
+                                        if (
+                                            report.checker_name == candidate.vuln_type
+                                            and report.filename not in report_names
+                                        )
+                                    ]
+                                    merged_reports = existing_reports + reports
+                                    store.replace_skill_reports(scan_id, candidate.vuln_type, merged_reports)
+                                    scan.skill_reports = [
+                                        report for report in scan.skill_reports
+                                        if report.checker_name != candidate.vuln_type
+                                    ] + merged_reports
+                            else:
+                                project_vulns = await run_project_audit(
+                                    workspace, candidate, project_id,
+                                    on_output=on_output,
+                                    cancel_event=cancel_event,
+                                    project_dir=project_dir,
+                                )
+                                project_audit_complete = bool(project_vulns)
                         else:
                             project_vulns = None
                             vuln = await run_audit(
@@ -1762,7 +1803,7 @@ async def _run_scan(
                             break
 
                         if candidate.function == "__project__":
-                            if not project_vulns:
+                            if not project_audit_complete and not project_vulns:
                                 project_vulns = [
                                     Vulnerability(
                                         file=candidate.file,
