@@ -131,6 +131,7 @@ opencode_concurrency: 3
 
 > 每个检查项的调用方式（`api` 或 `opencode`）在其 `checker.yaml` 中独立配置，无需全局 `mode` 选项。
 > 每个检查项可在 `checker.yaml` 中设置 `model_capability: low|medium|high` 指定最低模型能力；未配置时默认为 `any`，AI 去误报默认优先使用高能力模型。
+> 扫描详情页顶部的「模型看板」会展示当前扫描的 OpenCode 模型池统计，包括每个模型累计任务、成功/失败/超时/取消次数、平均耗时、运行中和排队数；页面刷新后会读取最近一次上报快照。
 > Agent 启动并连接服务器后，也可以在 Web UI 的 Agent 配置面板中直接保存或校验 LLM API 配置；保存后的配置会写回 `agent.yaml`。
 
 **第 3 步：确认代码索引工具**
@@ -579,6 +580,12 @@ CLI 工具调用约定：
 - `nga` / `opencode`：每个扫描或复核任务使用隔离的 OpenCode 配置目录，并通过 `OPENCODE_CONFIG_CONTENT` 注入当前任务的 MCP URL 和 SKILL 路径；`--dir` 仍指向真实项目根目录，不复制源码；CLI 进程的运行目录为目标项目下的 `.opendeephole/opencode/<task>/`，用于收敛工具自身生成的临时日志并避免多并发覆盖运行时配置。
 - `hac`：按 Gemini CLI 兼容方式运行，Agent 会在任务隔离配置目录写入 `.gemini/settings.json` 的 MCP server，并把技能复制到 `.gemini/skills/`。
 - `claude`：按 Claude Code 兼容方式运行，Agent 会在任务隔离配置目录写入 `.claude/opendeephole-mcp.json` 并通过 `--mcp-config` 注入 MCP，同时把技能复制到 `.claude/skills/`。
+
+OpenCode 模型池统计：
+
+- 位置审计、扫描前内存 API 识别和 AI 去误报都会通过统一调用入口累计模型池统计。
+- 扫描详情页点击「模型看板」可以查看每个模型的累计任务、成功/失败/超时/取消计数、平均耗时、当前运行数和当前排队数。
+- Agent 会周期性上报快照，服务端会保存到扫描记录中；页面刷新或重新进入扫描详情后会显示最近一次快照。
 
 ## 本地开发
 

@@ -195,6 +195,7 @@ async def _run_audit_via_opencode(
                 log_path=log_path, on_line=on_output, cancel_event=cancel_event,
                 project_dir=project_dir,
                 model_capability=getattr(checker_entry, "model_capability", "any"),
+                stats_scope_id=project_id,
             )
         except asyncio.TimeoutError:
             # Timeout — no retry; check if result was submitted before kill
@@ -300,6 +301,7 @@ async def run_project_audit(
                 log_path=log_path, on_line=on_output, cancel_event=cancel_event,
                 project_dir=project_dir,
                 model_capability=getattr(checker_entry, "model_capability", "any"),
+                stats_scope_id=project_id,
             )
         except asyncio.TimeoutError:
             logger.error("%s project audit timed out for %s (timeout=%ds)", tool, candidate.vuln_type, effective_timeout)
@@ -569,6 +571,7 @@ async def run_sensitive_clear_audit(
                 cancel_event=cancel_event,
                 project_dir=project_dir,
                 model_capability=getattr(checker_entry, "model_capability", "any"),
+                stats_scope_id=project_id,
             )
         except asyncio.TimeoutError:
             logger.error("%s sensitive_clear audit timed out for %s", tool, candidate.file)
@@ -737,6 +740,7 @@ async def run_project_report_audit(
                 project_dir=project_dir,
                 writable_paths=[report_dir],
                 model_capability=getattr(checker_entry, "model_capability", "any"),
+                stats_scope_id=project_id,
             )
         except asyncio.TimeoutError:
             logger.error(
@@ -1189,6 +1193,7 @@ async def _invoke_opencode(
     writable_paths: list[Path] | None = None,
     model_capability: str = "any",
     prefer_high_model: bool = False,
+    stats_scope_id: str = "",
 ) -> None:
     """Invoke the configured AI CLI, stream output line-by-line, write to log file.
 
@@ -1205,10 +1210,14 @@ async def _invoke_opencode(
         required_capability=model_capability,
         prefer_high=prefer_high_model,
         cancel_event=cancel_event,
+        stats_scope_id=stats_scope_id,
     )
     if lease is None:
         return
+    outcome = "failure"
+    duration_seconds: float | None = None
     try:
+        invoke_started = lease.started_at or time.monotonic()
         effective_cli_config = _effective_cli_config(cli_config, lease.option)
         timeout = int(_cfg_value(effective_cli_config, "timeout", timeout) or timeout)
         tool = _normalize_tool(effective_cli_config)
@@ -1360,7 +1369,9 @@ async def _invoke_opencode(
             )
             _cleanup_prompt_file(prompt_file)
             if timed_out:
+                outcome = "timeout"
                 raise asyncio.TimeoutError()
+            outcome = "cancelled"
             return
 
         try:
@@ -1372,8 +1383,14 @@ async def _invoke_opencode(
         if proc and proc.returncode not in (0, None):
             logger.error("%s exited with code %d", tool, proc.returncode)
             raise RuntimeError(f"{tool} exited with code {proc.returncode}")
+        outcome = "success"
+    except asyncio.CancelledError:
+        outcome = "cancelled"
+        raise
     finally:
-        await release_model_lease(lease)
+        if 'invoke_started' in locals():
+            duration_seconds = time.monotonic() - invoke_started
+        await release_model_lease(lease, outcome=outcome, duration_seconds=duration_seconds)
 
 
 def _result_payloads(data) -> list[dict]:

@@ -3,6 +3,7 @@
 ## 2026-06-10
 
 - **新增** OpenCode/兼容 CLI 统一模型池调度：Agent 配置支持 `opencode_concurrency` 和 `opencode.models[]`/`fp_review_cli.models[]`，可按模型能力、权重和单模型并发做负载分配；未配置模型池时保持原有单模型行为
+- **新增** 扫描详情页「模型看板」：实时展示 OpenCode 模型池每个模型的累计任务、成功/失败/超时/取消计数、平均耗时、运行中和排队数，刷新后可从扫描存储恢复最近快照
 - **新增** `checker.yaml` 支持 `model_capability: any|low|medium|high`，位置审计会按 checker 最低能力要求选择模型，AI 去误报和在线创建 SKILL 默认优先高能力模型
 - **优化** 位置审计、扫描前内存 API 识别和 AI 去误报改为复用统一 OpenCode 调用入口并支持多并发执行；`opencode`/`nga` 每次调用使用独立运行目录，避免并发时覆盖运行时配置
 - **优化** `sensitive_clear` 单次 Agent 分组审计最多包含 5 个函数，降低变量级敏感信息清零分析的单次上下文规模，减少大项目扫描超时

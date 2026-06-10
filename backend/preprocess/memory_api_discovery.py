@@ -450,6 +450,7 @@ async def _run_memory_api_batch(
         project_dir=project_root,
         writable_paths=[output_path.parent],
         model_capability="any",
+        stats_scope_id=project_id,
     )
 
 

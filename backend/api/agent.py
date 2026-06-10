@@ -47,6 +47,7 @@ from backend.models import (
     AgentInfo,
     AgentRemoteConfig,
     AgentScanFinish,
+    OpenCodePoolStatus,
     ScanEvent,
     ScanItemStatus,
     SkillReport,
@@ -956,6 +957,30 @@ async def agent_push_static_progress(scan_id: str, body: _StaticProgressBody) ->
             "static_scanned_files": scan.static_scanned_files,
             "static_analysis_done": scan.static_analysis_done,
         })
+    return {"ok": True}
+
+
+@router.post("/scan/{scan_id}/opencode-pool")
+async def agent_push_opencode_pool(scan_id: str, body: OpenCodePoolStatus) -> dict:
+    """Agent pushes the latest OpenCode model-pool status for one scan."""
+    store = get_scan_store()
+    store.update_opencode_pool_status(scan_id, body)
+
+    scan = _ensure_running_scan(scan_id)
+    if scan is not None:
+        scan.opencode_pool = body
+
+    from backend.sse import publish
+    publish(scan_id, "scan_status", {
+        "status": scan.status if scan else None,
+        "progress": scan.progress if scan else None,
+        "total_candidates": scan.total_candidates if scan else None,
+        "processed_candidates": scan.processed_candidates if scan else None,
+        "static_total_files": scan.static_total_files if scan else None,
+        "static_scanned_files": scan.static_scanned_files if scan else None,
+        "static_analysis_done": scan.static_analysis_done if scan else None,
+        "opencode_pool": body.model_dump(),
+    })
     return {"ok": True}
 
 

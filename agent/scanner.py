@@ -400,6 +400,8 @@ async def run_scan(
     mcp_server = None
     workspace: Optional[Path] = None
     previous_checkers_dir = os.environ.get(CHECKERS_DIR_ENV)
+    pool_status_stop = asyncio.Event()
+    pool_status_task: asyncio.Task | None = None
 
     try:
         project_path, code_scan_path = _resolve_scan_paths(project_path, code_scan_path)
@@ -412,6 +414,9 @@ async def run_scan(
 
         # Setup backend config before any backend imports
         _configure_backend(config, scan_dir)
+        pool_status_task = asyncio.create_task(
+            reporter.publish_opencode_pool_until(scan_id, pool_status_stop)
+        )
 
         async def emit(phase: str, message: str, candidate_index: Optional[int] = None) -> None:
             event = ScanEvent.create(phase, message, candidate_index)
@@ -1001,6 +1006,12 @@ async def run_scan(
         raise
 
     finally:
+        pool_status_stop.set()
+        if pool_status_task is not None:
+            try:
+                await pool_status_task
+            except Exception:
+                pass
         try:
             if mcp_server:
                 from agent import mcp_registry

@@ -158,6 +158,10 @@ async def run_fp_review(
     workspace: Optional[Path] = None
     _patched_env: bool = False    # whether we changed AGENT_PROJECT_DIR
     _patched_cfg: bool = False    # whether we changed the backend config
+    pool_status_stop = asyncio.Event()
+    pool_status_task = asyncio.create_task(
+        reporter.publish_opencode_pool_until(scan_id, pool_status_stop)
+    )
 
     async def emit(phase: str, message: str) -> None:
         event = ScanEvent.create(phase, message)
@@ -263,6 +267,7 @@ async def run_fp_review(
 
                 prove_bug = await _run_fp_review_stage(
                     stage="prove_bug",
+                    scan_id=scan_id,
                     workspace=vuln_workspace,
                     review_dir=review_dir,
                     review_id=review_id,
@@ -286,6 +291,7 @@ async def run_fp_review(
 
                 prove_fp = await _run_fp_review_stage(
                     stage="prove_fp",
+                    scan_id=scan_id,
                     workspace=vuln_workspace,
                     review_dir=review_dir,
                     review_id=review_id,
@@ -310,6 +316,7 @@ async def run_fp_review(
 
                 final_judge = await _run_fp_review_stage(
                     stage="final_judge",
+                    scan_id=scan_id,
                     workspace=vuln_workspace,
                     review_dir=review_dir,
                     review_id=review_id,
@@ -406,6 +413,11 @@ async def run_fp_review(
             pass
 
     finally:
+        pool_status_stop.set()
+        try:
+            await pool_status_task
+        except Exception:
+            pass
         if workspace is not None:
             _cleanup_fp_workspace(workspace)
         if own_mcp_server is not None:
@@ -430,6 +442,7 @@ async def run_fp_review(
 async def _run_fp_review_stage(
     *,
     stage: str,
+    scan_id: str,
     workspace: Path,
     review_dir: Path,
     review_id: str,
@@ -488,6 +501,7 @@ async def _run_fp_review_stage(
                 writable_paths=[artifact_dir],
                 model_capability="high",
                 prefer_high_model=True,
+                stats_scope_id=scan_id,
             )
         except asyncio.CancelledError:
             raise

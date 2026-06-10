@@ -15,6 +15,7 @@ from backend.models import (
     FpReviewJob,
     FpReviewResult,
     FpReviewStageOutput,
+    OpenCodePoolStatus,
     ScanEvent,
     ScanItemStatus,
     ScanMeta,
@@ -42,6 +43,10 @@ class ScanStoreBase(ABC):
     @abstractmethod
     def update_scan_product(self, scan_id: str, product: str) -> None:
         """Update the product associated with a scan."""
+
+    @abstractmethod
+    def update_opencode_pool_status(self, scan_id: str, status: OpenCodePoolStatus) -> None:
+        """Persist the latest OpenCode model-pool status snapshot for a scan."""
 
     @abstractmethod
     def list_scans(self) -> list[ScanSummary]:

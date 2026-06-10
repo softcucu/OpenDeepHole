@@ -141,6 +141,33 @@ export interface ScanEvent {
   candidate_index: number | null;
 }
 
+export interface OpenCodePoolModelStats {
+  id: string;
+  model: string;
+  capability: string;
+  weight: number;
+  max_concurrency: number;
+  queued: number;
+  running: number;
+  total: number;
+  success: number;
+  failure: number;
+  timeout: number;
+  cancelled: number;
+  avg_duration_seconds: number;
+  last_status: string;
+  last_started_at: string;
+  last_finished_at: string;
+}
+
+export interface OpenCodePoolStatus {
+  scope_id: string;
+  global_running: number;
+  global_queued: number;
+  models: OpenCodePoolModelStats[];
+  updated_at: string;
+}
+
 export interface ScanStatus {
   scan_id: string;
   project_id: string;
@@ -158,6 +185,7 @@ export interface ScanStatus {
   error_message: string | null;
   feedback_ids: string[];
   retryable_candidates_count: number;
+  opencode_pool?: OpenCodePoolStatus | null;
 
   // 静态分析进度
   static_total_files: number;

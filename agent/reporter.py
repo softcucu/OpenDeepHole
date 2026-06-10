@@ -206,6 +206,38 @@ class Reporter:
         except Exception:
             pass
 
+    async def push_opencode_pool_status(self, scan_id: str, snapshot: dict) -> None:
+        """Push the latest OpenCode model-pool status snapshot."""
+        if self.dry_run:
+            return
+        try:
+            await self._client.post(
+                f"{self.server_url}/api/agent/scan/{scan_id}/opencode-pool",
+                json=snapshot,
+                timeout=5.0,
+            )
+        except Exception:
+            pass
+
+    async def publish_opencode_pool_until(
+        self,
+        scan_id: str,
+        stop_event: asyncio.Event,
+        interval_seconds: float = 1.0,
+    ) -> None:
+        """Periodically publish model-pool stats until *stop_event* is set."""
+        from backend.opencode.model_pool import model_pool_snapshot
+
+        try:
+            while not stop_event.is_set():
+                await self.push_opencode_pool_status(scan_id, model_pool_snapshot(scan_id))
+                try:
+                    await asyncio.wait_for(stop_event.wait(), timeout=interval_seconds)
+                except asyncio.TimeoutError:
+                    pass
+        finally:
+            await self.push_opencode_pool_status(scan_id, model_pool_snapshot(scan_id))
+
     async def get_processed_keys(self, scan_id: str) -> set[tuple[str, int, str, str]]:
         """Fetch already-processed candidate keys for resume (skip these on restart)."""
         if self.dry_run:

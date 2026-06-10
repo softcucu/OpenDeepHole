@@ -14,6 +14,7 @@ from backend.models import (
     FpReviewResult,
     FpReviewStageOutput,
     FpReviewStatus,
+    OpenCodePoolStatus,
     ScanEvent,
     ScanItemStatus,
     ScanMeta,
@@ -36,6 +37,20 @@ def _json_dict(value: str | None) -> dict[str, str]:
         return {}
     return {str(k): str(v) for k, v in data.items()}
 
+
+def _opencode_pool_status(value: str | None) -> OpenCodePoolStatus | None:
+    try:
+        data = json.loads(value or "{}")
+    except Exception:
+        return None
+    if not isinstance(data, dict) or not data:
+        return None
+    try:
+        return OpenCodePoolStatus(**data)
+    except Exception:
+        return None
+
+
 _SCHEMA = """\
 CREATE TABLE IF NOT EXISTS scans (
     scan_id            TEXT PRIMARY KEY,
@@ -51,7 +66,8 @@ CREATE TABLE IF NOT EXISTS scans (
     feedback_ids       TEXT DEFAULT '[]',
     workspace_path     TEXT,
     product            TEXT NOT NULL DEFAULT '',
-    public_access_token TEXT NOT NULL DEFAULT ''
+    public_access_token TEXT NOT NULL DEFAULT '',
+    opencode_pool      TEXT NOT NULL DEFAULT '{}'
 );
 
 CREATE TABLE IF NOT EXISTS vulnerabilities (
@@ -220,6 +236,8 @@ class SqliteScanStore(ScanStoreBase):
             self._conn.execute("ALTER TABLE scans ADD COLUMN product TEXT NOT NULL DEFAULT ''")
         if "public_access_token" not in cols:
             self._conn.execute("ALTER TABLE scans ADD COLUMN public_access_token TEXT NOT NULL DEFAULT ''")
+        if "opencode_pool" not in cols:
+            self._conn.execute("ALTER TABLE scans ADD COLUMN opencode_pool TEXT NOT NULL DEFAULT '{}'")
         # vulnerabilities 表迁移
         vuln_cur = self._conn.execute("PRAGMA table_info(vulnerabilities)")
         vuln_cols = {r[1] for r in vuln_cur.fetchall()}
@@ -363,6 +381,7 @@ class SqliteScanStore(ScanStoreBase):
             current_candidate=current,
             error_message=row["error_message"],
             feedback_ids=json.loads(row["feedback_ids"] or "[]"),
+            opencode_pool=_opencode_pool_status(row["opencode_pool"]),
             static_total_files=row["static_total_files"] or 0,
             static_scanned_files=row["static_scanned_files"] or 0,
             static_analysis_done=bool(row["static_analysis_done"]),
@@ -400,8 +419,8 @@ class SqliteScanStore(ScanStoreBase):
                      current_candidate, error_message, feedback_ids,
                      static_total_files, static_scanned_files, static_analysis_done,
                      user_id, agent_name, agent_id, project_path, code_scan_path, scan_name,
-                     product, public_access_token)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     product, public_access_token, opencode_pool)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     scan.scan_id,
@@ -426,6 +445,7 @@ class SqliteScanStore(ScanStoreBase):
                     meta.scan_name,
                     meta.product,
                     meta.public_access_token,
+                    scan.opencode_pool.model_dump_json() if scan.opencode_pool else "{}",
                 ),
             )
             self._conn.commit()
@@ -493,6 +513,14 @@ class SqliteScanStore(ScanStoreBase):
             self._conn.execute(
                 "UPDATE scans SET product = ? WHERE scan_id = ?",
                 (product, scan_id),
+            )
+            self._conn.commit()
+
+    def update_opencode_pool_status(self, scan_id: str, status: OpenCodePoolStatus) -> None:
+        with self._lock:
+            self._conn.execute(
+                "UPDATE scans SET opencode_pool = ? WHERE scan_id = ?",
+                (status.model_dump_json(), scan_id),
             )
             self._conn.commit()
 

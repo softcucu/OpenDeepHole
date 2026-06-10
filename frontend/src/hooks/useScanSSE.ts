@@ -21,6 +21,7 @@ interface ScanStatusEvent {
   static_total_files?: number | null;
   static_scanned_files?: number | null;
   static_analysis_done?: boolean | null;
+  opencode_pool?: ScanStatus["opencode_pool"];
 }
 
 interface ScanVulnerabilityEvent {

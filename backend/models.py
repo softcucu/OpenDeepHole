@@ -299,6 +299,33 @@ class SkillReport(BaseModel):
     created_at: str = ""
 
 
+class OpenCodePoolModelStats(BaseModel):
+    id: str
+    model: str = ""
+    capability: str = ""
+    weight: float = 1.0
+    max_concurrency: int = 1
+    queued: int = 0
+    running: int = 0
+    total: int = 0
+    success: int = 0
+    failure: int = 0
+    timeout: int = 0
+    cancelled: int = 0
+    avg_duration_seconds: float = 0.0
+    last_status: str = ""
+    last_started_at: str = ""
+    last_finished_at: str = ""
+
+
+class OpenCodePoolStatus(BaseModel):
+    scope_id: str = ""
+    global_running: int = 0
+    global_queued: int = 0
+    models: list[OpenCodePoolModelStats] = []
+    updated_at: str = ""
+
+
 class ScanStatus(BaseModel):
     scan_id: str
     project_id: str = ""
@@ -316,6 +343,7 @@ class ScanStatus(BaseModel):
     error_message: str | None = None
     feedback_ids: list[str] = []
     retryable_candidates_count: int = 0
+    opencode_pool: OpenCodePoolStatus | None = None
 
     # 静态分析进度（按文件计）
     static_total_files: int = 0

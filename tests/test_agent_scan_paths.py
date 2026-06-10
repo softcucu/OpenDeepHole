@@ -15,7 +15,7 @@ from agent.scanner import (
     build_project_level_candidate,
     is_project_level_candidate,
 )
-from backend.models import Candidate, ScanItemStatus, ScanMeta, ScanStatus
+from backend.models import Candidate, OpenCodePoolStatus, ScanItemStatus, ScanMeta, ScanStatus
 from backend.store.sqlite import SqliteScanStore
 
 
@@ -275,6 +275,66 @@ class ScanStoreCodeScanPathTests(unittest.TestCase):
             self.assertEqual(loaded_scan.product, "5G")
             self.assertEqual(loaded_meta.product, "5G")
 
+    def test_scan_persists_opencode_pool_status(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = SqliteScanStore(Path(tmp) / "scans.db")
+            scan = ScanStatus(
+                scan_id="scan-1",
+                project_id="project",
+                scan_items=["npd"],
+                created_at="2026-01-01T00:00:00+00:00",
+                status=ScanItemStatus.AUDITING,
+                progress=0.5,
+                total_candidates=2,
+                processed_candidates=1,
+                vulnerabilities=[],
+            )
+            meta = ScanMeta(
+                scan_items=["npd"],
+                created_at=scan.created_at,
+                project_path="/repo/project",
+                code_scan_path="/repo/project/module",
+                scan_name="project",
+            )
+            store.save_scan(scan, meta)
+
+            store.update_opencode_pool_status(
+                "scan-1",
+                OpenCodePoolStatus(
+                    scope_id="scan-1",
+                    global_running=1,
+                    global_queued=2,
+                    models=[
+                        {
+                            "id": "fast",
+                            "model": "fast-model",
+                            "capability": "low",
+                            "weight": 3,
+                            "max_concurrency": 1,
+                            "queued": 2,
+                            "running": 1,
+                            "total": 4,
+                            "success": 3,
+                            "failure": 1,
+                            "timeout": 0,
+                            "cancelled": 0,
+                            "avg_duration_seconds": 1.5,
+                            "last_status": "running",
+                        }
+                    ],
+                    updated_at="2026-01-01T00:00:10+00:00",
+                ),
+            )
+
+            loaded = store.load_scan("scan-1")
+            self.assertIsNotNone(loaded)
+            pool = loaded[0].opencode_pool
+            self.assertIsNotNone(pool)
+            self.assertEqual(pool.scope_id, "scan-1")
+            self.assertEqual(pool.global_queued, 2)
+            self.assertEqual(pool.models[0].id, "fast")
+            self.assertEqual(pool.models[0].success, 3)
+
     def test_old_scan_database_migrates_product_column(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             db_path = Path(tmp) / "scans.db"
@@ -314,6 +374,48 @@ class ScanStoreCodeScanPathTests(unittest.TestCase):
             cols = {row[1] for row in cur.fetchall()}
 
         self.assertIn("product", cols)
+
+    def test_old_scan_database_migrates_opencode_pool_column(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "scans.db"
+            conn = sqlite3.connect(db_path)
+            conn.execute(
+                """\
+                CREATE TABLE scans (
+                    scan_id TEXT PRIMARY KEY,
+                    project_id TEXT NOT NULL,
+                    scan_items TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'pending',
+                    created_at TEXT NOT NULL,
+                    progress REAL DEFAULT 0.0,
+                    total_candidates INTEGER DEFAULT 0,
+                    processed_candidates INTEGER DEFAULT 0,
+                    current_candidate TEXT,
+                    error_message TEXT,
+                    feedback_ids TEXT DEFAULT '[]',
+                    workspace_path TEXT,
+                    static_total_files INTEGER DEFAULT 0,
+                    static_scanned_files INTEGER DEFAULT 0,
+                    static_analysis_done INTEGER DEFAULT 0,
+                    agent_id TEXT DEFAULT '',
+                    agent_name TEXT DEFAULT '',
+                    project_path TEXT DEFAULT '',
+                    code_scan_path TEXT DEFAULT '',
+                    scan_name TEXT DEFAULT '',
+                    user_id TEXT DEFAULT '',
+                    product TEXT NOT NULL DEFAULT '',
+                    public_access_token TEXT NOT NULL DEFAULT ''
+                )
+                """
+            )
+            conn.commit()
+            conn.close()
+
+            store = SqliteScanStore(db_path)
+            cur = store._conn.execute("PRAGMA table_info(scans)")
+            cols = {row[1] for row in cur.fetchall()}
+
+        self.assertIn("opencode_pool", cols)
 
 
 class StaticProgressGateTests(unittest.TestCase):
