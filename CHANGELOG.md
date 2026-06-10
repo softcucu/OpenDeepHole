@@ -7,7 +7,7 @@
 - **新增** `checker.yaml` 支持 `model_capability: any|low|medium|high`，位置审计会按 checker 最低能力要求选择模型，AI 去误报和在线创建 SKILL 默认优先高能力模型
 - **优化** Agent 模型池快照改为状态变化时上报，无变化时只保留低频心跳，避免 `/opencode-pool` 每秒重复写库和广播 SSE
 - **优化** 位置审计、扫描前内存 API 识别和 AI 去误报改为复用统一 OpenCode 调用入口并支持多并发执行；`opencode`/`nga` 每次调用使用独立运行目录，避免并发时覆盖运行时配置
-- **优化** `sensitive_clear` 改为启发式筛选敏感变量所在函数后按函数审计；每个函数只启动一次 Agent、只提交一次 `submit_result`，`ai_analysis` 和检查项报告改为人类可读 Markdown
+- **优化** `sensitive_clear` 改为启发式筛选敏感变量所在函数后按函数审计；每个函数只启动一次 Agent、只提交一次 `submit_result`，`ai_analysis` 改为人类可读 Markdown 并直接随漏洞条目展示
 - **优化** `sensitive_clear` 单次 Agent 分组审计最多包含 5 个函数，降低变量级敏感信息清零分析的单次上下文规模，减少大项目扫描超时
 
 ## 2026-06-02

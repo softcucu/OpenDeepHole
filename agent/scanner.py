@@ -822,15 +822,6 @@ async def run_scan(
                         project_dir=project_path,
                     )
                     project_vulns = sensitive_result.vulnerabilities
-                    if sensitive_result.reports:
-                        async with result_lock:
-                            existing = skill_report_accumulator.setdefault(candidate.vuln_type, [])
-                            report_names = {str(report.get("filename") or "") for report in sensitive_result.reports}
-                            existing[:] = [
-                                report for report in existing
-                                if str(report.get("filename") or "") not in report_names
-                            ] + sensitive_result.reports
-                            await reporter.replace_skill_reports(scan_id, candidate.vuln_type, existing)
                     if sensitive_result.complete and not project_vulns:
                         project_vulns = []
                     elif not sensitive_result.complete and not project_vulns:

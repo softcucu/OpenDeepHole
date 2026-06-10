@@ -444,27 +444,7 @@ def _read_sensitive_clear_audit_result(result_id: str, candidate: Candidate) -> 
             )
         )
 
-    candidate_id = str(metadata.get("candidate_id") or f"sensitive-clear-{function_name}")
-    report_name = re.sub(r"[^A-Za-z0-9_.-]+", "-", candidate_id).strip("-") or "sensitive-clear"
-    content = (
-        f"# Sensitive clear result: {function_name}\n\n"
-        f"- result_id: `{result_id}`\n"
-        f"- confirmed: `{str(confirmed).lower()}`\n"
-        f"- severity: `{severity}`\n"
-        f"- description: {description or candidate.description}\n\n"
-        f"{markdown}\n"
-    )
-    now = datetime.now(timezone.utc).isoformat()
-    reports = [
-        {
-            "checker_name": candidate.vuln_type,
-            "filename": f"{report_name}.md",
-            "title": f"Sensitive clear result {function_name}",
-            "content": content,
-            "created_at": now,
-        }
-    ]
-    return SensitiveClearAuditResult(vulnerabilities=vulnerabilities, reports=reports, complete=True)
+    return SensitiveClearAuditResult(vulnerabilities=vulnerabilities, reports=[], complete=True)
 
 
 async def run_sensitive_clear_audit(
@@ -479,19 +459,9 @@ async def run_sensitive_clear_audit(
     """Run one sensitive_clear function audit and collect one Markdown result."""
     config = get_config()
     if config.opencode.mock:
-        candidate_id = str(candidate.metadata.get("candidate_id", "sensitive-clear-function"))
-        report_name = re.sub(r"[^A-Za-z0-9_.-]+", "-", candidate_id).strip("-") or "sensitive-clear"
         return SensitiveClearAuditResult(
             vulnerabilities=[],
-            reports=[
-                {
-                    "checker_name": candidate.vuln_type,
-                    "filename": f"{report_name}.md",
-                    "title": "Sensitive clear mock results",
-                    "content": "# Sensitive clear mock results\n",
-                    "created_at": datetime.now(timezone.utc).isoformat(),
-                }
-            ],
+            reports=[],
             complete=True,
         )
 

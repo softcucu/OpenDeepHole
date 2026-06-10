@@ -1769,25 +1769,6 @@ async def _run_scan(
                                 project_vulns = []
                             elif not sensitive_result.complete and not project_vulns:
                                 project_vulns = None
-                            if sensitive_result.reports:
-                                reports = [
-                                    SkillReport(scan_id=scan_id, **report)
-                                    for report in sensitive_result.reports
-                                ]
-                                report_names = {report.filename for report in reports}
-                                existing_reports = [
-                                    report for report in scan.skill_reports
-                                    if (
-                                        report.checker_name == candidate.vuln_type
-                                        and report.filename not in report_names
-                                    )
-                                ]
-                                merged_reports = existing_reports + reports
-                                store.replace_skill_reports(scan_id, candidate.vuln_type, merged_reports)
-                                scan.skill_reports = [
-                                    report for report in scan.skill_reports
-                                    if report.checker_name != candidate.vuln_type
-                                ] + merged_reports
                         elif candidate.function == "__project__":
                             project_vulns = await run_project_audit(
                                 workspace, candidate, project_id,

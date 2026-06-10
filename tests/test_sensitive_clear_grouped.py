@@ -124,7 +124,7 @@ class SensitiveClearFunctionTests(unittest.TestCase):
         self.assertNotIn("char *password", prompt)
         self.assertNotIn("变量清单", prompt)
 
-    def test_sensitive_clear_result_stores_markdown_in_vulnerability_and_report(self) -> None:
+    def test_sensitive_clear_result_stores_markdown_in_vulnerability_entry_only(self) -> None:
         candidate = _candidate()
         with tempfile.TemporaryDirectory() as tmp:
             result_id = "result-sensitive"
@@ -155,10 +155,7 @@ class SensitiveClearFunctionTests(unittest.TestCase):
         self.assertEqual(result.vulnerabilities[0].line, 25)
         self.assertEqual(result.vulnerabilities[0].function, "login")
         self.assertEqual(result.vulnerabilities[0].ai_analysis, MARKDOWN_ANALYSIS.strip())
-        self.assertEqual(len(result.reports), 1)
-        self.assertTrue(result.reports[0]["filename"].endswith(".md"))
-        self.assertIn("## 变量包含什么敏感信息", result.reports[0]["content"])
-        self.assertIn(MARKDOWN_ANALYSIS.strip(), result.reports[0]["content"])
+        self.assertEqual(result.reports, [])
 
     def test_sensitive_clear_result_accepts_single_false_markdown_result(self) -> None:
         candidate = _candidate()
@@ -184,7 +181,7 @@ class SensitiveClearFunctionTests(unittest.TestCase):
         self.assertIsNotNone(result)
         self.assertTrue(result.complete)
         self.assertEqual(result.vulnerabilities, [])
-        self.assertEqual(len(result.reports), 1)
+        self.assertEqual(result.reports, [])
 
     def test_sensitive_clear_result_rejects_multiple_submit_results(self) -> None:
         candidate = _candidate()

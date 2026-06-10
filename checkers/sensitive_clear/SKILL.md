@@ -9,13 +9,6 @@ description: 分析单个 C/C++ 函数中的变量是否承载敏感信息，以
 
 本任务只会给出一个函数名。你必须自行查看函数源码，识别函数内可能承载敏感信息的变量，并判断这些变量生命周期结束后是否显式清零。初始提示词中的函数名只是候选线索，不代表一定存在漏洞。
 
-## 可用工具
-
-- `view_function_code(project_id, function_name, file_path="")` - 查看目标函数完整源码。
-- `view_struct_code(project_id, struct_name)` - 查看结构体定义。
-- `view_global_variable_definition(project_id, variable_name)` - 查看全局变量定义。
-- `submit_result(result_id, confirmed, severity, description, ai_analysis, file="", line=0, function="")` - 提交本函数最终结论。
-
 ## 敏感信息范围
 
 重点关注但不限于：
