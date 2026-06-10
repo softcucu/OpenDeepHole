@@ -35,18 +35,21 @@ class SensitiveClearGroupedTests(unittest.TestCase):
 
         candidates = Analyzer().find_candidates(Path("."), db=_FakeDb(functions))
 
-        self.assertEqual(len(candidates), 2)
+        self.assertEqual(len(candidates), 5)
         self.assertEqual(candidates[0].function, "__project__")
         self.assertEqual(candidates[0].metadata["kind"], "sensitive_clear_group")
-        self.assertEqual(len(candidates[0].metadata["functions"]), 20)
+        self.assertEqual(len(candidates[0].metadata["functions"]), 5)
+        self.assertTrue(
+            all(len(candidate.metadata["functions"]) <= 5 for candidate in candidates)
+        )
         pair_names = {
             (pair["function_name"], pair["variable_name"])
             for pair in candidates[0].metadata["pairs"]
         }
         self.assertIn(("fn1", "arg1"), pair_names)
         self.assertIn(("fn1", "local1"), pair_names)
-        self.assertIn(("fn20", "arg20"), pair_names)
-        self.assertIn(("fn20", "local20"), pair_names)
+        self.assertIn(("fn5", "arg5"), pair_names)
+        self.assertIn(("fn5", "local5"), pair_names)
         self.assertNotIn("void fn1", candidates[0].description)
 
     def test_analyzer_splits_very_long_function(self) -> None:

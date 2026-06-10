@@ -1,7 +1,7 @@
 """敏感信息未清零检测 — 分组静态分析器。
 
 本分析器只枚举函数名与变量名，不做敏感关键词或清零启发式过滤。
-按函数长度将 10-20 个函数组成一个审计分组，每组交由一次 Agent 调用处理。
+按函数长度将最多 5 个函数组成一个审计分组，每组交由一次 Agent 调用处理。
 """
 
 from __future__ import annotations
@@ -18,8 +18,8 @@ CPP_LANGUAGE = Language(tree_sitter_cpp.language())
 
 TARGET_GROUP_LINES = 800
 MAX_GROUP_LINES = 1200
-MIN_FUNCTIONS_PER_GROUP = 10
-MAX_FUNCTIONS_PER_GROUP = 20
+MIN_FUNCTIONS_PER_GROUP = 1
+MAX_FUNCTIONS_PER_GROUP = 5
 
 
 def _node_text(node) -> str:
