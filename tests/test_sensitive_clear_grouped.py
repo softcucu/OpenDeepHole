@@ -115,9 +115,11 @@ class SensitiveClearFunctionTests(unittest.TestCase):
             "result-sensitive",
         )
 
-        self.assertIn("函数 `login`", prompt)
-        self.assertIn("project_id 为 `project-1`", prompt)
+        self.assertIn("`src/auth.c` 文件中的 `login` 函数敏感信息未清0问题", prompt)
+        self.assertIn("project_id: `project-1`", prompt)
         self.assertIn("result-sensitive", prompt)
+        self.assertNotIn("初始提示词只提供函数名", prompt)
+        self.assertNotIn("Markdown", prompt)
         self.assertNotIn("password", prompt)
         self.assertNotIn("char *password", prompt)
         self.assertNotIn("变量清单", prompt)

@@ -361,14 +361,10 @@ def _sensitive_clear_function(candidate: Candidate) -> dict:
 def _sensitive_clear_prompt(skill_name: str, candidate: Candidate, project_id: str, result_id: str) -> str:
     metadata = _sensitive_clear_function(candidate)
     function_name = str(metadata.get("function_name") or candidate.function or "")
+    file_path = str(metadata.get("file") or candidate.file or "")
     return (
-        f"使用 `{skill_name}` 技能，审计函数 `{function_name}` 的敏感信息未清零问题。"
-        f"project_id 为 `{project_id}`。"
-        f"你的 result_id 是 `{result_id}`。"
-        f"初始提示词只提供函数名，不提供变量名、命中词或函数体。"
-        f"你必须自行查看源码，判断函数内哪些变量承载敏感信息，以及变量生命周期结束后是否显式清零。"
-        f"整个函数只能调用一次 submit_result。"
-        f"ai_analysis 必须是人类可读 Markdown，包含 SKILL 要求的固定字段标题。"
+        f"使用 `{skill_name}` 技能分析 `{file_path}` 文件中的 `{function_name}` 函数敏感信息未清0问题。"
+        f"project_id: `{project_id}`。result_id: `{result_id}`。"
     ).replace("\n", " ")
 
 
