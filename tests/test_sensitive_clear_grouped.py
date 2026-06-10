@@ -6,7 +6,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from backend.models import Candidate
-from backend.opencode.runner import _read_sensitive_clear_audit_result
+from backend.opencode.runner import _read_sensitive_clear_audit_result, _sensitive_clear_prompt
 from checkers.sensitive_clear.analyzer import Analyzer
 
 
@@ -18,130 +18,124 @@ class _FakeDb:
         return self._functions
 
 
-def _func(name: str, idx: int, body: str | None = None, line_count: int = 3) -> dict:
-    body = body or f"void {name}(int arg{idx}) {{\n  int local{idx} = arg{idx};\n}}\n"
+def _func(name: str, idx: int, body: str) -> dict:
     return {
         "name": name,
         "body": body,
         "file_path": "src/demo.c",
         "start_line": idx * 10,
-        "end_line": idx * 10 + line_count - 1,
+        "end_line": idx * 10 + body.count("\n"),
     }
 
 
-class SensitiveClearGroupedTests(unittest.TestCase):
-    def test_analyzer_groups_functions_and_keeps_all_variables(self) -> None:
-        functions = [_func(f"fn{i}", i) for i in range(1, 22)]
+def _candidate() -> Candidate:
+    return Candidate(
+        file="src/auth.c",
+        line=20,
+        function="login",
+        description="function-level sensitive clear",
+        vuln_type="sensitive_clear",
+        metadata={
+            "kind": "sensitive_clear_function",
+            "candidate_id": "sensitive-clear-src/auth.c:20:login",
+            "function_name": "login",
+            "file": "src/auth.c",
+            "start_line": 20,
+            "end_line": 42,
+            "suspicious_variables": [
+                {
+                    "name": "password",
+                    "kind": "local",
+                    "line": 22,
+                    "type": "char *",
+                    "declaration": "char *password = input;",
+                    "matches": ["password"],
+                }
+            ],
+        },
+    )
 
-        candidates = Analyzer().find_candidates(Path("."), db=_FakeDb(functions))
 
-        self.assertEqual(len(candidates), 5)
-        self.assertEqual(candidates[0].function, "__project__")
-        self.assertEqual(candidates[0].metadata["kind"], "sensitive_clear_group")
-        self.assertEqual(len(candidates[0].metadata["functions"]), 5)
-        self.assertTrue(
-            all(len(candidate.metadata["functions"]) <= 5 for candidate in candidates)
-        )
-        pair_names = {
-            (pair["function_name"], pair["variable_name"])
-            for pair in candidates[0].metadata["pairs"]
-        }
-        self.assertIn(("fn1", "arg1"), pair_names)
-        self.assertIn(("fn1", "local1"), pair_names)
-        self.assertIn(("fn5", "arg5"), pair_names)
-        self.assertIn(("fn5", "local5"), pair_names)
-        self.assertNotIn("void fn1", candidates[0].description)
+MARKDOWN_ANALYSIS = """## 变量包含什么敏感信息
 
-    def test_analyzer_splits_very_long_function(self) -> None:
+- `password` 保存认证口令。
+
+## 生命周期在哪里结束
+
+- 函数返回前生命周期结束。
+
+## 生命周期结束后是否显式清零
+
+- 未发现清零调用。
+
+## 是否有类似变量做了清零
+
+- 未发现。
+
+## 结论
+
+- confirmed=true，因为口令缓冲区返回前未清零。
+"""
+
+
+class SensitiveClearFunctionTests(unittest.TestCase):
+    def test_analyzer_emits_one_candidate_per_function_with_sensitive_heuristic_hits(self) -> None:
         functions = [
-            _func("small1", 1),
-            _func("small2", 2),
-            _func("huge", 3, body="void huge() {\n  int secret;\n}\n", line_count=1300),
-            _func("small3", 4),
+            _func(
+                "login",
+                1,
+                "void login(char *input) {\n  char *password = input;\n  int status = 0;\n}\n",
+            ),
+            _func(
+                "status_only",
+                2,
+                "void status_only(int code) {\n  int status = code;\n}\n",
+            ),
+            _func(
+                "derive",
+                3,
+                "void derive(unsigned char *seed) {\n  unsigned char session_key[32];\n}\n",
+            ),
         ]
 
         candidates = Analyzer().find_candidates(Path("."), db=_FakeDb(functions))
 
-        self.assertGreaterEqual(len(candidates), 3)
-        huge_groups = [
-            candidate for candidate in candidates
-            if any(func["function_name"] == "huge" for func in candidate.metadata["functions"])
-        ]
-        self.assertEqual(len(huge_groups), 1)
-        self.assertEqual(len(huge_groups[0].metadata["functions"]), 1)
+        self.assertEqual([candidate.function for candidate in candidates], ["login", "derive"])
+        self.assertEqual(candidates[0].metadata["kind"], "sensitive_clear_function")
+        self.assertEqual(candidates[0].metadata["suspicious_variables"][0]["name"], "password")
+        self.assertEqual(candidates[1].metadata["suspicious_variables"][0]["name"], "seed")
+        self.assertNotIn("password", candidates[0].description)
+        self.assertNotIn("session_key", candidates[1].description)
 
-    def test_sensitive_clear_result_requires_all_pairs_and_expands_only_confirmed(self) -> None:
-        candidate = Candidate(
-            file="src/demo.c",
-            line=10,
-            function="__project__",
-            description="grouped sensitive clear",
-            vuln_type="sensitive_clear",
-            metadata={
-                "kind": "sensitive_clear_group",
-                "group_id": "sensitive-clear-group-0001",
-                "pairs": [
-                    {
-                        "pair_id": "p1",
-                        "function_name": "login",
-                        "variable_name": "password",
-                        "file": "src/auth.c",
-                        "function_start_line": 20,
-                    },
-                    {
-                        "pair_id": "p2",
-                        "function_name": "login",
-                        "variable_name": "status",
-                        "file": "src/auth.c",
-                        "function_start_line": 20,
-                    },
-                ],
-            },
+    def test_sensitive_clear_prompt_only_exposes_function_name_not_variable_names(self) -> None:
+        prompt = _sensitive_clear_prompt(
+            "sensitive-variable-clear-check",
+            _candidate(),
+            "project-1",
+            "result-sensitive",
         )
+
+        self.assertIn("函数 `login`", prompt)
+        self.assertIn("project_id 为 `project-1`", prompt)
+        self.assertIn("result-sensitive", prompt)
+        self.assertNotIn("password", prompt)
+        self.assertNotIn("char *password", prompt)
+        self.assertNotIn("变量清单", prompt)
+
+    def test_sensitive_clear_result_stores_markdown_in_vulnerability_and_report(self) -> None:
+        candidate = _candidate()
         with tempfile.TemporaryDirectory() as tmp:
             result_id = "result-sensitive"
             Path(tmp, f"{result_id}.json").write_text(
                 json.dumps(
                     {
-                        "results": [
-                            {
-                                "confirmed": True,
-                                "severity": "high",
-                                "description": "password is not cleared",
-                                "file": "src/auth.c",
-                                "line": 25,
-                                "function": "login",
-                                "ai_analysis": json.dumps(
-                                    {
-                                        "pair_id": "p1",
-                                        "function_name": "login",
-                                        "variable_name": "password",
-                                        "is_sensitive": True,
-                                        "cleared_after_last_use": False,
-                                        "confirmed": True,
-                                        "evidence": "password receives credential data",
-                                        "reason": "no clear after use",
-                                    }
-                                ),
-                            },
-                            {
-                                "confirmed": False,
-                                "severity": "low",
-                                "description": "status is not sensitive",
-                                "ai_analysis": json.dumps(
-                                    {
-                                        "pair_id": "p2",
-                                        "function_name": "login",
-                                        "variable_name": "status",
-                                        "is_sensitive": False,
-                                        "cleared_after_last_use": False,
-                                        "confirmed": False,
-                                        "evidence": "status is an integer state",
-                                        "reason": "not sensitive",
-                                    }
-                                ),
-                            },
-                        ]
+                        "confirmed": True,
+                        "severity": "high",
+                        "description": "login leaves password uncleared",
+                        "file": "src/auth.c",
+                        "line": 25,
+                        "function": "login",
+                        "ai_analysis": MARKDOWN_ANALYSIS,
                     },
                     ensure_ascii=False,
                 ),
@@ -158,27 +152,14 @@ class SensitiveClearGroupedTests(unittest.TestCase):
         self.assertEqual(result.vulnerabilities[0].file, "src/auth.c")
         self.assertEqual(result.vulnerabilities[0].line, 25)
         self.assertEqual(result.vulnerabilities[0].function, "login")
+        self.assertEqual(result.vulnerabilities[0].ai_analysis, MARKDOWN_ANALYSIS.strip())
         self.assertEqual(len(result.reports), 1)
-        report_data = json.loads(result.reports[0]["content"])
-        self.assertEqual(report_data["total_pairs"], 2)
-        self.assertEqual(report_data["confirmed_count"], 1)
+        self.assertTrue(result.reports[0]["filename"].endswith(".md"))
+        self.assertIn("## 变量包含什么敏感信息", result.reports[0]["content"])
+        self.assertIn(MARKDOWN_ANALYSIS.strip(), result.reports[0]["content"])
 
-    def test_sensitive_clear_result_rejects_missing_pair(self) -> None:
-        candidate = Candidate(
-            file="src/demo.c",
-            line=10,
-            function="__project__",
-            description="grouped sensitive clear",
-            vuln_type="sensitive_clear",
-            metadata={
-                "kind": "sensitive_clear_group",
-                "group_id": "sensitive-clear-group-0001",
-                "pairs": [
-                    {"pair_id": "p1", "function_name": "a", "variable_name": "x"},
-                    {"pair_id": "p2", "function_name": "b", "variable_name": "y"},
-                ],
-            },
-        )
+    def test_sensitive_clear_result_accepts_single_false_markdown_result(self) -> None:
+        candidate = _candidate()
         with tempfile.TemporaryDirectory() as tmp:
             result_id = "result-sensitive"
             Path(tmp, f"{result_id}.json").write_text(
@@ -186,23 +167,50 @@ class SensitiveClearGroupedTests(unittest.TestCase):
                     {
                         "confirmed": False,
                         "severity": "low",
-                        "description": "only one result",
-                        "ai_analysis": json.dumps(
-                            {
-                                "pair_id": "p1",
-                                "function_name": "a",
-                                "variable_name": "x",
-                                "is_sensitive": False,
-                                "cleared_after_last_use": False,
-                                "confirmed": False,
-                                "evidence": "",
-                                "reason": "not sensitive",
-                            }
-                        ),
-                    }
+                        "description": "login clears all sensitive data",
+                        "ai_analysis": MARKDOWN_ANALYSIS.replace("confirmed=true", "confirmed=false"),
+                    },
+                    ensure_ascii=False,
                 ),
                 encoding="utf-8",
             )
+
+            fake_config = SimpleNamespace(storage=SimpleNamespace(scans_dir=tmp))
+            with patch("backend.opencode.runner.get_config", return_value=fake_config):
+                result = _read_sensitive_clear_audit_result(result_id, candidate)
+
+        self.assertIsNotNone(result)
+        self.assertTrue(result.complete)
+        self.assertEqual(result.vulnerabilities, [])
+        self.assertEqual(len(result.reports), 1)
+
+    def test_sensitive_clear_result_rejects_multiple_submit_results(self) -> None:
+        candidate = _candidate()
+        with tempfile.TemporaryDirectory() as tmp:
+            result_id = "result-sensitive"
+            Path(tmp, f"{result_id}.json").write_text(
+                json.dumps(
+                    {
+                        "results": [
+                            {
+                                "confirmed": False,
+                                "severity": "low",
+                                "description": "first",
+                                "ai_analysis": MARKDOWN_ANALYSIS,
+                            },
+                            {
+                                "confirmed": False,
+                                "severity": "low",
+                                "description": "second",
+                                "ai_analysis": MARKDOWN_ANALYSIS,
+                            },
+                        ]
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+
             fake_config = SimpleNamespace(storage=SimpleNamespace(scans_dir=tmp))
             with patch("backend.opencode.runner.get_config", return_value=fake_config):
                 result = _read_sensitive_clear_audit_result(result_id, candidate)

@@ -379,7 +379,7 @@ async def _run_audits(
     from agent import mcp_registry
     from agent.local_mcp import LocalMCPServer
     from backend.opencode.config import cleanup_workspace, create_scan_workspace
-    from backend.opencode.runner import run_audit, run_project_audit
+    from backend.opencode.runner import run_audit, run_project_audit, run_sensitive_clear_audit
 
     agent_project_dir = _agent_project_dir_for_index(index_db)
     os.environ["AGENT_PROJECT_DIR"] = str(agent_project_dir)
@@ -395,7 +395,24 @@ async def _run_audits(
         for candidate in candidates:
             if not quiet:
                 print(f"[audit] {candidate.file}:{candidate.line} {candidate.function}", flush=True)
-            if is_project_level_candidate(candidate):
+            if (
+                candidate.vuln_type == "sensitive_clear"
+                and isinstance(candidate.metadata, dict)
+                and candidate.metadata.get("kind") == "sensitive_clear_function"
+            ):
+                result = await run_sensitive_clear_audit(
+                    workspace,
+                    candidate,
+                    scan_id,
+                    on_output=None if quiet else lambda line: print(f"  {line}", flush=True),
+                    cancel_event=cancel_event,
+                    project_dir=project_path,
+                )
+                if result.vulnerabilities:
+                    results.extend(_audit_payload(candidate, vuln) for vuln in result.vulnerabilities)
+                else:
+                    results.append(_audit_payload(candidate, None))
+            elif is_project_level_candidate(candidate):
                 vulns = await run_project_audit(
                     workspace,
                     candidate,

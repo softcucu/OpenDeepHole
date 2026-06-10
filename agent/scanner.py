@@ -806,7 +806,36 @@ async def run_scan(
                     if checker_entry is not None and checker_entry.timeout_seconds
                     else config.opencode.timeout
                 )
-                if is_project_level_candidate(candidate):
+                if (
+                    candidate.vuln_type == "sensitive_clear"
+                    and isinstance(candidate.metadata, dict)
+                    and candidate.metadata.get("kind") == "sensitive_clear_function"
+                ):
+                    from backend.opencode.runner import run_sensitive_clear_audit
+                    sensitive_result = await run_sensitive_clear_audit(
+                        workspace,
+                        candidate,
+                        scan_id,
+                        on_output=lambda line: print(f"  {line}", flush=True),
+                        cancel_event=cancel_event,
+                        timeout=candidate_timeout,
+                        project_dir=project_path,
+                    )
+                    project_vulns = sensitive_result.vulnerabilities
+                    if sensitive_result.reports:
+                        async with result_lock:
+                            existing = skill_report_accumulator.setdefault(candidate.vuln_type, [])
+                            report_names = {str(report.get("filename") or "") for report in sensitive_result.reports}
+                            existing[:] = [
+                                report for report in existing
+                                if str(report.get("filename") or "") not in report_names
+                            ] + sensitive_result.reports
+                            await reporter.replace_skill_reports(scan_id, candidate.vuln_type, existing)
+                    if sensitive_result.complete and not project_vulns:
+                        project_vulns = []
+                    elif not sensitive_result.complete and not project_vulns:
+                        project_vulns = None
+                elif is_project_level_candidate(candidate):
                     if checker_entry is not None and checker_entry.result_mode == "markdown_reports":
                         from backend.opencode.runner import run_project_report_audit
                         report_dir = scan_dir / "skill_report_workspace" / candidate.vuln_type / "reports"
@@ -820,35 +849,6 @@ async def run_scan(
                             timeout=candidate_timeout,
                             project_dir=project_path,
                         )
-                    elif (
-                        candidate.vuln_type == "sensitive_clear"
-                        and isinstance(candidate.metadata, dict)
-                        and candidate.metadata.get("kind") == "sensitive_clear_group"
-                    ):
-                        from backend.opencode.runner import run_sensitive_clear_audit
-                        sensitive_result = await run_sensitive_clear_audit(
-                            workspace,
-                            candidate,
-                            scan_id,
-                            on_output=lambda line: print(f"  {line}", flush=True),
-                            cancel_event=cancel_event,
-                            timeout=candidate_timeout,
-                            project_dir=project_path,
-                        )
-                        project_vulns = sensitive_result.vulnerabilities
-                        if sensitive_result.reports:
-                            async with result_lock:
-                                existing = skill_report_accumulator.setdefault(candidate.vuln_type, [])
-                                report_names = {str(report.get("filename") or "") for report in sensitive_result.reports}
-                                existing[:] = [
-                                    report for report in existing
-                                    if str(report.get("filename") or "") not in report_names
-                                ] + sensitive_result.reports
-                                await reporter.replace_skill_reports(scan_id, candidate.vuln_type, existing)
-                        if sensitive_result.complete and not project_vulns:
-                            project_vulns = []
-                        elif not sensitive_result.complete and not project_vulns:
-                            project_vulns = None
                     else:
                         from backend.opencode.runner import run_project_audit
                         project_vulns = await run_project_audit(
@@ -896,7 +896,7 @@ async def run_scan(
                     processed_this_run += 1
                     return
 
-                if is_project_level_candidate(candidate):
+                if project_vulns is not None or is_project_level_candidate(candidate):
                     project_vulns = project_vulns if project_vulns is not None else [
                         Vulnerability(
                             file=candidate.file,

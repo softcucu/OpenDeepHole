@@ -1,7 +1,7 @@
 name: sensitive_clear
 label: Sensitive Data Clear / 敏感数据清除
-description: 敏感信息使用后未清零检测（认证凭据/密钥材料/安全随机数种子）
+description: 敏感信息使用后未清零检测（启发式敏感变量筛选，函数级生命周期清零审计）
 enabled: true
 skill_name: sensitive-variable-clear-check
 category: illegal_memory_use
-modified_at: "2026-06-09T11:06:14+08:00"
+modified_at: "2026-06-10T16:37:29+08:00"

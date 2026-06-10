@@ -1,11 +1,12 @@
-"""敏感信息未清零检测 — 分组静态分析器。
+"""敏感信息未清零检测 - 函数级静态候选生成器。
 
-本分析器只枚举函数名与变量名，不做敏感关键词或清零启发式过滤。
-按函数长度将最多 5 个函数组成一个审计分组，每组交由一次 Agent 调用处理。
+本分析器用宽松启发式找出可能承载敏感信息的变量，并按函数生成候选。
+变量名只保存在 metadata 中用于调试，运行时初始提示词不会暴露这些变量名。
 """
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import tree_sitter_cpp
@@ -16,10 +17,100 @@ from code_parser.code_utils import find_nodes_by_type
 
 CPP_LANGUAGE = Language(tree_sitter_cpp.language())
 
-TARGET_GROUP_LINES = 800
-MAX_GROUP_LINES = 1200
-MIN_FUNCTIONS_PER_GROUP = 1
-MAX_FUNCTIONS_PER_GROUP = 5
+SENSITIVE_TERMS = {
+    "accesskey",
+    "accesssecret",
+    "accesstoken",
+    "aes",
+    "apikey",
+    "appkey",
+    "appsecret",
+    "auth",
+    "bearer",
+    "cert",
+    "certificate",
+    "chacha",
+    "cipher",
+    "cookie",
+    "cred",
+    "credential",
+    "crypt",
+    "crypto",
+    "decrypt",
+    "derivedkey",
+    "des",
+    "digest",
+    "drbg",
+    "dsa",
+    "ecdh",
+    "ecdsa",
+    "ed25519",
+    "encrypt",
+    "entropy",
+    "hash",
+    "handshake",
+    "hkdf",
+    "hmac",
+    "jwt",
+    "kdf",
+    "key",
+    "keybag",
+    "keychain",
+    "keyfile",
+    "keyid",
+    "keymaterial",
+    "keyring",
+    "keystore",
+    "kms",
+    "mac",
+    "masterkey",
+    "md5",
+    "mfa",
+    "nonce",
+    "otp",
+    "pass",
+    "passcode",
+    "passphrase",
+    "passwd",
+    "password",
+    "pbkdf",
+    "pem",
+    "pin",
+    "pkcs",
+    "pkey",
+    "poly1305",
+    "premaster",
+    "private",
+    "privatekey",
+    "privkey",
+    "psk",
+    "pwd",
+    "random",
+    "refresh",
+    "refreshtoken",
+    "rng",
+    "rsa",
+    "salt",
+    "secret",
+    "seed",
+    "session",
+    "sessionid",
+    "sha",
+    "sharedkey",
+    "signature",
+    "signingkey",
+    "skey",
+    "ssl",
+    "ticket",
+    "tls",
+    "token",
+    "totp",
+    "trafficsecret",
+    "vault",
+    "x509",
+}
+
+SENSITIVE_RE = re.compile("|".join(re.escape(term) for term in sorted(SENSITIVE_TERMS, key=len, reverse=True)))
 
 
 def _node_text(node) -> str:
@@ -40,6 +131,37 @@ def _declarator_name(node) -> str:
     return _node_text(ids[0]).strip()
 
 
+def _normalize(text: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "", text.lower())
+
+
+def _sensitive_matches(name: str, declaration: str) -> list[str]:
+    haystack = f"{_normalize(name)} {_normalize(declaration)}"
+    matches = {match.group(0) for match in SENSITIVE_RE.finditer(haystack)}
+    return sorted(matches)
+
+
+def _type_fragment(declaration: str, name: str) -> str:
+    if not declaration or not name:
+        return ""
+    idx = declaration.find(name)
+    if idx < 0:
+        return declaration.strip()
+    return declaration[:idx].strip(" \t\n=*&,")
+
+
+def _variable_item(name: str, kind: str, node, declaration_node=None) -> dict:
+    declaration = _node_text(declaration_node or node).strip()
+    return {
+        "name": name,
+        "kind": kind,
+        "line": node.start_point[0] + 1,
+        "declaration": declaration,
+        "type": _type_fragment(declaration, name),
+        "matches": _sensitive_matches(name, declaration),
+    }
+
+
 def _extract_parameters(root) -> list[dict]:
     variables: list[dict] = []
     for node_type in ("parameter_declaration", "optional_parameter_declaration"):
@@ -47,13 +169,7 @@ def _extract_parameters(root) -> list[dict]:
             name = _identifier_name(param)
             if not name:
                 continue
-            variables.append(
-                {
-                    "name": name,
-                    "kind": "parameter",
-                    "line": param.start_point[0] + 1,
-                }
-            )
+            variables.append(_variable_item(name, "parameter", param))
     return variables
 
 
@@ -73,24 +189,12 @@ def _extract_local_variables(root) -> list[dict]:
                 name = _declarator_name(child)
                 if not name:
                     continue
-                variables.append(
-                    {
-                        "name": name,
-                        "kind": "local",
-                        "line": child.start_point[0] + 1,
-                    }
-                )
+                variables.append(_variable_item(name, "local", child, decl))
 
     for decl in find_nodes_by_type(root, "for_range_declaration"):
         name = _identifier_name(decl)
         if name:
-            variables.append(
-                {
-                    "name": name,
-                    "kind": "local",
-                    "line": decl.start_point[0] + 1,
-                }
-            )
+            variables.append(_variable_item(name, "local", decl))
     return variables
 
 
@@ -100,9 +204,11 @@ def _extract_variables(body_source: str) -> list[dict]:
     root = tree.root_node
 
     variables: list[dict] = []
-    seen: set[tuple[str, str]] = set()
+    seen: set[tuple[str, str, int]] = set()
     for item in _extract_parameters(root) + _extract_local_variables(root):
-        key = (item["kind"], item["name"])
+        if not item["matches"]:
+            continue
+        key = (item["kind"], item["name"], int(item["line"]))
         if key in seen:
             continue
         seen.add(key)
@@ -118,81 +224,46 @@ def _row_value(row, key: str, default=None):
     return default if value is None else value
 
 
-def _function_line_count(func: dict) -> int:
-    try:
-        start = int(_row_value(func, "start_line", 0) or 0)
-        end = int(_row_value(func, "end_line", start) or start)
-    except (TypeError, ValueError):
-        body = str(_row_value(func, "body", "") or "")
-        return max(1, body.count("\n") + 1)
-    return max(1, end - start + 1)
-
-
-def _should_flush_group(group: list[dict], next_func: dict) -> bool:
-    if not group:
-        return False
-    group_lines = sum(int(item["line_count"]) for item in group)
-    next_lines = int(next_func["line_count"])
-    if len(group) >= MAX_FUNCTIONS_PER_GROUP:
-        return True
-    if len(group) >= MIN_FUNCTIONS_PER_GROUP and group_lines + next_lines > TARGET_GROUP_LINES:
-        return True
-    if group_lines + next_lines > MAX_GROUP_LINES:
-        return True
-    return False
-
-
-def _build_group_candidate(group: list[dict], group_index: int) -> Candidate:
-    first = group[0]
-    group_id = f"sensitive-clear-group-{group_index:04d}"
-    pairs: list[dict] = []
-    functions: list[dict] = []
-    for func_idx, func in enumerate(group, 1):
-        functions.append(
-            {
-                "function_name": func["function_name"],
-                "file": func["file"],
-                "start_line": func["start_line"],
-                "end_line": func["end_line"],
-                "line_count": func["line_count"],
-            }
-        )
-        for var_idx, variable in enumerate(func["variables"], 1):
-            pair_id = f"{group_id}-f{func_idx:02d}-v{var_idx:03d}"
-            pairs.append(
-                {
-                    "pair_id": pair_id,
-                    "function_name": func["function_name"],
-                    "variable_name": variable["name"],
-                    "variable_kind": variable["kind"],
-                    "file": func["file"],
-                    "function_start_line": func["start_line"],
-                    "variable_line": variable["line"],
-                }
-            )
-
-    metadata = {
-        "kind": "sensitive_clear_group",
-        "group_id": group_id,
-        "functions": functions,
-        "pairs": pairs,
-    }
-    description = (
-        f"敏感信息未清零分组审计 {group_id}: "
-        f"{len(functions)} 个函数, {len(pairs)} 个变量。"
-    )
+def _build_function_candidate(func: dict, variables: list[dict]) -> Candidate:
+    function_name = str(_row_value(func, "name", "") or "")
+    file_path = str(_row_value(func, "file_path", "") or "")
+    start_line = int(_row_value(func, "start_line", 1) or 1)
+    end_line = int(_row_value(func, "end_line", start_line) or start_line)
+    candidate_id = f"sensitive-clear-{file_path}:{start_line}:{function_name}"
+    suspicious_variables = [
+        {
+            "name": variable["name"],
+            "kind": variable["kind"],
+            "line": start_line + int(variable["line"]) - 1,
+            "type": variable["type"],
+            "declaration": variable["declaration"],
+            "matches": variable["matches"],
+        }
+        for variable in variables
+    ]
     return Candidate(
-        file=str(first["file"]),
-        line=int(first["start_line"]),
-        function="__project__",
-        description=description,
+        file=file_path,
+        line=start_line,
+        function=function_name,
+        description=(
+            f"敏感信息未清零函数审计: 函数 {function_name} 存在启发式敏感变量线索，"
+            "需要审计变量生命周期结束后是否显式清零。"
+        ),
         vuln_type="sensitive_clear",
-        metadata=metadata,
+        metadata={
+            "kind": "sensitive_clear_function",
+            "candidate_id": candidate_id,
+            "function_name": function_name,
+            "file": file_path,
+            "start_line": start_line,
+            "end_line": end_line,
+            "suspicious_variables": suspicious_variables,
+        },
     )
 
 
 class Analyzer(BaseAnalyzer):
-    """按函数组生成敏感信息未清零审计候选。"""
+    """按函数生成敏感信息未清零审计候选。"""
 
     vuln_type = "sensitive_clear"
 
@@ -202,15 +273,12 @@ class Analyzer(BaseAnalyzer):
 
         candidates: list[Candidate] = []
         functions = db.get_all_functions()
-        group: list[dict] = []
-        group_index = 1
-
         total = len(functions)
         for idx, func in enumerate(functions):
             if self.on_file_progress:
                 self.on_file_progress(idx + 1, total)
 
-            body = func["body"] or ""
+            body = str(_row_value(func, "body", "") or "")
             if not body:
                 continue
 
@@ -218,21 +286,6 @@ class Analyzer(BaseAnalyzer):
             if not variables:
                 continue
 
-            item = {
-                "function_name": func["name"],
-                "file": func["file_path"],
-                "start_line": int(func["start_line"]),
-                "end_line": int(func["end_line"]),
-                "line_count": _function_line_count(func),
-                "variables": variables,
-            }
-            if _should_flush_group(group, item):
-                candidates.append(_build_group_candidate(group, group_index))
-                group_index += 1
-                group = []
-            group.append(item)
-
-        if group:
-            candidates.append(_build_group_candidate(group, group_index))
+            candidates.append(_build_function_candidate(func, variables))
 
         return candidates
