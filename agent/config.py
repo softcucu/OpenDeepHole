@@ -31,12 +31,27 @@ class LLMApiConfig:
 
 
 @dataclass
+class OpenCodeModelConfig:
+    id: str = ""
+    model: str = ""
+    capability: str = "high"       # low | medium | high
+    weight: float = 1.0
+    max_concurrency: int = 1
+    enabled: bool = True
+    tool: str = ""                 # optional per-model override
+    executable: str = ""           # optional per-model override
+    timeout: int | None = None
+    max_retries: int | None = None
+
+
+@dataclass
 class OpenCodeConfig:
     tool: str = "opencode"
     executable: str = "opencode"  # CLI executable name or full path
     model: str = ""
     timeout: int = 1200
     max_retries: int = 2          # retry on transient errors (not timeout)
+    models: list[OpenCodeModelConfig] = field(default_factory=list)
 
 
 @dataclass
@@ -60,6 +75,31 @@ def normalize_cli_config(config: OpenCodeConfig) -> OpenCodeConfig:
     config.tool = tool
     if not executable:
         config.executable = _DEFAULT_EXECUTABLES[tool]
+    normalized_models: list[OpenCodeModelConfig] = []
+    for index, model_cfg in enumerate(config.models or []):
+        if isinstance(model_cfg, dict):
+            model_cfg = OpenCodeModelConfig(**{
+                k: v for k, v in model_cfg.items()
+                if k in {f.name for f in dataclasses.fields(OpenCodeModelConfig)}
+            })
+        model_tool = (model_cfg.tool or "").strip().lower()
+        model_executable = (model_cfg.executable or "").strip()
+        if model_tool and model_tool not in AI_CLI_TOOLS:
+            inferred = Path(model_executable).name.lower() if model_executable else ""
+            model_tool = inferred if inferred in AI_CLI_TOOLS else ""
+        model_cfg.tool = model_tool
+        if model_tool and not model_executable:
+            model_cfg.executable = _DEFAULT_EXECUTABLES[model_tool]
+        if not model_cfg.id:
+            model_cfg.id = model_cfg.model or f"model-{index + 1}"
+        if model_cfg.capability not in {"low", "medium", "high"}:
+            model_cfg.capability = "high"
+        if model_cfg.weight <= 0:
+            model_cfg.weight = 1.0
+        if model_cfg.max_concurrency < 1:
+            model_cfg.max_concurrency = 1
+        normalized_models.append(model_cfg)
+    config.models = normalized_models
     return config
 
 
@@ -68,6 +108,20 @@ def effective_fp_review_cli_config(config: "AgentConfig") -> OpenCodeConfig:
     if config.fp_review_cli is None:
         return config.opencode
     return config.fp_review_cli
+
+
+def _bounded_int(value: object, default: int, minimum: int, maximum: int) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return default
+    return max(minimum, min(maximum, parsed))
+
+
+def _opencode_config_dict(config: OpenCodeConfig) -> dict:
+    data = dataclasses.asdict(config)
+    data["models"] = [dataclasses.asdict(model) for model in config.models]
+    return data
 
 
 @dataclass
@@ -81,6 +135,7 @@ class AgentConfig:
     llm_api: LLMApiConfig = field(default_factory=LLMApiConfig)
     opencode: OpenCodeConfig = field(default_factory=OpenCodeConfig)
     fp_review_cli: OpenCodeConfig | None = None
+    opencode_concurrency: int = 1
     memory_api_discovery: MemoryApiDiscoveryConfig = field(default_factory=MemoryApiDiscoveryConfig)
     # Runtime-only: path to the loaded config file (not serialized)
     config_file: Optional[Path] = field(default=None, repr=False, compare=False)
@@ -104,6 +159,11 @@ def apply_remote_config(config: AgentConfig, remote: dict) -> None:
                 setattr(sub_cfg, f.name, section[f.name])
         if attr == "opencode":
             normalize_cli_config(sub_cfg)
+    if "opencode_concurrency" in remote and remote["opencode_concurrency"] is not None:
+        try:
+            config.opencode_concurrency = max(1, min(8, int(remote["opencode_concurrency"])))
+        except (TypeError, ValueError):
+            config.opencode_concurrency = 1
     if "fp_review_cli" in remote:
         section = remote.get("fp_review_cli")
         if section is None:
@@ -138,15 +198,10 @@ def remote_config_dict(config: AgentConfig) -> dict:
             f.name: getattr(config.llm_api, f.name)
             for f in dataclasses.fields(config.llm_api)
         },
-        "opencode": {
-            f.name: getattr(config.opencode, f.name)
-            for f in dataclasses.fields(config.opencode)
-        },
+        "opencode": _opencode_config_dict(config.opencode),
+        "opencode_concurrency": config.opencode_concurrency,
         "fp_review_cli": (
-            None if config.fp_review_cli is None else {
-                f.name: getattr(config.fp_review_cli, f.name)
-                for f in dataclasses.fields(config.fp_review_cli)
-            }
+            None if config.fp_review_cli is None else _opencode_config_dict(config.fp_review_cli)
         ),
         "memory_api_discovery": {
             f.name: getattr(config.memory_api_discovery, f.name)
@@ -174,10 +229,17 @@ def load_config(path: Optional[Path] = None) -> AgentConfig:
 
     llm_fields = {f.name for f in dataclasses.fields(LLMApiConfig)}
     oc_fields = {f.name for f in dataclasses.fields(OpenCodeConfig)}
+    model_fields = {f.name for f in dataclasses.fields(OpenCodeModelConfig)}
     memory_api_fields = {f.name for f in dataclasses.fields(MemoryApiDiscoveryConfig)}
 
     llm_raw = {k: v for k, v in raw.get("llm_api", {}).items() if k in llm_fields}
     oc_raw = {k: v for k, v in raw.get("opencode", {}).items() if k in oc_fields}
+    if isinstance(oc_raw.get("models"), list):
+        oc_raw["models"] = [
+            OpenCodeModelConfig(**{k: v for k, v in item.items() if k in model_fields})
+            for item in oc_raw["models"]
+            if isinstance(item, dict)
+        ]
     memory_api_raw = {
         k: v for k, v in raw.get("memory_api_discovery", {}).items()
         if k in memory_api_fields
@@ -188,6 +250,12 @@ def load_config(path: Optional[Path] = None) -> AgentConfig:
     fp_cfg = None
     if isinstance(fp_raw, dict):
         fp_values = {k: v for k, v in fp_raw.items() if k in oc_fields}
+        if isinstance(fp_values.get("models"), list):
+            fp_values["models"] = [
+                OpenCodeModelConfig(**{k: v for k, v in item.items() if k in model_fields})
+                for item in fp_values["models"]
+                if isinstance(item, dict)
+            ]
         if "tool" not in fp_values and "executable" in fp_values:
             fp_values["tool"] = ""
         fp_cfg = OpenCodeConfig(**fp_values)
@@ -202,6 +270,7 @@ def load_config(path: Optional[Path] = None) -> AgentConfig:
         llm_api=LLMApiConfig(**llm_raw),
         opencode=normalize_cli_config(OpenCodeConfig(**oc_raw)),
         fp_review_cli=normalize_cli_config(fp_cfg) if fp_cfg is not None else None,
+        opencode_concurrency=_bounded_int(raw.get("opencode_concurrency", 1), 1, 1, 8),
         memory_api_discovery=MemoryApiDiscoveryConfig(**memory_api_raw),
         config_file=path,
     )
@@ -225,15 +294,12 @@ def save_config(config: AgentConfig) -> None:
     raw["no_proxy"] = config.no_proxy
     raw["llm_api"] = {f.name: getattr(config.llm_api, f.name)
                       for f in dataclasses.fields(config.llm_api)}
-    raw["opencode"] = {f.name: getattr(config.opencode, f.name)
-                       for f in dataclasses.fields(config.opencode)}
+    raw["opencode"] = _opencode_config_dict(config.opencode)
+    raw["opencode_concurrency"] = config.opencode_concurrency
     if config.fp_review_cli is None:
         raw.pop("fp_review_cli", None)
     else:
-        raw["fp_review_cli"] = {
-            f.name: getattr(config.fp_review_cli, f.name)
-            for f in dataclasses.fields(config.fp_review_cli)
-        }
+        raw["fp_review_cli"] = _opencode_config_dict(config.fp_review_cli)
     raw["memory_api_discovery"] = {
         f.name: getattr(config.memory_api_discovery, f.name)
         for f in dataclasses.fields(config.memory_api_discovery)

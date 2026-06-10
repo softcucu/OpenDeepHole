@@ -112,6 +112,18 @@ def test_opencode_uses_injected_config_and_project_dir_with_isolated_workspace(t
     assert env["NODE_TLS_REJECT_UNAUTHORIZED"] == "0"
 
 
+def test_opencode_runtime_cwd_can_be_namespaced_per_invocation(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    project = tmp_path / "project"
+    workspace.mkdir()
+    project.mkdir()
+
+    runtime_cwd = _select_cli_cwd(workspace, "opencode", project, runtime_namespace="fast/model 1")
+
+    assert runtime_cwd == project / ".opendeephole" / "opencode" / "fast_model_1"
+    assert runtime_cwd.is_dir()
+
+
 def test_runtime_writable_paths_include_windows_slash_variants() -> None:
     path = PureWindowsPath("C:/Users/26388/.opendeephole/fp_reviews/review/artifacts/1")
 

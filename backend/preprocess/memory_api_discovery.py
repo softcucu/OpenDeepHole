@@ -19,6 +19,7 @@ from typing import Any, Callable
 
 from backend.config import get_config
 from backend.logger import get_logger
+from backend.opencode.model_pool import configured_global_concurrency
 
 logger = get_logger(__name__)
 
@@ -192,36 +193,55 @@ async def ensure_memory_api_artifact(
 
     batches = _chunked(candidates, opts.batch_size)
     batch_paths: list[Path] = []
+    batch_items: list[tuple[int, list[MemoryApiCandidate], Path]] = []
     for index, batch in enumerate(batches, start=1):
-        if cancel_event is not None and cancel_event.is_set():
-            msg = "内存申请/释放函数分析已取消"
-            await _emit(msg)
-            return MemoryApiDiscoveryReport(out_path, skipped=True, candidates=len(candidates), batches=index - 1, message=msg)
         batch_path = intermediate_dir / f"batch-{index:04d}.json"
         batch_paths.append(batch_path)
-        await _emit(f"内存申请/释放函数分析批次 {index}/{len(batches)}：{len(batch)} 个候选")
-        try:
-            await _run_memory_api_batch(
-                workspace=workspace,
-                project_root=root,
-                project_id=project_id,
-                batch=batch,
-                batch_index=index,
-                batch_count=len(batches),
-                output_path=batch_path,
-                timeout=opts.timeout_seconds,
-                cancel_event=cancel_event,
-                on_line=on_line,
-            )
-        except Exception as exc:
-            logger.warning(
-                "Memory API analysis batch %d/%d failed; candidates will be unresolved: %s",
-                index, len(batches), exc,
-            )
-        if cancel_event is not None and cancel_event.is_set():
-            msg = "内存申请/释放函数分析已取消"
-            await _emit(msg)
-            return MemoryApiDiscoveryReport(out_path, skipped=True, candidates=len(candidates), batches=index, message=msg)
+        batch_items.append((index, batch, batch_path))
+
+    queue: asyncio.Queue[tuple[int, list[MemoryApiCandidate], Path]] = asyncio.Queue()
+    for item in batch_items:
+        queue.put_nowait(item)
+    concurrency = max(1, min(configured_global_concurrency(get_config()), len(batch_items) or 1))
+
+    async def _run_worker() -> None:
+        while not queue.empty():
+            index, batch, batch_path = queue.get_nowait()
+            try:
+                if cancel_event is not None and cancel_event.is_set():
+                    return
+                await _emit(f"内存申请/释放函数分析批次 {index}/{len(batches)}：{len(batch)} 个候选")
+                try:
+                    await _run_memory_api_batch(
+                        workspace=workspace,
+                        project_root=root,
+                        project_id=project_id,
+                        batch=batch,
+                        batch_index=index,
+                        batch_count=len(batches),
+                        output_path=batch_path,
+                        timeout=opts.timeout_seconds,
+                        cancel_event=cancel_event,
+                        on_line=on_line,
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "Memory API analysis batch %d/%d failed; candidates will be unresolved: %s",
+                        index, len(batches), exc,
+                    )
+            finally:
+                queue.task_done()
+
+    if cancel_event is not None and cancel_event.is_set():
+        msg = "内存申请/释放函数分析已取消"
+        await _emit(msg)
+        return MemoryApiDiscoveryReport(out_path, skipped=True, candidates=len(candidates), batches=0, message=msg)
+    await asyncio.gather(*(_run_worker() for _ in range(concurrency)))
+    if cancel_event is not None and cancel_event.is_set():
+        msg = "内存申请/释放函数分析已取消"
+        await _emit(msg)
+        completed = sum(1 for path in batch_paths if path.is_file())
+        return MemoryApiDiscoveryReport(out_path, skipped=True, candidates=len(candidates), batches=completed, message=msg)
 
     artifact = merge_memory_api_results(
         project_root=root,
@@ -429,6 +449,7 @@ async def _run_memory_api_batch(
         cancel_event=cancel_event,
         project_dir=project_root,
         writable_paths=[output_path.parent],
+        model_capability="any",
     )
 
 

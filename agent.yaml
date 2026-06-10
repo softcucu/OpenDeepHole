@@ -36,6 +36,18 @@ opencode:
   model: ""               # 留空则使用 opencode 默认模型
   timeout: 1200            # 单次调用超时（秒）
   max_retries: 2           # 非超时错误重试次数
+  # 可选：多模型池。未配置时使用上方 model，且所有 checker 都可使用。
+  # models:
+  #   - id: "fast"
+  #     model: "fast-model"
+  #     capability: "low"      # low | medium | high
+  #     weight: 3              # 权重越高，空闲时越优先分配
+  #     max_concurrency: 2
+  #     enabled: true
+  models: []
+
+# OpenCode/兼容 CLI 全局并发数，同时受单模型 max_concurrency 限制。
+opencode_concurrency: 1
 
 # AI 去误报 CLI 配置（可选）
 # 删除或设为 null 时，默认继承上面的 opencode 工具和模型配置。
@@ -45,3 +57,4 @@ opencode:
 #   model: ""
 #   timeout: 1200
 #   max_retries: 2
+#   models: []

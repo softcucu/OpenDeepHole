@@ -37,6 +37,7 @@ export interface CheckerInfo {
   can_delete: boolean;
   result_mode: string;
   timeout_seconds?: number | null;
+  model_capability?: "any" | "low" | "medium" | "high" | string;
 }
 
 export interface CheckerCatalogItem {
@@ -56,6 +57,7 @@ export interface CheckerCatalogItem {
   can_delete: boolean;
   result_mode: string;
   timeout_seconds?: number | null;
+  model_capability?: "any" | "low" | "medium" | "high" | string;
 }
 
 export interface SkillDraft {
@@ -238,6 +240,20 @@ export interface AgentOpenCodeConfig {
   model: string;
   timeout: number;
   max_retries: number;
+  models: AgentOpenCodeModelConfig[];
+}
+
+export interface AgentOpenCodeModelConfig {
+  id: string;
+  model: string;
+  capability: "low" | "medium" | "high" | string;
+  weight: number;
+  max_concurrency: number;
+  enabled: boolean;
+  tool?: "nga" | "opencode" | "hac" | "claude" | string;
+  executable?: string;
+  timeout?: number | null;
+  max_retries?: number | null;
 }
 
 export interface AgentMemoryApiDiscoveryConfig {
@@ -249,6 +265,7 @@ export interface AgentMemoryApiDiscoveryConfig {
 
 export interface AgentRemoteConfig {
   no_proxy: string;
+  opencode_concurrency: number;
   llm_api: AgentLLMApiConfig;
   opencode: AgentOpenCodeConfig;
   fp_review_cli?: AgentOpenCodeConfig | null;

@@ -29,6 +29,19 @@ class MCPServerConfig(BaseModel):
     port: int = 8100
 
 
+class OpenCodeModelConfig(BaseModel):
+    id: str = ""
+    model: str = ""
+    capability: str = "high"  # low | medium | high
+    weight: float = 1.0
+    max_concurrency: int = 1
+    enabled: bool = True
+    tool: str = ""
+    executable: str = ""
+    timeout: int | None = None
+    max_retries: int | None = None
+
+
 class OpenCodeConfig(BaseModel):
     tool: str = "opencode"
     executable: str = "opencode"  # CLI executable name or full path
@@ -36,6 +49,7 @@ class OpenCodeConfig(BaseModel):
     timeout: int = 1200
     max_retries: int = 2  # retry on transient errors (not timeout)
     mock: bool = False  # When True, skip real opencode and return fake results
+    models: list[OpenCodeModelConfig] = []
 
 
 class MemoryApiDiscoveryConfig(BaseModel):
@@ -85,6 +99,7 @@ class LLMApiConfig(BaseModel):
 
 class AppConfig(BaseModel):
     no_proxy: str = "10.0.0.0/8"
+    opencode_concurrency: int = 1
     server: ServerConfig = ServerConfig()
     mcp_server: MCPServerConfig = MCPServerConfig()
     opencode: OpenCodeConfig = OpenCodeConfig()

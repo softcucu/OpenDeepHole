@@ -9,6 +9,7 @@ and configures the backend in isolation.
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import json
 import os
 import shutil
@@ -218,29 +219,33 @@ async def run_fp_review(
             f"max_retries={getattr(fp_cli, 'max_retries', '')}",
         )
 
-        for position, vuln in enumerate(vulnerabilities):
-            if cancel_event is not None and cancel_event.is_set():
-                await emit("fp_review", f"FP review cancelled after reviewing {position} items")
-                await reporter.finish_fp_review(scan_id, review_id, "cancelled", "用户手动停止")
-                return
+        processed_reviews = 0
+        progress_lock = asyncio.Lock()
+        review_queue: asyncio.Queue[tuple[int, dict]] = asyncio.Queue()
+        for item in enumerate(vulnerabilities):
+            review_queue.put_nowait(item)
+        review_concurrency = max(1, min(config.opencode_concurrency, len(vulnerabilities) or 1))
 
+        async def review_one(position: int, vuln: dict) -> None:
+            nonlocal processed_reviews
             vuln_index = int(vuln["index"])
-            _create_fp_workspace(
-                workspace,
-                mcp_port,
-                vuln_type=vuln["vuln_type"],
-                feedback_entries=get_fp_review_feedback(scan_id),
-            )
 
             await emit(
                 "fp_review",
                 f"[{position + 1}] Reviewing {vuln['vuln_type'].upper()} "
                 f"at {vuln['file']}:{vuln['line']} ({vuln['function']})",
             )
-            await reporter.push_fp_progress(scan_id, review_id, vuln_index, position)
+            async with progress_lock:
+                await reporter.push_fp_progress(scan_id, review_id, vuln_index, processed_reviews)
             result_submitted = False
 
             try:
+                vuln_workspace = _create_fp_workspace(
+                    workspace / str(vuln_index),
+                    mcp_port,
+                    vuln_type=vuln["vuln_type"],
+                    feedback_entries=get_fp_review_feedback(scan_id),
+                )
                 fake_candidate = Candidate(
                     file=vuln["file"],
                     line=vuln["line"],
@@ -258,7 +263,7 @@ async def run_fp_review(
 
                 prove_bug = await _run_fp_review_stage(
                     stage="prove_bug",
-                    workspace=workspace,
+                    workspace=vuln_workspace,
                     review_dir=review_dir,
                     review_id=review_id,
                     vuln_index=vuln_index,
@@ -274,8 +279,6 @@ async def run_fp_review(
                     ai_analysis_path=ai_analysis_path,
                 )
                 if cancel_event is not None and cancel_event.is_set():
-                    await emit("fp_review", f"FP review cancelled after reviewing {position} items")
-                    await reporter.finish_fp_review(scan_id, review_id, "cancelled", "用户手动停止")
                     return
 
                 stage_outputs["prove_bug"] = _stage_markdown_or_placeholder("prove_bug", prove_bug)
@@ -283,7 +286,7 @@ async def run_fp_review(
 
                 prove_fp = await _run_fp_review_stage(
                     stage="prove_fp",
-                    workspace=workspace,
+                    workspace=vuln_workspace,
                     review_dir=review_dir,
                     review_id=review_id,
                     vuln_index=vuln_index,
@@ -301,15 +304,13 @@ async def run_fp_review(
                     ai_analysis_path=ai_analysis_path,
                 )
                 if cancel_event is not None and cancel_event.is_set():
-                    await emit("fp_review", f"FP review cancelled after reviewing {position} items")
-                    await reporter.finish_fp_review(scan_id, review_id, "cancelled", "用户手动停止")
                     return
                 stage_outputs["prove_fp"] = _stage_markdown_or_placeholder("prove_fp", prove_fp)
                 await reporter.push_fp_stage_output(scan_id, review_id, vuln_index, "prove_fp", stage_outputs["prove_fp"])
 
                 final_judge = await _run_fp_review_stage(
                     stage="final_judge",
-                    workspace=workspace,
+                    workspace=vuln_workspace,
                     review_dir=review_dir,
                     review_id=review_id,
                     vuln_index=vuln_index,
@@ -331,8 +332,6 @@ async def run_fp_review(
                     ai_analysis_path=ai_analysis_path,
                 )
                 if cancel_event is not None and cancel_event.is_set():
-                    await emit("fp_review", f"FP review cancelled after reviewing {position} items")
-                    await reporter.finish_fp_review(scan_id, review_id, "cancelled", "用户手动停止")
                     return
                 stage_outputs["final_judge"] = _stage_markdown_or_placeholder("final_judge", final_judge)
                 await reporter.push_fp_stage_output(scan_id, review_id, vuln_index, "final_judge", stage_outputs["final_judge"])
@@ -358,9 +357,7 @@ async def run_fp_review(
                     )
 
             except asyncio.CancelledError:
-                await emit("fp_review", f"FP review cancelled after reviewing {position} items")
-                await reporter.finish_fp_review(scan_id, review_id, "cancelled", "用户手动停止")
-                return
+                raise
             except _FpStageFailure as exc:
                 markdown = _stage_failure_markdown(exc)
                 await reporter.push_fp_stage_output(
@@ -374,14 +371,28 @@ async def run_fp_review(
             except Exception as exc:
                 await emit("fp_review", f"[{position + 1}] Review error: {exc}")
 
-            await reporter.push_fp_progress(
-                scan_id,
-                review_id,
-                vuln_index,
-                position + 1,
-            )
-            if not result_submitted:
-                await emit("fp_review", f"[{position + 1}] No FP review result saved")
+            async with progress_lock:
+                processed_reviews += 1
+                await reporter.push_fp_progress(scan_id, review_id, vuln_index, processed_reviews)
+                if not result_submitted:
+                    await emit("fp_review", f"[{position + 1}] No FP review result saved")
+
+        async def review_worker() -> None:
+            while cancel_event is None or not cancel_event.is_set():
+                try:
+                    position, vuln = review_queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    return
+                try:
+                    await review_one(position, vuln)
+                finally:
+                    review_queue.task_done()
+
+        await asyncio.gather(*(review_worker() for _ in range(review_concurrency)))
+        if cancel_event is not None and cancel_event.is_set():
+            await emit("fp_review", f"FP review cancelled after reviewing {processed_reviews} items")
+            await reporter.finish_fp_review(scan_id, review_id, "cancelled", "用户手动停止")
+            return
 
         await reporter.finish_fp_review(scan_id, review_id, "complete", None)
         await emit("fp_review", f"FP review complete: {len(vulnerabilities)} vulnerabilities reviewed")
@@ -475,6 +486,8 @@ async def _run_fp_review_stage(
                 cli_config=cli_config,
                 project_dir=project,
                 writable_paths=[artifact_dir],
+                model_capability="high",
+                prefer_high_model=True,
             )
         except asyncio.CancelledError:
             raise
@@ -641,6 +654,8 @@ def _configure_fp_backend(config, review_dir: Path) -> None:
     """
     import yaml
 
+    opencode_config = dataclasses.asdict(config.opencode)
+    opencode_config["mock"] = False
     raw = {
         "llm_api": {
             "enabled": True,
@@ -652,14 +667,8 @@ def _configure_fp_backend(config, review_dir: Path) -> None:
             "max_retries": config.llm_api.max_retries,
             "stream": config.llm_api.stream,
         },
-        "opencode": {
-            "tool": config.opencode.tool,
-            "executable": config.opencode.executable,
-            "model": config.opencode.model,
-            "timeout": config.opencode.timeout,
-            "max_retries": config.opencode.max_retries,
-            "mock": False,
-        },
+        "opencode": opencode_config,
+        "opencode_concurrency": config.opencode_concurrency,
         "storage": {
             # projects_dir is irrelevant in Mode B — AGENT_PROJECT_DIR overrides DB lookup
             "projects_dir": str(review_dir),
@@ -675,14 +684,9 @@ def _configure_fp_backend(config, review_dir: Path) -> None:
         "no_proxy": config.no_proxy,
     }
     if config.fp_review_cli is not None:
-        raw["fp_review_cli"] = {
-            "tool": config.fp_review_cli.tool,
-            "executable": config.fp_review_cli.executable,
-            "model": config.fp_review_cli.model,
-            "timeout": config.fp_review_cli.timeout,
-            "max_retries": config.fp_review_cli.max_retries,
-            "mock": False,
-        }
+        fp_review_cli_config = dataclasses.asdict(config.fp_review_cli)
+        fp_review_cli_config["mock"] = False
+        raw["fp_review_cli"] = fp_review_cli_config
     config_path = review_dir / "config.yaml"
     config_path.write_text(yaml.dump(raw), encoding="utf-8")
     os.environ["CONFIG_PATH"] = str(config_path)

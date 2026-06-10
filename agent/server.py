@@ -361,6 +361,8 @@ async def _run_skill_creator(
         timeout=_config.opencode.timeout,
         on_line=on_output,
         project_dir=workspace,
+        model_capability="high",
+        prefer_high_model=True,
     )
     return _parse_skill_creator_output("\n".join(lines))
 

@@ -60,6 +60,7 @@ class CheckerEntry:
     created_by_username: str = ""
     result_mode: str = "vulnerabilities"  # "vulnerabilities" | "markdown_reports"
     timeout_seconds: int | None = None
+    model_capability: str = "any"  # "any" | "low" | "medium" | "high"
 
 
 _registry: dict[str, CheckerEntry] | None = None
@@ -210,6 +211,7 @@ def _load_checker(checker_dir: Path, yaml_path: Path, *, user_created: bool = Fa
         created_by_username=str(meta.get("created_by_username") or "").strip(),
         result_mode=_normalize_result_mode(meta.get("result_mode")),
         timeout_seconds=_normalize_timeout_seconds(meta.get("timeout_seconds")),
+        model_capability=_normalize_model_capability(meta.get("model_capability")),
     )
 
 
@@ -241,6 +243,14 @@ def _normalize_timeout_seconds(value: object) -> int | None:
         logger.warning("Invalid checker timeout_seconds %r, ignoring", value)
         return None
     return timeout
+
+
+def _normalize_model_capability(value: object) -> str:
+    capability = str(value or "any").strip().lower()
+    if capability not in {"any", "low", "medium", "high"}:
+        logger.warning("Unknown checker model_capability %r, falling back to any", value)
+        return "any"
+    return capability
 
 
 def normalize_checker_category(value: object) -> str:

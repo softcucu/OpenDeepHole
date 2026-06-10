@@ -106,6 +106,7 @@ class CheckerInfo(BaseModel):
     can_delete: bool = False
     result_mode: str = "vulnerabilities"
     timeout_seconds: int | None = None
+    model_capability: str = "any"
 
 
 class CheckerCatalogItem(BaseModel):
@@ -126,6 +127,7 @@ class CheckerCatalogItem(BaseModel):
     can_delete: bool = False
     result_mode: str = "vulnerabilities"
     timeout_seconds: int | None = None
+    model_capability: str = "any"
 
 
 class SkillDraft(BaseModel):
@@ -364,12 +366,26 @@ class AgentLLMApiConfig(BaseModel):
     stream: bool = False
 
 
+class AgentOpenCodeModelConfig(BaseModel):
+    id: str = ""
+    model: str = ""
+    capability: str = "high"
+    weight: float = 1.0
+    max_concurrency: int = 1
+    enabled: bool = True
+    tool: str = ""
+    executable: str = ""
+    timeout: int | None = None
+    max_retries: int | None = None
+
+
 class AgentOpenCodeConfig(BaseModel):
     tool: str = "opencode"
     executable: str = "opencode"
     model: str = ""
     timeout: int = 1200
     max_retries: int = 2
+    models: list[AgentOpenCodeModelConfig] = []
 
 
 class AgentMemoryApiDiscoveryConfig(BaseModel):
@@ -382,6 +398,7 @@ class AgentMemoryApiDiscoveryConfig(BaseModel):
 class AgentRemoteConfig(BaseModel):
     """Agent configuration managed from the server Web UI."""
     no_proxy: str = "10.0.0.0/8"
+    opencode_concurrency: int = 1
     llm_api: AgentLLMApiConfig = AgentLLMApiConfig()
     opencode: AgentOpenCodeConfig = AgentOpenCodeConfig()
     fp_review_cli: AgentOpenCodeConfig | None = None

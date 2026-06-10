@@ -87,6 +87,8 @@ class AgentConfigTests(unittest.TestCase):
         self.assertEqual(remote["opencode"]["tool"], "nga")
         self.assertEqual(remote["opencode"]["timeout"], 1200)
         self.assertEqual(remote["opencode"]["max_retries"], 2)
+        self.assertEqual(remote["opencode_concurrency"], 1)
+        self.assertEqual(remote["opencode"]["models"], [])
         self.assertIsNone(remote["fp_review_cli"])
         self.assertEqual(remote["memory_api_discovery"]["batch_size"], 8)
         self.assertEqual(remote["memory_api_discovery"]["max_candidates"], 200)
@@ -128,6 +130,8 @@ class AgentConfigTests(unittest.TestCase):
             self.assertEqual(raw["opencode"]["tool"], "opencode")
             self.assertEqual(raw["opencode"]["timeout"], 1200)
             self.assertEqual(raw["opencode"]["max_retries"], 2)
+            self.assertEqual(raw["opencode"]["models"], [])
+            self.assertEqual(raw["opencode_concurrency"], 1)
             self.assertEqual(raw["fp_review_cli"]["tool"], "claude")
             self.assertEqual(raw["fp_review_cli"]["timeout"], 900)
             self.assertTrue(raw["memory_api_discovery"]["enabled"])
@@ -156,6 +160,90 @@ class AgentConfigTests(unittest.TestCase):
 
             self.assertNotIn("no_proxy", os.environ)
             self.assertNotIn("NO_PROXY", os.environ)
+
+    def test_remote_config_round_trips_opencode_model_pool(self) -> None:
+        cfg = AgentConfig()
+        apply_remote_config(
+            cfg,
+            {
+                "opencode_concurrency": 4,
+                "opencode": {
+                    "tool": "opencode",
+                    "executable": "opencode",
+                    "models": [
+                        {
+                            "id": "fast",
+                            "model": "fast-model",
+                            "capability": "low",
+                            "weight": 3,
+                            "max_concurrency": 2,
+                            "enabled": True,
+                        },
+                        {
+                            "id": "deep",
+                            "model": "deep-model",
+                            "capability": "high",
+                            "weight": 1,
+                            "max_concurrency": 1,
+                            "enabled": True,
+                        },
+                    ],
+                },
+                "fp_review_cli": {
+                    "tool": "opencode",
+                    "executable": "opencode",
+                    "models": [
+                        {
+                            "id": "judge",
+                            "model": "judge-model",
+                            "capability": "high",
+                        }
+                    ],
+                },
+            },
+        )
+
+        self.assertEqual(cfg.opencode_concurrency, 4)
+        self.assertEqual(cfg.opencode.models[0].id, "fast")
+        self.assertEqual(cfg.opencode.models[0].capability, "low")
+        self.assertEqual(cfg.opencode.models[0].weight, 3)
+        self.assertIsNotNone(cfg.fp_review_cli)
+        self.assertEqual(cfg.fp_review_cli.models[0].id, "judge")
+
+        remote = remote_config_dict(cfg)
+        self.assertEqual(remote["opencode_concurrency"], 4)
+        self.assertEqual(remote["opencode"]["models"][1]["model"], "deep-model")
+        self.assertEqual(remote["fp_review_cli"]["models"][0]["capability"], "high")
+
+    def test_load_config_normalizes_invalid_model_pool_values(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "agent.yaml"
+            path.write_text(
+                yaml.dump(
+                    {
+                        "opencode_concurrency": "bad",
+                        "opencode": {
+                            "models": [
+                                {
+                                    "model": "m1",
+                                    "capability": "unknown",
+                                    "weight": 0,
+                                    "max_concurrency": 0,
+                                }
+                            ]
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            cfg = load_config(path)
+
+            self.assertEqual(cfg.opencode_concurrency, 1)
+            self.assertEqual(cfg.opencode.models[0].id, "m1")
+            self.assertEqual(cfg.opencode.models[0].capability, "high")
+            self.assertEqual(cfg.opencode.models[0].weight, 1)
+            self.assertEqual(cfg.opencode.models[0].max_concurrency, 1)
 
 
 if __name__ == "__main__":

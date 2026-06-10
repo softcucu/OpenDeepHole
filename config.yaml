@@ -2,6 +2,8 @@
 
 no_proxy: "10.0.0.0/8"  # 逗号分隔的不走代理地址，如 "localhost,127.0.0.1,10.0.0.0/8"
 
+opencode_concurrency: 1  # OpenCode/兼容 CLI 全局并发数
+
 server:
   host: "0.0.0.0"
   port: 8000
@@ -16,6 +18,7 @@ opencode:
   timeout: 1200  # seconds per candidate analysis
   max_retries: 2  # retry on transient errors (not timeout)
   mock: false    # set to false when opencode is configured
+  models: []     # optional model pool; see README for fields
 
 storage:
   projects_dir: "../OpenDeepHoleData/projects"

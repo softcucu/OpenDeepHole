@@ -34,6 +34,7 @@ async def list_checkers(current_user: User = Depends(get_current_user)) -> list[
             can_delete=_can_delete_user_skill(e.user_created, e.created_by_user_id, current_user),
             result_mode=e.result_mode,
             timeout_seconds=e.timeout_seconds,
+            model_capability=e.model_capability,
         )
         for e in registry.values()
         if _is_visible_to_user(e.visibility, current_user)
@@ -130,6 +131,7 @@ def _discover_catalog_items(checkers_dir: Path | None = None) -> list[CheckerCat
                     creator_username=str(meta.get("created_by_username") or "").strip(),
                     result_mode=_normalize_result_mode(meta.get("result_mode")),
                     timeout_seconds=_normalize_timeout_seconds(meta.get("timeout_seconds")),
+                    model_capability=_normalize_model_capability(meta.get("model_capability")),
                 )
             )
 
@@ -182,6 +184,11 @@ def _normalize_timeout_seconds(value: object) -> int | None:
     except (TypeError, ValueError):
         return None
     return timeout if timeout > 0 else None
+
+
+def _normalize_model_capability(value: object) -> str:
+    capability = str(value or "any").strip().lower()
+    return capability if capability in {"any", "low", "medium", "high"} else "any"
 
 
 def _is_visible_to_user(visibility: str, user: User) -> bool:

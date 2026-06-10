@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { getAgents, getAgentConfig, testAgentConfig, updateAgentConfig } from "../api/client";
-import type { AgentInfo, AgentRemoteConfig } from "../types";
+import type { AgentInfo, AgentOpenCodeConfig, AgentOpenCodeModelConfig, AgentRemoteConfig } from "../types";
 
 interface Props {
   onBack: () => void;
@@ -8,6 +8,7 @@ interface Props {
 
 const DEFAULT_CONFIG: AgentRemoteConfig = {
   no_proxy: "10.0.0.0/8",
+  opencode_concurrency: 1,
   llm_api: {
     base_url: "https://api.anthropic.com",
     api_key: "",
@@ -23,6 +24,7 @@ const DEFAULT_CONFIG: AgentRemoteConfig = {
     model: "",
     timeout: 1200,
     max_retries: 2,
+    models: [],
   },
   fp_review_cli: null,
   memory_api_discovery: {
@@ -31,6 +33,19 @@ const DEFAULT_CONFIG: AgentRemoteConfig = {
     timeout_seconds: 300,
     max_candidates: 200,
   },
+};
+
+const DEFAULT_MODEL: AgentOpenCodeModelConfig = {
+  id: "",
+  model: "",
+  capability: "high",
+  weight: 1,
+  max_concurrency: 1,
+  enabled: true,
+  tool: "",
+  executable: "",
+  timeout: null,
+  max_retries: null,
 };
 
 const TOOL_OPTIONS = [
@@ -49,6 +64,28 @@ const DEFAULT_EXECUTABLE_BY_TOOL: Record<string, string> = {
 
 function deepClone<T>(obj: T): T {
   return JSON.parse(JSON.stringify(obj));
+}
+
+function normalizeConfig(config: AgentRemoteConfig): AgentRemoteConfig {
+  const base = deepClone(DEFAULT_CONFIG);
+  const opencode = { ...base.opencode, ...config.opencode };
+  opencode.models = Array.isArray(config.opencode?.models) ? config.opencode.models : [];
+  const fpReviewCli = config.fp_review_cli
+    ? {
+        ...opencode,
+        ...config.fp_review_cli,
+        models: Array.isArray(config.fp_review_cli.models) ? config.fp_review_cli.models : [],
+      }
+    : null;
+  return {
+    ...base,
+    ...config,
+    opencode_concurrency: config.opencode_concurrency || 1,
+    opencode,
+    fp_review_cli: fpReviewCli,
+    memory_api_discovery: { ...base.memory_api_discovery, ...config.memory_api_discovery },
+    llm_api: { ...base.llm_api, ...config.llm_api },
+  };
 }
 
 interface AgentConfigPanelProps {
@@ -71,7 +108,7 @@ function AgentConfigPanel({ agent }: AgentConfigPanelProps) {
     setError(null);
     try {
       const data = await getAgentConfig(agent.agent_id);
-      setCfg(data);
+      setCfg(normalizeConfig(data));
     } catch {
       setError("加载配置失败");
     } finally {
@@ -130,6 +167,25 @@ function AgentConfigPanel({ agent }: AgentConfigPanelProps) {
     setCfg((prev) => {
       const base = prev.fp_review_cli ?? { ...prev.opencode };
       return { ...prev, fp_review_cli: { ...base, [key]: value } };
+    });
+  };
+
+  const setConcurrency = (value: number) => {
+    setCfg((prev) => ({ ...prev, opencode_concurrency: Math.max(1, Math.min(8, value || 1)) }));
+  };
+
+  const updateModelPool = (
+    section: "opencode" | "fp_review_cli",
+    updater: (models: AgentOpenCodeModelConfig[]) => AgentOpenCodeModelConfig[],
+  ) => {
+    setCfg((prev) => {
+      const current: AgentOpenCodeConfig = section === "opencode"
+        ? prev.opencode
+        : (prev.fp_review_cli ?? { ...prev.opencode, models: [] });
+      const next = { ...current, models: updater(current.models || []) };
+      return section === "opencode"
+        ? { ...prev, opencode: next }
+        : { ...prev, fp_review_cli: next };
     });
   };
 
@@ -268,6 +324,16 @@ function AgentConfigPanel({ agent }: AgentConfigPanelProps) {
                         className={inputCls} min={0} max={10} />
                     </Field>
                   </div>
+                  <Field label="OpenCode 并发数" hint="同时运行的 CLI 任务总数">
+                    <input type="number" value={cfg.opencode_concurrency}
+                      onChange={(e) => setConcurrency(Number(e.target.value))}
+                      className={inputCls} min={1} max={8} />
+                  </Field>
+                  <ModelPoolEditor
+                    title="审计模型池"
+                    models={cfg.opencode.models || []}
+                    onChange={(models) => updateModelPool("opencode", () => models)}
+                  />
                 </div>
               </div>
 
@@ -321,6 +387,11 @@ function AgentConfigPanel({ agent }: AgentConfigPanelProps) {
                           className={inputCls} min={0} max={10} />
                       </Field>
                     </div>
+                    <ModelPoolEditor
+                      title="去误报模型池"
+                      models={cfg.fp_review_cli.models || []}
+                      onChange={(models) => updateModelPool("fp_review_cli", () => models)}
+                    />
                   </div>
                 )}
               </div>
@@ -375,6 +446,126 @@ function AgentConfigPanel({ agent }: AgentConfigPanelProps) {
 
 const inputCls =
   "w-full bg-slate-900 border border-slate-600 rounded-lg px-3 py-1.5 text-sm text-white placeholder-slate-500 focus:outline-none focus:border-blue-500 transition-colors";
+
+function ModelPoolEditor({
+  title,
+  models,
+  onChange,
+}: {
+  title: string;
+  models: AgentOpenCodeModelConfig[];
+  onChange: (models: AgentOpenCodeModelConfig[]) => void;
+}) {
+  const updateAt = (index: number, patch: Partial<AgentOpenCodeModelConfig>) => {
+    onChange(models.map((model, i) => (i === index ? { ...model, ...patch } : model)));
+  };
+  const addModel = () => {
+    onChange([...models, { ...DEFAULT_MODEL, id: `model-${models.length + 1}` }]);
+  };
+  const removeAt = (index: number) => {
+    onChange(models.filter((_, i) => i !== index));
+  };
+
+  return (
+    <div className="border border-slate-700 rounded-lg p-3 space-y-3">
+      <div className="flex items-center justify-between gap-3">
+        <span className="text-xs font-semibold text-slate-300">{title}</span>
+        <button
+          type="button"
+          onClick={addModel}
+          className="px-2.5 py-1 text-xs text-white bg-slate-700 hover:bg-slate-600 rounded-md transition-colors"
+        >
+          添加模型
+        </button>
+      </div>
+      {models.length === 0 ? (
+        <p className="text-xs text-slate-500">未配置时使用上方默认模型，且所有能力要求都可使用。</p>
+      ) : (
+        <div className="space-y-3">
+          {models.map((model, index) => (
+            <div key={index} className="grid grid-cols-1 md:grid-cols-12 gap-2 border border-slate-700 rounded-lg p-2">
+              <label className="md:col-span-1 flex items-center gap-2 text-xs text-slate-300">
+                <input
+                  type="checkbox"
+                  checked={model.enabled}
+                  onChange={(e) => updateAt(index, { enabled: e.target.checked })}
+                  className="h-4 w-4 rounded border-slate-600 bg-slate-900 text-blue-600 focus:ring-blue-500"
+                />
+                启用
+              </label>
+              <input
+                type="text"
+                value={model.id}
+                onChange={(e) => updateAt(index, { id: e.target.value })}
+                className={`${inputCls} md:col-span-2`}
+                placeholder="ID"
+              />
+              <input
+                type="text"
+                value={model.model}
+                onChange={(e) => updateAt(index, { model: e.target.value })}
+                className={`${inputCls} md:col-span-3`}
+                placeholder="模型名"
+              />
+              <select
+                value={model.capability || "high"}
+                onChange={(e) => updateAt(index, { capability: e.target.value })}
+                className={`${inputCls} md:col-span-2`}
+              >
+                <option value="low">低能力</option>
+                <option value="medium">中能力</option>
+                <option value="high">高能力</option>
+              </select>
+              <input
+                type="number"
+                value={model.weight}
+                onChange={(e) => updateAt(index, { weight: Number(e.target.value) })}
+                className={`${inputCls} md:col-span-1`}
+                min={0.1}
+                step={0.1}
+                title="权重"
+              />
+              <input
+                type="number"
+                value={model.max_concurrency}
+                onChange={(e) => updateAt(index, { max_concurrency: Number(e.target.value) })}
+                className={`${inputCls} md:col-span-1`}
+                min={1}
+                title="单模型并发"
+              />
+              <button
+                type="button"
+                onClick={() => removeAt(index)}
+                className="md:col-span-2 px-2.5 py-1 text-xs text-red-200 bg-red-500/10 hover:bg-red-500/20 border border-red-500/20 rounded-md transition-colors"
+              >
+                删除
+              </button>
+              <div className="md:col-span-12 grid grid-cols-1 sm:grid-cols-2 gap-2">
+                <select
+                  value={model.tool || ""}
+                  onChange={(e) => updateAt(index, { tool: e.target.value })}
+                  className={inputCls}
+                >
+                  <option value="">继承工具</option>
+                  {TOOL_OPTIONS.map((item) => (
+                    <option key={item.value} value={item.value}>{item.label}</option>
+                  ))}
+                </select>
+                <input
+                  type="text"
+                  value={model.executable || ""}
+                  onChange={(e) => updateAt(index, { executable: e.target.value })}
+                  className={inputCls}
+                  placeholder="可执行文件覆盖（可选）"
+                />
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
 
 function Field({
   label,

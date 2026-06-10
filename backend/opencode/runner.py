@@ -18,6 +18,11 @@ from datetime import datetime, timezone
 from backend.config import get_config
 from backend.logger import get_logger
 from backend.models import Candidate, Vulnerability
+from backend.opencode.model_pool import (
+    acquire_model_lease,
+    configured_global_concurrency,
+    release_model_lease,
+)
 
 logger = get_logger(__name__)
 
@@ -189,6 +194,7 @@ async def _run_audit_via_opencode(
                 workspace, prompt, effective_timeout,
                 log_path=log_path, on_line=on_output, cancel_event=cancel_event,
                 project_dir=project_dir,
+                model_capability=getattr(checker_entry, "model_capability", "any"),
             )
         except asyncio.TimeoutError:
             # Timeout — no retry; check if result was submitted before kill
@@ -293,6 +299,7 @@ async def run_project_audit(
                 workspace, prompt, effective_timeout,
                 log_path=log_path, on_line=on_output, cancel_event=cancel_event,
                 project_dir=project_dir,
+                model_capability=getattr(checker_entry, "model_capability", "any"),
             )
         except asyncio.TimeoutError:
             logger.error("%s project audit timed out for %s (timeout=%ds)", tool, candidate.vuln_type, effective_timeout)
@@ -561,6 +568,7 @@ async def run_sensitive_clear_audit(
                 on_line=on_output,
                 cancel_event=cancel_event,
                 project_dir=project_dir,
+                model_capability=getattr(checker_entry, "model_capability", "any"),
             )
         except asyncio.TimeoutError:
             logger.error("%s sensitive_clear audit timed out for %s", tool, candidate.file)
@@ -728,6 +736,7 @@ async def run_project_report_audit(
                 cancel_event=cancel_event,
                 project_dir=project_dir,
                 writable_paths=[report_dir],
+                model_capability=getattr(checker_entry, "model_capability", "any"),
             )
         except asyncio.TimeoutError:
             logger.error(
@@ -762,6 +771,28 @@ def _cfg_value(config_obj, key: str, default=None):
     if isinstance(config_obj, dict):
         return config_obj.get(key, default)
     return getattr(config_obj, key, default)
+
+
+def _effective_cli_config(cli_config, model_option) -> dict:
+    data = {
+        "tool": _cfg_value(cli_config, "tool", ""),
+        "executable": _cfg_value(cli_config, "executable", ""),
+        "model": _cfg_value(cli_config, "model", ""),
+        "timeout": _cfg_value(cli_config, "timeout", 1200),
+        "max_retries": _cfg_value(cli_config, "max_retries", 2),
+        "models": _cfg_value(cli_config, "models", []),
+    }
+    if model_option.tool:
+        data["tool"] = model_option.tool
+    if model_option.executable:
+        data["executable"] = model_option.executable
+    if model_option.model:
+        data["model"] = model_option.model
+    if model_option.timeout is not None:
+        data["timeout"] = model_option.timeout
+    if model_option.max_retries is not None:
+        data["max_retries"] = model_option.max_retries
+    return data
 
 
 def _normalize_tool(config_obj) -> str:
@@ -1049,9 +1080,18 @@ def _build_cli_env(
     return env
 
 
-def _select_cli_cwd(workspace: Path, tool: str, project_dir: Path | None = None) -> Path:
+def _select_cli_cwd(
+    workspace: Path,
+    tool: str,
+    project_dir: Path | None = None,
+    runtime_namespace: str | None = None,
+) -> Path:
     if tool in {"nga", "opencode"} and project_dir:
         runtime_dir = project_dir / ".opendeephole" / "opencode"
+        if runtime_namespace:
+            safe_namespace = re.sub(r"[^A-Za-z0-9_.-]+", "_", runtime_namespace).strip("._")
+            if safe_namespace:
+                runtime_dir = runtime_dir / safe_namespace
         try:
             runtime_dir.mkdir(parents=True, exist_ok=True)
             return runtime_dir
@@ -1147,6 +1187,8 @@ async def _invoke_opencode(
     cli_config=None,
     project_dir: Path | None = None,
     writable_paths: list[Path] | None = None,
+    model_capability: str = "any",
+    prefer_high_model: bool = False,
 ) -> None:
     """Invoke the configured AI CLI, stream output line-by-line, write to log file.
 
@@ -1157,160 +1199,181 @@ async def _invoke_opencode(
     """
     config = get_config()
     cli_config = cli_config or config.opencode
-    tool = _normalize_tool(cli_config)
-    executable = _resolve_cli_executable(cli_config)
-    model = str(_cfg_value(cli_config, "model", "") or "")
-    cwd = _select_cli_cwd(workspace, tool, project_dir)
-    prompt_file: Path | None = None
-    # When the prompt is very long, pass a short file-reference message instead
-    # of the full command-line argument to avoid hitting the Windows
-    # CreateProcess 32767-character limit ([WinError 206]).
-    _PROMPT_CLI_LIMIT = 8000
-    prompt_arg = prompt
-    if len(prompt) > _PROMPT_CLI_LIMIT:
-        prompt_file = _write_prompt_file(cwd, prompt)
-        prompt_arg = _prompt_file_message(prompt_file)
-    cmd = _build_cli_command(
-        tool, executable, workspace, prompt_arg, model,
-        project_dir=project_dir,
+    lease = await acquire_model_lease(
+        cli_config,
+        global_concurrency=configured_global_concurrency(config),
+        required_capability=model_capability,
+        prefer_high=prefer_high_model,
+        cancel_event=cancel_event,
     )
-
-    logger.debug("%s command: %s", tool, " ".join(shlex.quote(part) for part in cmd))
-
-    config_workspace = _prepare_cli_workspace(
-        workspace,
-        tool,
-        runtime_cwd=cwd,
-        writable_paths=writable_paths,
-    )
-    env = _build_cli_env(config_workspace, tool, writable_paths=writable_paths)
-
-    kwargs: dict = {}
-    if sys.platform == "win32":
-        kwargs["creationflags"] = CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP
-    else:
-        kwargs["start_new_session"] = True
-
-    loop = asyncio.get_running_loop()
-    # Queue carries output lines; None is the end-of-stream sentinel.
-    queue: asyncio.Queue[str | None] = asyncio.Queue()
-    proc_holder: list[subprocess.Popen | None] = [None]
-
-    def _stream() -> int:
-        """Blocking: run the selected CLI, push lines into the asyncio queue."""
-        proc = subprocess.Popen(
-            cmd,
-            cwd=str(cwd),
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            bufsize=1,
-            encoding="utf-8",
-            errors="replace",
-            env=env,
-            **kwargs,
-        )
-        proc_holder[0] = proc
-        try:
-            assert proc.stdout is not None
-            while True:
-                line = proc.stdout.readline()
-                if not line:
-                    if proc.poll() is not None:
-                        break
-                    continue
-                line = _strip_ansi(line.rstrip())
-                if line:
-                    loop.call_soon_threadsafe(queue.put_nowait, line)
-        finally:
-            try:
-                proc.stdout.close()
-            except Exception:
-                pass
-            proc.wait()
-            loop.call_soon_threadsafe(queue.put_nowait, None)
-        return proc.returncode
-
-    def _terminate(reason: str) -> None:
-        proc = proc_holder[0]
-        if proc is not None:
-            _terminate_process_tree(proc, tool=tool, reason=reason)
-
-    stream_future = loop.run_in_executor(None, _stream)
-
-    # Watcher: kill proc immediately when cancel_event fires.
-    async def _cancel_watcher() -> None:
-        if cancel_event:
-            while not cancel_event.is_set():
-                await asyncio.sleep(0.2)
-            _terminate("cancel")
-
-    watcher = asyncio.create_task(_cancel_watcher()) if cancel_event else None
-
-    log_lines: list[str] = []
-    started = time.monotonic()
-    deadline = asyncio.get_event_loop().time() + timeout
-    timed_out = False
-    cancelled = False
-
-    try:
-        while True:
-            if cancel_event and cancel_event.is_set():
-                cancelled = True
-                _terminate("cancel")
-                break
-            remaining = deadline - asyncio.get_event_loop().time()
-            if remaining <= 0:
-                timed_out = True
-                _terminate("timeout")
-                break
-            try:
-                line = await asyncio.wait_for(queue.get(), timeout=min(remaining, 1.0))
-            except asyncio.TimeoutError:
-                continue
-            if line is None:  # end-of-stream sentinel
-                break
-            log_lines.append(line)
-            logger.debug("[%s] %s", tool, line)
-            if on_line:
-                on_line(line)
-    finally:
-        if watcher:
-            watcher.cancel()
-            try:
-                await watcher
-            except asyncio.CancelledError:
-                pass
-        if log_path and log_lines:
-            try:
-                log_path.write_text("\n".join(log_lines), encoding="utf-8")
-            except Exception:
-                pass
-
-    if timed_out or cancelled:
-        await _wait_for_stream_exit_after_termination(
-            stream_future,
-            tool=tool,
-            timed_out=timed_out,
-            cancelled=cancelled,
-            timeout=timeout,
-            started=started,
-        )
-        _cleanup_prompt_file(prompt_file)
-        if timed_out:
-            raise asyncio.TimeoutError()
+    if lease is None:
         return
-
     try:
-        await stream_future  # wait for thread to exit cleanly
-    finally:
-        _cleanup_prompt_file(prompt_file)
+        effective_cli_config = _effective_cli_config(cli_config, lease.option)
+        timeout = int(_cfg_value(effective_cli_config, "timeout", timeout) or timeout)
+        tool = _normalize_tool(effective_cli_config)
+        executable = _resolve_cli_executable(effective_cli_config)
+        model = str(_cfg_value(effective_cli_config, "model", "") or "")
+        runtime_namespace = f"{lease.option.id}-{uuid4().hex[:8]}"
+        cwd = _select_cli_cwd(workspace, tool, project_dir, runtime_namespace=runtime_namespace)
+        if on_line:
+            capability_note = model_capability or "any"
+            on_line(
+                f"[{tool}] model={lease.option.id} capability={lease.option.capability} "
+                f"required={capability_note} running={lease.running}/{lease.global_running}"
+            )
+        prompt_file: Path | None = None
+        # When the prompt is very long, pass a short file-reference message instead
+        # of the full command-line argument to avoid hitting the Windows
+        # CreateProcess 32767-character limit ([WinError 206]).
+        _PROMPT_CLI_LIMIT = 8000
+        prompt_arg = prompt
+        if len(prompt) > _PROMPT_CLI_LIMIT:
+            prompt_file = _write_prompt_file(cwd, prompt)
+            prompt_arg = _prompt_file_message(prompt_file)
+        cmd = _build_cli_command(
+            tool, executable, workspace, prompt_arg, model,
+            project_dir=project_dir,
+        )
 
-    proc = proc_holder[0]
-    if proc and proc.returncode not in (0, None):
-        logger.error("%s exited with code %d", tool, proc.returncode)
-        raise RuntimeError(f"{tool} exited with code {proc.returncode}")
+        logger.debug("%s command: %s", tool, " ".join(shlex.quote(part) for part in cmd))
+
+        config_workspace = _prepare_cli_workspace(
+            workspace,
+            tool,
+            runtime_cwd=cwd,
+            writable_paths=writable_paths,
+        )
+        env = _build_cli_env(config_workspace, tool, writable_paths=writable_paths)
+
+        kwargs: dict = {}
+        if sys.platform == "win32":
+            kwargs["creationflags"] = CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP
+        else:
+            kwargs["start_new_session"] = True
+
+        loop = asyncio.get_running_loop()
+        # Queue carries output lines; None is the end-of-stream sentinel.
+        queue: asyncio.Queue[str | None] = asyncio.Queue()
+        proc_holder: list[subprocess.Popen | None] = [None]
+
+        def _stream() -> int:
+            """Blocking: run the selected CLI, push lines into the asyncio queue."""
+            proc = subprocess.Popen(
+                cmd,
+                cwd=str(cwd),
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1,
+                encoding="utf-8",
+                errors="replace",
+                env=env,
+                **kwargs,
+            )
+            proc_holder[0] = proc
+            try:
+                assert proc.stdout is not None
+                while True:
+                    line = proc.stdout.readline()
+                    if not line:
+                        if proc.poll() is not None:
+                            break
+                        continue
+                    line = _strip_ansi(line.rstrip())
+                    if line:
+                        loop.call_soon_threadsafe(queue.put_nowait, line)
+            finally:
+                try:
+                    proc.stdout.close()
+                except Exception:
+                    pass
+                proc.wait()
+                loop.call_soon_threadsafe(queue.put_nowait, None)
+            return proc.returncode
+
+        def _terminate(reason: str) -> None:
+            proc = proc_holder[0]
+            if proc is not None:
+                _terminate_process_tree(proc, tool=tool, reason=reason)
+
+        stream_future = loop.run_in_executor(None, _stream)
+
+        # Watcher: kill proc immediately when cancel_event fires.
+        async def _cancel_watcher() -> None:
+            if cancel_event:
+                while not cancel_event.is_set():
+                    await asyncio.sleep(0.2)
+                _terminate("cancel")
+
+        watcher = asyncio.create_task(_cancel_watcher()) if cancel_event else None
+
+        log_lines: list[str] = []
+        started = time.monotonic()
+        deadline = asyncio.get_event_loop().time() + timeout
+        timed_out = False
+        cancelled = False
+
+        try:
+            while True:
+                if cancel_event and cancel_event.is_set():
+                    cancelled = True
+                    _terminate("cancel")
+                    break
+                remaining = deadline - asyncio.get_event_loop().time()
+                if remaining <= 0:
+                    timed_out = True
+                    _terminate("timeout")
+                    break
+                try:
+                    line = await asyncio.wait_for(queue.get(), timeout=min(remaining, 1.0))
+                except asyncio.TimeoutError:
+                    continue
+                if line is None:  # end-of-stream sentinel
+                    break
+                log_lines.append(line)
+                logger.debug("[%s] %s", tool, line)
+                if on_line:
+                    on_line(line)
+        finally:
+            if watcher:
+                watcher.cancel()
+                try:
+                    await watcher
+                except asyncio.CancelledError:
+                    pass
+            if log_path and log_lines:
+                try:
+                    log_path.write_text("\n".join(log_lines), encoding="utf-8")
+                except Exception:
+                    pass
+
+        if timed_out or cancelled:
+            await _wait_for_stream_exit_after_termination(
+                stream_future,
+                tool=tool,
+                timed_out=timed_out,
+                cancelled=cancelled,
+                timeout=timeout,
+                started=started,
+            )
+            _cleanup_prompt_file(prompt_file)
+            if timed_out:
+                raise asyncio.TimeoutError()
+            return
+
+        try:
+            await stream_future  # wait for thread to exit cleanly
+        finally:
+            _cleanup_prompt_file(prompt_file)
+
+        proc = proc_holder[0]
+        if proc and proc.returncode not in (0, None):
+            logger.error("%s exited with code %d", tool, proc.returncode)
+            raise RuntimeError(f"{tool} exited with code {proc.returncode}")
+    finally:
+        await release_model_lease(lease)
 
 
 def _result_payloads(data) -> list[dict]:

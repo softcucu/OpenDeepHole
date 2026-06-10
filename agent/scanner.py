@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import json
 import os
 import shutil
@@ -315,6 +316,8 @@ def _replace_sqlite_db(temp_path: Path, final_path: Path) -> None:
 def _configure_backend(config: AgentConfig, scan_dir: Path) -> None:
     """Write a temporary backend config and reset singletons so all backend
     modules use the agent's settings (LLM API key, scans_dir, etc.)."""
+    opencode_config = dataclasses.asdict(config.opencode)
+    opencode_config["mock"] = False
     raw = {
         "llm_api": {
             "enabled": True,  # per-checker mode in checker.yaml controls api vs opencode
@@ -326,14 +329,8 @@ def _configure_backend(config: AgentConfig, scan_dir: Path) -> None:
             "max_retries": config.llm_api.max_retries,
             "stream": config.llm_api.stream,
         },
-        "opencode": {
-            "tool": config.opencode.tool,
-            "executable": config.opencode.executable,
-            "model": config.opencode.model,
-            "timeout": config.opencode.timeout,
-            "max_retries": config.opencode.max_retries,
-            "mock": False,
-        },
+        "opencode": opencode_config,
+        "opencode_concurrency": config.opencode_concurrency,
         "memory_api_discovery": {
             "enabled": config.memory_api_discovery.enabled,
             "batch_size": config.memory_api_discovery.batch_size,
@@ -357,14 +354,9 @@ def _configure_backend(config: AgentConfig, scan_dir: Path) -> None:
         "no_proxy": config.no_proxy,
     }
     if config.fp_review_cli is not None:
-        raw["fp_review_cli"] = {
-            "tool": config.fp_review_cli.tool,
-            "executable": config.fp_review_cli.executable,
-            "model": config.fp_review_cli.model,
-            "timeout": config.fp_review_cli.timeout,
-            "max_retries": config.fp_review_cli.max_retries,
-            "mock": False,
-        }
+        fp_review_cli_config = dataclasses.asdict(config.fp_review_cli)
+        fp_review_cli_config["mock"] = False
+        raw["fp_review_cli"] = fp_review_cli_config
     config_path = scan_dir / "config.yaml"
     config_path.write_text(yaml.dump(raw), encoding="utf-8")
     os.environ["CONFIG_PATH"] = str(config_path)
@@ -781,18 +773,16 @@ async def run_scan(
             await emit("auditing", f"Audit order: {_audit_order_summary(remaining)}")
 
         cancelled = False
-        for i, candidate in enumerate(remaining):
-            global_index = already_done + i
+        audit_concurrency = max(1, min(config.opencode_concurrency, len(remaining) or 1))
+        result_lock = asyncio.Lock()
+        queue: asyncio.Queue[tuple[int, Candidate]] = asyncio.Queue()
+        for item in enumerate(remaining):
+            queue.put_nowait(item)
 
-            # Check for stop signal via cancel_event
-            if cancel_event.is_set():
-                await emit(
-                    "auditing",
-                    f"Scan stopped by user request after {global_index} candidates",
-                    candidate_index=global_index,
-                )
-                cancelled = True
-                break
+        _configure_backend(config, scan_dir)
+
+        async def process_candidate(global_index: int, candidate: Candidate) -> None:
+            nonlocal processed_this_run
 
             await emit(
                 "auditing",
@@ -803,8 +793,8 @@ async def run_scan(
 
             vuln: Optional[Vulnerability] = None
             project_vulns: list[Vulnerability] | None = None
+            markdown_reports: list[dict] | None = None
             try:
-                _configure_backend(config, scan_dir)
                 checker_entry = registry.get(candidate.vuln_type)
                 candidate_timeout = (
                     checker_entry.timeout_seconds
@@ -815,7 +805,7 @@ async def run_scan(
                     if checker_entry is not None and checker_entry.result_mode == "markdown_reports":
                         from backend.opencode.runner import run_project_report_audit
                         report_dir = scan_dir / "skill_report_workspace" / candidate.vuln_type / "reports"
-                        reports = await run_project_report_audit(
+                        markdown_reports = await run_project_report_audit(
                             workspace,
                             candidate,
                             scan_id,
@@ -825,69 +815,46 @@ async def run_scan(
                             timeout=candidate_timeout,
                             project_dir=project_path,
                         )
-                        if cancel_event.is_set():
-                            await emit(
-                                "auditing",
-                                f"Scan stopped during report-mode SKILL {global_index + 1}",
-                                candidate_index=global_index,
-                            )
-                            cancelled = True
-                            break
-                        await reporter.replace_skill_reports(scan_id, candidate.vuln_type, reports)
-                        await emit(
-                            "auditing",
-                            f"[{global_index + 1}] Markdown reports synced: {len(reports)}",
-                            candidate_index=global_index,
+                    elif (
+                        candidate.vuln_type == "sensitive_clear"
+                        and isinstance(candidate.metadata, dict)
+                        and candidate.metadata.get("kind") == "sensitive_clear_group"
+                    ):
+                        from backend.opencode.runner import run_sensitive_clear_audit
+                        sensitive_result = await run_sensitive_clear_audit(
+                            workspace,
+                            candidate,
+                            scan_id,
+                            on_output=lambda line: print(f"  {line}", flush=True),
+                            cancel_event=cancel_event,
+                            timeout=candidate_timeout,
+                            project_dir=project_path,
                         )
-                        await reporter.report_processed_key(
-                            scan_id, candidate.file, candidate.line, candidate.function, candidate.vuln_type
-                        )
-                        processed_this_run += 1
-                        continue
-                    else:
-                        if (
-                            candidate.vuln_type == "sensitive_clear"
-                            and isinstance(candidate.metadata, dict)
-                            and candidate.metadata.get("kind") == "sensitive_clear_group"
-                        ):
-                            from backend.opencode.runner import run_sensitive_clear_audit
-                            sensitive_result = await run_sensitive_clear_audit(
-                                workspace,
-                                candidate,
-                                scan_id,
-                                on_output=lambda line: print(f"  {line}", flush=True),
-                                cancel_event=cancel_event,
-                                timeout=candidate_timeout,
-                                project_dir=project_path,
-                            )
-                            project_vulns = sensitive_result.vulnerabilities
-                            if sensitive_result.reports:
+                        project_vulns = sensitive_result.vulnerabilities
+                        if sensitive_result.reports:
+                            async with result_lock:
                                 existing = skill_report_accumulator.setdefault(candidate.vuln_type, [])
                                 report_names = {str(report.get("filename") or "") for report in sensitive_result.reports}
                                 existing[:] = [
                                     report for report in existing
                                     if str(report.get("filename") or "") not in report_names
                                 ] + sensitive_result.reports
-                                await reporter.replace_skill_reports(
-                                    scan_id,
-                                    candidate.vuln_type,
-                                    existing,
-                                )
-                            if sensitive_result.complete and not project_vulns:
-                                project_vulns = []
-                            elif not sensitive_result.complete and not project_vulns:
-                                project_vulns = None
-                        else:
-                            from backend.opencode.runner import run_project_audit
-                            project_vulns = await run_project_audit(
-                                workspace,
-                                candidate,
-                                scan_id,
-                                on_output=lambda line: print(f"  {line}", flush=True),
-                                cancel_event=cancel_event,
-                                timeout=candidate_timeout,
-                                project_dir=project_path,
-                            )
+                                await reporter.replace_skill_reports(scan_id, candidate.vuln_type, existing)
+                        if sensitive_result.complete and not project_vulns:
+                            project_vulns = []
+                        elif not sensitive_result.complete and not project_vulns:
+                            project_vulns = None
+                    else:
+                        from backend.opencode.runner import run_project_audit
+                        project_vulns = await run_project_audit(
+                            workspace,
+                            candidate,
+                            scan_id,
+                            on_output=lambda line: print(f"  {line}", flush=True),
+                            cancel_event=cancel_event,
+                            timeout=candidate_timeout,
+                            project_dir=project_path,
+                        )
                 else:
                     from backend.opencode.runner import run_audit
                     vuln = await run_audit(
@@ -902,19 +869,60 @@ async def run_scan(
             except Exception as exc:
                 await emit("auditing", f"[{global_index + 1}] Analysis error: {exc}", candidate_index=global_index)
 
-            # If cancelled during this candidate's analysis, do NOT mark as processed
             if cancel_event.is_set():
                 await emit(
                     "auditing",
                     f"Scan stopped during candidate {global_index + 1}",
                     candidate_index=global_index,
                 )
-                cancelled = True
-                break
+                return
 
-            if is_project_level_candidate(candidate):
-                project_vulns = project_vulns if project_vulns is not None else [
-                    Vulnerability(
+            async with result_lock:
+                if markdown_reports is not None:
+                    await reporter.replace_skill_reports(scan_id, candidate.vuln_type, markdown_reports)
+                    await emit(
+                        "auditing",
+                        f"[{global_index + 1}] Markdown reports synced: {len(markdown_reports)}",
+                        candidate_index=global_index,
+                    )
+                    await reporter.report_processed_key(
+                        scan_id, candidate.file, candidate.line, candidate.function, candidate.vuln_type
+                    )
+                    processed_this_run += 1
+                    return
+
+                if is_project_level_candidate(candidate):
+                    project_vulns = project_vulns if project_vulns is not None else [
+                        Vulnerability(
+                            file=candidate.file,
+                            line=candidate.line,
+                            function=candidate.function,
+                            vuln_type=candidate.vuln_type,
+                            severity="unknown",
+                            description=candidate.description,
+                            ai_analysis="No analysis result returned",
+                            confirmed=False,
+                            ai_verdict="no_result",
+                        )
+                    ]
+                    for project_vuln in project_vulns:
+                        _attach_function_source(project_vuln, candidate, function_source_cache)
+                        vulnerabilities.append(project_vuln)
+                        await reporter.report_vulnerability(scan_id, project_vuln)
+                    confirmed_project = sum(1 for v in project_vulns if v.confirmed)
+                    await emit(
+                        "auditing",
+                        f"[{global_index + 1}] Result: {confirmed_project} confirmed / {len(project_vulns)} submitted",
+                        candidate_index=global_index,
+                    )
+                    await reporter.report_processed_key(
+                        scan_id, candidate.file, candidate.line, candidate.function, candidate.vuln_type
+                    )
+                    processed_this_run += 1
+                    return
+
+                if vuln is None:
+                    vuln = Vulnerability(
                         file=candidate.file,
                         line=candidate.line,
                         function=candidate.function,
@@ -925,55 +933,44 @@ async def run_scan(
                         confirmed=False,
                         ai_verdict="no_result",
                     )
-                ]
-                for project_vuln in project_vulns:
-                    _attach_function_source(project_vuln, candidate, function_source_cache)
-                    vulnerabilities.append(project_vuln)
-                    await reporter.report_vulnerability(scan_id, project_vuln)
-                confirmed_project = sum(1 for v in project_vulns if v.confirmed)
-                await emit(
-                    "auditing",
-                    f"[{global_index + 1}] Result: {confirmed_project} confirmed / {len(project_vulns)} submitted",
-                    candidate_index=global_index,
-                )
+                _attach_function_source(vuln, candidate, function_source_cache)
+
+                vulnerabilities.append(vuln)
+                _verdict_labels = {
+                    "confirmed": "CONFIRMED",
+                    "not_confirmed": "not confirmed",
+                    "timeout": "TIMEOUT",
+                    "no_result": "no result",
+                }
+                result_label = _verdict_labels.get(vuln.ai_verdict, "not confirmed")
+                await emit("auditing", f"[{global_index + 1}] Result: {result_label}", candidate_index=global_index)
+                await reporter.report_vulnerability(scan_id, vuln)
                 await reporter.report_processed_key(
                     scan_id, candidate.file, candidate.line, candidate.function, candidate.vuln_type
                 )
                 processed_this_run += 1
-                continue
 
-            if vuln is None and not is_project_level_candidate(candidate):
-                vuln = Vulnerability(
-                    file=candidate.file,
-                    line=candidate.line,
-                    function=candidate.function,
-                    vuln_type=candidate.vuln_type,
-                    severity="unknown",
-                    description=candidate.description,
-                    ai_analysis="No analysis result returned",
-                    confirmed=False,
-                    ai_verdict="no_result",
-                )
-            _attach_function_source(vuln, candidate, function_source_cache)
+        async def audit_worker() -> None:
+            while not cancel_event.is_set():
+                try:
+                    i, candidate = queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    return
+                try:
+                    await process_candidate(already_done + i, candidate)
+                finally:
+                    queue.task_done()
 
-            vulnerabilities.append(vuln)
-            _verdict_labels = {
-                "confirmed": "CONFIRMED",
-                "not_confirmed": "not confirmed",
-                "timeout": "TIMEOUT",
-                "no_result": "no result",
-            }
-            result_label = _verdict_labels.get(vuln.ai_verdict, "not confirmed")
-            await emit("auditing", f"[{global_index + 1}] Result: {result_label}", candidate_index=global_index)
-
-            # Upload this result to the server immediately so it appears in the UI
-            await reporter.report_vulnerability(scan_id, vuln)
-
-            # Report this candidate as processed so it can be skipped on resume
-            await reporter.report_processed_key(
-                scan_id, candidate.file, candidate.line, candidate.function, candidate.vuln_type
+        if cancel_event.is_set():
+            await emit(
+                "auditing",
+                f"Scan stopped by user request after {already_done} candidates",
+                candidate_index=already_done,
             )
-            processed_this_run += 1
+            cancelled = True
+        else:
+            await asyncio.gather(*(audit_worker() for _ in range(audit_concurrency)))
+            cancelled = cancel_event.is_set()
 
         # --- Phase 8: Report results ---
         if cancelled:

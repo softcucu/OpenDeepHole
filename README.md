@@ -94,6 +94,24 @@ opencode:
   executable: "opencode"
   model: ""
   timeout: 1200
+  max_retries: 2
+  # 可选：多模型池。未配置时使用上方 model，且所有 checker 都可使用。
+  models:
+    - id: "fast"
+      model: "fast-model"
+      capability: "low"      # low | medium | high
+      weight: 3              # 权重越高，空闲时越优先分配
+      max_concurrency: 2
+      enabled: true
+    - id: "deep"
+      model: "deep-model"
+      capability: "high"
+      weight: 1
+      max_concurrency: 1
+      enabled: true
+
+# OpenCode/兼容 CLI 全局并发数，同时受单模型 max_concurrency 限制
+opencode_concurrency: 3
 
 # AI 去误报 CLI 配置可选；不配置则继承上面的审计工具和模型
 # fp_review_cli:
@@ -101,9 +119,18 @@ opencode:
 #   executable: "claude"
 #   model: ""
 #   timeout: 1200
+#   max_retries: 2
+#   models:
+#     - id: "judge"
+#       model: "high-capability-model"
+#       capability: "high"
+#       weight: 1
+#       max_concurrency: 1
+#       enabled: true
 ```
 
 > 每个检查项的调用方式（`api` 或 `opencode`）在其 `checker.yaml` 中独立配置，无需全局 `mode` 选项。
+> 每个检查项可在 `checker.yaml` 中设置 `model_capability: low|medium|high` 指定最低模型能力；未配置时默认为 `any`，AI 去误报默认优先使用高能力模型。
 > Agent 启动并连接服务器后，也可以在 Web UI 的 Agent 配置面板中直接保存或校验 LLM API 配置；保存后的配置会写回 `agent.yaml`。
 
 **第 3 步：确认代码索引工具**
@@ -203,6 +230,7 @@ enabled: true
 visibility: public    # public: 所有用户可见；admin: 仅管理员测试可见
 # mode: opencode       # 可选，默认 opencode；设为 api 则使用 prompt.txt + LLM 直接调用
 # skill_name: uaf-audit # 可选，opencode 模式下自定义 skill 名称
+# model_capability: high # 可选，any/low/medium/high；未配置默认 any
 ```
 
 每个 Checker 独立配置 `mode`，同一次扫描中不同 Checker 可使用不同调用方式。
@@ -531,6 +559,10 @@ opencode:
   model: ""      # 留空则使用 opencode 默认模型
   timeout: 1200
   max_retries: 2
+  models: []     # 可配置多个模型，字段同上方快速开始示例
+
+# OpenCode/兼容 CLI 全局并发数；位置审计、扫描前 API 识别和 AI 去误报都会复用
+opencode_concurrency: 1
 
 # AI 去误报 CLI 配置（可选；不配置则继承上面的审计工具和模型）
 # fp_review_cli:
@@ -539,11 +571,12 @@ opencode:
 #   model: ""
 #   timeout: 1200
 #   max_retries: 2
+#   models: []
 ```
 
 CLI 工具调用约定：
 
-- `nga` / `opencode`：每个扫描或复核任务使用隔离的 OpenCode 配置目录，并通过 `OPENCODE_CONFIG_CONTENT` 注入当前任务的 MCP URL 和 SKILL 路径；`--dir` 仍指向真实项目根目录，不复制源码；CLI 进程的运行目录为目标项目下的 `.opendeephole/opencode/`，用于收敛工具自身生成的临时日志。
+- `nga` / `opencode`：每个扫描或复核任务使用隔离的 OpenCode 配置目录，并通过 `OPENCODE_CONFIG_CONTENT` 注入当前任务的 MCP URL 和 SKILL 路径；`--dir` 仍指向真实项目根目录，不复制源码；CLI 进程的运行目录为目标项目下的 `.opendeephole/opencode/<task>/`，用于收敛工具自身生成的临时日志并避免多并发覆盖运行时配置。
 - `hac`：按 Gemini CLI 兼容方式运行，Agent 会在任务隔离配置目录写入 `.gemini/settings.json` 的 MCP server，并把技能复制到 `.gemini/skills/`。
 - `claude`：按 Claude Code 兼容方式运行，Agent 会在任务隔离配置目录写入 `.claude/opendeephole-mcp.json` 并通过 `--mcp-config` 注入 MCP，同时把技能复制到 `.claude/skills/`。
 
