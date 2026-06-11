@@ -873,52 +873,25 @@ async def run_scan(
                 )
                 return
 
-            async with result_lock:
-                if markdown_reports is not None:
-                    await reporter.replace_skill_reports(scan_id, candidate.vuln_type, markdown_reports)
-                    await emit(
-                        "auditing",
-                        f"[{global_index + 1}] Markdown reports synced: {len(markdown_reports)}",
-                        candidate_index=global_index,
-                    )
-                    await reporter.report_processed_key(
-                        scan_id, candidate.file, candidate.line, candidate.function, candidate.vuln_type
-                    )
+            # HTTP 上报放在锁外，避免并发 worker 在结果上报阶段互相串行；
+            # result_lock 只保护共享状态（vulnerabilities / processed_this_run）。
+            if markdown_reports is not None:
+                await reporter.replace_skill_reports(scan_id, candidate.vuln_type, markdown_reports)
+                await emit(
+                    "auditing",
+                    f"[{global_index + 1}] Markdown reports synced: {len(markdown_reports)}",
+                    candidate_index=global_index,
+                )
+                await reporter.report_processed_key(
+                    scan_id, candidate.file, candidate.line, candidate.function, candidate.vuln_type
+                )
+                async with result_lock:
                     processed_this_run += 1
-                    return
+                return
 
-                if project_vulns is not None or is_project_level_candidate(candidate):
-                    project_vulns = project_vulns if project_vulns is not None else [
-                        Vulnerability(
-                            file=candidate.file,
-                            line=candidate.line,
-                            function=candidate.function,
-                            vuln_type=candidate.vuln_type,
-                            severity="unknown",
-                            description=candidate.description,
-                            ai_analysis="No analysis result returned",
-                            confirmed=False,
-                            ai_verdict="no_result",
-                        )
-                    ]
-                    for project_vuln in project_vulns:
-                        _attach_function_source(project_vuln, candidate, function_source_cache)
-                        vulnerabilities.append(project_vuln)
-                        await reporter.report_vulnerability(scan_id, project_vuln)
-                    confirmed_project = sum(1 for v in project_vulns if v.confirmed)
-                    await emit(
-                        "auditing",
-                        f"[{global_index + 1}] Result: {confirmed_project} confirmed / {len(project_vulns)} submitted",
-                        candidate_index=global_index,
-                    )
-                    await reporter.report_processed_key(
-                        scan_id, candidate.file, candidate.line, candidate.function, candidate.vuln_type
-                    )
-                    processed_this_run += 1
-                    return
-
-                if vuln is None:
-                    vuln = Vulnerability(
+            if project_vulns is not None or is_project_level_candidate(candidate):
+                project_vulns = project_vulns if project_vulns is not None else [
+                    Vulnerability(
                         file=candidate.file,
                         line=candidate.line,
                         function=candidate.function,
@@ -929,21 +902,55 @@ async def run_scan(
                         confirmed=False,
                         ai_verdict="no_result",
                     )
-                _attach_function_source(vuln, candidate, function_source_cache)
-
-                vulnerabilities.append(vuln)
-                _verdict_labels = {
-                    "confirmed": "CONFIRMED",
-                    "not_confirmed": "not confirmed",
-                    "timeout": "TIMEOUT",
-                    "no_result": "no result",
-                }
-                result_label = _verdict_labels.get(vuln.ai_verdict, "not confirmed")
-                await emit("auditing", f"[{global_index + 1}] Result: {result_label}", candidate_index=global_index)
-                await reporter.report_vulnerability(scan_id, vuln)
+                ]
+                async with result_lock:
+                    for project_vuln in project_vulns:
+                        _attach_function_source(project_vuln, candidate, function_source_cache)
+                        vulnerabilities.append(project_vuln)
+                for project_vuln in project_vulns:
+                    await reporter.report_vulnerability(scan_id, project_vuln)
+                confirmed_project = sum(1 for v in project_vulns if v.confirmed)
+                await emit(
+                    "auditing",
+                    f"[{global_index + 1}] Result: {confirmed_project} confirmed / {len(project_vulns)} submitted",
+                    candidate_index=global_index,
+                )
                 await reporter.report_processed_key(
                     scan_id, candidate.file, candidate.line, candidate.function, candidate.vuln_type
                 )
+                async with result_lock:
+                    processed_this_run += 1
+                return
+
+            if vuln is None:
+                vuln = Vulnerability(
+                    file=candidate.file,
+                    line=candidate.line,
+                    function=candidate.function,
+                    vuln_type=candidate.vuln_type,
+                    severity="unknown",
+                    description=candidate.description,
+                    ai_analysis="No analysis result returned",
+                    confirmed=False,
+                    ai_verdict="no_result",
+                )
+            _attach_function_source(vuln, candidate, function_source_cache)
+
+            async with result_lock:
+                vulnerabilities.append(vuln)
+            _verdict_labels = {
+                "confirmed": "CONFIRMED",
+                "not_confirmed": "not confirmed",
+                "timeout": "TIMEOUT",
+                "no_result": "no result",
+            }
+            result_label = _verdict_labels.get(vuln.ai_verdict, "not confirmed")
+            await emit("auditing", f"[{global_index + 1}] Result: {result_label}", candidate_index=global_index)
+            await reporter.report_vulnerability(scan_id, vuln)
+            await reporter.report_processed_key(
+                scan_id, candidate.file, candidate.line, candidate.function, candidate.vuln_type
+            )
+            async with result_lock:
                 processed_this_run += 1
 
         async def audit_worker() -> None:
@@ -954,6 +961,15 @@ async def run_scan(
                     return
                 try:
                     await process_candidate(already_done + i, candidate)
+                except Exception as exc:
+                    # 单个候选的未预期异常不应杀死 worker（否则 gather 会
+                    # 级联取消其余 worker，导致整批审计中断）。
+                    print(f"[error] Candidate {already_done + i + 1} failed: {exc}")
+                    await emit(
+                        "auditing",
+                        f"[{already_done + i + 1}] Unexpected error: {exc}",
+                        candidate_index=already_done + i,
+                    )
                 finally:
                     queue.task_done()
 

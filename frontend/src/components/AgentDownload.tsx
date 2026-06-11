@@ -592,9 +592,21 @@ export default function AgentDownload({ onBack }: Props) {
   const [agents, setAgents] = useState<AgentInfo[]>([]);
 
   useEffect(() => {
-    getAgents().then(setAgents).catch(() => {});
-    const id = setInterval(() => getAgents().then(setAgents).catch(() => {}), 10000);
-    return () => clearInterval(id);
+    const refresh = () => getAgents().then(setAgents).catch(() => {});
+    refresh();
+    // 页面不可见时跳过轮询，重新可见时立即刷新
+    const id = setInterval(() => {
+      if (document.visibilityState === "hidden") return;
+      refresh();
+    }, 10000);
+    const onVisibilityChange = () => {
+      if (document.visibilityState === "visible") refresh();
+    };
+    document.addEventListener("visibilitychange", onVisibilityChange);
+    return () => {
+      clearInterval(id);
+      document.removeEventListener("visibilitychange", onVisibilityChange);
+    };
   }, []);
 
   const handleDownload = async () => {

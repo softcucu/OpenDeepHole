@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { getScanProducts, getScans, resumeScan, deleteScan, updateScanProduct, retryIncompleteScan } from "../api/client";
 import type { ScanSummary, ScanItemStatus, User } from "../types";
 
@@ -221,14 +221,37 @@ export default function ScanHistory({ onViewScan, onDownloadAgent, onNewScan, us
     }
   };
 
+  // 自适应轮询：有运行中扫描时 5s，全部空闲时降为 30s；页面不可见时暂停，
+  // 重新可见时立即刷新一次。
+  const hasRunningScans = scans.some((s) => isRunning(s.status));
+  const hasRunningRef = useRef(hasRunningScans);
+  hasRunningRef.current = hasRunningScans;
+
   useEffect(() => {
     fetchScans();
     getScanProducts().then(setProducts).catch(() => {});
 
+    let lastFetch = Date.now();
     const timer = setInterval(() => {
+      if (document.visibilityState === "hidden") return;
+      const interval = hasRunningRef.current ? 5000 : 30000;
+      if (Date.now() - lastFetch < interval) return;
+      lastFetch = Date.now();
       fetchScans();
     }, 5000);
-    return () => clearInterval(timer);
+
+    const onVisibilityChange = () => {
+      if (document.visibilityState === "visible") {
+        lastFetch = Date.now();
+        fetchScans();
+      }
+    };
+    document.addEventListener("visibilitychange", onVisibilityChange);
+
+    return () => {
+      clearInterval(timer);
+      document.removeEventListener("visibilitychange", onVisibilityChange);
+    };
   }, []);
 
   const handleResume = async (scanId: string) => {

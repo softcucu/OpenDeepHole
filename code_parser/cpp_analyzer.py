@@ -205,6 +205,25 @@ class CppAnalyzer:
         self._global_variables: list[_IndexedGlobalVariable] = []
         self._global_variables_by_name: dict[str, list[_IndexedGlobalVariable]] = defaultdict(list)
         self._parser = Parser(_CPP_LANGUAGE)
+        self._file_id_cache: dict[str, int] = {}
+        self._pending_calls: list[tuple[int, str, int | None, int, int, int]] = []
+        self._pending_global_refs: list[tuple[int, str, int, int | None, int, int, str, str]] = []
+
+    def _get_file_id(self, rel_path: str) -> int:
+        """get_or_create_file with an in-memory cache (one DB roundtrip per path)."""
+        file_id = self._file_id_cache.get(rel_path)
+        if file_id is None:
+            file_id = self.db.get_or_create_file(rel_path)
+            self._file_id_cache[rel_path] = file_id
+        return file_id
+
+    def _flush_reference_batches(self) -> None:
+        if self._pending_calls:
+            self.db.insert_function_calls_batch(self._pending_calls)
+            self._pending_calls.clear()
+        if self._pending_global_refs:
+            self.db.insert_global_variable_references_batch(self._pending_global_refs)
+            self._pending_global_refs.clear()
 
     # ------------------------------------------------------------------
     # Public API
@@ -236,7 +255,7 @@ class CppAnalyzer:
             if cancel_check and cancel_check():
                 return
             rel_path = self._relative_path(project_root, filepath)
-            self.db.get_or_create_file(rel_path)
+            self._get_file_id(rel_path)
             source_cache[rel_path] = filepath.read_text(
                 encoding="utf-8", errors="replace"
             ).splitlines()
@@ -437,7 +456,7 @@ class CppAnalyzer:
                 for call in session.query_callers(symbol):
                     callee_name = symbol
                     caller = self._select_caller_function(call)
-                    file_id = self.db.get_or_create_file(call.file_path)
+                    file_id = self._get_file_id(call.file_path)
                     col = max(call.text.find(self._short_name(symbol)), 0)
                     key = (callee_name, call.file_path, call.line, caller.function_id if caller else None)
                     if key in seen:
@@ -563,7 +582,7 @@ class CppAnalyzer:
         if "{" not in body:
             return
 
-        file_id = self.db.get_or_create_file(rel_path)
+        file_id = self._get_file_id(rel_path)
         signature = entry.get("signature") or self._first_line(body).strip()
         is_static = self._is_file_scope(entry, body)
         function_id = self.db.insert_function(
@@ -601,7 +620,7 @@ class CppAnalyzer:
         if end_line < start_line:
             end_line = self._find_definition_end(lines, start_line)
         definition = self._slice_lines(lines, start_line, end_line)
-        file_id = self.db.get_or_create_file(rel_path)
+        file_id = self._get_file_id(rel_path)
         self.db.insert_struct(
             name=name,
             file_id=file_id,
@@ -623,7 +642,7 @@ class CppAnalyzer:
         definition = self._slice_lines(lines, start_line, end_line)
         if "(" in self._first_line(definition):
             return
-        file_id = self.db.get_or_create_file(rel_path)
+        file_id = self._get_file_id(rel_path)
         is_static = self._is_file_scope(entry, definition)
         global_var_id = self.db.insert_global_variable(
             name=name,
@@ -668,6 +687,7 @@ class CppAnalyzer:
 
         for idx, function in enumerate(self._functions, start=1):
             if cancel_check and cancel_check():
+                self._flush_reference_batches()
                 return
             if function.body:
                 tree = self._parser.parse(function.body.encode("utf-8", errors="replace"))
@@ -679,8 +699,11 @@ class CppAnalyzer:
                     seen_calls,
                     seen_globals,
                 )
+            if idx % 200 == 0:
+                self._flush_reference_batches()
             if on_stage_progress and (idx % 100 == 0 or idx == total_functions):
                 on_stage_progress("tree-sitter refs", idx, total_functions)
+        self._flush_reference_batches()
 
     def _index_tree_sitter_function_references(
         self,
@@ -691,7 +714,7 @@ class CppAnalyzer:
         seen_calls: set[tuple[int, str, int, int]],
         seen_globals: set[tuple[int, str, int, int]],
     ) -> None:
-        file_id = self.db.get_or_create_file(function.file_path)
+        file_id = self._get_file_id(function.file_path)
         local_declarations = self._collect_local_declarations(root)
         for node in self._walk_tree(root):
             if node.type == "call_expression":
@@ -730,14 +753,14 @@ class CppAnalyzer:
             return
         seen_calls.add(key)
 
-        self.db.insert_function_call(
-            caller_function_id=caller.function_id,
-            callee_name=stored_callee_name,
-            file_id=file_id,
-            line=line,
-            column=column,
-            callee_function_id=callee.function_id if callee else None,
-        )
+        self._pending_calls.append((
+            caller.function_id,
+            stored_callee_name,
+            callee.function_id if callee else None,
+            file_id,
+            line,
+            column,
+        ))
 
     def _insert_tree_sitter_global_reference(
         self,
@@ -772,16 +795,16 @@ class CppAnalyzer:
 
         lines = source_cache.get(function.file_path, [])
         line_text = lines[line - 1] if 0 < line <= len(lines) else ""
-        self.db.insert_global_variable_reference(
-            global_var_id=global_var.global_var_id,
-            variable_name=name,
-            file_id=file_id,
-            function_id=function.function_id,
-            line=line,
-            column=column,
-            context=line_text.strip(),
-            access_type=self._global_access_type(name, line_text),
-        )
+        self._pending_global_refs.append((
+            global_var.global_var_id,
+            name,
+            file_id,
+            function.function_id,
+            line,
+            column,
+            line_text.strip(),
+            self._global_access_type(name, line_text),
+        ))
 
     def _index_global_variable_references(
         self,
@@ -800,7 +823,7 @@ class CppAnalyzer:
             name = row["name"]
             pattern = re.compile(r"\b" + re.escape(name) + r"\b")
             for rel_path, lines in source_cache.items():
-                file_id = self.db.get_or_create_file(rel_path)
+                file_id = self._get_file_id(rel_path)
                 for line_no, line_text in enumerate(lines, start=1):
                     if not pattern.search(line_text):
                         continue

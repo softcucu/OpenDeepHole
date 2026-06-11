@@ -144,6 +144,7 @@ CREATE TABLE IF NOT EXISTS feedback_entries (
 
 CREATE INDEX IF NOT EXISTS idx_feedback_project ON feedback_entries(project_id);
 CREATE INDEX IF NOT EXISTS idx_feedback_project_type ON feedback_entries(project_id, vuln_type);
+CREATE INDEX IF NOT EXISTS idx_feedback_source_scan ON feedback_entries(source_scan_id);
 
 CREATE TABLE IF NOT EXISTS fp_review_jobs (
     review_id     TEXT PRIMARY KEY,
@@ -203,6 +204,9 @@ class SqliteScanStore(ScanStoreBase):
         self._conn = sqlite3.connect(
             str(db_path), check_same_thread=False
         )
+        # 统一在此设置一次 Row 工厂；连接被多线程共享，
+        # 各读方法中反复赋值属于对共享状态的无锁突变。
+        self._conn.row_factory = sqlite3.Row
         self._lock = threading.Lock()  # 保护多线程下 execute+commit 的原子性
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute("PRAGMA foreign_keys=ON")
@@ -459,7 +463,6 @@ class SqliteScanStore(ScanStoreBase):
             self._conn.commit()
 
     def load_scan(self, scan_id: str) -> tuple[ScanStatus, ScanMeta] | None:
-        self._conn.row_factory = sqlite3.Row
         cur = self._conn.execute(
             "SELECT * FROM scans WHERE scan_id = ?", (scan_id,)
         )
@@ -469,7 +472,6 @@ class SqliteScanStore(ScanStoreBase):
         return self._row_to_scan_status(row), self._row_to_meta(row)
 
     def get_scan_meta(self, scan_id: str) -> ScanMeta | None:
-        self._conn.row_factory = sqlite3.Row
         cur = self._conn.execute(
             "SELECT * FROM scans WHERE scan_id = ?", (scan_id,)
         )
@@ -495,7 +497,6 @@ class SqliteScanStore(ScanStoreBase):
         )
 
     def list_scans(self) -> list[ScanSummary]:
-        self._conn.row_factory = sqlite3.Row
         cur = self._conn.execute(
             """\
             SELECT s.*, COUNT(v.id) AS vuln_count, u.username
@@ -509,7 +510,6 @@ class SqliteScanStore(ScanStoreBase):
         return [self._row_to_scan_summary(row) for row in cur.fetchall()]
 
     def list_scans_by_user(self, user_id: str) -> list[ScanSummary]:
-        self._conn.row_factory = sqlite3.Row
         cur = self._conn.execute(
             """\
             SELECT s.*, COUNT(v.id) AS vuln_count, u.username
@@ -704,7 +704,6 @@ class SqliteScanStore(ScanStoreBase):
     def upsert_incomplete_vulnerability(self, scan_id: str, vuln: Vulnerability) -> int:
         """Replace an existing timeout/no-result row for this candidate, else append."""
         with self._lock:
-            self._conn.row_factory = sqlite3.Row
             cur = self._conn.execute(
                 """\
                 SELECT idx
@@ -825,7 +824,6 @@ class SqliteScanStore(ScanStoreBase):
             self._conn.commit()
 
     def clear_vulnerability_user_verdict(self, scan_id: str, index: int) -> list[str]:
-        self._conn.row_factory = sqlite3.Row
         with self._lock:
             cur = self._conn.execute(
                 """\
@@ -886,7 +884,6 @@ class SqliteScanStore(ScanStoreBase):
             return removed_ids
 
     def get_vulnerabilities(self, scan_id: str) -> list[Vulnerability]:
-        self._conn.row_factory = sqlite3.Row
         cur = self._conn.execute(
             """\
             SELECT * FROM vulnerabilities
@@ -918,7 +915,6 @@ class SqliteScanStore(ScanStoreBase):
     def get_vuln_stats_by_scans(self, scan_ids: list[str]) -> dict[str, list[VulnStat]]:
         out: dict[str, list[VulnStat]] = {sid: [] for sid in scan_ids}
         with self._lock:
-            self._conn.row_factory = sqlite3.Row
             for i in range(0, len(scan_ids), 500):  # SQLite 绑定变量数上限保护
                 chunk = scan_ids[i:i + 500]
                 placeholders = ",".join("?" * len(chunk))
@@ -969,7 +965,6 @@ class SqliteScanStore(ScanStoreBase):
             self._conn.commit()
 
     def list_skill_reports(self, scan_id: str, checker_name: str | None = None) -> list[SkillReport]:
-        self._conn.row_factory = sqlite3.Row
         if checker_name:
             cur = self._conn.execute(
                 """\
@@ -1022,7 +1017,6 @@ class SqliteScanStore(ScanStoreBase):
             self._conn.commit()
 
     def get_events(self, scan_id: str) -> list[ScanEvent]:
-        self._conn.row_factory = sqlite3.Row
         cur = self._conn.execute(
             "SELECT * FROM events WHERE scan_id = ? ORDER BY id",
             (scan_id,),
@@ -1108,7 +1102,6 @@ class SqliteScanStore(ScanStoreBase):
             self.add_feedback(entry)
             return entry
 
-        self._conn.row_factory = sqlite3.Row
         with self._lock:
             cur = self._conn.execute(
                 """\
@@ -1250,7 +1243,6 @@ class SqliteScanStore(ScanStoreBase):
             return cur.rowcount > 0
 
     def list_feedback(self, vuln_type: str | None = None, project_id: str | None = None) -> list[FeedbackEntry]:
-        self._conn.row_factory = sqlite3.Row
         conditions: list[str] = []
         params: list = []
         if vuln_type:
@@ -1267,7 +1259,6 @@ class SqliteScanStore(ScanStoreBase):
         return [self._row_to_feedback(r) for r in cur.fetchall()]
 
     def list_feedback_by_scan(self, scan_id: str) -> list[FeedbackEntry]:
-        self._conn.row_factory = sqlite3.Row
         cur = self._conn.execute(
             "SELECT * FROM feedback_entries WHERE source_scan_id = ? ORDER BY created_at DESC",
             (scan_id,),
@@ -1277,7 +1268,6 @@ class SqliteScanStore(ScanStoreBase):
     def get_feedback_by_ids(self, ids: list[str]) -> list[FeedbackEntry]:
         if not ids:
             return []
-        self._conn.row_factory = sqlite3.Row
         placeholders = ", ".join("?" for _ in ids)
         cur = self._conn.execute(
             f"SELECT * FROM feedback_entries WHERE id IN ({placeholders})",
@@ -1403,7 +1393,6 @@ class SqliteScanStore(ScanStoreBase):
 
     def get_fp_review_job(self, review_id: str) -> FpReviewJob | None:
         with self._lock:
-            self._conn.row_factory = sqlite3.Row
             cur = self._conn.execute(
                 "SELECT * FROM fp_review_jobs WHERE review_id = ?", (review_id,)
             )
@@ -1414,7 +1403,6 @@ class SqliteScanStore(ScanStoreBase):
 
     def get_fp_review_by_scan(self, scan_id: str) -> FpReviewJob | None:
         with self._lock:
-            self._conn.row_factory = sqlite3.Row
             cur = self._conn.execute(
                 """\
                 SELECT *
@@ -1432,7 +1420,6 @@ class SqliteScanStore(ScanStoreBase):
 
     def list_fp_review_results_by_scan(self, scan_id: str) -> list[FpReviewResult]:
         with self._lock:
-            self._conn.row_factory = sqlite3.Row
             cur = self._conn.execute(
                 """\
                 SELECT r.*
@@ -1448,7 +1435,6 @@ class SqliteScanStore(ScanStoreBase):
     def list_fp_review_verdicts_by_scans(self, scan_ids: list[str]) -> dict[str, list[FpReviewResult]]:
         out: dict[str, list[FpReviewResult]] = {sid: [] for sid in scan_ids}
         with self._lock:
-            self._conn.row_factory = sqlite3.Row
             for i in range(0, len(scan_ids), 500):  # SQLite 绑定变量数上限保护
                 chunk = scan_ids[i:i + 500]
                 placeholders = ",".join("?" * len(chunk))
@@ -1498,7 +1484,6 @@ class SqliteScanStore(ScanStoreBase):
 
     def list_fp_review_stage_outputs_by_review(self, review_id: str) -> list[FpReviewStageOutput]:
         with self._lock:
-            self._conn.row_factory = sqlite3.Row
             cur = self._conn.execute(
                 """\
                 SELECT *
@@ -1522,7 +1507,6 @@ class SqliteScanStore(ScanStoreBase):
 
     def _row_to_fp_review_job(self, row: sqlite3.Row) -> FpReviewJob:
         review_id = row["review_id"]
-        self._conn.row_factory = sqlite3.Row
         cur = self._conn.execute(
             "SELECT * FROM fp_review_results WHERE review_id = ? ORDER BY id",
             (review_id,),
@@ -1660,25 +1644,21 @@ class SqliteScanStore(ScanStoreBase):
         )
 
     def get_user_by_id(self, user_id: str) -> UserInDB | None:
-        self._conn.row_factory = sqlite3.Row
         cur = self._conn.execute("SELECT * FROM users WHERE user_id = ?", (user_id,))
         row = cur.fetchone()
         return self._row_to_user(row) if row else None
 
     def get_user_by_username(self, username: str) -> UserInDB | None:
-        self._conn.row_factory = sqlite3.Row
         cur = self._conn.execute("SELECT * FROM users WHERE username = ?", (username,))
         row = cur.fetchone()
         return self._row_to_user(row) if row else None
 
     def get_user_by_agent_token(self, agent_token: str) -> UserInDB | None:
-        self._conn.row_factory = sqlite3.Row
         cur = self._conn.execute("SELECT * FROM users WHERE agent_token = ?", (agent_token,))
         row = cur.fetchone()
         return self._row_to_user(row) if row else None
 
     def list_users(self) -> list[UserInDB]:
-        self._conn.row_factory = sqlite3.Row
         cur = self._conn.execute("SELECT * FROM users ORDER BY created_at")
         return [self._row_to_user(row) for row in cur.fetchall()]
 

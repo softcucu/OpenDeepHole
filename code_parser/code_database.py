@@ -101,6 +101,10 @@ class CodeDatabase:
                 ON functions(file_id, start_line, end_line);
             CREATE INDEX IF NOT EXISTS idx_function_calls_callee
                 ON function_calls(callee_name);
+            CREATE INDEX IF NOT EXISTS idx_function_calls_caller
+                ON function_calls(caller_function_id);
+            CREATE INDEX IF NOT EXISTS idx_global_var_refs_name
+                ON global_variable_references(variable_name);
             CREATE INDEX IF NOT EXISTS idx_structs_name
                 ON structs(name);
             CREATE INDEX IF NOT EXISTS idx_global_variables_name
@@ -215,6 +219,22 @@ class CodeDatabase:
             (caller_function_id, callee_name, callee_function_id, file_id, line, column),
         )
 
+    def insert_function_calls_batch(
+        self,
+        rows: list[tuple[int, str, int | None, int, int, int]],
+    ) -> None:
+        """Bulk-insert function call rows.
+
+        Each row is (caller_function_id, callee_name, callee_function_id,
+        file_id, line, column).
+        """
+        self._conn.executemany(
+            """INSERT INTO function_calls
+               (caller_function_id, callee_name, callee_function_id, file_id, line, column)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            rows,
+        )
+
     def insert_global_variable(
         self,
         name: str,
@@ -250,6 +270,22 @@ class CodeDatabase:
                (global_var_id, variable_name, file_id, function_id, line, column, context, access_type)
                VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
             (global_var_id, variable_name, file_id, function_id, line, column, context, access_type),
+        )
+
+    def insert_global_variable_references_batch(
+        self,
+        rows: list[tuple[int, str, int, int | None, int, int, str, str]],
+    ) -> None:
+        """Bulk-insert global variable reference rows.
+
+        Each row is (global_var_id, variable_name, file_id, function_id,
+        line, column, context, access_type).
+        """
+        self._conn.executemany(
+            """INSERT INTO global_variable_references
+               (global_var_id, variable_name, file_id, function_id, line, column, context, access_type)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            rows,
         )
 
     # ------------------------------------------------------------------
