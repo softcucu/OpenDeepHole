@@ -8,6 +8,7 @@
 - **修复** Agent WebSocket 重连后后端误判 AI 去误报已停止：Agent hello 新增 `active_fp_reviews` 上报，后端重新挂接仍在运行的复核任务（更新扫描 agent_id、恢复因断连误标 error 的任务为 running），旧连接的延迟取消不再误杀存活复核；`stage-output` 上报端点补齐与 progress/result 一致的断连自动恢复
 - **修复** 页面刷新后无最终结论条目的"复核中"状态和阶段输出消失：`GET /fp_review` 现在会合并 `fp_review_stage_outputs` 中的阶段 Markdown，无最终结论的漏洞以占位条目返回
 - **优化** 复核结束后仍无最终结论的条目前端显示"复核失败"徽章，不再永远停留在"复核中"
+- **修复** 扫描详情页打开后整页白屏：并发高亮改造引入的 `useMemo` 被放在加载态提前返回之后，违反 React Hooks 顺序规则导致前端崩溃；改为普通表达式计算
 
 ## 2026-06-10
 

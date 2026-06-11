@@ -428,15 +428,14 @@ export default function ScanStatus({ scanId, onBack }: Props) {
   const staleAgentDisconnectError = scan.status === "cancelled" && agentDisconnectError && !!scan.agent_online;
   const visibleErrorMessage = staleAgentDisconnectError ? null : scan.error_message;
   const isFpReviewing = fpReview?.status === "running" || fpReview?.status === "pending";
-  const currentFpReviewIndices = useMemo(() => {
-    if (!isFpReviewing) return new Set<number>();
-    const indices = fpReview?.current_vuln_indices?.length
-      ? fpReview.current_vuln_indices
-      : fpReview?.current_vuln_index != null
-      ? [fpReview.current_vuln_index]
-      : [];
-    return new Set(indices.filter((i) => i >= 0));
-  }, [isFpReviewing, fpReview?.current_vuln_indices, fpReview?.current_vuln_index]);
+  const fpIndicesSource = !isFpReviewing
+    ? []
+    : fpReview?.current_vuln_indices?.length
+    ? fpReview.current_vuln_indices
+    : fpReview?.current_vuln_index != null
+    ? [fpReview.current_vuln_index]
+    : [];
+  const currentFpReviewIndices = new Set(fpIndicesSource.filter((i) => i >= 0));
   const currentFpReviewTargets = [...currentFpReviewIndices]
     .sort((a, b) => a - b)
     .map((i) => scan.vulnerabilities[i])
