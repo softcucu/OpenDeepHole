@@ -7,8 +7,10 @@ delegates execution to agents, and provides read/status/mark endpoints.
 import asyncio
 import csv
 import io
+import re
 import shutil
 import uuid
+import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import AsyncGenerator
@@ -812,6 +814,137 @@ async def download_report(
         content="﻿" + buf.getvalue(),
         media_type="text/csv; charset=utf-8-sig",
         headers={"Content-Disposition": f'attachment; filename="report-{scan_id}.csv"'},
+    )
+
+
+# Stage key -> Chinese title for the FP-review debate sections.
+_FP_STAGE_TITLES = [
+    ("prove_bug", "确认漏洞 (prove_bug)"),
+    ("prove_fp", "证明误报 (prove_fp)"),
+    ("final_judge", "最终裁定 (final_judge)"),
+]
+
+
+def _scan_fp_result_map(scan_id: str) -> dict[int, FpReviewResult]:
+    """Return a {vuln_index: FpReviewResult} map (with merged stage outputs) for a scan."""
+    store = get_scan_store()
+    job = store.get_fp_review_by_scan(scan_id)
+    if job is None:
+        return {}
+    merged = _merge_latest_fp_review_results(job, scan_id)
+    return {r.vuln_index: r for r in merged.results}
+
+
+def _safe_filename_part(text: str) -> str:
+    """Sanitize a string for safe use inside a download filename / zip entry."""
+    cleaned = re.sub(r"[^\w.-]+", "_", text.strip())
+    return cleaned.strip("._") or "item"
+
+
+def _vuln_report_markdown(idx, vuln, fp_result: FpReviewResult | None) -> str:
+    """Render a single vulnerability (AI analysis + FP-review stages) as Markdown."""
+    lines: list[str] = []
+    lines.append(f"# 漏洞报告 — {vuln.vuln_type} @ {vuln.file}:{vuln.line}")
+    lines.append("")
+    lines.append("| 字段 | 内容 |")
+    lines.append("| --- | --- |")
+    lines.append(f"| 文件 | {vuln.file} |")
+    lines.append(f"| 行号 | {vuln.line} |")
+    lines.append(f"| 函数 | {vuln.function} |")
+    lines.append(f"| 类型 | {vuln.vuln_type} |")
+    lines.append(f"| 严重级别 | {vuln.severity} |")
+    lines.append(f"| AI 判定 | {vuln.ai_verdict or ('confirmed' if vuln.confirmed else '')} |")
+    if vuln.user_verdict:
+        lines.append(f"| 用户判定 | {vuln.user_verdict} |")
+    lines.append("")
+    lines.append("## 描述")
+    lines.append("")
+    lines.append(vuln.description or "（无）")
+    lines.append("")
+    if vuln.user_verdict_reason:
+        lines.append("## 用户判定理由")
+        lines.append("")
+        lines.append(vuln.user_verdict_reason)
+        lines.append("")
+    lines.append("## AI 分析")
+    lines.append("")
+    lines.append(vuln.ai_analysis or "（无）")
+    lines.append("")
+
+    if fp_result is not None:
+        lines.append("## 去误报复核")
+        lines.append("")
+        verdict_label = {"tp": "真实漏洞 (tp)", "fp": "误报 (fp)"}.get(fp_result.verdict, fp_result.verdict)
+        lines.append(f"- **最终结论**：{verdict_label}")
+        lines.append(f"- **严重级别**：{fp_result.severity}")
+        if fp_result.reason:
+            lines.append(f"- **理由**：{fp_result.reason}")
+        lines.append("")
+        for key, title in _FP_STAGE_TITLES:
+            stage_md = (fp_result.stage_outputs or {}).get(key)
+            if not stage_md:
+                continue
+            lines.append(f"### 阶段：{title}")
+            lines.append("")
+            lines.append(stage_md)
+            lines.append("")
+
+    return "\n".join(lines).rstrip() + "\n"
+
+
+@router.get("/api/scan/{scan_id}/vulnerability/{idx}/report")
+async def download_vulnerability_report(
+    scan_id: str,
+    idx: int,
+    current_user: User = Depends(get_current_user),
+) -> Response:
+    """Download a single vulnerability's report (AI analysis + FP review) as Markdown."""
+    _check_scan_owner(scan_id, current_user)
+    scan = await get_scan_status(scan_id, current_user)
+    if idx < 0 or idx >= len(scan.vulnerabilities):
+        raise HTTPException(status_code=404, detail="Vulnerability index out of range")
+    vuln = scan.vulnerabilities[idx]
+    fp_map = _scan_fp_result_map(scan_id)
+    markdown = _vuln_report_markdown(idx, vuln, fp_map.get(idx))
+    fname = f"vuln-{idx}-{_safe_filename_part(vuln.file)}_{vuln.line}.md"
+    return Response(
+        content=markdown,
+        media_type="text/markdown; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{fname}"'},
+    )
+
+
+@router.get("/api/scan/{scan_id}/report.zip")
+async def download_report_zip(
+    scan_id: str,
+    current_user: User = Depends(get_current_user),
+) -> Response:
+    """Download all AI-confirmed vulnerabilities as a zip of Markdown reports."""
+    _check_scan_owner(scan_id, current_user)
+    scan = await get_scan_status(scan_id, current_user)
+    fp_map = _scan_fp_result_map(scan_id)
+
+    confirmed = [
+        (i, v)
+        for i, v in enumerate(scan.vulnerabilities)
+        if v.confirmed or v.ai_verdict == "confirmed"
+    ]
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        if not confirmed:
+            zf.writestr("README.md", f"# 扫描 {scan_id}\n\n本次扫描没有 AI 确认为问题的漏洞。\n")
+        else:
+            index_lines = [f"# 扫描 {scan_id} 漏洞报告索引", "", f"共 {len(confirmed)} 个 AI 确认问题：", ""]
+            for i, v in confirmed:
+                entry = f"vuln-{i}-{_safe_filename_part(v.file)}_{v.line}.md"
+                index_lines.append(f"- [{v.vuln_type} @ {v.file}:{v.line}]({entry})")
+                zf.writestr(entry, _vuln_report_markdown(i, v, fp_map.get(i)))
+            zf.writestr("README.md", "\n".join(index_lines) + "\n")
+    buf.seek(0)
+    return Response(
+        content=buf.getvalue(),
+        media_type="application/zip",
+        headers={"Content-Disposition": f'attachment; filename="scan-{scan_id}-report.zip"'},
     )
 
 

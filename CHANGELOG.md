@@ -1,5 +1,10 @@
 # 更新日志
 
+## 2026-06-17
+
+- **新增** 漏洞报告 Markdown 导出：对每一个 AI 判定为「是问题」的扫描项，详情页新增「导出 MD」按钮，导出包含元信息、描述、AI 分析以及去误报三阶段（prove_bug / prove_fp / final_judge）报告的 Markdown 文件（`GET /api/scan/{id}/vulnerability/{idx}/report`）
+- **新增** 扫描整体报告导出：扫描详情页顶部新增「导出报告」按钮，将本次扫描所有 AI 确认为问题的漏洞各自导出为 Markdown 并打包为 zip（含索引 `README.md`），无确认问题时仍返回带说明的 zip（`GET /api/scan/{id}/report.zip`）；同步提供公开分享场景的对应端点
+
 ## 2026-06-11
 
 - **优化** AI 去误报新增正方早退：`prove-bug` 阶段提交 `confirmed=false`（非问题）时直接以正方理由记录"可能误报"最终结果并推送前端，跳过 `prove-fp` 和 `final-judge` 两个阶段；此前该场景下模型常不写 artifact 也不提交结论，导致阶段失败后既无后续阶段也无任何复核结果

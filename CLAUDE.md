@@ -185,7 +185,7 @@ The legacy `POST /api/upload` endpoint also triggers indexing (background task) 
 backend/
   api/
     agent.py      — WebSocket endpoint, agent registry, scan event receivers
-    scan.py       — Scan CRUD, dispatches commands to agents via WebSocket
+    scan.py       — Scan CRUD, dispatches commands to agents via WebSocket; report export (CSV `/report`, per-vuln Markdown `/vulnerability/{idx}/report`, all-confirmed zip `/report.zip`)
     checkers.py   — GET /api/checkers
     upload.py     — POST /api/upload (legacy server-hosted scan flow)
     feedback.py   — Feedback CRUD

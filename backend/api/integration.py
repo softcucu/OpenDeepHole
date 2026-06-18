@@ -275,6 +275,23 @@ async def download_public_report(
     return await scan_api.download_report(scan_id, current_user)
 
 
+@router.get("/api/public/scans/{scan_id}/vulnerability/{idx}/report")
+async def download_public_vulnerability_report(
+    scan_id: str,
+    idx: int,
+    current_user: User = Depends(_public_user_dependency),
+) -> Response:
+    return await scan_api.download_vulnerability_report(scan_id, idx, current_user)
+
+
+@router.get("/api/public/scans/{scan_id}/report.zip")
+async def download_public_report_zip(
+    scan_id: str,
+    current_user: User = Depends(_public_user_dependency),
+) -> Response:
+    return await scan_api.download_report_zip(scan_id, current_user)
+
+
 @router.post("/api/public/scans/{scan_id}/mark")
 async def mark_public_vulnerability(
     scan_id: str,

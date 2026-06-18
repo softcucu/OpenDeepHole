@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { getScanStatus, stopScan, downloadScanReport, getCheckers, updateScanFeedback, getSkillContent, triggerFpReview, stopFpReview, getFpReview, getFpReviewSkill, getSkillReports, retryIncompleteScan } from "../api/client";
+import { getScanStatus, stopScan, downloadScanReport, downloadScanReportZip, getCheckers, updateScanFeedback, getSkillContent, triggerFpReview, stopFpReview, getFpReview, getFpReviewSkill, getSkillReports, retryIncompleteScan } from "../api/client";
 import type { FpReviewJob, IndexStatus, ScanItemStatus, ScanStatus as ScanStatusType, ScanEvent, CheckerInfo, SkillReport, OpenCodePoolStatus } from "../types";
 import { useScanSSE } from "../hooks/useScanSSE";
 import type { ScanSSEHandlers, SSEStateSetters } from "../hooks/useScanSSE";
@@ -44,6 +44,7 @@ export default function ScanStatus({ scanId, onBack }: Props) {
   const [stopping, setStopping] = useState(false);
   const [retryingIncomplete, setRetryingIncomplete] = useState(false);
   const [downloadingReport, setDownloadingReport] = useState(false);
+  const [exportingZip, setExportingZip] = useState(false);
   const [logOpen, setLogOpen] = useState(false);
   const [modelPoolOpen, setModelPoolOpen] = useState(false);
   const [lastSeenEvents, setLastSeenEvents] = useState(0);
@@ -316,6 +317,27 @@ export default function ScanStatus({ scanId, onBack }: Props) {
       alert(`下载 CSV 失败：${msg}`);
     } finally {
       setDownloadingReport(false);
+    }
+  };
+
+  const handleExportZip = async () => {
+    if (!scan) return;
+    setExportingZip(true);
+    try {
+      const blob = await downloadScanReportZip(scan.scan_id);
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `scan-${scan.scan_id}-report.zip`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      window.setTimeout(() => URL.revokeObjectURL(url), 0);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : "未知错误";
+      alert(`导出报告失败：${msg}`);
+    } finally {
+      setExportingZip(false);
     }
   };
 
@@ -606,6 +628,15 @@ export default function ScanStatus({ scanId, onBack }: Props) {
                   </button>
                 )}
               </>
+            )}
+            {isDone && (
+              <button
+                onClick={handleExportZip}
+                disabled={exportingZip}
+                className="px-3 py-1.5 text-sm font-medium text-white bg-blue-600 hover:bg-blue-700 disabled:bg-blue-800 disabled:cursor-not-allowed rounded-lg transition-colors"
+              >
+                {exportingZip ? "导出中..." : "导出报告"}
+              </button>
             )}
             {isDone && (
               <button
