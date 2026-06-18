@@ -1,8 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { getScanStatus, stopScan, downloadScanReport, downloadScanReportZip, getCheckers, updateScanFeedback, getSkillContent, triggerFpReview, stopFpReview, getFpReview, getFpReviewSkill, getSkillReports, retryIncompleteScan } from "../api/client";
-import type { FpReviewJob, IndexStatus, ScanItemStatus, ScanStatus as ScanStatusType, ScanEvent, CheckerInfo, SkillReport, OpenCodePoolStatus } from "../types";
+import { getScanStatus, stopScan, downloadScanReport, downloadScanReportZip, getCheckers, updateScanFeedback, getSkillContent, triggerFpReview, stopFpReview, getFpReview, getFpReviewSkill, getScanGitHistory, getSkillReports, retryIncompleteScan } from "../api/client";
+import type { FpReviewJob, HistoryPattern, IndexStatus, ScanItemStatus, ScanStatus as ScanStatusType, ScanEvent, CheckerInfo, SkillReport, OpenCodePoolStatus } from "../types";
 import { useScanSSE } from "../hooks/useScanSSE";
 import type { ScanSSEHandlers, SSEStateSetters } from "../hooks/useScanSSE";
 import VulnerabilityList from "./VulnerabilityList";
@@ -75,6 +75,10 @@ export default function ScanStatus({ scanId, onBack }: Props) {
   // Code indexing progress
   const [indexStatus, setIndexStatus] = useState<IndexStatus | null>(null);
 
+  // Git history mined patterns
+  const [gitHistory, setGitHistory] = useState<HistoryPattern[]>([]);
+  const [showGitHistory, setShowGitHistory] = useState(false);
+
   const isRunning = scan && (scan.status === "pending" || scan.status === "analyzing" || scan.status === "auditing");
   const isDone = scan && (scan.status === "complete" || scan.status === "error" || scan.status === "cancelled");
 
@@ -94,6 +98,9 @@ export default function ScanStatus({ scanId, onBack }: Props) {
       .catch(() => {});
     getFpReview(scanId)
       .then(setFpReview)
+      .catch(() => {});
+    getScanGitHistory(scanId)
+      .then(setGitHistory)
       .catch(() => {});
   }, [scanId]);
 
@@ -202,6 +209,8 @@ export default function ScanStatus({ scanId, onBack }: Props) {
             ...(existing?.stage_outputs ?? {}),
             ...(data.stage_outputs ?? {}),
           },
+          match_reference: data.match_reference ?? existing?.match_reference ?? "",
+          match_type: data.match_type ?? existing?.match_type ?? "",
           created_at: new Date().toISOString(),
         };
         return {
@@ -835,6 +844,42 @@ export default function ScanStatus({ scanId, onBack }: Props) {
 
       {/* Main content — Results table */}
       <div className="flex-1 overflow-auto px-6 py-4">
+        {gitHistory.length > 0 && (
+          <div className="mb-4 rounded-lg border border-purple-500/30 bg-purple-500/5">
+            <button
+              onClick={() => setShowGitHistory((v) => !v)}
+              className="w-full flex items-center justify-between px-4 py-2.5 text-left"
+            >
+              <span className="text-sm font-semibold text-purple-200">
+                git 历史问题模式（{gitHistory.length}）
+              </span>
+              <span className="text-xs text-slate-400">{showGitHistory ? "收起" : "展开"}</span>
+            </button>
+            {showGitHistory && (
+              <div className="px-4 pb-3 space-y-2">
+                {gitHistory.map((p, i) => (
+                  <div key={i} className="rounded-md border border-slate-700 bg-slate-900/60 p-3">
+                    <div className="flex flex-wrap items-center gap-2 mb-1">
+                      <span className="text-xs font-mono text-purple-300">{p.source || "?"}</span>
+                      {p.lens_hint && (
+                        <span className="text-xs px-1.5 py-0.5 rounded border border-slate-600 text-slate-300">
+                          {p.lens_hint}
+                        </span>
+                      )}
+                    </div>
+                    <p className="text-sm text-slate-200">{p.pattern}</p>
+                    {p.files && p.files.length > 0 && (
+                      <p className="text-xs text-slate-500 mt-1">涉及文件：{p.files.join(", ")}</p>
+                    )}
+                    {p.rationale && (
+                      <p className="text-xs text-slate-400 mt-1">{p.rationale}</p>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
         {scan.vulnerabilities.length === 0 && isDone ? (
           <div className="flex items-center justify-center h-64 text-slate-400">
             <div className="text-center">

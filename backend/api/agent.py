@@ -44,10 +44,12 @@ from backend.api.scan import _running_scans, _scan_owners
 from backend.auth import get_current_user
 from backend.logger import get_logger
 from backend.models import (
+    AgentGitHistory,
     AgentInfo,
     AgentRemoteConfig,
     AgentScanFinish,
     FpReviewStatus,
+    HistoryPattern,
     OpenCodePoolStatus,
     ScanEvent,
     ScanItemStatus,
@@ -807,6 +809,23 @@ async def agent_report_vulnerability(scan_id: str, vuln: Vulnerability) -> dict:
         scan_id, vuln.vuln_type, vuln.file, vuln.line, vuln.confirmed,
     )
     return {"ok": True}
+
+
+@router.post("/scan/{scan_id}/git_history")
+async def agent_push_git_history(scan_id: str, body: AgentGitHistory) -> dict:
+    """Agent uploads the mined git-history security problem patterns for a scan."""
+    store = get_scan_store()
+    store.replace_git_history_patterns(scan_id, body.patterns)
+    from backend.sse import publish
+    publish(scan_id, "git_history", {"count": len(body.patterns)})
+    logger.info("Git history patterns stored for scan %s: %d", scan_id, len(body.patterns))
+    return {"ok": True}
+
+
+@router.get("/scan/{scan_id}/git_history")
+async def agent_get_git_history(scan_id: str) -> list[HistoryPattern]:
+    """Return the mined git-history patterns for a scan (used by FP review)."""
+    return get_scan_store().get_git_history_patterns(scan_id)
 
 
 @router.post("/scan/{scan_id}/skill-report")

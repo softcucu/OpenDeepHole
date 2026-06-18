@@ -58,3 +58,13 @@ opencode_concurrency: 1
 #   timeout: 1200
 #   max_retries: 2
 #   models: []
+
+# Git 历史安全问题挖掘配置
+# 扫描时分析 git 提交历史，挖掘历史安全问题模式，并对每条模式做全仓同类变体排查；
+# 去误报阶段据此做「历史/校验匹配」直接定级。
+git_history:
+  enabled: true        # 是否启用（非 git 仓库会自动跳过）
+  max_commits: 200     # 最多分析最近 N 条提交
+  since: ""            # git log --since 过滤，如 "6 months ago"（留空不限）
+  paths: ""            # git log 路径过滤，空格分隔（留空不限）
+  variant_hunt: true   # 是否对每条历史问题模式做全仓同类变体排查

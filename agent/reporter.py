@@ -9,7 +9,7 @@ from typing import Optional
 
 import httpx
 
-from backend.models import FeedbackEntry, ScanEvent, Vulnerability
+from backend.models import FeedbackEntry, HistoryPattern, ScanEvent, Vulnerability
 
 
 OPENCODE_POOL_UNCHANGED_HEARTBEAT_SECONDS = 15.0
@@ -288,6 +288,34 @@ class Reporter:
         except Exception:
             return set()
 
+    async def push_git_history(self, scan_id: str, patterns: list[HistoryPattern]) -> None:
+        """Upload the mined git-history security patterns for a scan."""
+        if self.dry_run:
+            print(f"  [git_history] {len(patterns)} pattern(s) mined")
+            return
+        try:
+            await self._client.post(
+                f"{self.server_url}/api/agent/scan/{scan_id}/git_history",
+                json={"patterns": [p.model_dump() for p in patterns]},
+                timeout=30.0,
+            )
+        except Exception as e:
+            print(f"Warning: failed to upload git history patterns: {e}")
+
+    async def get_git_history(self, scan_id: str) -> list[HistoryPattern]:
+        """Fetch the mined git-history security patterns for a scan (FP review use)."""
+        if self.dry_run:
+            return []
+        try:
+            resp = await self._client.get(
+                f"{self.server_url}/api/agent/scan/{scan_id}/git_history",
+                timeout=10.0,
+            )
+            resp.raise_for_status()
+            return [HistoryPattern(**item) for item in resp.json()]
+        except Exception:
+            return []
+
     async def get_feedback(self, vuln_types: list[str]) -> list[FeedbackEntry]:
         """Fetch feedback entries from the server for SKILL enrichment."""
         if self.dry_run or not vuln_types:
@@ -313,6 +341,8 @@ class Reporter:
         reason: str,
         vulnerability_report: str = "",
         stage_outputs: dict[str, str] | None = None,
+        match_reference: str = "",
+        match_type: str = "",
     ) -> None:
         """Push a single FP review result to the server."""
         if self.dry_run:
@@ -330,6 +360,8 @@ class Reporter:
                     "reason": reason,
                     "vulnerability_report": vulnerability_report,
                     "stage_outputs": stage_outputs or {},
+                    "match_reference": match_reference,
+                    "match_type": match_type,
                 },
                 timeout=10.0,
             )

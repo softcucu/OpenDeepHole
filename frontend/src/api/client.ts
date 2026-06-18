@@ -1,5 +1,5 @@
 import axios from "axios";
-import type { AgentConfigTestResult, AgentInfo, AgentRemoteConfig, CheckerCatalogItem, CheckerDashboardResponse, CheckerInfo, FeedbackEntry, FpReviewJob, IndexStatus, ScanStatus, ScanStartResponse, ScanSummary, SkillCreateJob, SkillImportFile, SkillReport, TokenResponse, User, UserFeedbackVerdict } from "../types";
+import type { AgentConfigTestResult, AgentInfo, AgentRemoteConfig, CheckerCatalogItem, CheckerDashboardResponse, CheckerInfo, FeedbackEntry, FpReviewJob, HistoryPattern, IndexStatus, ScanStatus, ScanStartResponse, ScanSummary, SkillCreateJob, SkillImportFile, SkillReport, TokenResponse, User, UserFeedbackVerdict } from "../types";
 
 const api = axios.create({ baseURL: "/" });
 
@@ -564,6 +564,18 @@ export async function getFpReview(scanId: string): Promise<FpReviewJob> {
     return data;
   }
   const { data } = await api.get<FpReviewJob>(`/api/scan/${scanId}/fp_review`);
+  return data;
+}
+
+export async function getScanGitHistory(scanId: string): Promise<HistoryPattern[]> {
+  if (isPublicScan(scanId)) {
+    const { data } = await api.get<HistoryPattern[]>(
+      publicScanPath("/git_history"),
+      { params: publicParams() },
+    );
+    return data;
+  }
+  const { data } = await api.get<HistoryPattern[]>(`/api/scan/${scanId}/git_history`);
   return data;
 }
 

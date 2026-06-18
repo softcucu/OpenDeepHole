@@ -87,6 +87,7 @@ class Vulnerability(BaseModel):
     ticket_id: str = ""                      # 问题单号
     function_source: str = ""
     function_start_line: int | None = None
+    variant_of: str = ""                     # 同类变体排查命中时，来源历史问题模式（根因摘要+出处提交/文件）
 
 
 # --- API request/response models ---
@@ -423,6 +424,14 @@ class AgentMemoryApiDiscoveryConfig(BaseModel):
     max_candidates: int = 200
 
 
+class AgentGitHistoryConfig(BaseModel):
+    enabled: bool = True
+    max_commits: int = 200
+    since: str = ""
+    paths: str = ""
+    variant_hunt: bool = True
+
+
 class AgentRemoteConfig(BaseModel):
     """Agent configuration managed from the server Web UI."""
     no_proxy: str = "10.0.0.0/8"
@@ -431,6 +440,7 @@ class AgentRemoteConfig(BaseModel):
     opencode: AgentOpenCodeConfig = AgentOpenCodeConfig()
     fp_review_cli: AgentOpenCodeConfig | None = None
     memory_api_discovery: AgentMemoryApiDiscoveryConfig = AgentMemoryApiDiscoveryConfig()
+    git_history: AgentGitHistoryConfig = AgentGitHistoryConfig()
 
 
 class CreateScanRequest(BaseModel):
@@ -558,6 +568,22 @@ class CheckerDashboardResponse(BaseModel):
     checkers: list[CheckerDashboardStats]
 
 
+# --- Git history mining models ---
+
+class HistoryPattern(BaseModel):
+    """从 git 历史中挖掘出的一条「历史安全问题模式」。"""
+    pattern: str                  # 根因 + 缺陷类型 + 触发条件的抽象描述
+    source: str = ""              # 出处：提交短 hash + 标题
+    lens_hint: str = ""           # memory | integer | race | injection | authn | crypto | dos | infoleak
+    files: list[str] = []         # 涉及/出现的文件
+    rationale: str = ""           # 判定理由 + 改动要点摘要
+
+
+class AgentGitHistory(BaseModel):
+    """Agent 上报某次扫描挖掘出的历史问题模式批次。"""
+    patterns: list[HistoryPattern] = []
+
+
 # --- FP Review models ---
 
 class FpReviewStatus(str, Enum):
@@ -572,10 +598,12 @@ class FpReviewResult(BaseModel):
     """Per-vulnerability false-positive review result."""
     vuln_index: int           # index in the parent scan's vulnerability list
     verdict: str              # "tp" (true positive) | "fp" (false positive)
-    severity: str = "low"     # "high" | "medium" | "low"
+    severity: str = "low"     # "high" | "low"
     reason: str               # AI reasoning
     vulnerability_report: str = ""  # Markdown report for confirmed issues
     stage_outputs: dict[str, str] = {}
+    match_reference: str = ""  # 命中历史问题模式或其它函数校验时，对应的修复/校验描述
+    match_type: str = ""       # "history" | "validation" | ""（命中类型）
     created_at: str
 
 
@@ -617,6 +645,8 @@ class AgentFpReviewResult(BaseModel):
     reason: str
     vulnerability_report: str = ""
     stage_outputs: dict[str, str] = {}
+    match_reference: str = ""
+    match_type: str = ""
 
 
 class AgentFpReviewStageOutput(BaseModel):

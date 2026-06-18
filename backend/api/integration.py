@@ -24,6 +24,7 @@ from backend.models import (
     FeedbackEntry,
     FeedbackUpdateRequest,
     FpReviewJob,
+    HistoryPattern,
     MarkRequest,
     ScanStatus,
     UnmarkRequest,
@@ -386,6 +387,14 @@ async def get_public_fp_review(
     current_user: User = Depends(_public_user_dependency),
 ) -> FpReviewJob:
     return await scan_api.get_fp_review(scan_id, current_user)
+
+
+@router.get("/api/public/scans/{scan_id}/git_history", response_model=list[HistoryPattern])
+async def get_public_scan_git_history(
+    scan_id: str,
+    current_user: User = Depends(_public_user_dependency),
+) -> list[HistoryPattern]:
+    return await scan_api.get_scan_git_history(scan_id, current_user)
 
 
 @router.get("/api/public/scans/{scan_id}/checkers", response_model=list[CheckerInfo])

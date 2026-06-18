@@ -62,11 +62,12 @@ class AgentFeedbackTests(unittest.TestCase):
                 ])
 
     def test_fp_review_severity_normalization(self) -> None:
+        # 二元定级：外部可触发(high) → high，其余一律 low。
         self.assertEqual(fp_reviewer._normalize_fp_severity("high", "tp"), "high")
-        self.assertEqual(fp_reviewer._normalize_fp_severity("medium", "tp"), "medium")
-        self.assertEqual(fp_reviewer._normalize_fp_severity("low", "tp"), "medium")
+        self.assertEqual(fp_reviewer._normalize_fp_severity("medium", "tp"), "low")
+        self.assertEqual(fp_reviewer._normalize_fp_severity("low", "tp"), "low")
         self.assertEqual(fp_reviewer._normalize_fp_severity("high", "fp"), "low")
-        self.assertEqual(fp_reviewer._normalize_fp_severity("critical", "tp"), "medium")
+        self.assertEqual(fp_reviewer._normalize_fp_severity("critical", "tp"), "low")
 
     def test_fp_review_final_judge_false_as_fp(self) -> None:
         final_judge = fp_reviewer._FpStageResult(
@@ -89,7 +90,9 @@ class AgentFeedbackTests(unittest.TestCase):
         self.assertEqual((verdict, severity, report), ("fp", "low", ""))
         self.assertIn("caller checks null", reason)
 
-    def test_fp_review_final_judge_preserves_medium_issue_report(self) -> None:
+    def test_fp_review_final_judge_non_high_normalized_to_low(self) -> None:
+        # 二元定级：confirmed 但非外部可触发（severity!=high）一律归一为 low，
+        # 报告仍需保留（confirmed=true）。
         final_judge = fp_reviewer._FpStageResult(
             result_id="final",
             result=Vulnerability(
@@ -107,8 +110,29 @@ class AgentFeedbackTests(unittest.TestCase):
 
         verdict, severity, reason, report = fp_reviewer._finalize_fp_review_result(final_judge)
 
-        self.assertEqual((verdict, severity), ("tp", "medium"))
+        self.assertEqual((verdict, severity), ("tp", "low"))
         self.assertIn("final code chain", reason)
+        self.assertIn("## Full Call Stack", report)
+
+    def test_fp_review_final_judge_high_preserved(self) -> None:
+        final_judge = fp_reviewer._FpStageResult(
+            result_id="final",
+            result=Vulnerability(
+                file="a.c",
+                line=10,
+                function="parse",
+                vuln_type="npd",
+                severity="high",
+                description="final tp",
+                ai_analysis="final code chain",
+                confirmed=True,
+            ),
+            payload={"vulnerability_report": _valid_issue_report()},
+        )
+
+        verdict, severity, reason, report = fp_reviewer._finalize_fp_review_result(final_judge)
+
+        self.assertEqual((verdict, severity), ("tp", "high"))
         self.assertIn("## Full Call Stack", report)
 
     def test_fp_review_does_not_save_result_when_cli_returns_none(self) -> None:

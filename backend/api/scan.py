@@ -35,6 +35,7 @@ from backend.models import (
     FpReviewJob,
     FpReviewResult,
     FpReviewStatus,
+    HistoryPattern,
     MarkRequest,
     ScanItemStatus,
     ScanMeta,
@@ -807,9 +808,20 @@ async def download_report(
     scan = await get_scan_status(scan_id, current_user)
     buf = io.StringIO()
     writer = csv.writer(buf)
-    writer.writerow(["file", "line", "function", "vuln_type", "severity", "confirmed", "description", "ai_analysis"])
-    for v in scan.vulnerabilities:
-        writer.writerow([v.file, v.line, v.function, v.vuln_type, v.severity, v.confirmed, v.description, v.ai_analysis])
+    fp_map = _scan_fp_result_map(scan_id)
+    writer.writerow([
+        "file", "line", "function", "vuln_type", "severity", "confirmed",
+        "fp_verdict", "fp_severity", "match_type", "match_reference", "variant_of",
+        "description", "ai_analysis",
+    ])
+    for i, v in enumerate(scan.vulnerabilities):
+        fp = fp_map.get(i)
+        writer.writerow([
+            v.file, v.line, v.function, v.vuln_type, v.severity, v.confirmed,
+            fp.verdict if fp else "", fp.severity if fp else "",
+            fp.match_type if fp else "", fp.match_reference if fp else "",
+            v.variant_of, v.description, v.ai_analysis,
+        ])
     return Response(
         content="﻿" + buf.getvalue(),
         media_type="text/csv; charset=utf-8-sig",
@@ -819,6 +831,7 @@ async def download_report(
 
 # Stage key -> Chinese title for the FP-review debate sections.
 _FP_STAGE_TITLES = [
+    ("history_match", "历史/校验匹配 (history_match)"),
     ("prove_bug", "确认漏洞 (prove_bug)"),
     ("prove_fp", "证明误报 (prove_fp)"),
     ("final_judge", "最终裁定 (final_judge)"),
@@ -854,6 +867,8 @@ def _vuln_report_markdown(idx, vuln, fp_result: FpReviewResult | None) -> str:
     lines.append(f"| 类型 | {vuln.vuln_type} |")
     lines.append(f"| 严重级别 | {vuln.severity} |")
     lines.append(f"| AI 判定 | {vuln.ai_verdict or ('confirmed' if vuln.confirmed else '')} |")
+    if getattr(vuln, "variant_of", ""):
+        lines.append(f"| 同类变体来源 | {vuln.variant_of} |")
     if vuln.user_verdict:
         lines.append(f"| 用户判定 | {vuln.user_verdict} |")
     lines.append("")
@@ -877,6 +892,13 @@ def _vuln_report_markdown(idx, vuln, fp_result: FpReviewResult | None) -> str:
         verdict_label = {"tp": "真实漏洞 (tp)", "fp": "误报 (fp)"}.get(fp_result.verdict, fp_result.verdict)
         lines.append(f"- **最终结论**：{verdict_label}")
         lines.append(f"- **严重级别**：{fp_result.severity}")
+        if getattr(fp_result, "match_type", ""):
+            match_label = {"history": "对应历史问题模式", "validation": "对应其它函数校验"}.get(
+                fp_result.match_type, fp_result.match_type
+            )
+            lines.append(f"- **匹配类型**：{match_label}")
+        if getattr(fp_result, "match_reference", ""):
+            lines.append(f"- **对应修复/校验**：{fp_result.match_reference}")
         if fp_result.reason:
             lines.append(f"- **理由**：{fp_result.reason}")
         lines.append("")
@@ -1330,6 +1352,16 @@ async def get_fp_review(
     return _merge_latest_fp_review_results(job, scan_id)
 
 
+@router.get("/api/scan/{scan_id}/git_history", response_model=list[HistoryPattern])
+async def get_scan_git_history(
+    scan_id: str,
+    current_user: User = Depends(get_current_user),
+) -> list[HistoryPattern]:
+    """Return the git-history security problem patterns mined for a scan."""
+    _check_scan_owner(scan_id, current_user)
+    return get_scan_store().get_git_history_patterns(scan_id)
+
+
 @router.get("/api/scan/{scan_id}/events")
 async def scan_events_sse(scan_id: str, token: str = Query(...)) -> StreamingResponse:
     """SSE stream for real-time scan and FP review status updates.
@@ -1427,11 +1459,8 @@ async def agent_fp_review_result(scan_id: str, body: AgentFpReviewResult) -> dic
         store.update_fp_review_job(body.review_id, status="running", error_message="")
         logger.info("FP review %s auto-recovered from agent disconnect", body.review_id)
     now = datetime.now(timezone.utc).isoformat()
-    severity = body.severity if body.severity in {"high", "medium", "low"} else "low"
-    if body.verdict == "fp":
-        severity = "low"
-    elif severity == "low":
-        severity = "medium"
+    # 去误报定级简化为二元：tp 且外部可触发（或命中历史/校验匹配）为 high，其余一律 low。
+    severity = "high" if (body.verdict == "tp" and body.severity == "high") else "low"
     result = FpReviewResult(
         vuln_index=body.vuln_index,
         verdict=body.verdict,
@@ -1439,6 +1468,8 @@ async def agent_fp_review_result(scan_id: str, body: AgentFpReviewResult) -> dic
         reason=body.reason,
         vulnerability_report=body.vulnerability_report if body.verdict == "tp" else "",
         stage_outputs=body.stage_outputs,
+        match_reference=body.match_reference,
+        match_type=body.match_type,
         created_at=now,
     )
     store.add_fp_review_result(body.review_id, result)
@@ -1448,6 +1479,8 @@ async def agent_fp_review_result(scan_id: str, body: AgentFpReviewResult) -> dic
         "verdict": body.verdict, "severity": severity, "reason": body.reason,
         "vulnerability_report": result.vulnerability_report,
         "stage_outputs": result.stage_outputs,
+        "match_reference": result.match_reference,
+        "match_type": result.match_type,
     })
     logger.debug("FP review result for %s vuln[%d]: %s", scan_id, body.vuln_index, body.verdict)
     return {"ok": True}
@@ -1465,7 +1498,7 @@ async def agent_fp_review_stage_output(scan_id: str, body: AgentFpReviewStageOut
     if job.status == FpReviewStatus.ERROR and _is_agent_disconnect_error(job.error_message):
         store.update_fp_review_job(body.review_id, status="running", error_message="")
         logger.info("FP review %s auto-recovered from agent disconnect", body.review_id)
-    if body.stage not in {"prove_bug", "prove_fp", "final_judge"}:
+    if body.stage not in {"history_match", "prove_bug", "prove_fp", "final_judge"}:
         raise HTTPException(status_code=400, detail="Invalid FP review stage")
     now = datetime.now(timezone.utc).isoformat()
     store.upsert_fp_review_stage_output(

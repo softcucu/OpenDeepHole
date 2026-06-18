@@ -16,6 +16,7 @@ from backend.models import (
     FpReviewJob,
     FpReviewResult,
     FpReviewStageOutput,
+    HistoryPattern,
     OpenCodePoolStatus,
     ScanEvent,
     ScanItemStatus,
@@ -278,6 +279,16 @@ class ScanStoreBase(ABC):
     @abstractmethod
     def add_fp_review_result(self, review_id: str, result: FpReviewResult) -> None:
         """Append a single vulnerability FP review result to a job."""
+
+    # -- Git history patterns --
+
+    @abstractmethod
+    def replace_git_history_patterns(self, scan_id: str, patterns: list[HistoryPattern]) -> None:
+        """Replace the mined git-history security patterns for a scan."""
+
+    @abstractmethod
+    def get_git_history_patterns(self, scan_id: str) -> list[HistoryPattern]:
+        """Return the mined git-history security patterns for a scan, in order."""
 
     # -- Users --
 

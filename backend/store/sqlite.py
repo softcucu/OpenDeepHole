@@ -15,6 +15,7 @@ from backend.models import (
     FpReviewResult,
     FpReviewStageOutput,
     FpReviewStatus,
+    HistoryPattern,
     OpenCodePoolStatus,
     ScanEvent,
     ScanItemStatus,
@@ -89,6 +90,7 @@ CREATE TABLE IF NOT EXISTS vulnerabilities (
     user_verdict_reason TEXT,
     ticket_submitted    INTEGER NOT NULL DEFAULT 0,
     ticket_id           TEXT NOT NULL DEFAULT '',
+    variant_of          TEXT NOT NULL DEFAULT '',
     UNIQUE(scan_id, idx)
 );
 
@@ -166,8 +168,22 @@ CREATE TABLE IF NOT EXISTS fp_review_results (
     reason      TEXT NOT NULL,
     vulnerability_report TEXT NOT NULL DEFAULT '',
     stage_outputs TEXT NOT NULL DEFAULT '{}',
+    match_reference TEXT NOT NULL DEFAULT '',
+    match_type  TEXT NOT NULL DEFAULT '',
     created_at  TEXT NOT NULL,
     UNIQUE(review_id, vuln_index)
+);
+
+CREATE TABLE IF NOT EXISTS git_history_patterns (
+    scan_id     TEXT NOT NULL REFERENCES scans(scan_id) ON DELETE CASCADE,
+    idx         INTEGER NOT NULL,
+    pattern     TEXT NOT NULL,
+    source      TEXT NOT NULL DEFAULT '',
+    lens_hint   TEXT NOT NULL DEFAULT '',
+    files       TEXT NOT NULL DEFAULT '[]',
+    rationale   TEXT NOT NULL DEFAULT '',
+    created_at  TEXT NOT NULL,
+    PRIMARY KEY(scan_id, idx)
 );
 
 CREATE TABLE IF NOT EXISTS fp_review_stage_outputs (
@@ -268,6 +284,10 @@ class SqliteScanStore(ScanStoreBase):
         if "ticket_id" not in vuln_cols:
             self._conn.execute(
                 "ALTER TABLE vulnerabilities ADD COLUMN ticket_id TEXT NOT NULL DEFAULT ''"
+            )
+        if "variant_of" not in vuln_cols:
+            self._conn.execute(
+                "ALTER TABLE vulnerabilities ADD COLUMN variant_of TEXT NOT NULL DEFAULT ''"
             )
 
         feedback_cur = self._conn.execute("PRAGMA table_info(feedback_entries)")
@@ -370,6 +390,28 @@ class SqliteScanStore(ScanStoreBase):
             self._conn.execute(
                 "ALTER TABLE fp_review_results ADD COLUMN stage_outputs TEXT NOT NULL DEFAULT '{}'"
             )
+        if "match_reference" not in fp_cols:
+            self._conn.execute(
+                "ALTER TABLE fp_review_results ADD COLUMN match_reference TEXT NOT NULL DEFAULT ''"
+            )
+        if "match_type" not in fp_cols:
+            self._conn.execute(
+                "ALTER TABLE fp_review_results ADD COLUMN match_type TEXT NOT NULL DEFAULT ''"
+            )
+        # git 历史问题模式表（旧库补建）
+        self._conn.executescript("""\
+            CREATE TABLE IF NOT EXISTS git_history_patterns (
+                scan_id     TEXT NOT NULL REFERENCES scans(scan_id) ON DELETE CASCADE,
+                idx         INTEGER NOT NULL,
+                pattern     TEXT NOT NULL,
+                source      TEXT NOT NULL DEFAULT '',
+                lens_hint   TEXT NOT NULL DEFAULT '',
+                files       TEXT NOT NULL DEFAULT '[]',
+                rationale   TEXT NOT NULL DEFAULT '',
+                created_at  TEXT NOT NULL,
+                PRIMARY KEY(scan_id, idx)
+            );
+        """)
         # user_id 列由上方 ALTER 迁移产生，索引只能建在迁移之后
         self._conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_scans_user ON scans(user_id)"
@@ -680,8 +722,8 @@ class SqliteScanStore(ScanStoreBase):
                      severity, description, ai_analysis, confirmed,
                      ai_verdict, user_verdict, user_verdict_reason,
                      ticket_submitted, ticket_id,
-                     function_source, function_start_line)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     function_source, function_start_line, variant_of)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     scan_id,
@@ -701,6 +743,7 @@ class SqliteScanStore(ScanStoreBase):
                     vuln.ticket_id if vuln.ticket_submitted else "",
                     vuln.function_source,
                     vuln.function_start_line,
+                    vuln.variant_of,
                 ),
             )
             self._conn.commit()
@@ -741,7 +784,8 @@ class SqliteScanStore(ScanStoreBase):
                         ticket_submitted = 0,
                         ticket_id = '',
                         function_source = ?,
-                        function_start_line = ?
+                        function_start_line = ?,
+                        variant_of = ?
                     WHERE scan_id = ? AND idx = ?
                     """,
                     (
@@ -752,6 +796,7 @@ class SqliteScanStore(ScanStoreBase):
                         vuln.ai_verdict,
                         vuln.function_source,
                         vuln.function_start_line,
+                        vuln.variant_of,
                         scan_id,
                         idx,
                     ),
@@ -771,8 +816,8 @@ class SqliteScanStore(ScanStoreBase):
                      severity, description, ai_analysis, confirmed,
                      ai_verdict, user_verdict, user_verdict_reason,
                      ticket_submitted, ticket_id,
-                     function_source, function_start_line)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     function_source, function_start_line, variant_of)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     scan_id,
@@ -792,6 +837,7 @@ class SqliteScanStore(ScanStoreBase):
                     vuln.ticket_id if vuln.ticket_submitted else "",
                     vuln.function_source,
                     vuln.function_start_line,
+                    vuln.variant_of,
                 ),
             )
             self._conn.commit()
@@ -913,6 +959,7 @@ class SqliteScanStore(ScanStoreBase):
                 ticket_id=r["ticket_id"] or "",
                 function_source=r["function_source"] or "",
                 function_start_line=r["function_start_line"],
+                variant_of=(r["variant_of"] if "variant_of" in r.keys() else "") or "",
             )
             for r in cur.fetchall()
         ]
@@ -1549,6 +1596,8 @@ class SqliteScanStore(ScanStoreBase):
             reason=row["reason"],
             vulnerability_report=row["vulnerability_report"] or "",
             stage_outputs=stage_outputs,
+            match_reference=(row["match_reference"] if "match_reference" in row.keys() else "") or "",
+            match_type=(row["match_type"] if "match_type" in row.keys() else "") or "",
             created_at=row["created_at"],
         )
 
@@ -1610,8 +1659,9 @@ class SqliteScanStore(ScanStoreBase):
             self._conn.execute(
                 """\
                 INSERT OR REPLACE INTO fp_review_results
-                    (review_id, vuln_index, verdict, severity, reason, vulnerability_report, stage_outputs, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    (review_id, vuln_index, verdict, severity, reason, vulnerability_report,
+                     stage_outputs, match_reference, match_type, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     review_id,
@@ -1621,10 +1671,64 @@ class SqliteScanStore(ScanStoreBase):
                     result.reason,
                     result.vulnerability_report,
                     json.dumps(result.stage_outputs, ensure_ascii=False),
+                    result.match_reference,
+                    result.match_type,
                     result.created_at,
                 ),
             )
             self._conn.commit()
+
+    # -- Git history patterns --
+
+    def replace_git_history_patterns(self, scan_id: str, patterns: list[HistoryPattern]) -> None:
+        now = __import__("datetime").datetime.now(
+            __import__("datetime").timezone.utc
+        ).isoformat()
+        with self._lock:
+            self._conn.execute(
+                "DELETE FROM git_history_patterns WHERE scan_id = ?", (scan_id,)
+            )
+            for idx, p in enumerate(patterns):
+                self._conn.execute(
+                    """\
+                    INSERT INTO git_history_patterns
+                        (scan_id, idx, pattern, source, lens_hint, files, rationale, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        scan_id,
+                        idx,
+                        p.pattern,
+                        p.source,
+                        p.lens_hint,
+                        json.dumps(p.files, ensure_ascii=False),
+                        p.rationale,
+                        now,
+                    ),
+                )
+            self._conn.commit()
+
+    def get_git_history_patterns(self, scan_id: str) -> list[HistoryPattern]:
+        cur = self._conn.execute(
+            "SELECT * FROM git_history_patterns WHERE scan_id = ? ORDER BY idx",
+            (scan_id,),
+        )
+        out: list[HistoryPattern] = []
+        for r in cur.fetchall():
+            try:
+                files = json.loads(r["files"] or "[]")
+            except Exception:
+                files = []
+            out.append(
+                HistoryPattern(
+                    pattern=r["pattern"],
+                    source=r["source"] or "",
+                    lens_hint=r["lens_hint"] or "",
+                    files=files if isinstance(files, list) else [],
+                    rationale=r["rationale"] or "",
+                )
+            )
+        return out
 
     # -- Users --
 

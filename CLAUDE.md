@@ -67,17 +67,25 @@ Each scan runs the full pipeline locally on the agent machine:
 3. MCP      — start LocalMCPServer in-process on a random port (CLI audit mode only)
 4. Workspace — create_scan_workspace() with per-task opencode.json + skill symlinks + merged feedback
 5. Static   — each checker's analyzer.find_candidates() → candidate list (cached for resume)
-6. AI audit — run_audit() per candidate (selected CLI tool or LLM API direct call)
+5.5 Git history — (fresh scans, git repo, git_history.enabled) agent/git_history.py mines security-fix
+    patterns from commit history (one LLM call per commit, submit_history_pattern); agent/variant_hunter.py
+    then hunts whole-repo same-class sites per pattern (submit_variant_finding) → extra candidates tagged
+    metadata.variant_of, merged into the candidate set. Patterns pushed via POST /api/agent/scan/{id}/git_history
+6. AI audit — run_audit() per candidate (selected CLI tool or LLM API direct call); variant_of propagated to Vulnerability
 7. Report   — upload vulnerabilities + finish event to server; clean up on completion
 ```
+
+**Git history config** (`git_history` in config.yaml/agent.yaml): `enabled`, `max_commits`, `since`, `paths`, `variant_hunt`. Mined patterns persist server-side in the `git_history_patterns` table and are exposed via `GET /api/scan/{id}/git_history` (frontend "git 历史问题模式" panel).
 
 **Resume support**: scan dir at `~/.opendeephole/scans/<scan_id>/` is preserved on cancel/error.  
 **Index storage**: `code_index.db` is stored directly in the project directory (`<project_path>/code_index.db`). Re-scanning the same project reuses the existing index.
 
 ## Agent — FP Review Pipeline (`agent/fp_reviewer.py`)
 
-Three-stage debate per vulnerability: `prove_bug` → `prove_fp` → `final_judge`, each a CLI call that must write a Markdown artifact **and** call `submit_result` (missing either → retry per `fp_review_cli.max_retries`, then stage failure; retry prompts re-emphasize the contract).
+Per vulnerability: an optional `history_match` stage first, then the three-stage debate `prove_bug` → `prove_fp` → `final_judge`, each a CLI call that must write a Markdown artifact **and** call its submit tool (missing either → retry per `fp_review_cli.max_retries`, then stage failure; retry prompts re-emphasize the contract).
 
+- **History/validation match** (`history_match`, skill `fp_review_match.md`, tool `submit_match_result`): runs first when git-history patterns exist (fetched via `reporter.get_git_history`) or the candidate carries `variant_of`. If the candidate corresponds to a historical problem pattern (same root cause) or another call site that validates correctly (which this site lacks), it is **directly marked `high` and the three-stage debate is skipped**; the result records `match_type` (`history`|`validation`) and `match_reference`. No match → fall through to the debate.
+- **Binary severity**: FP-review severity is now high/low only — match or externally-triggerable → `high`, everything else (former medium, fp) → `low` (`_normalize_fp_severity`, debate prompts, and the result endpoint all enforce this).
 - **Early exit**: if `prove_bug` submits `confirmed=false`, the review pushes a final `fp` result with prove_bug's reasoning and skips the other two stages. Only confirmed-by-prove_bug candidates go through the full debate, where `final_judge` decides.
 - **Concurrency**: review workers are sized from `total_model_capacity()`; the agent reports the full set of in-progress vuln indices (`active_indices`) with each progress push. Backend stores it in `fp_review_jobs.current_vuln_indices` (JSON) and the frontend highlights all of them.
 - **Reconnect resilience**: agent hello includes `active_fp_reviews`; backend `_reattach_active_fp_reviews()` re-points the scan at the new agent_id and recovers jobs error-marked by the disconnect grace task. The progress/result/stage-output endpoints also auto-recover disconnect-errored jobs to running.
@@ -203,17 +211,21 @@ backend/
 agent/
   main.py         — Entry point; WebSocket client loop with auto-reconnect
   server.py       — Command handlers: handle_task(), handle_stop(), handle_resume()
-  scanner.py      — Full local scan pipeline (index → static → AI → report)
-  reporter.py     — HTTP client: pushes events/results to backend
+  scanner.py      — Full local scan pipeline (index → static → git-history → AI → report)
+  git_history.py  — Mines git-history security-fix patterns (one LLM call per commit)
+  variant_hunter.py — Hunts whole-repo same-class sites per history pattern → variant candidates
+  fp_reviewer.py  — FP review: history_match (skip→high) + three-stage debate, binary severity
+  reporter.py     — HTTP client: pushes events/results/git-history to backend
   task_manager.py — In-memory task registry with cancel_event per scan
   index_store.py  — Manages code_index.db in project directory
   local_mcp.py    — LocalMCPServer: runs MCP server in-process on random port
   config.py       — AgentConfig, load_config(), apply_remote_config()
+  skills/         — Standalone skills: fp_review*.md, fp_review_match.md, git_history_mine.md, variant_hunt.md
 
 checkers/         — Plugin directories (npd, oob, safe_mem_oob, uaf, intoverflow, memleak)
 code_parser/      — Shared C/C++ indexer (ctags + tree-sitter + SQLite)
-mcp_server/       — MCP Server (tools.py, server.py)
+mcp_server/       — MCP Server (tools.py: code queries + submit_result/submit_history_pattern/submit_variant_finding/submit_match_result)
 frontend/         — React + TypeScript + Vite + Tailwind CSS
-config.yaml       — Server-side settings (ports, storage, logging, llm_api, opencode)
-agent.yaml        — Agent-side settings (server_url, agent_name, llm_api, opencode, fp_review_cli)
+config.yaml       — Server-side settings (ports, storage, logging, llm_api, opencode, git_history)
+agent.yaml        — Agent-side settings (server_url, agent_name, llm_api, opencode, fp_review_cli, git_history)
 ```

@@ -25,9 +25,12 @@ from agent.config import effective_fp_review_cli_config
 
 _FP_FEEDBACK_FILE = Path.home() / ".opendeephole" / "fp_feedback.json"
 _FP_REVIEW_FEEDBACK: dict[str, list[dict]] = {}
-_FP_REVIEW_SKILLS = ("prove-bug", "prove-fp", "final-judge")
+# 每次复核的 git 历史问题模式快照（list[dict]，来自后端 GET .../git_history）
+_FP_REVIEW_HISTORY: dict[str, list[dict]] = {}
+_FP_REVIEW_SKILLS = ("history-match", "prove-bug", "prove-fp", "final-judge")
 _LEGACY_FP_REVIEW_SKILLS = ("fp-review", "fp-review-discriminator")
 _FP_STAGE_LABELS = {
+    "history_match": "历史/校验匹配",
     "prove_bug": "正方论证",
     "prove_fp": "反方论证",
     "final_judge": "最终裁决",
@@ -113,6 +116,31 @@ def get_fp_review_feedback(scan_id: str) -> list[dict]:
     return list(_FP_REVIEW_FEEDBACK.get(scan_id, []))
 
 
+def set_fp_review_history(scan_id: str, patterns: list[dict]) -> None:
+    """Store the git-history problem patterns snapshot for an active FP review."""
+    _FP_REVIEW_HISTORY[scan_id] = patterns
+
+
+def get_fp_review_history(scan_id: str) -> list[dict]:
+    """Return the git-history problem patterns snapshot for an active FP review."""
+    return list(_FP_REVIEW_HISTORY.get(scan_id, []))
+
+
+def _render_history_patterns(patterns: list[dict]) -> str:
+    """Render history patterns as a compact numbered list for the match prompt."""
+    lines: list[str] = []
+    for i, p in enumerate(patterns, 1):
+        source = str(p.get("source") or "").strip()
+        pattern = str(p.get("pattern") or "").strip()
+        lens = str(p.get("lens_hint") or "").strip()
+        files = ", ".join(p.get("files") or []) if isinstance(p.get("files"), list) else ""
+        head = f"{i}. [{source or '?'}]"
+        if lens:
+            head += f"（lens={lens}）"
+        lines.append(f"{head} {pattern}" + (f"  涉及文件：{files}" if files else ""))
+    return "\n".join(lines)
+
+
 async def run_fp_review(
     config,
     reporter,
@@ -149,6 +177,13 @@ async def run_fp_review(
     review_dir = Path.home() / ".opendeephole" / "fp_reviews" / review_id
     review_dir.mkdir(parents=True, exist_ok=True)
     set_fp_review_feedback(scan_id, feedback_entries or [])
+
+    # 拉取本次扫描挖掘出的 git 历史问题模式，供「历史/校验匹配」阶段使用
+    try:
+        history_patterns = await reporter.get_git_history(scan_id)
+        set_fp_review_history(scan_id, [p.model_dump() for p in history_patterns])
+    except Exception:
+        set_fp_review_history(scan_id, [])
 
     # Detect active MCP server for this project
     from agent import mcp_registry
@@ -275,60 +310,22 @@ async def run_fp_review(
                 ai_analysis_path.write_text(vuln.get("ai_analysis", ""), encoding="utf-8")
                 stage_outputs: dict[str, str] = {}
 
-                prove_bug = await _run_fp_review_stage(
-                    stage="prove_bug",
-                    scan_id=scan_id,
-                    workspace=vuln_workspace,
-                    review_dir=review_dir,
-                    review_id=review_id,
-                    vuln_index=vuln_index,
-                    artifact_dir=artifact_dir,
-                    output_markdown_path=artifact_dir / "prove-bug.md",
-                    vuln=vuln,
-                    project_id_for_prompt=project_id_for_prompt,
-                    timeout=fp_cli.timeout,
-                    cancel_event=cancel_event,
-                    cli_config=fp_cli,
-                    project=project,
-                    candidate=fake_candidate,
-                    ai_analysis_path=ai_analysis_path,
-                )
-                if cancel_event is not None and cancel_event.is_set():
-                    return
-
-                stage_outputs["prove_bug"] = _stage_markdown_or_placeholder("prove_bug", prove_bug)
-                await reporter.push_fp_stage_output(scan_id, review_id, vuln_index, "prove_bug", stage_outputs["prove_bug"])
-
-                if prove_bug is not None and prove_bug.result is not None and not prove_bug.result.confirmed:
-                    # 正方论证已判定非问题：正式早退，直接记录误报结果，
-                    # 跳过反方论证与最终裁决两个阶段。
-                    reason = _stage_reason(prove_bug) or "正方论证未能证明该候选是真实问题。"
-                    await reporter.push_fp_result(
-                        scan_id,
-                        review_id,
-                        vuln_index,
-                        "fp",
-                        "low",
-                        reason,
-                        "",
-                        stage_outputs=stage_outputs,
-                    )
-                    result_submitted = True
-                    await emit(
-                        "fp_review",
-                        f"[{position + 1}] FALSE POSITIVE（正方未证明问题，提前判定误报）severity=low",
-                    )
-                else:
-                    prove_fp = await _run_fp_review_stage(
-                        stage="prove_fp",
+                # --- Stage 0: 历史/校验匹配 ---
+                # 若候选能与某条历史问题模式或其它函数里把校验做对了的站点对应上，
+                # 直接判定 high 并跳过三阶段对抗辩论。
+                history_patterns = get_fp_review_history(scan_id)
+                variant_of = str(vuln.get("variant_of") or "")
+                matched_high = False
+                if history_patterns or variant_of:
+                    history_match = await _run_fp_review_stage(
+                        stage="history_match",
                         scan_id=scan_id,
                         workspace=vuln_workspace,
                         review_dir=review_dir,
                         review_id=review_id,
                         vuln_index=vuln_index,
                         artifact_dir=artifact_dir,
-                        output_markdown_path=artifact_dir / "prove-fp.md",
-                        input_markdown_paths=[artifact_dir / "prove-bug.md"],
+                        output_markdown_path=artifact_dir / "history-match.md",
                         vuln=vuln,
                         project_id_for_prompt=project_id_for_prompt,
                         timeout=fp_cli.timeout,
@@ -336,62 +333,156 @@ async def run_fp_review(
                         cli_config=fp_cli,
                         project=project,
                         candidate=fake_candidate,
-                        prove_bug=prove_bug,
                         ai_analysis_path=ai_analysis_path,
+                        history_patterns=history_patterns,
+                        variant_of=variant_of,
                     )
                     if cancel_event is not None and cancel_event.is_set():
                         return
-                    stage_outputs["prove_fp"] = _stage_markdown_or_placeholder("prove_fp", prove_fp)
-                    await reporter.push_fp_stage_output(scan_id, review_id, vuln_index, "prove_fp", stage_outputs["prove_fp"])
-
-                    final_judge = await _run_fp_review_stage(
-                        stage="final_judge",
-                        scan_id=scan_id,
-                        workspace=vuln_workspace,
-                        review_dir=review_dir,
-                        review_id=review_id,
-                        vuln_index=vuln_index,
-                        artifact_dir=artifact_dir,
-                        output_markdown_path=artifact_dir / "final-judge.md",
-                        input_markdown_paths=[
-                            artifact_dir / "prove-bug.md",
-                            artifact_dir / "prove-fp.md",
-                        ],
-                        vuln=vuln,
-                        project_id_for_prompt=project_id_for_prompt,
-                        timeout=fp_cli.timeout,
-                        cancel_event=cancel_event,
-                        cli_config=fp_cli,
-                        project=project,
-                        candidate=fake_candidate,
-                        prove_bug=prove_bug,
-                        prove_fp=prove_fp,
-                        ai_analysis_path=ai_analysis_path,
-                    )
-                    if cancel_event is not None and cancel_event.is_set():
-                        return
-                    stage_outputs["final_judge"] = _stage_markdown_or_placeholder("final_judge", final_judge)
-                    await reporter.push_fp_stage_output(scan_id, review_id, vuln_index, "final_judge", stage_outputs["final_judge"])
-
-                    if final_judge is None or final_judge.result is None:
-                        await emit("fp_review", f"[{position + 1}] Final-judge returned no result — preserving any previous review result")
-                    else:
-                        verdict, severity, reason, vulnerability_report = _finalize_fp_review_result(final_judge)
+                    stage_outputs["history_match"] = _stage_markdown_or_placeholder("history_match", history_match)
+                    await reporter.push_fp_stage_output(scan_id, review_id, vuln_index, "history_match", stage_outputs["history_match"])
+                    if history_match is not None and history_match.result is not None and history_match.result.confirmed:
+                        match_type = str(history_match.payload.get("match_type") or "") or ("history" if variant_of else "history")
+                        match_reference = str(history_match.payload.get("match_reference") or variant_of)
+                        reason = _stage_reason(history_match) or "命中历史问题模式或其它函数的正确校验，直接判定为 high。"
+                        report = _stage_report(history_match)
                         await reporter.push_fp_result(
                             scan_id,
                             review_id,
                             vuln_index,
-                            verdict,
-                            severity,
+                            "tp",
+                            "high",
                             reason,
-                            vulnerability_report,
+                            report,
+                            stage_outputs=stage_outputs,
+                            match_reference=match_reference,
+                            match_type=match_type,
+                        )
+                        result_submitted = True
+                        matched_high = True
+                        await emit(
+                            "fp_review",
+                            f"[{position + 1}] 命中历史/校验匹配（{match_type}）→ HIGH，跳过三阶段辩论",
+                        )
+
+                if not matched_high:
+                    prove_bug = await _run_fp_review_stage(
+                        stage="prove_bug",
+                        scan_id=scan_id,
+                        workspace=vuln_workspace,
+                        review_dir=review_dir,
+                        review_id=review_id,
+                        vuln_index=vuln_index,
+                        artifact_dir=artifact_dir,
+                        output_markdown_path=artifact_dir / "prove-bug.md",
+                        vuln=vuln,
+                        project_id_for_prompt=project_id_for_prompt,
+                        timeout=fp_cli.timeout,
+                        cancel_event=cancel_event,
+                        cli_config=fp_cli,
+                        project=project,
+                        candidate=fake_candidate,
+                        ai_analysis_path=ai_analysis_path,
+                    )
+                    if cancel_event is not None and cancel_event.is_set():
+                        return
+
+                    stage_outputs["prove_bug"] = _stage_markdown_or_placeholder("prove_bug", prove_bug)
+                    await reporter.push_fp_stage_output(scan_id, review_id, vuln_index, "prove_bug", stage_outputs["prove_bug"])
+
+                    if prove_bug is not None and prove_bug.result is not None and not prove_bug.result.confirmed:
+                        # 正方论证已判定非问题：正式早退，直接记录误报结果，
+                        # 跳过反方论证与最终裁决两个阶段。
+                        reason = _stage_reason(prove_bug) or "正方论证未能证明该候选是真实问题。"
+                        await reporter.push_fp_result(
+                            scan_id,
+                            review_id,
+                            vuln_index,
+                            "fp",
+                            "low",
+                            reason,
+                            "",
                             stage_outputs=stage_outputs,
                         )
                         result_submitted = True
                         await emit(
                             "fp_review",
-                            f"[{position + 1}] {'TRUE POSITIVE' if verdict == 'tp' else 'FALSE POSITIVE'} severity={severity}",
+                            f"[{position + 1}] FALSE POSITIVE（正方未证明问题，提前判定误报）severity=low",
                         )
+                    else:
+                        prove_fp = await _run_fp_review_stage(
+                            stage="prove_fp",
+                            scan_id=scan_id,
+                            workspace=vuln_workspace,
+                            review_dir=review_dir,
+                            review_id=review_id,
+                            vuln_index=vuln_index,
+                            artifact_dir=artifact_dir,
+                            output_markdown_path=artifact_dir / "prove-fp.md",
+                            input_markdown_paths=[artifact_dir / "prove-bug.md"],
+                            vuln=vuln,
+                            project_id_for_prompt=project_id_for_prompt,
+                            timeout=fp_cli.timeout,
+                            cancel_event=cancel_event,
+                            cli_config=fp_cli,
+                            project=project,
+                            candidate=fake_candidate,
+                            prove_bug=prove_bug,
+                            ai_analysis_path=ai_analysis_path,
+                        )
+                        if cancel_event is not None and cancel_event.is_set():
+                            return
+                        stage_outputs["prove_fp"] = _stage_markdown_or_placeholder("prove_fp", prove_fp)
+                        await reporter.push_fp_stage_output(scan_id, review_id, vuln_index, "prove_fp", stage_outputs["prove_fp"])
+
+                        final_judge = await _run_fp_review_stage(
+                            stage="final_judge",
+                            scan_id=scan_id,
+                            workspace=vuln_workspace,
+                            review_dir=review_dir,
+                            review_id=review_id,
+                            vuln_index=vuln_index,
+                            artifact_dir=artifact_dir,
+                            output_markdown_path=artifact_dir / "final-judge.md",
+                            input_markdown_paths=[
+                                artifact_dir / "prove-bug.md",
+                                artifact_dir / "prove-fp.md",
+                            ],
+                            vuln=vuln,
+                            project_id_for_prompt=project_id_for_prompt,
+                            timeout=fp_cli.timeout,
+                            cancel_event=cancel_event,
+                            cli_config=fp_cli,
+                            project=project,
+                            candidate=fake_candidate,
+                            prove_bug=prove_bug,
+                            prove_fp=prove_fp,
+                            ai_analysis_path=ai_analysis_path,
+                        )
+                        if cancel_event is not None and cancel_event.is_set():
+                            return
+                        stage_outputs["final_judge"] = _stage_markdown_or_placeholder("final_judge", final_judge)
+                        await reporter.push_fp_stage_output(scan_id, review_id, vuln_index, "final_judge", stage_outputs["final_judge"])
+
+                        if final_judge is None or final_judge.result is None:
+                            await emit("fp_review", f"[{position + 1}] Final-judge returned no result — preserving any previous review result")
+                        else:
+                            verdict, severity, reason, vulnerability_report = _finalize_fp_review_result(final_judge)
+                            await reporter.push_fp_result(
+                                scan_id,
+                                review_id,
+                                vuln_index,
+                                verdict,
+                                severity,
+                                reason,
+                                vulnerability_report,
+                                stage_outputs=stage_outputs,
+                            )
+                            result_submitted = True
+                            await emit(
+                                "fp_review",
+                                f"[{position + 1}] {'TRUE POSITIVE' if verdict == 'tp' else 'FALSE POSITIVE'} severity={severity}",
+                            )
 
             except asyncio.CancelledError:
                 raise
@@ -465,6 +556,7 @@ async def run_fp_review(
             import backend.registry as _reg_mod
             _reg_mod._registry = None
         _FP_REVIEW_FEEDBACK.pop(scan_id, None)
+        _FP_REVIEW_HISTORY.pop(scan_id, None)
         shutil.rmtree(review_dir, ignore_errors=True)
 
 
@@ -493,6 +585,8 @@ async def _run_fp_review_stage(
     prove_bug: _FpStageResult | None = None,
     prove_fp: _FpStageResult | None = None,
     ai_analysis_path: Path | None = None,
+    history_patterns: list[dict] | None = None,
+    variant_of: str = "",
 ) -> _FpStageResult | None:
     from backend.opencode.runner import _invoke_opencode, _read_result
 
@@ -513,6 +607,8 @@ async def _run_fp_review_stage(
             prove_bug=prove_bug,
             prove_fp=prove_fp,
             ai_analysis_path=ai_analysis_path,
+            history_patterns=history_patterns,
+            variant_of=variant_of,
         )
         if attempt > 1:
             prompt += (
@@ -604,6 +700,8 @@ def _build_fp_review_prompt(
     prove_bug: _FpStageResult | None = None,
     prove_fp: _FpStageResult | None = None,
     ai_analysis_path: Path | None = None,
+    history_patterns: list[dict] | None = None,
+    variant_of: str = "",
 ) -> str:
     output_path = str(output_markdown_path.resolve()) if output_markdown_path else ""
     input_paths = [str(path.resolve()) for path in input_markdown_paths or []]
@@ -612,7 +710,34 @@ def _build_fp_review_prompt(
         if ai_analysis_path
         else f"原始 AI 分析：{vuln['ai_analysis']} "
     )
-    if stage == "prove_bug":
+    if stage == "history_match":
+        patterns_text = _render_history_patterns(history_patterns or [])
+        variant_hint = (
+            f"该候选由同类变体排查命中，疑似对应历史问题：{variant_of}。"
+            f"请优先核实它与该历史问题是否同根因。"
+            if variant_of else ""
+        )
+        prompt = (
+            f"使用 `history-match` 技能，判断位于 "
+            f"{vuln['file']}:{vuln['line']} 函数 `{vuln['function']}` 中"
+            f"的 {vuln['vuln_type'].upper()} 候选能否与**历史问题模式**或**其它函数里把校验做对了的站点**对应上。"
+            f"project_id 为 `{project_id_for_prompt}`。"
+            f"review_id 为 `{review_id}`，vuln_index 为 `{vuln_index}`。"
+            f"原始描述：{vuln['description']} "
+            f"{ai_analysis_ref}"
+            f"{variant_hint}"
+            f"已挖掘的历史问题模式列表（可用 git show <出处提交> 复核根因）：\n{patterns_text or '（无）'}\n"
+            f"判断标准（满足任一即视为匹配）：(a) 与某条历史问题模式**同根因**（同缺陷类型、同触发条件）；"
+            f"(b) 全仓存在对**同一被调点/危险原语**把校验做对了的另一处调用站点，而本候选缺失该校验。"
+            f"你必须将本阶段 Markdown 论证写入 `{output_path}`，不得写入其它路径。"
+            f"你的 result_id 是 `{result_id}`。"
+            f"分析完成后，你**必须**使用此 result_id 调用 `submit_match_result` MCP 工具提交结论："
+            f"matched=true 表示对应上（match_type 填 history 或 validation，match_reference 填"
+            f"历史模式根因摘要+出处提交，或正确校验站点 path:line + 一句话说明，并提交 vulnerability_report，"
+            f"包含 Summary、Vulnerable Code、Full Call Stack、Root Cause、Why It is Reachable、Impact、Evidence 七个二级标题）；"
+            f"matched=false 表示无法对应（此时会转入三阶段辩论，不要勉强匹配）。不要使用 CVSS 打分。"
+        )
+    elif stage == "prove_bug":
         prompt = (
             f"使用 `prove-bug` 技能，作为正方论证位于 "
             f"{vuln['file']}:{vuln['line']} 函数 `{vuln['function']}` 中"
@@ -625,9 +750,8 @@ def _build_fp_review_prompt(
             f"你的 result_id 是 `{result_id}`。"
             f"分析完成后，你**必须**使用此 result_id 调用 submit_result MCP 工具提交阶段结论。"
             f"默认假设代码是安全的；只有证明真实代码问题时才使用 confirmed=true。"
-            f"severity 必须按外部可触发性判断：外部可触发问题使用 high；"
-            f"有代码问题但未证明外部可触发使用 medium；非问题使用 low。"
-            f"只要 confirmed=true，不管 severity 是 high 还是 medium，"
+            f"severity 只分两档：外部可触发的问题使用 high；其余（无法证明外部可触发或非问题）一律使用 low。"
+            f"只要 confirmed=true，"
             f"都必须在 vulnerability_report 中提交 Markdown 问题报告，"
             f"并包含 Summary、Vulnerable Code、Full Call Stack、Root Cause、"
             f"Why It is Reachable、Impact、Evidence 七个二级标题。不要使用 CVSS 打分。"
@@ -649,9 +773,9 @@ def _build_fp_review_prompt(
             f"你的 result_id 是 `{result_id}`。"
             f"分析完成后，你**必须**使用此 result_id 调用 submit_result MCP 工具提交阶段结论。"
             f"如果找到足以证明非问题的理由，使用 confirmed=false 且 severity=low。"
-            f"如果反方未能证明非问题，仍使用 confirmed=true；外部可触发为 high，"
-            f"仅代码问题或外部触发证据不足为 medium。"
-            f"只要 confirmed=true，不管 severity 是 high 还是 medium，"
+            f"如果反方未能证明非问题，仍使用 confirmed=true；severity 只分两档："
+            f"外部可触发为 high，其余一律为 low。"
+            f"只要 confirmed=true，"
             f"都必须提交 vulnerability_report，可沿用或修正 prove-bug 的报告。不要使用 CVSS 打分。"
         )
     elif stage == "final_judge":
@@ -674,11 +798,10 @@ def _build_fp_review_prompt(
             f"你的 result_id 是 `{result_id}`。"
             f"分析完成后，你**必须**使用此 result_id 调用 submit_result MCP 工具提交最终结论。"
             f"最终 confirmed=false 表示误报；confirmed=true 表示真实问题。"
-            f"severity 必须按外部可触发性判断：外部可触发问题使用 high；"
-            f"有代码问题但未证明外部可触发使用 medium；非问题使用 low。"
+            f"severity 只分两档：论证为外部可触发的问题使用 high；其余（无法证明外部可触发或非问题）一律使用 low。"
             f"最终 ai_analysis 必须像 memleak 输出一样包含完整代码链、关键代码片段和说明，"
             f"让读者不重新查看代码也能判断结论。"
-            f"只要 confirmed=true，不管 severity 是 high 还是 medium，"
+            f"只要 confirmed=true，"
             f"都必须提交 vulnerability_report，包含 Summary、Vulnerable Code、Full Call Stack、Root Cause、"
             f"Why It is Reachable、Impact、Evidence 七个二级标题。不要使用 CVSS 打分。"
         )
@@ -751,14 +874,13 @@ def _configure_fp_backend(config, review_dir: Path) -> None:
 
 
 def _normalize_fp_severity(severity: str, verdict: str) -> str:
+    # 去误报定级简化为二元：外部可触发 → high，其余 → low。
     normalized = (severity or "").strip().lower()
     if verdict == "fp":
         return "low"
     if normalized == "high":
         return "high"
-    if normalized in {"medium", "low"}:
-        return "medium"
-    return "medium"
+    return "low"
 
 
 def _finalize_fp_review_result(final_judge: _FpStageResult) -> tuple[str, str, str, str]:
@@ -887,6 +1009,12 @@ def _create_fp_workspace(
             if not vuln_type or entry.get("vuln_type") == vuln_type
         ]
         fp_section = format_feedback_experience(matching_feedback)
+        _write_fp_skill(
+            workspace,
+            "history-match",
+            Path(__file__).parent / "skills" / "fp_review_match.md",
+            fp_section,
+        )
         _write_fp_skill(
             workspace,
             "prove-bug",

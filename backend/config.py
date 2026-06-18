@@ -59,6 +59,19 @@ class MemoryApiDiscoveryConfig(BaseModel):
     max_candidates: int = 200
 
 
+class GitHistoryConfig(BaseModel):
+    """Git 历史安全问题挖掘配置。
+
+    扫描时分析 git 提交历史，提炼一批「历史安全问题模式」，并据此做同类
+    变体排查与去误报阶段的历史/校验匹配定级。
+    """
+    enabled: bool = True
+    max_commits: int = 200          # 最多分析最近 N 条提交
+    since: str = ""                 # git log --since 过滤（可空）
+    paths: str = ""                 # git log 路径过滤（可空，空格分隔）
+    variant_hunt: bool = True       # 是否对每条历史模式做全仓同类变体排查
+
+
 class StorageConfig(BaseModel):
     projects_dir: str = str(_DEFAULT_DATA_ROOT / "projects")
     scans_dir: str = str(_DEFAULT_DATA_ROOT / "scans")
@@ -105,6 +118,7 @@ class AppConfig(BaseModel):
     opencode: OpenCodeConfig = OpenCodeConfig()
     fp_review_cli: OpenCodeConfig | None = None
     memory_api_discovery: MemoryApiDiscoveryConfig = MemoryApiDiscoveryConfig()
+    git_history: GitHistoryConfig = GitHistoryConfig()
     storage: StorageConfig = StorageConfig()
     scan: ScanConfig = ScanConfig()
     logging: LoggingConfig = LoggingConfig()

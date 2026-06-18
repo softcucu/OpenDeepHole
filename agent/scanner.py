@@ -615,6 +615,7 @@ async def run_scan(
         # (written by a previous run of this scan_id).  DB existence alone does
         # NOT skip this phase.
         candidates: list[Candidate] = []
+        ran_fresh_static = False
         if retry_mode:
             candidates = [
                 _normalize_candidate_for_project(Candidate(**d), project_path, code_scan_path)
@@ -645,6 +646,7 @@ async def run_scan(
             total = len(candidates)
             await emit("static_analysis", f"已加载 {total} 个缓存候选点", candidate_index=total)
         else:
+            ran_fresh_static = True
             await emit("static_analysis", "Running static analyzers...")
 
             loop = asyncio.get_running_loop()
@@ -737,6 +739,79 @@ async def run_scan(
                 json.dumps([c.model_dump() for c in candidates], ensure_ascii=False),
                 encoding="utf-8",
             )
+
+        # --- Phase 5.5: git history mining + variant hunting (fresh scans only) ---
+        # 仅在首次扫描（非续扫、非缓存命中）时运行；续扫/复核从后端读取已上报的模式。
+        if (
+            ran_fresh_static
+            and not retry_mode
+            and getattr(config, "git_history", None) is not None
+            and config.git_history.enabled
+            and workspace is not None
+            and not cancel_event.is_set()
+        ):
+            try:
+                from agent.git_history import mine_history
+                from agent.variant_hunter import hunt_variants
+
+                history_patterns = await mine_history(
+                    config=config,
+                    project_path=project_path,
+                    workspace=workspace,
+                    scan_id=scan_id,
+                    cancel_event=cancel_event,
+                    emit=emit,
+                    cli_config=config.opencode,
+                )
+                if history_patterns:
+                    await reporter.push_git_history(scan_id, history_patterns)
+
+                if (
+                    history_patterns
+                    and config.git_history.variant_hunt
+                    and not cancel_event.is_set()
+                ):
+                    variant_candidates = await hunt_variants(
+                        config=config,
+                        patterns=history_patterns,
+                        project_path=project_path,
+                        code_scan_path=code_scan_path,
+                        workspace=workspace,
+                        scan_id=scan_id,
+                        checker_types=list(registry.keys()),
+                        cancel_event=cancel_event,
+                        emit=emit,
+                        cli_config=config.opencode,
+                    )
+                    existing_keys = {
+                        (c.file, c.line, c.function, c.vuln_type) for c in candidates
+                    }
+                    added = 0
+                    for raw_vc in variant_candidates:
+                        vc = _normalize_candidate_for_project(raw_vc, project_path, code_scan_path)
+                        if not _candidate_in_scan_scope(vc, project_path, code_scan_path):
+                            continue
+                        key = (vc.file, vc.line, vc.function, vc.vuln_type)
+                        if key in existing_keys:
+                            continue
+                        existing_keys.add(key)
+                        candidates.append(vc)
+                        added += 1
+                    if added:
+                        total = len(candidates)
+                        candidates_cache_path.write_text(
+                            json.dumps([c.model_dump() for c in candidates], ensure_ascii=False),
+                            encoding="utf-8",
+                        )
+                        await emit(
+                            "static_analysis",
+                            f"合并 {added} 个同类变体候选后共 {total} 个候选点",
+                            candidate_index=total,
+                        )
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                await emit("git_history", f"历史挖掘/变体排查异常（已跳过）: {exc}")
 
         function_source_cache = await asyncio.to_thread(
             _build_function_source_cache,
@@ -939,6 +1014,12 @@ async def run_scan(
                     ai_verdict="no_result",
                 )
             _attach_function_source(vuln, candidate, function_source_cache)
+            if (
+                isinstance(candidate.metadata, dict)
+                and candidate.metadata.get("variant_of")
+                and not vuln.variant_of
+            ):
+                vuln.variant_of = str(candidate.metadata.get("variant_of"))
 
             async with result_lock:
                 vulnerabilities.append(vuln)

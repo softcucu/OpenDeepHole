@@ -321,3 +321,132 @@ def register_tools(mcp: FastMCP) -> None:
         })
         _mcp_log("◀", "submit_result", f"saved → {result_path}")
         return f"结果已提交（result_id={result_id}）。"
+
+    @mcp.tool()
+    def submit_history_pattern(
+        result_id: str,
+        security_related: bool,
+        pattern: str = "",
+        lens_hint: str = "",
+        files: str = "",
+        rationale: str = "",
+    ) -> str:
+        """
+        提交一条 git 历史提交的安全问题模式判定结论。分析完单条提交后必须调用此工具。
+
+        参数：
+            result_id: 分析任务标识符（由分析提示中提供，原样传入，不要修改）。
+            security_related: 该提交是否是一次安全修复。
+            pattern: 若相关，提炼出的可复用问题模式（根因 + 缺陷类型 + 触发条件的抽象描述，不要只抄提交标题）。
+            lens_hint: 安全视角，可选值 memory/integer/race/injection/authn/crypto/dos/infoleak。
+            files: 涉及的文件，逗号分隔。
+            rationale: 判定理由 + 改动要点摘要。
+
+        返回：
+            提交成功的确认消息。
+        """
+        _mcp_log("▶", "submit_history_pattern",
+                 f"security_related={security_related} pattern={_preview(pattern)}")
+        scans_dir = _get_config().storage.scans_dir
+        result_path = Path(scans_dir) / f"{result_id}.json"
+        result_path.parent.mkdir(parents=True, exist_ok=True)
+        file_list = [s.strip() for s in str(files or "").replace("\n", ",").split(",") if s.strip()]
+        result_path.write_text(json.dumps({
+            "kind": "history_pattern",
+            "security_related": bool(security_related),
+            "pattern": pattern,
+            "lens_hint": lens_hint,
+            "files": file_list,
+            "rationale": rationale,
+        }, ensure_ascii=False), encoding="utf-8")
+        _mcp_log("◀", "submit_history_pattern", f"saved → {result_path}")
+        return f"历史问题模式已提交（result_id={result_id}）。"
+
+    @mcp.tool()
+    def submit_variant_finding(
+        result_id: str,
+        file: str,
+        line: int,
+        function: str,
+        vuln_type: str,
+        description: str,
+        rationale: str = "",
+    ) -> str:
+        """
+        提交一处同类变体排查命中的疑似缺陷站点。每核实坐实一处即调用一次（可多次调用累加）。
+
+        参数：
+            result_id: 任务标识符（由分析提示中提供，原样传入，不要修改）。
+            file: 命中站点所在文件路径（相对项目根）。
+            line: 命中站点行号。
+            function: 命中站点所在函数。
+            vuln_type: 缺陷类型，必须从分析提示给出的可选检查项列表中选一个。
+            description: 一句话描述该处缺陷及其与历史问题模式的相似点。
+            rationale: 可选，核实推理过程（为何该站点缺少等价校验/存在同类缺陷）。
+
+        返回：
+            提交成功的确认消息。
+        """
+        _mcp_log("▶", "submit_variant_finding",
+                 f"{file}:{line} vuln_type={vuln_type!r} {_preview(description)}")
+        scans_dir = _get_config().storage.scans_dir
+        result_path = Path(scans_dir) / f"{result_id}.json"
+        result_path.parent.mkdir(parents=True, exist_ok=True)
+        _append_result_payload(result_path, {
+            "kind": "variant_finding",
+            "file": file,
+            "line": line,
+            "function": function,
+            "vuln_type": vuln_type,
+            "description": description,
+            "rationale": rationale,
+        })
+        _mcp_log("◀", "submit_variant_finding", f"saved → {result_path}")
+        return f"变体站点已提交（result_id={result_id}）。"
+
+    @mcp.tool()
+    def submit_match_result(
+        result_id: str,
+        matched: bool,
+        match_type: str = "",
+        match_reference: str = "",
+        description: str = "",
+        ai_analysis: str = "",
+        vulnerability_report: str = "",
+    ) -> str:
+        """
+        提交去误报「历史/校验匹配」阶段的结论。判断该候选是否能与历史问题模式或其它函数的
+        正确校验对应上；若能对应，则直接判定为 high。
+
+        参数：
+            result_id: 任务标识符（由分析提示中提供，原样传入，不要修改）。
+            matched: 是否成立匹配（true 表示与历史问题或其它函数校验对应上，可直接定为 high）。
+            match_type: 匹配类型，"history"（对应历史问题模式）或 "validation"（对应其它函数的正确校验）。
+            match_reference: 对应的修复/校验描述：历史模式根因摘要+出处提交，或正确校验站点 path:line + 一句话说明。
+            description: 一句话结论摘要。
+            ai_analysis: 详细推理（含代码路径与匹配依据）。
+            vulnerability_report: 匹配成立时填写的 Markdown 问题报告。
+
+        返回：
+            提交成功的确认消息。
+        """
+        _mcp_log("▶", "submit_match_result",
+                 f"matched={matched} match_type={match_type!r} ref={_preview(match_reference)}")
+        scans_dir = _get_config().storage.scans_dir
+        result_path = Path(scans_dir) / f"{result_id}.json"
+        result_path.parent.mkdir(parents=True, exist_ok=True)
+        result_path.write_text(json.dumps({
+            "kind": "match_result",
+            "confirmed": bool(matched),
+            "severity": "high" if matched else "low",
+            "description": description,
+            "ai_analysis": ai_analysis,
+            "vulnerability_report": vulnerability_report,
+            "match_type": match_type,
+            "match_reference": match_reference,
+            "file": "",
+            "line": 0,
+            "function": "",
+        }, ensure_ascii=False), encoding="utf-8")
+        _mcp_log("◀", "submit_match_result", f"saved → {result_path}")
+        return f"匹配结论已提交（result_id={result_id}）。"

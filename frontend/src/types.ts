@@ -114,6 +114,15 @@ export interface Vulnerability {
   ticket_id?: string;
   function_source?: string;
   function_start_line?: number | null;
+  variant_of?: string;
+}
+
+export interface HistoryPattern {
+  pattern: string;
+  source: string;
+  lens_hint: string;
+  files: string[];
+  rationale: string;
 }
 
 export interface SkillReport {
@@ -314,6 +323,8 @@ export interface FpReviewResult {
   reason: string;
   vulnerability_report: string;
   stage_outputs?: Record<string, string>;
+  match_reference?: string;
+  match_type?: "history" | "validation" | "" | string;
   created_at: string;
 }
 

@@ -2,6 +2,10 @@
 
 ## 2026-06-18
 
+- **新增** git 历史安全问题挖掘 + 同类变体排查（迁移自 SecAnt）：扫描流水线在索引后新增阶段，逐条提交（每条提交一个 LLM 调用）判定是否为安全修复并提炼「历史问题模式」（根因+缺陷类型+触发条件抽象），随后对每条模式派一个 agent 在全仓搜索同类未修复站点，命中的作为带 `variant_of` 的新候选并入审计。新增配置 `git_history`（`enabled`/`max_commits`/`since`/`paths`/`variant_hunt`）、Agent 模块 `agent/git_history.py` 与 `agent/variant_hunter.py`、skill `git_history_mine.md`/`variant_hunt.md`、MCP 工具 `submit_history_pattern`/`submit_variant_finding`、端点 `POST/GET /api/agent/scan/{id}/git_history` 与 `GET /api/scan/{id}/git_history`，扫描详情页新增「git 历史问题模式」面板
+- **新增** 去误报「历史/校验匹配」首阶段（`history_match`）：复核每个候选时先判断它能否与某条历史问题模式（同根因）或其它函数里把校验做对了的调用站点对应上；命中则**直接判定 high 并跳过三阶段对抗辩论**，报告中通过 `match_type`（history/validation）+ `match_reference` 字段标明对应的修复/校验，新增 skill `fp_review_match.md` 与 MCP 工具 `submit_match_result`
+- **变更** 去误报定级简化为二元 high/low：命中历史/校验匹配或论证为外部可触发 → high，其余（含原 medium、误报）一律 → low；`prove_bug`/`prove_fp`/`final_judge` 三阶段 prompt 与 `_normalize_fp_severity` 同步调整
+- **新增** 字段：`Vulnerability.variant_of`（同类变体来源）、`FpReviewResult.match_reference`/`match_type`；报告导出（CSV/单漏洞 Markdown/report.zip）与前端复核结果区均展示这些字段（旧库自动迁移，新增表 `git_history_patterns`）
 - **优化** `multi_ptr_leak2`（多层指针外层释放遗漏成员）静态分析器（自 `feat/deep-mining` 分支拣选）：索引函数改为逐函数流式处理，单棵 tree-sitter Tree 用完即弃，常驻内存从「整仓 N 棵 AST」降到「单函数 1 棵」；解析前用 `_RELEASE_HINT_RE` 做廉价文本预筛跳过不含释放语义 token 的函数；新增 `scope_prefix` 将处理范围收敛到本次扫描路径；释放 wrapper 名直接从索引函数名列提取无需解析函数体。行为与召回不变，仅性能/内存优化
 
 ## 2026-06-17

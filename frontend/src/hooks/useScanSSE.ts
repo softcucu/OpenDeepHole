@@ -60,6 +60,8 @@ interface FpReviewResultEvent {
   reason: string;
   vulnerability_report?: string;
   stage_outputs?: Record<string, string>;
+  match_reference?: string;
+  match_type?: string;
 }
 
 interface FpReviewStageOutputEvent {

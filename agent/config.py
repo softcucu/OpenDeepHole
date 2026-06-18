@@ -62,6 +62,16 @@ class MemoryApiDiscoveryConfig:
     max_candidates: int = 200
 
 
+@dataclass
+class GitHistoryConfig:
+    """Git 历史安全问题挖掘配置（与后端 GitHistoryConfig 对应）。"""
+    enabled: bool = True
+    max_commits: int = 200
+    since: str = ""
+    paths: str = ""
+    variant_hunt: bool = True
+
+
 def normalize_cli_config(config: OpenCodeConfig) -> OpenCodeConfig:
     """Normalize a CLI config in place while keeping legacy executable values."""
     tool = (config.tool or "").strip().lower()
@@ -137,6 +147,7 @@ class AgentConfig:
     fp_review_cli: OpenCodeConfig | None = None
     opencode_concurrency: int = 1
     memory_api_discovery: MemoryApiDiscoveryConfig = field(default_factory=MemoryApiDiscoveryConfig)
+    git_history: GitHistoryConfig = field(default_factory=GitHistoryConfig)
     # Runtime-only: path to the loaded config file (not serialized)
     config_file: Optional[Path] = field(default=None, repr=False, compare=False)
 
@@ -178,6 +189,11 @@ def apply_remote_config(config: AgentConfig, remote: dict) -> None:
         for f in dataclasses.fields(config.memory_api_discovery):
             if f.name in section and section[f.name] is not None:
                 setattr(config.memory_api_discovery, f.name, section[f.name])
+    section = remote.get("git_history") or {}
+    if isinstance(section, dict):
+        for f in dataclasses.fields(config.git_history):
+            if f.name in section and section[f.name] is not None:
+                setattr(config.git_history, f.name, section[f.name])
 
 
 def apply_network_env(config: AgentConfig) -> None:
@@ -206,6 +222,10 @@ def remote_config_dict(config: AgentConfig) -> dict:
         "memory_api_discovery": {
             f.name: getattr(config.memory_api_discovery, f.name)
             for f in dataclasses.fields(config.memory_api_discovery)
+        },
+        "git_history": {
+            f.name: getattr(config.git_history, f.name)
+            for f in dataclasses.fields(config.git_history)
         },
     }
 
@@ -244,6 +264,11 @@ def load_config(path: Optional[Path] = None) -> AgentConfig:
         k: v for k, v in raw.get("memory_api_discovery", {}).items()
         if k in memory_api_fields
     }
+    git_history_fields = {f.name for f in dataclasses.fields(GitHistoryConfig)}
+    git_history_raw = {
+        k: v for k, v in raw.get("git_history", {}).items()
+        if k in git_history_fields
+    }
     if "tool" not in oc_raw and "executable" in oc_raw:
         oc_raw["tool"] = ""
     fp_raw = raw.get("fp_review_cli", None)
@@ -272,6 +297,7 @@ def load_config(path: Optional[Path] = None) -> AgentConfig:
         fp_review_cli=normalize_cli_config(fp_cfg) if fp_cfg is not None else None,
         opencode_concurrency=_bounded_int(raw.get("opencode_concurrency", 1), 1, 1, 8),
         memory_api_discovery=MemoryApiDiscoveryConfig(**memory_api_raw),
+        git_history=GitHistoryConfig(**git_history_raw),
         config_file=path,
     )
     return cfg
@@ -303,6 +329,10 @@ def save_config(config: AgentConfig) -> None:
     raw["memory_api_discovery"] = {
         f.name: getattr(config.memory_api_discovery, f.name)
         for f in dataclasses.fields(config.memory_api_discovery)
+    }
+    raw["git_history"] = {
+        f.name: getattr(config.git_history, f.name)
+        for f in dataclasses.fields(config.git_history)
     }
     with open(path, "w", encoding="utf-8") as f:
         yaml.dump(raw, f, allow_unicode=True, default_flow_style=False)
