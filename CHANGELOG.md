@@ -1,5 +1,11 @@
 # 更新日志
 
+## 2026-06-22
+
+- **变更** 去误报由「手动点击」改为**扫描完成自动触发**：扫描完成（status=complete）且存在已确认漏洞时，后端在 `agent_finish_scan` 末尾自动发起 AI 去误报，无需再点「AI去误报」按钮（按钮仍保留，可手动重跑/补跑未复核项）。仅在该扫描尚无去误报任务时触发，避免 resume/重复 finish 造成重复复核。新增配置 `fp_review.auto_on_complete`（默认 `true`，可关闭）；触发逻辑抽取为 `backend/api/scan.py` 内部函数 `_start_fp_review`，被手动端点与自动触发共用
+- **变更** 扫描详情页改为**左右主从布局**：左侧为精简问题列表（文件:行 / 函数 / 类型 / 严重级别 + AI/去误报状态徽章、变体/命中标记），顶部保留严重级别与类型筛选；右侧为选中问题详情，描述、AI 分析与去误报各阶段（历史/校验匹配、正方论证、反方论证、最终裁决）输出均以 Markdown 渲染展示
+- **变更** 详情页默认**只显示「问题」**：AI 审计未确认（confirmed=false）或去误报判为 fp 的候选默认隐藏，顶部「显示全部」开关可查看被隐藏的非问题候选
+
 ## 2026-06-18
 
 - **新增** git 历史安全问题挖掘 + 同类变体排查（迁移自 SecAnt）：扫描流水线在索引后新增阶段，逐条提交（每条提交一个 LLM 调用）判定是否为安全修复并提炼「历史问题模式」（根因+缺陷类型+触发条件抽象），随后对每条模式派一个 agent 在全仓搜索同类未修复站点，命中的作为带 `variant_of` 的新候选并入审计。新增配置 `git_history`（`enabled`/`max_commits`/`since`/`paths`/`variant_hunt`）、Agent 模块 `agent/git_history.py` 与 `agent/variant_hunter.py`、skill `git_history_mine.md`/`variant_hunt.md`、MCP 工具 `submit_history_pattern`/`submit_variant_finding`、端点 `POST/GET /api/agent/scan/{id}/git_history` 与 `GET /api/scan/{id}/git_history`，扫描详情页新增「git 历史问题模式」面板

@@ -110,6 +110,12 @@ class LLMApiConfig(BaseModel):
     stream: bool = False
 
 
+class FpReviewConfig(BaseModel):
+    """去误报（false-positive review）流程配置。"""
+    # 扫描完成且存在已确认漏洞时，自动触发去误报，无需手动点击。
+    auto_on_complete: bool = True
+
+
 class AppConfig(BaseModel):
     no_proxy: str = "10.0.0.0/8"
     opencode_concurrency: int = 1
@@ -117,6 +123,7 @@ class AppConfig(BaseModel):
     mcp_server: MCPServerConfig = MCPServerConfig()
     opencode: OpenCodeConfig = OpenCodeConfig()
     fp_review_cli: OpenCodeConfig | None = None
+    fp_review: FpReviewConfig = FpReviewConfig()
     memory_api_discovery: MemoryApiDiscoveryConfig = MemoryApiDiscoveryConfig()
     git_history: GitHistoryConfig = GitHistoryConfig()
     storage: StorageConfig = StorageConfig()

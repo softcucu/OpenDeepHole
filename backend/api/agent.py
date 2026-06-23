@@ -42,6 +42,7 @@ from pydantic import BaseModel
 
 from backend.api.scan import _running_scans, _scan_owners
 from backend.auth import get_current_user
+from backend.config import get_config
 from backend.logger import get_logger
 from backend.models import (
     AgentGitHistory,
@@ -868,7 +869,7 @@ async def agent_replace_skill_reports(scan_id: str, body: dict) -> dict:
 
 
 @router.post("/scan/{scan_id}/finish")
-async def agent_finish_scan(scan_id: str, body: AgentScanFinish) -> dict:
+async def agent_finish_scan(scan_id: str, body: AgentScanFinish, request: Request) -> dict:
     """Agent pushes final results when the scan completes, errors, or is cancelled."""
     store = get_scan_store()
 
@@ -929,10 +930,31 @@ async def agent_finish_scan(scan_id: str, body: AgentScanFinish) -> dict:
     })
 
     confirmed = sum(1 for v in body.vulnerabilities if v.confirmed)
+    if confirmed == 0:
+        confirmed = sum(1 for v in store.get_vulnerabilities(scan_id) if v.confirmed)
     logger.info(
         "Agent finished scan %s: %s — %d confirmed / %d candidates",
         scan_id, body.status, confirmed, final_total,
     )
+
+    # 扫描完成且存在已确认漏洞时，自动触发去误报（无需手动点击）。
+    # 仅在尚无去误报任务时触发，避免 resume / 重复 finish 造成重复复核。
+    if (
+        final_status == ScanItemStatus.COMPLETE
+        and confirmed > 0
+        and get_config().fp_review.auto_on_complete
+        and store.get_fp_review_by_scan(scan_id) is None
+    ):
+        from backend.api.scan import _start_fp_review, _server_url_from_request
+        try:
+            started = await _start_fp_review(
+                scan_id, _server_url_from_request(request), raise_on_error=False
+            )
+            if started is not None:
+                logger.info("Auto FP review started for scan %s after completion", scan_id)
+        except Exception as exc:  # 自动触发失败不应影响扫描完成处理
+            logger.warning("Auto FP review for scan %s failed: %s", scan_id, exc)
+
     return {"ok": True}
 
 

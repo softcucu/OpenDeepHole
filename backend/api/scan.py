@@ -1221,33 +1221,54 @@ async def batch_unmark_vulnerabilities(
 # ---------------------------------------------------------------------------
 
 
-@router.post("/api/scan/{scan_id}/fp_review", response_model=dict)
-async def trigger_fp_review(
+async def _start_fp_review(
     scan_id: str,
-    request: Request,
-    current_user: User = Depends(get_current_user),
-) -> dict:
-    """Trigger AI false-positive review for all confirmed vulnerabilities in a scan."""
-    _check_scan_owner(scan_id, current_user)
-    from backend.api.agent import create_agent_runtime_update_payload, send_agent_command
+    server_url: str,
+    *,
+    raise_on_error: bool = True,
+) -> dict | None:
+    """Start an AI false-positive review for all confirmed vulnerabilities in a scan.
 
-    scan = await get_scan_status(scan_id, current_user)
+    Shared by the manual trigger endpoint and the auto-trigger on scan completion.
+    When ``raise_on_error`` is False, failures are logged and ``None`` is returned
+    instead of raising — used by the auto-trigger path so a failed/blocked review
+    never breaks scan-finish handling.
+    """
+    from backend.api.agent import (
+        create_agent_runtime_update_payload,
+        send_agent_command,
+        _registered_agents,
+        _agent_ws,
+    )
+
+    def _fail(status_code: int, detail: str) -> None:
+        if raise_on_error:
+            raise HTTPException(status_code=status_code, detail=detail)
+        logger.warning("Auto FP review for scan %s skipped: %s", scan_id, detail)
+        return None
+
     store = get_scan_store()
-    latest_fp_results = _latest_fp_review_result_map(scan_id)
+    if scan_id in _running_scans:
+        scan = _running_scans[scan_id]
+    else:
+        loaded = store.load_scan(scan_id)
+        if loaded is None:
+            return _fail(404, "Scan not found")
+        scan = loaded[0]
 
+    latest_fp_results = _latest_fp_review_result_map(scan_id)
     confirmed = _ordered_fp_review_candidates(scan, latest_fp_results)
     if not confirmed:
-        raise HTTPException(status_code=400, detail="No confirmed vulnerabilities to review")
+        return _fail(400, "No confirmed vulnerabilities to review")
 
     meta = store.get_scan_meta(scan_id)
     if meta is None:
-        raise HTTPException(status_code=404, detail="Scan not found")
+        return _fail(404, "Scan not found")
 
     if not meta.agent_id and not meta.agent_name:
-        raise HTTPException(status_code=400, detail="No agent associated with this scan")
+        return _fail(400, "No agent associated with this scan")
 
     # Resolve agent_id — may be stale if agent reconnected
-    from backend.api.agent import _registered_agents, _agent_ws
     agent_id = meta.agent_id
     if not agent_id or agent_id not in _agent_ws:
         agent_id = None
@@ -1257,9 +1278,9 @@ async def trigger_fp_review(
                     agent_id = aid
                     break
     if agent_id is None:
-        raise HTTPException(
-            status_code=400,
-            detail=f"扫描关联的 Agent「{meta.agent_name or '未知'}」不在线，请先启动该 Agent",
+        return _fail(
+            400,
+            f"扫描关联的 Agent「{meta.agent_name or '未知'}」不在线，请先启动该 Agent",
         )
 
     # Update stored agent_id if it changed
@@ -1278,11 +1299,11 @@ async def trigger_fp_review(
         "project_path": meta.project_path,
         "vulnerabilities": confirmed,
         "feedback_entries": feedback_entries,
-        "agent_runtime_update": create_agent_runtime_update_payload(_server_url_from_request(request)),
+        "agent_runtime_update": create_agent_runtime_update_payload(server_url),
     })
     if not ok:
         store.update_fp_review_job(review_id, status="error", error_message="Agent not connected")
-        raise HTTPException(status_code=502, detail="Agent not connected")
+        return _fail(502, "Agent not connected")
 
     store.update_fp_review_job(review_id, status="running")
     from backend.sse import publish
@@ -1297,6 +1318,17 @@ async def trigger_fp_review(
         "total": len(confirmed),
         "processed": 0,
     }
+
+
+@router.post("/api/scan/{scan_id}/fp_review", response_model=dict)
+async def trigger_fp_review(
+    scan_id: str,
+    request: Request,
+    current_user: User = Depends(get_current_user),
+) -> dict:
+    """Trigger AI false-positive review for all confirmed vulnerabilities in a scan."""
+    _check_scan_owner(scan_id, current_user)
+    return await _start_fp_review(scan_id, _server_url_from_request(request), raise_on_error=True)
 
 
 @router.post("/api/scan/{scan_id}/fp_review/stop")

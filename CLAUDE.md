@@ -84,12 +84,14 @@ Each scan runs the full pipeline locally on the agent machine:
 
 Per vulnerability: an optional `history_match` stage first, then the three-stage debate `prove_bug` → `prove_fp` → `final_judge`, each a CLI call that must write a Markdown artifact **and** call its submit tool (missing either → retry per `fp_review_cli.max_retries`, then stage failure; retry prompts re-emphasize the contract).
 
+- **Auto-trigger on completion**: when a scan finishes with status `complete` and ≥1 confirmed vulnerability, the backend automatically starts FP review at the end of `agent_finish_scan` (no manual click). Gated by config `fp_review.auto_on_complete` (default `true`) and skipped if the scan already has an FP review job (avoids duplicate triggers on resume/repeat finish). The shared trigger logic lives in `backend/api/scan.py::_start_fp_review` (used by both the manual `POST /api/scan/{id}/fp_review` endpoint and the auto path; `raise_on_error=False` on the auto path so a blocked review never breaks scan finish). The manual button is retained for re-runs / catching up unreviewed candidates.
 - **History/validation match** (`history_match`, skill `fp_review_match.md`, tool `submit_match_result`): runs first when git-history patterns exist (fetched via `reporter.get_git_history`) or the candidate carries `variant_of`. If the candidate corresponds to a historical problem pattern (same root cause) or another call site that validates correctly (which this site lacks), it is **directly marked `high` and the three-stage debate is skipped**; the result records `match_type` (`history`|`validation`) and `match_reference`. No match → fall through to the debate.
 - **Binary severity**: FP-review severity is now high/low only — match or externally-triggerable → `high`, everything else (former medium, fp) → `low` (`_normalize_fp_severity`, debate prompts, and the result endpoint all enforce this).
 - **Early exit**: if `prove_bug` submits `confirmed=false`, the review pushes a final `fp` result with prove_bug's reasoning and skips the other two stages. Only confirmed-by-prove_bug candidates go through the full debate, where `final_judge` decides.
 - **Concurrency**: review workers are sized from `total_model_capacity()`; the agent reports the full set of in-progress vuln indices (`active_indices`) with each progress push. Backend stores it in `fp_review_jobs.current_vuln_indices` (JSON) and the frontend highlights all of them.
 - **Reconnect resilience**: agent hello includes `active_fp_reviews`; backend `_reattach_active_fp_reviews()` re-points the scan at the new agent_id and recovers jobs error-marked by the disconnect grace task. The progress/result/stage-output endpoints also auto-recover disconnect-errored jobs to running.
 - **Persistence**: stage Markdown is stored in `fp_review_stage_outputs`; `GET /api/scan/{id}/fp_review` merges it into results (placeholder entries with empty `reason` for vulns without a final verdict), so reloads keep showing in-progress/failed stage output. The frontend shows "复核失败" when a job has finished but a vuln has no final verdict.
+- **Detail UI** (`frontend/src/components/VulnerabilityList.tsx`): master-detail layout — left a compact issue list (file:line / function / type / severity + AI & FP-review status badges, variant/match markers) with severity & type filters on top; right the selected issue's detail, rendering `description`, `ai_analysis`, and each FP stage output (`history_match`/`prove_bug`/`prove_fp`/`final_judge`) as Markdown. **Default view shows only "issues"** — candidates that AI audit left unconfirmed (`confirmed=false`) or that FP review marked `fp` are hidden by default; a "显示全部" toggle reveals them.
 
 ## Plugin Architecture (Checkers)
 
@@ -226,6 +228,6 @@ checkers/         — Plugin directories (npd, oob, safe_mem_oob, uaf, intoverfl
 code_parser/      — Shared C/C++ indexer (ctags + tree-sitter + SQLite)
 mcp_server/       — MCP Server (tools.py: code queries + submit_result/submit_history_pattern/submit_variant_finding/submit_match_result)
 frontend/         — React + TypeScript + Vite + Tailwind CSS
-config.yaml       — Server-side settings (ports, storage, logging, llm_api, opencode, git_history)
+config.yaml       — Server-side settings (ports, storage, logging, llm_api, opencode, git_history, fp_review)
 agent.yaml        — Agent-side settings (server_url, agent_name, llm_api, opencode, fp_review_cli, git_history)
 ```
