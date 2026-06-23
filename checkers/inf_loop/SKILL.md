@@ -5,16 +5,15 @@ description: 验证死循环候选漏洞（CWE-835），判断是否为真实可
 
 # 死循环漏洞验证
 
-你正在验证一个由 semgrep 静态分析发现的候选死循环漏洞（CWE-835）。你的任务是判断这是真实的 bug 还是误报。
+你正在核实一处候选死循环线索（CWE-835）。你的任务是判断这是真实的 bug 还是误报。
 
 ## 背景
 
-静态分析器已经完成了以下工作：
-- 使用 semgrep 扫描了 15 类死循环模式（while/for/do-while 循环控制变量未更新、C++ 迭代器失效、容器遍历中修改容器、zero-step 步进等）
-- 在候选位置发现了"某个 continue/迭代路径上，循环控制状态未被推进"的模式
-- candidate 描述中的**规则类型**指明了具体是哪类模式，**循环控制变量**指明了被追踪的变量名
+候选线索通常落在以下死循环形态之一（while/for/do-while 循环控制变量未更新、C++ 迭代器失效、容器遍历中修改容器、zero-step 步进等），即"某个 continue/迭代路径上，循环控制状态未被推进"。
 
-semgrep 是纯语法模式匹配，无法感知：跨函数的状态更新、指针/引用间接修改、外部信号/flag 退出、以及有意设计的事件循环。你需要做语义层面的验证。
+候选描述中已尽量给出**循环控制变量**等线索（请据此自行判断属于下文哪种形态）。
+
+候选线索只来自语法层面的初筛，无法感知：跨函数的状态更新、指针/引用间接修改、外部信号/flag 退出、以及有意设计的事件循环。你需要做语义层面的验证。
 
 ## 可用工具
 
@@ -26,29 +25,29 @@ semgrep 是纯语法模式匹配，无法感知：跨函数的状态更新、指
 
 ### Step 1 — 读取完整函数体
 
-用 `view_function_code` 获取 candidate 所在函数的完整源码。注意：candidate 描述中只有 semgrep 匹配的几行，不足以判断，必须看整个函数。
+用 `view_function_code` 获取 candidate 所在函数的完整源码。注意：候选描述只给了少量上下文，不足以判断，必须看整个函数。
 
-### Step 2 — 理解规则类型，明确验证目标
+### Step 2 — 判断候选形态，明确验证目标
 
-根据 candidate 描述中的**规则类型**，确定本次要验证的核心问题：
+根据候选涉及的循环形态（自行判断属于下表哪类），确定本次要验证的核心问题：
 
-| 规则类型 | 核心验证问题 |
+| 候选形态 | 核心验证问题 |
 |---------|------------|
-| `*-while-continue-no-progress` | continue 分支之前，循环控制变量是否在**所有代码路径**上都有更新？ |
-| `*-for-empty-update-continue-*` | for 循环 increment 为空，continue 跳回 condition 而非 increment，变量是否在循环体内每条 continue 前更新？ |
-| `do-while-continue-no-progress` | do-while 的 continue 跳回 condition，该 condition 依赖的状态是否在 continue 前更新？ |
-| `unchecked-zero-step-*` | 步进量（`$STEP`）在运行时是否可能为 0？若为 0 则循环不前进 |
-| `erase-without-reassign-in-loop` | `container.erase(it)` 的返回值是否被赋回迭代器？否则迭代器失效导致 UB 或死循环 |
-| `continue-without-progress`（iterator）| 迭代器控制的循环，continue 分支前迭代器是否推进？ |
-| `string-find-without-position-advance` | `str.find(x, pos)` 的 pos 是否在循环中递增？否则永远在同一位置搜索 |
-| `associative-lower-bound-key-not-advanced` | `lower_bound(key)` 的 key 是否在循环中推进？ |
-| `container-mutated-during-iterator-loop` | 在迭代器循环中 insert/erase，是否正确更新了迭代器？ |
-| `range-for-mutates-same-container` | range-for 遍历时修改同一容器，是否会导致迭代器失效？ |
-| `worklist-reenqueue-same-item-without-state-change` | 重新入队的元素，其状态是否有改变？否则会被无限反复处理 |
+| while + continue 无推进 | continue 分支之前，循环控制变量是否在**所有代码路径**上都有更新？ |
+| for 空 increment + continue | for 循环 increment 为空，continue 跳回 condition 而非 increment，变量是否在循环体内每条 continue 前更新？ |
+| do-while + continue 无推进 | do-while 的 continue 跳回 condition，该 condition 依赖的状态是否在 continue 前更新？ |
+| 步进量可能为 0 | 步进量（`$STEP`）在运行时是否可能为 0？若为 0 则循环不前进 |
+| erase 后未回写迭代器 | `container.erase(it)` 的返回值是否被赋回迭代器？否则迭代器失效导致 UB 或死循环 |
+| 迭代器循环 continue 无推进 | 迭代器控制的循环，continue 分支前迭代器是否推进？ |
+| str.find 位置未递增 | `str.find(x, pos)` 的 pos 是否在循环中递增？否则永远在同一位置搜索 |
+| lower_bound key 未推进 | `lower_bound(key)` 的 key 是否在循环中推进？ |
+| 迭代器循环中修改容器 | 在迭代器循环中 insert/erase，是否正确更新了迭代器？ |
+| range-for 修改同一容器 | range-for 遍历时修改同一容器，是否会导致迭代器失效？ |
+| worklist 重复入队未改状态 | 重新入队的元素，其状态是否有改变？否则会被无限反复处理 |
 
 ### Step 3 — 验证退出条件与间接更新
 
-检查循环内是否有 semgrep 遗漏的退出或推进机制：
+检查循环内是否有初筛遗漏的退出或推进机制：
 
 - **显式退出**：`break` / `return` / `throw` / `goto` / `exit()` 是否覆盖了所有可达路径？
 - **子函数内的隐式更新**：continue 前调用的子函数是否在内部推进了状态（如 `buf = next_record(buf)`）？用 `view_function_code` 查看可疑的子函数。
@@ -79,8 +78,8 @@ semgrep 是纯语法模式匹配，无法感知：跨函数的状态更新、指
 
 ### 判为误报（confirmed=false）的情形
 
-1. **循环变量实际被更新**：通过指针/引用/子函数间接更新，semgrep 未能识别
-2. **有效的隐式退出**：break/return 存在于 semgrep 未覆盖的路径上（如宏展开、内联函数）
+1. **循环变量实际被更新**：通过指针/引用/子函数间接更新，语法初筛未能识别
+2. **有效的隐式退出**：break/return 存在于语法初筛未覆盖的路径上（如宏展开、内联函数）
 3. **有意设计的无限循环**：主循环、事件泵、含阻塞等待的服务循环
 4. **zero-step 不可达**：步进量在调用约定/类型约束下不可能为 0
 5. **迭代器已正确更新**：erase/insert 的返回值被正确赋回

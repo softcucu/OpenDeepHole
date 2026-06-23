@@ -229,8 +229,9 @@ class Analyzer(BaseAnalyzer):
                     line=abs_line,
                     function=func_name,
                     description=(
-                        f"函数 '{func_name}' 中链式指针 '{expr_text}' "
-                        f"存在空指针解引用风险"
+                        f"函数 `{func_name}` 中链式指针 `{expr_text}` 是否存在"
+                        f"空指针解引用问题，请审计确认。\n"
+                        f"相关线索：链式指针 `{expr_text}` 的中间层在使用前可能未判空。"
                     ),
                     vuln_type=self.vuln_type,
                 )

@@ -332,8 +332,10 @@ class Analyzer(BaseAnalyzer):
             seen.add(dedup_key)
 
             # 组装 description
-            sev_label = _SEV_LABEL.get(severity, severity)
-            parts: list[str] = [f"[{sev_label}] {rule_category}", message]
+            subject = ptr_name or (f"{obj_name}->{field_name}" if obj_name and field_name else field_name) or obj_name or "指针/资源"
+            parts: list[str] = [
+                f"函数 `{func_name}` 中 `{subject}` 是否存在重复释放（double free）问题，请审计确认。"
+            ]
 
             details: list[str] = []
             if ptr_name:
@@ -371,10 +373,7 @@ class Analyzer(BaseAnalyzer):
             if label:
                 details.append(f"goto 标签: {label}")
             if details:
-                parts.append("\n".join(details))
-
-            if matched_lines:
-                parts.append(f"匹配代码:\n{matched_lines}")
+                parts.append("相关线索：\n" + "\n".join(details))
 
             yield Candidate(
                 file=rel_path,

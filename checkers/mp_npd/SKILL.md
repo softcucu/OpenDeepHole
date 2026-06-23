@@ -5,19 +5,19 @@ description: 验证多层指针空指针解引用候选漏洞（CWE-476），判
 
 # 多层指针空指针解引用验证
 
-你正在验证一个由 semgrep 静态分析发现的候选空指针解引用漏洞（CWE-476），漏洞模式是 **多层指针**（形如 `ctx->session->buf`、`req->msg->hdr->len`）在使用前未完整判空。你的任务是判断这是真实的 bug 还是误报。
+你正在核实一处候选空指针解引用线索（CWE-476），问题形态是 **多层指针**（形如 `ctx->session->buf`、`req->msg->hdr->len`）在使用前未完整判空。你的任务是判断这是真实的 bug 还是误报。
 
 ## 背景
 
-静态分析器已经完成了以下工作：
+候选线索通常落在以下多层指针判空缺失的 3 个典型形态之一：
 
-- 使用 semgrep 扫描了 3 条规则，覆盖多层指针判空缺失的 3 个典型模式：
-  1. **multi-layer-pointer-use-before-null-check**：多层指针 `$ROOT->$F1->$F2` 在使用前未见任何对 `$ROOT` 或 `$ROOT->$F1` 的判空（最宽泛规则）
-  2. **multi-layer-pointer-root-checked-child-unchecked**：根指针 `$ROOT` 已在外层 `if` 中判空，但内层使用了 `$ROOT->$F1->$F2`，中间层 `$ROOT->$F1` 未判空（confidence=high）
-  3. **multi-layer-pointer-used-as-argument-before-null-check**：多层指针 `$ROOT->$F1->$F2` 作为参数传入函数调用 `$CALL(..., $ROOT->$F1->$F2, ...)`，使用前未完整判空
-- candidate 描述中的**规则类型 / 多层指针表达式 / 根指针 / 中间层 / 被调用函数**等元信息已尽量提取
+1. **多层指针使用前未判空**：多层指针 `$ROOT->$F1->$F2` 在使用前未见任何对 `$ROOT` 或 `$ROOT->$F1` 的判空（最宽泛形态）
+2. **根指针已判空、中间层未判空**：根指针 `$ROOT` 已在外层 `if` 中判空，但内层使用了 `$ROOT->$F1->$F2`，中间层 `$ROOT->$F1` 未判空
+3. **作为参数传入前未判空**：多层指针 `$ROOT->$F1->$F2` 作为参数传入函数调用 `$CALL(..., $ROOT->$F1->$F2, ...)`，使用前未完整判空
 
-semgrep 是纯语法模式匹配，无法感知：判空发生在调用方、判空通过宏（`CHECK_NULL(ctx)`）或断言（`assert / BUG_ON`）实现、字段在结构体设计上"不可能为空"（构造函数保证）、判空在 inline 函数 / 子函数内完成等场景。多层指针使用本身**误报率高**，必须做语义层面的验证。
+候选描述中已尽量给出**多层指针表达式 / 根指针 / 中间层 / 被调用函数**等线索（请据此自行判断属于上述哪种形态）。
+
+候选线索只来自语法层面的初筛，无法感知：判空发生在调用方、判空通过宏（`CHECK_NULL(ctx)`）或断言（`assert / BUG_ON`）实现、字段在结构体设计上"不可能为空"（构造函数保证）、判空在 inline 函数 / 子函数内完成等场景。多层指针使用本身**误报率高**，必须做语义层面的验证。
 
 ## 可用工具
 
@@ -30,10 +30,10 @@ semgrep 是纯语法模式匹配，无法感知：判空发生在调用方、判
 
 ### Step 1 — 读取完整函数体
 
-用 `view_function_code` 获取 candidate 所在函数的完整源码。candidate 描述只给了 semgrep 匹配的几行，**必须**看到完整函数才能判断：
+用 `view_function_code` 获取 candidate 所在函数的完整源码。候选描述只给了少量上下文，**必须**看到完整函数才能判断：
 
 - 函数入口处是否对 `$ROOT` 或 `$ROOT->$F1` 做了校验（包括 `if (!ctx || !ctx->session) return -1;`、`assert(ctx && ctx->session)`、`CHECK_PTR(ctx->session)` 等宏）
-- 该使用点上方是否存在被 semgrep 因 pattern 形式不同而漏掉的判空（如 `if (likely(p))`、`if ((p) != ((void *)0))`、`switch` 语句、`?:` 三目表达式）
+- 该使用点上方是否存在初筛因形式不同而漏掉的判空（如 `if (likely(p))`、`if ((p) != ((void *)0))`、`switch` 语句、`?:` 三目表达式）
 - 是否在 `if (ctx) { ... if (ctx->session) { ... } }` 这种嵌套但中间夹杂语句的结构里
 
 ### Step 2 — 理解"多层指针解引用"的常见判空架构
@@ -45,24 +45,22 @@ semgrep 是纯语法模式匹配，无法感知：判空发生在调用方、判
 完整判空通常有几种实现方式：
 
 1. **入口集中校验**：函数顶部一次性校验所有参数及其中间层，后续访问无需重复判空。**正常架构，告警通常误报。**
-2. **逐层 if 检查**：`if (ctx && ctx->session && ctx->session->buf) { ... }`，semgrep 已识别。
-3. **失败提前返回**：`if (!ctx || !ctx->session) return -ERR;`，semgrep 已识别基础形式，但变体（含日志、含计数、`{ log(); return; }` 多语句）可能漏判。
+2. **逐层 if 检查**：`if (ctx && ctx->session && ctx->session->buf) { ... }`，属易识别的安全写法。
+3. **失败提前返回**：`if (!ctx || !ctx->session) return -ERR;`，基础形式易识别，但变体（含日志、含计数、`{ log(); return; }` 多语句）易被漏看。
 4. **结构体不变量**：根对象通过构造函数 `create_ctx` 保证 `session` 永远非空；语义上是"私有数据，外部碰不到"。**正常架构，告警通常误报。**
 5. **真实漏报**：使用前确实未做任何判空，且不变量也不保证非空。**这才是真实漏洞。**
 
-### Step 3 — 根据规则类型聚焦核心验证问题
+### Step 3 — 根据候选形态聚焦核心验证问题
 
-| 规则类型 | 核心验证问题 |
+| 候选形态 | 核心验证问题 |
 |---------|------------|
-| `multi-layer-pointer-use-before-null-check` | 函数内是否真的没有判空？是否依赖入口校验、宏校验、不变量保证非空？根指针的来源是否可控？ |
-| `multi-layer-pointer-root-checked-child-unchecked` | `$ROOT` 已判空，但中间层 `$ROOT->$F1` 是否可能为 NULL？结构体设计上是否允许 `$ROOT->$F1 == NULL`（如可选字段、懒加载、清理过程中暂时为空）？ |
-| `multi-layer-pointer-used-as-argument-before-null-check` | 被调用函数 `$CALL` 是否在内部做了 NULL 校验？传入的 `$ROOT->$F1->$F2` 解引用动作发生在调用前还是调用内？ |
+| 使用前未判空 | 函数内是否真的没有判空？是否依赖入口校验、宏校验、不变量保证非空？根指针的来源是否可控？ |
+| 根指针已判空、中间层未判空 | `$ROOT` 已判空，但中间层 `$ROOT->$F1` 是否可能为 NULL？结构体设计上是否允许 `$ROOT->$F1 == NULL`（如可选字段、懒加载、清理过程中暂时为空）？ |
+| 作为参数传入前未判空 | 被调用函数 `$CALL` 是否在内部做了 NULL 校验？传入的 `$ROOT->$F1->$F2` 解引用动作发生在调用前还是调用内？ |
 
 ### Step 4 — 验证"看不见的"判空路径
 
-semgrep 的 `pattern-not-inside` 限制：
-
-- 只识别字面形式 `if ($ROOT && $ROOT->$F1)` 等少量变体；以下形式会漏判：
+语法初筛只能识别字面形式 `if ($ROOT && $ROOT->$F1)` 等少量变体；以下形式会被漏判：
   - **宏校验**：`CHECK_NULL_RETURN(ctx, -1); CHECK_NULL_RETURN(ctx->session, -1);`
   - **inline 函数封装**：`validate_ctx(ctx)` 内部 abort/return
   - **switch / 三目运算符 / 短路逻辑链**：`(!ctx || !ctx->session) ? bail() : 0;`
@@ -85,7 +83,7 @@ semgrep 的 `pattern-not-inside` 限制：
 
 ### Step 6 — 多层指针作为函数参数的特殊情形
 
-对于规则 3（`used-as-argument-before-null-check`）：
+对于"作为参数传入前未判空"形态：
 
 - C/C++ 语义：`func(ctx->session->buf)` 在 `func` 调用前就已经完成了 `ctx->session->buf` 的解引用读取，NULL 解引用发生在调用方而非被调函数。
 - 即使 `func` 内部做了 `if (!ptr) return;`，**也来不及** —— 解引用已经发生。
@@ -101,10 +99,10 @@ semgrep 的 `pattern-not-inside` 限制：
 
 ### 判为误报（confirmed=false）的情形
 
-1. **入口集中校验**：函数顶部已校验 `$ROOT` 与 `$ROOT->$F1`（含通过宏 / inline 函数），semgrep 未识别
+1. **入口集中校验**：函数顶部已校验 `$ROOT` 与 `$ROOT->$F1`（含通过宏 / inline 函数），语法初筛未识别
 2. **caller 已校验**：所有 caller 都在持有有效 `$ROOT->$F1` 时才调用当前函数（通过 `find_function_references` 全量确认）
 3. **结构体不变量保证**：`$ROOT->$F1` 在该类型生命周期内不为 NULL（构造函数必填、destroy 之外无置空路径），且当前函数不可能在 destroy 后被调用
-4. **宏 / inline 函数完成判空**：semgrep 看不到的防御机制存在
+4. **宏 / inline 函数完成判空**：语法初筛看不到的防御机制存在
 5. **路径不可达**：触发空指针访问的具体上下文在正常运行中不可能成立
 6. **测试 / mock / 模拟代码**：路径在 tests/、mock/ 等目录下
 
@@ -141,3 +139,9 @@ semgrep 的 `pattern-not-inside` 限制：
   4. caller 端是否承担校验责任（`find_function_references` 结论）
   5. 是否存在通过宏 / inline 函数 / 不变量完成的隐式校验
   6. 最终判定理由
+
+  **当 `confirmed=true` 时，`ai_analysis` 必须同时包含以下三要素，缺一不可：**
+  - **【赋值点】** 中间层指针 `$ROOT->$F1`（或根指针）**被赋值的确切位置**（文件:行号）及为何可能为 NULL；
+    若赋值来自其它函数（返回值/输出参数），读取该函数确认它确实可能写出 / 返回 NULL；
+  - **【无判空路径】** 从赋值点到解引用点的每条可达路径上均无有效判空的证明；
+  - **【调用链/调用过程】** 从赋值点到解引用点的调用链或执行路径（跨函数时给出 `caller → callee`，可用 `find_function_references` 佐证），并标注关键行号。

@@ -578,10 +578,9 @@ class Analyzer(BaseAnalyzer):
                         line=line,
                         function=func_name,
                         description=(
-                            f"[cppcheck] 函数 '{func_name}' 中变量 '{symbol}' "
-                            f"存在{desc_type}{custom_hint}。"
+                            f"函数 `{func_name}` 中变量 `{symbol}` 是否存在"
+                            f"{desc_type}问题{custom_hint}，请审计确认。"
                             f"请检查所有退出路径是否正确释放。"
-                            f"（{msg}）"
                         ),
                         vuln_type="resleak",
                     )
@@ -615,8 +614,9 @@ class Analyzer(BaseAnalyzer):
                 line=line,
                 function=func_name,
                 description=(
-                    f"[锁/线程资源] 函数 '{func_name}' 中存在 {res_types} 的获取操作，"
-                    f"且函数有多处 return 出口，请检查是否所有路径均有对应释放操作。"
+                    f"函数 `{func_name}` 中 {res_types} 是否存在资源泄漏问题，请审计确认。"
+                    f"该函数存在 {res_types} 的获取操作且有多处 return 出口，"
+                    f"请检查是否所有路径均有对应释放操作。"
                 ),
                 vuln_type="resleak",
             )

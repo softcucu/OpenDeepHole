@@ -374,8 +374,10 @@ class Analyzer(BaseAnalyzer):
             seen.add(dedup_key)
 
             # 组装 description
-            sev_label = _SEV_LABEL.get(severity, severity)
-            parts: list[str] = [f"[{sev_label}] {rule_category}", message]
+            subject = ptr_expr or (f"{root}->{field1}" if root and field1 else root) or "多层指针"
+            parts: list[str] = [
+                f"函数 `{func_name}` 中多层指针 `{subject}` 是否存在空指针解引用问题，请审计确认。"
+            ]
 
             details: list[str] = []
             if ptr_expr:
@@ -387,10 +389,7 @@ class Analyzer(BaseAnalyzer):
             if call_name:
                 details.append(f"被调用函数: {call_name}")
             if details:
-                parts.append("\n".join(details))
-
-            if matched_lines:
-                parts.append(f"匹配代码:\n{matched_lines}")
+                parts.append("相关线索：\n" + "\n".join(details))
 
             produced += 1
             yield Candidate(
@@ -401,4 +400,4 @@ class Analyzer(BaseAnalyzer):
                 vuln_type=self.vuln_type,
             )
 
-        print(f"  [static] {self.vuln_type} produced candidates: {produced}", flush=True)
+        print(f"  {self.vuln_type} produced candidates: {produced}", flush=True)

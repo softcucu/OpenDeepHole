@@ -293,12 +293,12 @@ class Analyzer(BaseAnalyzer):
             seen.add(key)
 
             # 组装 description
-            sev_label = _SEV_LABEL.get(severity, severity)
-            parts = [f"[{sev_label}] {rule_category}", message]
+            loop_subject = f"（控制变量 `{loop_var}`）" if loop_var else ""
+            parts = [
+                f"函数 `{func_name}` 中的循环{loop_subject}是否存在无法退出/死循环问题，请审计确认。"
+            ]
             if loop_var:
-                parts.append(f"循环控制变量: {loop_var}")
-            if matched_lines:
-                parts.append(f"匹配代码:\n{matched_lines}")
+                parts.append(f"相关线索：循环控制变量 {loop_var}")
 
             yield Candidate(
                 file=rel_path,

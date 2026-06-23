@@ -316,8 +316,10 @@ class Analyzer(BaseAnalyzer):
             seen.add(dedup_key)
 
             # 组装 description
-            sev_label = _SEV_LABEL.get(severity, severity)
-            parts: list[str] = [f"[{sev_label}] {rule_category}", message]
+            subject = idx_expr or field_name or buf_name or ptr_name or type_name or "缓冲区访问"
+            parts: list[str] = [
+                f"函数 `{func_name}` 中 `{subject}` 是否存在缓冲区越界读写问题，请审计确认。"
+            ]
 
             details: list[str] = []
             if type_name:
@@ -339,10 +341,7 @@ class Analyzer(BaseAnalyzer):
             if call_name:
                 details.append(f"调用函数: {call_name}")
             if details:
-                parts.append("\n".join(details))
-
-            if matched_lines:
-                parts.append(f"匹配代码:\n{matched_lines}")
+                parts.append("相关线索：\n" + "\n".join(details))
 
             yield Candidate(
                 file=rel_path,

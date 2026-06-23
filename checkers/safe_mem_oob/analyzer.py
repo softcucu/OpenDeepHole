@@ -233,9 +233,10 @@ class Analyzer(BaseAnalyzer):
                 continue
             seen.add(dedup_key)
 
-            sev_label = _SEV_LABEL.get(severity, severity)
-            parts: list[str] = [f"[{sev_label}] {rule_category}", message]
-            parts.append(f"风险分类: {risk_class}")
+            subject = call_name or dst_expr or "安全内存函数调用"
+            parts: list[str] = [
+                f"函数 `{func_name}` 中安全内存函数 `{subject}` 调用是否存在越界问题，请审计确认。"
+            ]
 
             details: list[str] = []
             if call_name:
@@ -249,9 +250,7 @@ class Analyzer(BaseAnalyzer):
             if offset_expr:
                 details.append(f"偏移/索引: {offset_expr}")
             if details:
-                parts.append("\n".join(details))
-            if matched_lines:
-                parts.append(f"匹配代码:\n{matched_lines}")
+                parts.append("相关线索：\n" + "\n".join(details))
 
             yield Candidate(
                 file=rel_path,

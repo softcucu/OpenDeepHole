@@ -47,7 +47,7 @@ class Analyzer(BaseAnalyzer):
                 file=file_path,
                 line=start_line,
                 function=func_name,
-                description=f"对函数 {func_name} 进行越界读写（OOB）六场景审计",
+                description=f"函数 `{func_name}` 是否存在越界读写（OOB）问题，请审计确认。",
                 vuln_type=self.vuln_type,
             ))
 

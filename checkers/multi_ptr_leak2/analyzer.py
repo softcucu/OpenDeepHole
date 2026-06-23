@@ -1023,16 +1023,17 @@ class Analyzer(BaseAnalyzer):
             func_start_line = func.line_base + _line(func.node)
 
             lines = [
-                "静态过滤命中：释放调用的静态分析实参可解析为含指针成员的结构体对象，"
-                "需要确认释放实现是否只释放最外层对象而遗漏成员指针。",
+                f"函数 `{func.name}` 中释放调用 `{site.callee}({site.arg_text})` "
+                f"是否存在结构体指针成员泄漏问题（释放实现可能只释放最外层对象而遗漏成员指针），"
+                f"请审计确认。",
+                "相关线索：",
                 f"所在函数: {func.name} ({func.file}:{func_start_line})",
                 f"调用形式: {site.call_form}",
-                f"静态分析实参: {site.analysis_target}",
+                f"释放实参: {site.analysis_target}",
             ]
             if site.call_form == "method_call":
                 lines.append(f"receiver: {site.receiver_text or '(unknown)'}")
             lines.extend([
-                f"释放调用命中关键字: {matched_keyword or '(unknown)'}",
                 f"释放调用: {site.callee}({site.arg_text})",
                 f"实参类型: {site.arg_type.name}"
                 f"{'*' if site.arg_type.is_pointer else ''}",

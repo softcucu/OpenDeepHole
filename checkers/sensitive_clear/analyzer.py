@@ -246,8 +246,9 @@ def _build_function_candidate(func: dict, variables: list[dict]) -> Candidate:
         line=start_line,
         function=function_name,
         description=(
-            f"敏感信息未清零函数审计: 函数 {function_name} 存在启发式敏感变量线索，"
-            "需要审计变量生命周期结束后是否显式清零。"
+            f"函数 `{function_name}` 中敏感变量 "
+            f"{', '.join('`' + v['name'] + '`' for v in suspicious_variables) or '（疑似敏感变量）'} "
+            f"在生命周期结束后是否存在未清零问题，请审计确认。"
         ),
         vuln_type="sensitive_clear",
         metadata={

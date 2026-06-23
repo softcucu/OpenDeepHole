@@ -169,8 +169,12 @@ class Analyzer(BaseAnalyzer):
                     or "unknown"
                 )
 
-            sev_label = _SEV_LABEL.get(severity, severity)
-            parts: list[str] = [f"[{sev_label}] {source}", message]
+            idx_subject = idx_expr or "循环索引"
+            mem_subject = f"访问 `{memory_expr}` " if memory_expr else ""
+            parts: list[str] = [
+                f"函数 `{func_name}` 中循环索引 `{idx_subject}` {mem_subject}"
+                f"是否存在越界访问问题，请审计确认。"
+            ]
 
             details: list[str] = []
             if idx_expr:
@@ -183,12 +187,9 @@ class Analyzer(BaseAnalyzer):
                 details.append(f"局部边界表达式: {bound_expr}")
             if memory_expr:
                 details.append(f"内存访问: {memory_expr}")
-            if metadata.get("recall") == "high":
-                details.append("规则策略: 宽召回，需 LLM 严格确认真实边界和可达性")
             if details:
-                parts.append("\n".join(details))
-            if matched_lines:
-                parts.append(f"匹配代码:\n{matched_lines}")
+                parts.append("相关线索：\n" + "\n".join(details))
+            parts.append("审计要点：严格确认真实边界与可达性。")
 
             yield Candidate(
                 file=rel_path,

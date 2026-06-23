@@ -89,9 +89,9 @@ class Analyzer(BaseAnalyzer):
                         line=deref_line,
                         function=func_name,
                         description=(
-                            f"Pointer variable '{var_name}' is dereferenced in "
-                            f"function '{func_name}' without an apparent null check. "
-                            f"Possible null pointer dereference (NPD)."
+                            f"函数 `{func_name}` 中指针变量 `{var_name}` 是否存在"
+                            f"空指针解引用问题，请审计确认。\n"
+                            f"相关线索：指针变量 `{var_name}` 在该函数中被解引用。"
                         ),
                         vuln_type="npd",
                     )

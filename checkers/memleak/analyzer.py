@@ -1042,8 +1042,8 @@ class Analyzer(BaseAnalyzer):
                     kind_desc = KIND_DESC.get(issue.kind, issue.kind)
                     leaked_str = ", ".join(issue.leaked)
                     detail_lines.append(
-                        f"{index}. 第 {issue.line} 行 [{kind_desc}] "
-                        f"变量 {leaked_str} 在退出点前未释放。{issue.hint}"
+                        f"{index}. 第 {issue.line} 行（{kind_desc}）"
+                        f"变量 {leaked_str} 在退出点前是否未释放。{issue.hint}"
                     )
 
                 yield Candidate(
@@ -1051,8 +1051,9 @@ class Analyzer(BaseAnalyzer):
                     line=first.line,
                     function=first.func,
                     description=(
-                        f"函数 '{first.func}' 中发现 {len(group)} 个疑似内存泄漏点，"
-                        "请在一次审计中统一判断并只提交一个结果。\n"
+                        f"函数 `{first.func}` 中是否存在内存泄漏问题，请审计确认；"
+                        f"共有 {len(group)} 个待核实位置，请在一次审计中统一判断并只提交一个结果。\n"
+                        "相关线索：\n"
                         + "\n".join(detail_lines)
                     ),
                     vuln_type="memleak",

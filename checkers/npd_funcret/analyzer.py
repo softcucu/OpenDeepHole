@@ -489,26 +489,21 @@ class Analyzer(BaseAnalyzer):
 
             # 构建描述
             if assign_type == _ASSIGN_TYPE_PARAM:
-                assign_desc = f"通过参数赋值（&{ptr_name or '?'}）"
-                desc_prefix = (
-                    f"指针 '{ptr_name or '?'}' 通过函数 '{called_func or '?'}' "
-                    f"的输出参数赋值后，未进行空指针检查即被解引用。"
-                )
+                assign_desc = f"通过函数 `{called_func or '?'}` 的输出参数赋值（&{ptr_name or '?'}）"
             else:
-                assign_desc = "通过返回值赋值"
-                desc_prefix = (
-                    f"指针 '{ptr_name or '?'}' 接收函数 '{called_func or '?'}' "
-                    f"的返回值后，未进行空指针检查即被解引用。"
-                )
+                assign_desc = f"接收函数 `{called_func or '?'}` 的返回值赋值"
+
+            desc_prefix = (
+                f"函数 `{func_name}` 中指针 `{ptr_name or '?'}`（{assign_desc}）"
+                f"是否存在空指针解引用问题，请审计确认。"
+            )
 
             parts: list[str] = [desc_prefix]
 
+            detail_lines: list[str] = [f"赋值方式: {assign_desc}"]
             if called_func:
-                parts.append(f"赋值函数: {called_func}")
-            parts.append(f"赋值方式: {assign_desc}")
-
-            if matched_lines:
-                parts.append(f"匹配代码:\n{matched_lines}")
+                detail_lines.append(f"赋值来源函数: {called_func}")
+            parts.append("相关线索：\n" + "\n".join(detail_lines))
 
             # related_functions 传递被调函数名，让 AI 可以检查其函数体
             related = [called_func] if called_func else []

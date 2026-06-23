@@ -372,8 +372,10 @@ class Analyzer(BaseAnalyzer):
             seen.add(dedup_key)
 
             # 组装 description
-            sev_label = _SEV_LABEL.get(severity, severity)
-            parts: list[str] = [f"[{sev_label}] {rule_category}", message]
+            subject = field_expr or acq or root or "资源成员"
+            parts: list[str] = [
+                f"函数 `{func_name}` 中 `{subject}` 是否存在资源泄漏问题，请审计确认。"
+            ]
 
             details: list[str] = []
             if field_expr:
@@ -393,10 +395,7 @@ class Analyzer(BaseAnalyzer):
             if type_name:
                 details.append(f"类型: {type_name}")
             if details:
-                parts.append("\n".join(details))
-
-            if matched_lines:
-                parts.append(f"匹配代码:\n{matched_lines}")
+                parts.append("相关线索：\n" + "\n".join(details))
 
             produced += 1
             yield Candidate(

@@ -185,9 +185,10 @@ class Analyzer(BaseAnalyzer):
                     or "unknown"
                 )
 
-            sev_label = _SEV_LABEL.get(severity, severity)
-            parts: list[str] = [f"[{sev_label}] {source}", message]
-            parts.append(f"风险分类: {risk_class}")
+            subject = arith_expr or sink_expr or "整数运算"
+            parts: list[str] = [
+                f"函数 `{func_name}` 中整数运算 `{subject}` 是否存在整数溢出问题，请审计确认。"
+            ]
 
             details: list[str] = []
             if arith_expr:
@@ -200,11 +201,9 @@ class Analyzer(BaseAnalyzer):
             target_var = _mv(metavars, "$VAR") or _mv(metavars, "$SIZEVAR")
             if target_var:
                 details.append(f"中间变量: {target_var}")
-            details.append("复核重点: 确认输入是否外部可控、是否存在有效范围/溢出检查、溢出结果是否可达危险使用点")
-            parts.append("\n".join(details))
-
-            if matched_lines:
-                parts.append(f"匹配代码:\n{matched_lines}")
+            if details:
+                parts.append("相关线索：\n" + "\n".join(details))
+            parts.append("审计要点：确认输入是否外部可控、是否存在有效范围/溢出检查、溢出结果是否可达危险使用点。")
 
             yield Candidate(
                 file=rel_path,
