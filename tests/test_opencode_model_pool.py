@@ -9,6 +9,7 @@ from backend.opencode.model_pool import (
     model_options,
     model_pool_snapshot,
     release_model_lease,
+    total_model_capacity,
 )
 
 
@@ -20,6 +21,8 @@ def _reset_model_pool():
     model_pool_module._running_by_model.clear()
     model_pool_module._global_running = 0
     model_pool_module._last_used.clear()
+    model_pool_module._stats_by_scope.clear()
+    model_pool_module._scope_updated_at.clear()
     yield
 
 
@@ -40,9 +43,11 @@ def test_model_options_normalizes_enabled_models() -> None:
             {
                 "id": "fast",
                 "model": "fast-model",
+                "use_default_model": True,
                 "capability": "low",
                 "weight": 2,
                 "max_concurrency": 2,
+                "time_windows": [{"start": "09:00", "end": "18:00"}],
             },
             {"id": "off", "model": "off-model", "enabled": False},
         ],
@@ -51,9 +56,12 @@ def test_model_options_normalizes_enabled_models() -> None:
     options = model_options(cfg, global_concurrency=4)
 
     assert [option.id for option in options] == ["fast"]
+    assert options[0].model == ""
+    assert options[0].use_default_model is True
     assert options[0].capability == "low"
     assert options[0].weight == 2
     assert options[0].max_concurrency == 2
+    assert options[0].time_windows == ((540, 1080),)
 
 
 def test_acquire_model_lease_filters_by_capability_and_releases() -> None:
@@ -170,9 +178,8 @@ def test_model_pool_snapshot_tracks_scope_queue_and_outcomes() -> None:
     asyncio.run(run())
 
 
-def test_no_global_gate_across_models() -> None:
-    """One busy model must not block another idle, eligible model — even with
-    a low opencode_concurrency setting (the original cross-scan starvation bug)."""
+def test_global_concurrency_is_hard_gate_across_models() -> None:
+    """The top-level concurrency is a hard cap over all model-pool leases."""
 
     async def run():
         cfg = SimpleNamespace(
@@ -193,19 +200,22 @@ def test_no_global_gate_across_models() -> None:
         try:
             assert fp_lease is not None
             assert fp_lease.option.id == "deep"
-            # ...while a normal scan in another scope must immediately get the
-            # idle medium model instead of queueing behind a global limit.
-            scan_lease = await asyncio.wait_for(
+            # ...while a normal scan in another scope must queue behind the
+            # global limit even though the medium model itself is idle.
+            scan_task = asyncio.create_task(
                 acquire_model_lease(
                     cfg,
                     global_concurrency=1,
                     required_capability="any",
                     stats_scope_id="scope-scan",
-                ),
-                timeout=1,
+                )
             )
+            await asyncio.sleep(0.05)
+            assert not scan_task.done()
+            await release_model_lease(fp_lease, outcome="success", duration_seconds=0.1)
+            fp_lease = None
+            scan_lease = await asyncio.wait_for(scan_task, timeout=1)
             assert scan_lease is not None
-            assert scan_lease.option.id == "fast"
             await release_model_lease(scan_lease, outcome="success", duration_seconds=0.1)
         finally:
             await release_model_lease(fp_lease, outcome="success", duration_seconds=0.1)
@@ -227,10 +237,10 @@ def test_queued_task_falls_back_to_other_free_model() -> None:
         scope = "test-scope-queue-fallback"
 
         lease_a = await acquire_model_lease(
-            cfg, global_concurrency=1, required_capability="any", stats_scope_id=scope
+            cfg, global_concurrency=2, required_capability="any", stats_scope_id=scope
         )
         lease_b = await acquire_model_lease(
-            cfg, global_concurrency=1, required_capability="any", stats_scope_id=scope
+            cfg, global_concurrency=2, required_capability="any", stats_scope_id=scope
         )
         assert lease_a is not None and lease_b is not None
         held = {lease_a.option.id: lease_a, lease_b.option.id: lease_b}
@@ -238,7 +248,7 @@ def test_queued_task_falls_back_to_other_free_model() -> None:
 
         third_task = asyncio.create_task(
             acquire_model_lease(
-                cfg, global_concurrency=1, required_capability="any", stats_scope_id=scope
+                cfg, global_concurrency=2, required_capability="any", stats_scope_id=scope
             )
         )
         try:
@@ -260,5 +270,52 @@ def test_queued_task_falls_back_to_other_free_model() -> None:
                 third_task.cancel()
             for lease in held.values():
                 await release_model_lease(lease, outcome="success", duration_seconds=0.1)
+
+    asyncio.run(run())
+
+
+def test_total_model_capacity_honors_active_time_windows(monkeypatch: pytest.MonkeyPatch) -> None:
+    cfg = SimpleNamespace(
+        models=[
+            {"id": "day", "model": "day-model", "capability": "low", "max_concurrency": 3},
+            {"id": "night", "model": "night-model", "capability": "high", "max_concurrency": 3},
+        ],
+    )
+    monkeypatch.setattr(
+        model_pool_module,
+        "_option_available_now",
+        lambda option, now=None: option.id == "day",
+    )
+
+    assert total_model_capacity(cfg, global_concurrency=2, required_capability="any") == 2
+    # No active model satisfies the high requirement; capacity still returns a
+    # single worker so the task can queue until a matching time window opens.
+    assert total_model_capacity(cfg, global_concurrency=2, required_capability="high") == 1
+
+
+def test_acquire_queues_when_matching_model_is_outside_time_window(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def run():
+        cfg = SimpleNamespace(
+            models=[
+                {"id": "day", "model": "day-model", "capability": "low", "max_concurrency": 1},
+                {"id": "night", "model": "night-model", "capability": "high", "max_concurrency": 1},
+            ],
+        )
+        active = {"day"}
+
+        def available(option, now=None):
+            return option.id in active
+
+        monkeypatch.setattr(model_pool_module, "_option_available_now", available)
+        task = asyncio.create_task(acquire_model_lease(cfg, global_concurrency=1, required_capability="high"))
+        await asyncio.sleep(0.05)
+        assert not task.done()
+        active.add("night")
+        async with model_pool_module._condition:
+            model_pool_module._condition.notify_all()
+        lease = await asyncio.wait_for(task, timeout=1)
+        assert lease is not None
+        assert lease.option.id == "night"
+        await release_model_lease(lease, outcome="success", duration_seconds=0.1)
 
     asyncio.run(run())

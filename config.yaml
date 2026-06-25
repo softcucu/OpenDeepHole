@@ -20,11 +20,11 @@ mcp_server:
 
 opencode:
   executable: "opencode"  # opencode 可执行文件名或完整路径，如 "myopencode" 或 "C:/tools/opencode.cmd"
-  model: ""
+  model: ""       # 兼容字段：未配置 models 时使用；留空则使用 CLI 默认模型
   timeout: 1200  # seconds per candidate analysis
   max_retries: 2  # retry on transient errors (not timeout)
   mock: false    # set to false when opencode is configured
-  models: []     # optional model pool; see README for fields
+  models: []     # optional model pool; see README for fields, time windows, and default model rows
 
 fp_review:
   auto_on_complete: true  # 扫描完成且存在已确认漏洞时，自动触发去误报（无需手动点击）

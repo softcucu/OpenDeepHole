@@ -15,6 +15,7 @@ from backend.opencode.runner import (
     _build_cli_command,
     _build_cli_env,
     _cleanup_prompt_file,
+    _effective_cli_config,
     _prompt_file_message,
     _prepare_cli_workspace,
     _select_cli_cwd,
@@ -56,6 +57,27 @@ def test_cli_command_builders_use_selected_tool(tmp_path: Path) -> None:
     assert nga[:3] == ["nga", "run", "--dir"]
     assert isolated_nga[:4] == ["nga", "run", "--dir", str(project_dir)]
     assert "--model" in nga
+
+
+def test_effective_cli_config_can_select_cli_default_model() -> None:
+    cfg = SimpleNamespace(
+        tool="opencode",
+        executable="opencode",
+        model="configured-model",
+        timeout=1200,
+        max_retries=2,
+        models=[],
+    )
+    option = SimpleNamespace(
+        tool="",
+        executable="",
+        model="",
+        use_default_model=True,
+        timeout=None,
+        max_retries=None,
+    )
+
+    assert _effective_cli_config(cfg, option)["model"] == ""
 
 
 def test_long_prompt_file_reference_is_passed_as_message(tmp_path: Path) -> None:

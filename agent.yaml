@@ -33,20 +33,32 @@ llm_api:
 opencode:
   tool: "nga"
   executable: "nga"  # 可执行文件名或完整路径，Windows 示例："C:/tools/nga.cmd"
-  model: ""               # 留空则使用 opencode 默认模型
+  model: ""               # 兼容字段：未配置 models 时使用；留空则使用 CLI 默认模型
   timeout: 1200            # 单次调用超时（秒）
   max_retries: 2           # 非超时错误重试次数
   # 可选：多模型池。未配置时使用上方 model，且所有 checker 都可使用。
   # models:
   #   - id: "fast"
   #     model: "fast-model"
+  #     use_default_model: false
   #     capability: "low"      # low | medium | high
   #     weight: 3              # 权重越高，空闲时越优先分配
   #     max_concurrency: 2
   #     enabled: true
+  #     time_windows:          # 可选，每日 Agent 本地时间；空数组表示全天可用
+  #       - start: "09:00"
+  #         end: "18:00"
+  #   - id: "default"
+  #     model: ""
+  #     use_default_model: true # 不传 --model，使用 CLI 默认模型
+  #     capability: "high"
+  #     weight: 1
+  #     max_concurrency: 1
+  #     enabled: true
   models: []
 
-# OpenCode/兼容 CLI 全局并发数，同时受单模型 max_concurrency 限制。
+# OpenCode/兼容 CLI 总并发数；配置 models 后也是所有模型合计运行数的硬上限。
+# 实际并发同时受单模型 max_concurrency 和每日使用时间限制。
 opencode_concurrency: 1
 
 # 静态候选跨规则去重：同 family、同函数只保留一个代表候选。
@@ -62,7 +74,7 @@ pattern_filter:
 # fp_review_cli:
 #   tool: "claude"
 #   executable: "claude"
-#   model: ""
+#   model: ""       # 兼容字段：未配置 models 时使用
 #   timeout: 1200
 #   max_retries: 2
 #   models: []

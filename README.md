@@ -96,34 +96,47 @@ llm_api:
 opencode:
   tool: "opencode"
   executable: "opencode"
-  model: ""
+  model: ""       # 兼容字段：未配置 models 时使用；留空则使用 CLI 默认模型
   timeout: 1200
   max_retries: 2
-  # 可选：多模型池。未配置时使用上方 model，且所有 checker 都可使用。
+  # 可选：多模型池。配置后由模型池统一决定模型、能力、时间和并发。
   models:
     - id: "fast"
       model: "fast-model"
+      use_default_model: false
       capability: "low"      # low | medium | high
       weight: 3              # 权重越高，空闲时越优先分配
       max_concurrency: 2
       enabled: true
+      time_windows:          # Agent 本地每日时间；空数组表示全天可用
+        - start: "09:00"
+          end: "18:00"
     - id: "deep"
       model: "deep-model"
+      use_default_model: false
       capability: "high"
       weight: 1
       max_concurrency: 1
       enabled: true
+      time_windows: []
+    - id: "default"
+      model: ""
+      use_default_model: true # 不传 --model，使用 CLI 默认模型
+      capability: "high"
+      weight: 1
+      max_concurrency: 1
+      enabled: true
+      time_windows: []
 
-# OpenCode/兼容 CLI 并发数：未配置 models 时为单模型并发上限；
-# 配置 models 后并发完全由各模型 max_concurrency 决定（总并发 = 各启用模型之和），
-# 多个扫描/去误报任务共享模型池，按模型各自限流，互不阻塞
+# OpenCode/兼容 CLI 总并发数：所有模型合计运行数不得超过该值，
+# 同时受单模型 max_concurrency 和每日使用时间限制。
 opencode_concurrency: 3
 
 # AI 去误报 CLI 配置可选；不配置则继承上面的审计工具和模型
 # fp_review_cli:
 #   tool: "claude"
 #   executable: "claude"
-#   model: ""
+#   model: ""      # 兼容字段：未配置 models 时使用
 #   timeout: 1200
 #   max_retries: 2
 #   models:
@@ -137,8 +150,9 @@ opencode_concurrency: 3
 
 > 每个检查项的调用方式（`api` 或 `opencode`）在其 `checker.yaml` 中独立配置，无需全局 `mode` 选项。
 > 每个检查项可在 `checker.yaml` 中设置 `model_capability: low|medium|high` 指定最低模型能力；未配置时默认为 `any`，AI 去误报默认优先使用高能力模型。
+> 模型池的 `time_windows` 使用 Agent 本地每日时间，支持跨午夜窗口；空数组表示全天可用。若存在满足能力要求但当前不在时间窗口内的模型，任务会排队等待，而不会降级使用当前时段的低能力模型。
 > 扫描详情页顶部的「模型看板」会展示当前扫描的 OpenCode 模型池统计，包括每个模型累计任务、成功/失败/超时/取消次数、平均耗时、运行中和排队数；页面刷新后会读取最近一次上报快照。
-> Agent 启动并连接服务器后，也可以在 Web UI 的 Agent 配置面板中直接保存或校验 LLM API 配置；保存后的配置会写回 `agent.yaml`。
+> Agent 启动并连接服务器后，也可以在 Web UI 的「客户端」页面中直接保存或校验 LLM API 配置，并在独立「模型池」页签中配置默认模型、能力、每日使用时间和并发；保存后的配置会写回 `agent.yaml`。
 
 **第 3 步：确认代码索引工具**
 
@@ -573,13 +587,13 @@ llm_api:
 opencode:
   tool: "opencode"
   executable: "opencode"
-  model: ""      # 留空则使用 opencode 默认模型
+  model: ""      # 兼容字段：未配置 models 时使用；留空则使用 CLI 默认模型
   timeout: 1200
   max_retries: 2
   models: []     # 可配置多个模型，字段同上方快速开始示例
 
-# OpenCode/兼容 CLI 并发数；位置审计、扫描前 API 识别和 AI 去误报都会复用。
-# 未配置 models 时为单模型并发上限；配置 models 后并发由各模型 max_concurrency 决定
+# OpenCode/兼容 CLI 总并发数；位置审计、扫描前 API 识别和 AI 去误报都会复用。
+# 配置 models 后，该值仍是所有模型合计运行数的硬上限
 opencode_concurrency: 1
 
 # 静态候选跨规则去重：同 family、同文件、同函数只保留一个代表候选
@@ -594,7 +608,7 @@ pattern_filter:
 # fp_review_cli:
 #   tool: "claude"
 #   executable: "claude"
-#   model: ""
+#   model: ""      # 兼容字段：未配置 models 时使用
 #   timeout: 1200
 #   max_retries: 2
 #   models: []
@@ -613,6 +627,8 @@ CLI 工具调用约定：
 OpenCode 模型池统计：
 
 - 位置审计、扫描前内存 API 识别和 AI 去误报都会通过统一调用入口累计模型池统计。
+- 配置模型池后，`opencode_concurrency` 是所有模型合计运行数的硬上限；每个模型还会受自己的 `max_concurrency` 和 `time_windows` 限制。
+- 模型行可设置 `use_default_model: true`，表示参与模型池调度但调用 CLI 时不传 `--model`。
 - 扫描详情页点击「模型看板」可以查看每个模型的累计任务、成功/失败/超时/取消计数、平均耗时、当前运行数和当前排队数。
 - Agent 会在模型池状态变化时上报快照，无变化时只保留低频心跳；服务端会保存到扫描记录中，页面刷新或重新进入扫描详情后会显示最近一次快照。
 

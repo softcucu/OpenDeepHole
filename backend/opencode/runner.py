@@ -718,7 +718,9 @@ def _effective_cli_config(cli_config, model_option) -> dict:
         data["tool"] = model_option.tool
     if model_option.executable:
         data["executable"] = model_option.executable
-    if model_option.model:
+    if getattr(model_option, "use_default_model", False):
+        data["model"] = ""
+    elif model_option.model:
         data["model"] = model_option.model
     if model_option.timeout is not None:
         data["timeout"] = model_option.timeout

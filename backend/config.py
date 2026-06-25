@@ -32,6 +32,7 @@ class MCPServerConfig(BaseModel):
 class OpenCodeModelConfig(BaseModel):
     id: str = ""
     model: str = ""
+    use_default_model: bool = False
     capability: str = "high"  # low | medium | high
     weight: float = 1.0
     max_concurrency: int = 1
@@ -40,6 +41,7 @@ class OpenCodeModelConfig(BaseModel):
     executable: str = ""
     timeout: int | None = None
     max_retries: int | None = None
+    time_windows: list[dict[str, str]] = []
 
 
 class OpenCodeConfig(BaseModel):

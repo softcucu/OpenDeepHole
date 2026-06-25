@@ -61,6 +61,7 @@ const DEFAULT_CONFIG: AgentRemoteConfig = {
 const DEFAULT_MODEL: AgentOpenCodeModelConfig = {
   id: "",
   model: "",
+  use_default_model: false,
   capability: "high",
   weight: 1,
   max_concurrency: 1,
@@ -69,6 +70,7 @@ const DEFAULT_MODEL: AgentOpenCodeModelConfig = {
   executable: "",
   timeout: null,
   max_retries: null,
+  time_windows: [],
 };
 
 const TOOL_OPTIONS = [
@@ -92,12 +94,12 @@ function deepClone<T>(obj: T): T {
 function normalizeConfig(config: AgentRemoteConfig): AgentRemoteConfig {
   const base = deepClone(DEFAULT_CONFIG);
   const opencode = { ...base.opencode, ...config.opencode };
-  opencode.models = Array.isArray(config.opencode?.models) ? config.opencode.models : [];
+  opencode.models = normalizeModels(config.opencode?.models);
   const fpReviewCli = config.fp_review_cli
     ? {
         ...opencode,
         ...config.fp_review_cli,
-        models: Array.isArray(config.fp_review_cli.models) ? config.fp_review_cli.models : [],
+        models: normalizeModels(config.fp_review_cli.models),
       }
     : null;
   return {
@@ -114,12 +116,45 @@ function normalizeConfig(config: AgentRemoteConfig): AgentRemoteConfig {
   };
 }
 
+function normalizeModels(models?: AgentOpenCodeModelConfig[]): AgentOpenCodeModelConfig[] {
+  return Array.isArray(models)
+    ? models.map((model) => ({
+        ...DEFAULT_MODEL,
+        ...model,
+        time_windows: Array.isArray(model.time_windows) ? model.time_windows : [],
+      }))
+    : [];
+}
+
+function validateTime(value: string): boolean {
+  return /^([01]\d|2[0-3]):[0-5]\d$/.test(value);
+}
+
+function validateModelPool(title: string, models: AgentOpenCodeModelConfig[]): string | null {
+  const seen = new Set<string>();
+  for (const [index, model] of models.entries()) {
+    const row = `${title} 第 ${index + 1} 行`;
+    const id = model.id.trim();
+    if (!id) return `${row} 缺少 ID`;
+    if (seen.has(id)) return `${title} 存在重复 ID：${id}`;
+    seen.add(id);
+    if (!model.use_default_model && !model.model.trim()) return `${row} 缺少模型名`;
+    for (const window of model.time_windows || []) {
+      if (!validateTime(window.start) || !validateTime(window.end) || window.start === window.end) {
+        return `${row} 的使用时间必须是有效的 HH:MM-HH:MM，且起止不能相同`;
+      }
+    }
+  }
+  return null;
+}
+
 interface AgentConfigPanelProps {
   agent: AgentInfo;
 }
 
 function AgentConfigPanel({ agent }: AgentConfigPanelProps) {
   const [open, setOpen] = useState(false);
+  const [activeTab, setActiveTab] = useState<"base" | "models">("base");
   const [cfg, setCfg] = useState<AgentRemoteConfig>(deepClone(DEFAULT_CONFIG));
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -146,6 +181,13 @@ function AgentConfigPanel({ agent }: AgentConfigPanelProps) {
     setSaving(true);
     setError(null);
     try {
+      const validationError =
+        validateModelPool("审计模型池", cfg.opencode.models || [])
+        || validateModelPool("去误报模型池", cfg.fp_review_cli?.models || []);
+      if (validationError) {
+        setError(validationError);
+        return;
+      }
       await updateAgentConfig(agent.agent_id, cfg);
       setSaved(true);
       setTimeout(() => setSaved(false), 2000);
@@ -215,6 +257,19 @@ function AgentConfigPanel({ agent }: AgentConfigPanelProps) {
     });
   };
 
+  const setFpInherit = (inherit: boolean) => {
+    setCfg((prev) => ({
+      ...prev,
+      fp_review_cli: inherit
+        ? null
+        : {
+            ...prev.opencode,
+            model: "",
+            models: normalizeModels(prev.opencode.models).filter((model) => model.capability === "high"),
+          },
+    }));
+  };
+
   const setFpTool = (tool: string) => {
     setCfg((prev) => {
       const base = prev.fp_review_cli ?? { ...prev.opencode };
@@ -267,6 +322,33 @@ function AgentConfigPanel({ agent }: AgentConfigPanelProps) {
             </div>
           ) : (
             <div className="space-y-5">
+              <div className="flex gap-2 border-b border-slate-700 pb-2">
+                <button
+                  type="button"
+                  onClick={() => setActiveTab("base")}
+                  className={`px-3 py-1.5 text-xs font-medium rounded-md transition-colors ${
+                    activeTab === "base"
+                      ? "bg-blue-600 text-white"
+                      : "text-slate-400 hover:text-slate-100 hover:bg-slate-700"
+                  }`}
+                >
+                  基础配置
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setActiveTab("models")}
+                  className={`px-3 py-1.5 text-xs font-medium rounded-md transition-colors ${
+                    activeTab === "models"
+                      ? "bg-blue-600 text-white"
+                      : "text-slate-400 hover:text-slate-100 hover:bg-slate-700"
+                  }`}
+                >
+                  模型池
+                </button>
+              </div>
+
+              {activeTab === "base" && (
+                <>
               {/* LLM API */}
               <div>
                 <h3 className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-3">LLM API 配置</h3>
@@ -333,12 +415,7 @@ function AgentConfigPanel({ agent }: AgentConfigPanelProps) {
                       onChange={(e) => setOC("executable", e.target.value)}
                       className={inputCls} placeholder={DEFAULT_EXECUTABLE_BY_TOOL[cfg.opencode.tool] ?? "opencode"} />
                   </Field>
-                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-                    <Field label="模型" hint="留空使用默认">
-                      <input type="text" value={cfg.opencode.model}
-                        onChange={(e) => setOC("model", e.target.value)}
-                        className={inputCls} placeholder="（默认）" />
-                    </Field>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                     <Field label="超时（秒）">
                       <input type="number" value={cfg.opencode.timeout}
                         onChange={(e) => setOC("timeout", Number(e.target.value))}
@@ -350,16 +427,6 @@ function AgentConfigPanel({ agent }: AgentConfigPanelProps) {
                         className={inputCls} min={0} max={10} />
                     </Field>
                   </div>
-                  <Field label="OpenCode 并发数" hint="同时运行的 CLI 任务总数">
-                    <input type="number" value={cfg.opencode_concurrency}
-                      onChange={(e) => setConcurrency(Number(e.target.value))}
-                      className={inputCls} min={1} max={8} />
-                  </Field>
-                  <ModelPoolEditor
-                    title="审计模型池"
-                    models={cfg.opencode.models || []}
-                    onChange={(models) => updateModelPool("opencode", () => models)}
-                  />
                 </div>
               </div>
 
@@ -370,12 +437,7 @@ function AgentConfigPanel({ agent }: AgentConfigPanelProps) {
                   <input
                     type="checkbox"
                     checked={!cfg.fp_review_cli}
-                    onChange={(e) => {
-                      setCfg((prev) => ({
-                        ...prev,
-                        fp_review_cli: e.target.checked ? null : { ...prev.opencode },
-                      }));
-                    }}
+                    onChange={(e) => setFpInherit(e.target.checked)}
                     className="h-4 w-4 rounded border-slate-600 bg-slate-900 text-blue-600 focus:ring-blue-500"
                   />
                   继承 LLM 审计工具和模型
@@ -396,12 +458,7 @@ function AgentConfigPanel({ agent }: AgentConfigPanelProps) {
                         onChange={(e) => setFpCli("executable", e.target.value)}
                         className={inputCls} placeholder={DEFAULT_EXECUTABLE_BY_TOOL[cfg.fp_review_cli.tool] ?? "opencode"} />
                     </Field>
-                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-                      <Field label="模型" hint="留空使用默认">
-                        <input type="text" value={cfg.fp_review_cli.model}
-                          onChange={(e) => setFpCli("model", e.target.value)}
-                          className={inputCls} placeholder="（默认）" />
-                      </Field>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                       <Field label="超时（秒）">
                         <input type="number" value={cfg.fp_review_cli.timeout}
                           onChange={(e) => setFpCli("timeout", Number(e.target.value))}
@@ -413,11 +470,6 @@ function AgentConfigPanel({ agent }: AgentConfigPanelProps) {
                           className={inputCls} min={0} max={10} />
                       </Field>
                     </div>
-                    <ModelPoolEditor
-                      title="去误报模型池"
-                      models={cfg.fp_review_cli.models || []}
-                      onChange={(models) => updateModelPool("fp_review_cli", () => models)}
-                    />
                   </div>
                 )}
               </div>
@@ -431,6 +483,45 @@ function AgentConfigPanel({ agent }: AgentConfigPanelProps) {
                     className={inputCls} placeholder="localhost,127.0.0.1" />
                 </Field>
               </div>
+                </>
+              )}
+
+              {activeTab === "models" && (
+                <div className="space-y-5">
+                  <div>
+                    <h3 className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-3">总并发</h3>
+                    <Field label="OpenCode 并发数" hint="所有模型合计同时运行的 CLI 任务上限">
+                      <input type="number" value={cfg.opencode_concurrency}
+                        onChange={(e) => setConcurrency(Number(e.target.value))}
+                        className={inputCls} min={1} max={8} />
+                    </Field>
+                  </div>
+                  <ModelPoolEditor
+                    title="审计模型池"
+                    models={cfg.opencode.models || []}
+                    onChange={(models) => updateModelPool("opencode", () => models)}
+                  />
+                  <div>
+                    <h3 className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-3">AI 去误报模型池</h3>
+                    <label className="flex items-center gap-2 text-sm text-slate-300 mb-3">
+                      <input
+                        type="checkbox"
+                        checked={!cfg.fp_review_cli}
+                        onChange={(e) => setFpInherit(e.target.checked)}
+                        className="h-4 w-4 rounded border-slate-600 bg-slate-900 text-blue-600 focus:ring-blue-500"
+                      />
+                      继承审计模型池
+                    </label>
+                    {cfg.fp_review_cli && (
+                      <ModelPoolEditor
+                        title="去误报模型池"
+                        models={cfg.fp_review_cli.models || []}
+                        onChange={(models) => updateModelPool("fp_review_cli", () => models)}
+                      />
+                    )}
+                  </div>
+                </div>
+              )}
 
               {error && (
                 <p className="text-sm text-red-400 bg-red-500/10 border border-red-500/20 rounded-lg px-3 py-2">
@@ -488,24 +579,51 @@ function ModelPoolEditor({
   const addModel = () => {
     onChange([...models, { ...DEFAULT_MODEL, id: `model-${models.length + 1}` }]);
   };
+  const addDefaultModel = () => {
+    onChange([...models, { ...DEFAULT_MODEL, id: "default", use_default_model: true, model: "" }]);
+  };
   const removeAt = (index: number) => {
     onChange(models.filter((_, i) => i !== index));
+  };
+  const addWindow = (index: number) => {
+    const current = models[index].time_windows || [];
+    updateAt(index, { time_windows: [...current, { start: "09:00", end: "18:00" }] });
+  };
+  const updateWindow = (modelIndex: number, windowIndex: number, patch: { start?: string; end?: string }) => {
+    const current = models[modelIndex].time_windows || [];
+    updateAt(modelIndex, {
+      time_windows: current.map((window, i) => (i === windowIndex ? { ...window, ...patch } : window)),
+    });
+  };
+  const removeWindow = (modelIndex: number, windowIndex: number) => {
+    updateAt(modelIndex, {
+      time_windows: (models[modelIndex].time_windows || []).filter((_, i) => i !== windowIndex),
+    });
   };
 
   return (
     <div className="border border-slate-700 rounded-lg p-3 space-y-3">
       <div className="flex items-center justify-between gap-3">
         <span className="text-xs font-semibold text-slate-300">{title}</span>
-        <button
-          type="button"
-          onClick={addModel}
-          className="px-2.5 py-1 text-xs text-white bg-slate-700 hover:bg-slate-600 rounded-md transition-colors"
-        >
-          添加模型
-        </button>
+        <div className="flex gap-2">
+          <button
+            type="button"
+            onClick={addDefaultModel}
+            className="px-2.5 py-1 text-xs text-slate-100 bg-slate-700 hover:bg-slate-600 rounded-md transition-colors"
+          >
+            添加默认模型
+          </button>
+          <button
+            type="button"
+            onClick={addModel}
+            className="px-2.5 py-1 text-xs text-white bg-blue-600 hover:bg-blue-500 rounded-md transition-colors"
+          >
+            添加模型
+          </button>
+        </div>
       </div>
       {models.length === 0 ? (
-        <p className="text-xs text-slate-500">未配置时使用上方默认模型，且所有能力要求都可使用。</p>
+        <p className="text-xs text-slate-500">未配置模型池时使用兼容的单模型配置；配置后由这里的模型、时间和总并发统一调度。</p>
       ) : (
         <div className="space-y-3">
           {models.map((model, index) => (
@@ -529,8 +647,9 @@ function ModelPoolEditor({
               <input
                 type="text"
                 value={model.model}
-                onChange={(e) => updateAt(index, { model: e.target.value })}
-                className={`${inputCls} md:col-span-3`}
+                onChange={(e) => updateAt(index, { model: e.target.value, use_default_model: false })}
+                disabled={!!model.use_default_model}
+                className={`${inputCls} md:col-span-3 disabled:opacity-50`}
                 placeholder="模型名"
               />
               <select
@@ -566,7 +685,16 @@ function ModelPoolEditor({
               >
                 删除
               </button>
-              <div className="md:col-span-12 grid grid-cols-1 sm:grid-cols-2 gap-2">
+              <label className="md:col-span-12 flex items-center gap-2 text-xs text-slate-300">
+                <input
+                  type="checkbox"
+                  checked={!!model.use_default_model}
+                  onChange={(e) => updateAt(index, { use_default_model: e.target.checked, model: e.target.checked ? "" : model.model })}
+                  className="h-4 w-4 rounded border-slate-600 bg-slate-900 text-blue-600 focus:ring-blue-500"
+                />
+                使用 CLI 默认模型（不传 --model）
+              </label>
+              <div className="md:col-span-12 grid grid-cols-1 sm:grid-cols-4 gap-2">
                 <select
                   value={model.tool || ""}
                   onChange={(e) => updateAt(index, { tool: e.target.value })}
@@ -584,6 +712,65 @@ function ModelPoolEditor({
                   className={inputCls}
                   placeholder="可执行文件覆盖（可选）"
                 />
+                <input
+                  type="number"
+                  value={model.timeout ?? ""}
+                  onChange={(e) => updateAt(index, { timeout: e.target.value === "" ? null : Number(e.target.value) })}
+                  className={inputCls}
+                  min={30}
+                  placeholder="超时覆盖"
+                />
+                <input
+                  type="number"
+                  value={model.max_retries ?? ""}
+                  onChange={(e) => updateAt(index, { max_retries: e.target.value === "" ? null : Number(e.target.value) })}
+                  className={inputCls}
+                  min={0}
+                  max={10}
+                  placeholder="重试覆盖"
+                />
+              </div>
+              <div className="md:col-span-12 space-y-2">
+                <div className="flex items-center justify-between gap-3">
+                  <span className="text-xs text-slate-400">每日使用时间</span>
+                  <button
+                    type="button"
+                    onClick={() => addWindow(index)}
+                    className="px-2 py-1 text-xs text-slate-200 bg-slate-700 hover:bg-slate-600 rounded-md transition-colors"
+                  >
+                    添加时间段
+                  </button>
+                </div>
+                {(model.time_windows || []).length === 0 ? (
+                  <p className="text-xs text-slate-500">全天可用</p>
+                ) : (
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                    {(model.time_windows || []).map((window, windowIndex) => (
+                      <div key={windowIndex} className="flex items-center gap-2">
+                        <input
+                          type="time"
+                          value={window.start}
+                          onChange={(e) => updateWindow(index, windowIndex, { start: e.target.value })}
+                          className={inputCls}
+                        />
+                        <span className="text-xs text-slate-500">至</span>
+                        <input
+                          type="time"
+                          value={window.end}
+                          onChange={(e) => updateWindow(index, windowIndex, { end: e.target.value })}
+                          className={inputCls}
+                        />
+                        <button
+                          type="button"
+                          onClick={() => removeWindow(index, windowIndex)}
+                          className="px-2 py-1 text-xs text-red-200 bg-red-500/10 hover:bg-red-500/20 border border-red-500/20 rounded-md transition-colors"
+                        >
+                          删除
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                )}
               </div>
             </div>
           ))}
@@ -663,7 +850,7 @@ export default function AgentDownload({ onBack }: Props) {
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-900 via-slate-800 to-slate-900 text-gray-100">
-      <div className="max-w-3xl mx-auto px-6 py-8">
+      <div className="max-w-5xl mx-auto px-6 py-8">
         {/* Header */}
         <div className="flex items-center gap-4 mb-8">
           <button

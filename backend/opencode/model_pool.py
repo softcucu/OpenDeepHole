@@ -16,6 +16,7 @@ CAPABILITY_ORDER = {"low": 0, "medium": 1, "high": 2}
 class ModelOption:
     id: str
     model: str
+    use_default_model: bool
     capability: str
     weight: float
     max_concurrency: int
@@ -23,6 +24,7 @@ class ModelOption:
     executable: str = ""
     timeout: int | None = None
     max_retries: int | None = None
+    time_windows: tuple[tuple[int, int], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -106,8 +108,73 @@ def _safe_float(value: object, default: float, minimum: float = 0.01) -> float:
     return parsed if parsed >= minimum else default
 
 
+def _bool_value(value: object, default: bool = False) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"1", "true", "yes", "on"}:
+            return True
+        if normalized in {"0", "false", "no", "off"}:
+            return False
+    if value is None:
+        return default
+    return bool(value)
+
+
 def configured_global_concurrency(config: Any) -> int:
     return _safe_int(_cfg_value(config, "opencode_concurrency", 1), 1, 1)
+
+
+def _configured_model_pool_enabled(cli_config: Any) -> bool:
+    return bool(_cfg_value(cli_config, "models", None) or [])
+
+
+def _parse_minutes(value: object) -> int | None:
+    parts = str(value or "").strip().split(":")
+    if len(parts) != 2:
+        return None
+    try:
+        hour = int(parts[0])
+        minute = int(parts[1])
+    except ValueError:
+        return None
+    if not (0 <= hour <= 23 and 0 <= minute <= 59):
+        return None
+    return hour * 60 + minute
+
+
+def _parse_time_windows(value: object) -> tuple[tuple[int, int], ...]:
+    if not isinstance(value, list):
+        return ()
+    windows: list[tuple[int, int]] = []
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        start = _parse_minutes(item.get("start"))
+        end = _parse_minutes(item.get("end"))
+        if start is None or end is None or start == end:
+            continue
+        windows.append((start, end))
+    return tuple(windows)
+
+
+def _option_available_now(option: ModelOption, now: datetime | None = None) -> bool:
+    if not option.time_windows:
+        return True
+    local_now = now or datetime.now().astimezone()
+    current = local_now.hour * 60 + local_now.minute
+    for start, end in option.time_windows:
+        if start < end:
+            if start <= current < end:
+                return True
+        elif current >= start or current < end:
+            return True
+    return False
+
+
+def _active_options(options: list[ModelOption], now: datetime | None = None) -> list[ModelOption]:
+    return [option for option in options if _option_available_now(option, now)]
 
 
 def total_model_capacity(
@@ -118,21 +185,30 @@ def total_model_capacity(
 ) -> int:
     """Sum of max_concurrency across enabled models satisfying the requirement.
 
-    This is the number of CLI invocations that can actually run in parallel,
-    so callers should size their worker pools from it instead of the global
-    concurrency setting alone.
+    This is the number of CLI invocations that can actually run in parallel.
+    When a model pool is configured, the top-level concurrency is a hard cap
+    over all currently time-eligible models.
     """
     required = normalize_requirement(required_capability)
     options = model_options(cli_config, global_concurrency=global_concurrency)
+    if _configured_model_pool_enabled(cli_config):
+        options = _active_options(options)
     eligible = [
         option for option in options
         if capability_satisfies(option.capability, required)
     ]
     if not eligible:
-        # Mirror acquire_model_lease(): an over-restrictive requirement falls
-        # back to all enabled models rather than deadlocking.
-        eligible = options
-    return max(1, sum(option.max_concurrency for option in eligible))
+        all_options = model_options(cli_config, global_concurrency=global_concurrency)
+        configured_match = _eligible_options(all_options, required_capability=required)
+        if not _configured_model_pool_enabled(cli_config) or not configured_match:
+            # Mirror acquire_model_lease(): an over-restrictive requirement falls
+            # back to all enabled models rather than deadlocking. A configured
+            # but currently out-of-window matching model should still be waited on.
+            eligible = options
+    capacity = sum(option.max_concurrency for option in eligible)
+    if _configured_model_pool_enabled(cli_config):
+        capacity = min(global_concurrency, capacity)
+    return max(1, capacity)
 
 
 def model_options(cli_config: Any, *, global_concurrency: int) -> list[ModelOption]:
@@ -144,14 +220,18 @@ def model_options(cli_config: Any, *, global_concurrency: int) -> list[ModelOpti
         enabled = bool(_cfg_value(raw, "enabled", True))
         if not enabled:
             continue
-        model = str(_cfg_value(raw, "model", "") or "").strip()
-        model_id = str(_cfg_value(raw, "id", "") or model or f"model-{index + 1}").strip()
+        use_default_model = _bool_value(_cfg_value(raw, "use_default_model", False))
+        model = "" if use_default_model else str(_cfg_value(raw, "model", "") or "").strip()
+        model_id = str(
+            _cfg_value(raw, "id", "") or model or ("default" if use_default_model else f"model-{index + 1}")
+        ).strip()
         if not model_id:
             continue
         options.append(
             ModelOption(
                 id=model_id,
                 model=model,
+                use_default_model=use_default_model,
                 capability=normalize_capability(_cfg_value(raw, "capability", "high")),
                 weight=_safe_float(_cfg_value(raw, "weight", 1), 1.0),
                 max_concurrency=_safe_int(
@@ -170,6 +250,7 @@ def model_options(cli_config: Any, *, global_concurrency: int) -> list[ModelOpti
                     if _cfg_value(raw, "max_retries", None) not in (None, "")
                     else None
                 ),
+                time_windows=_parse_time_windows(_cfg_value(raw, "time_windows", [])),
             )
         )
     if options:
@@ -179,6 +260,7 @@ def model_options(cli_config: Any, *, global_concurrency: int) -> list[ModelOpti
         ModelOption(
             id="default",
             model=str(_cfg_value(cli_config, "model", "") or ""),
+            use_default_model=not bool(str(_cfg_value(cli_config, "model", "") or "").strip()),
             capability="high",
             weight=1.0,
             max_concurrency=global_concurrency,
@@ -202,8 +284,11 @@ def _eligible_options(
 def _choose_available(
     options: list[ModelOption],
     *,
+    global_concurrency: int,
     prefer_high: bool = False,
 ) -> ModelOption | None:
+    if _global_running >= global_concurrency:
+        return None
     available = [
         option for option in options
         if _running_by_model.get(option.id, 0) < option.max_concurrency
@@ -285,19 +370,22 @@ async def acquire_model_lease(
     stats_scope_id: str = "",
 ) -> ModelLease | None:
     required = normalize_requirement(required_capability)
-    options = model_options(cli_config, global_concurrency=global_concurrency)
-    eligible = _eligible_options(options, required_capability=required)
-    if not eligible:
-        # Configuration is too restrictive. Fall back to all enabled models so
-        # the audit can still run, but scheduling will make the mismatch visible.
-        eligible = options
+    hard_global_concurrency = max(1, global_concurrency)
+    pool_enabled = _configured_model_pool_enabled(cli_config)
+    all_options = model_options(cli_config, global_concurrency=hard_global_concurrency)
 
     global _global_running
     queued_model_id = ""
     if stats_scope_id:
         async with _condition:
-            stats = _ensure_scope_models_locked(stats_scope_id, options)
-            queued_option = _choose_queue_target(eligible, stats)
+            stats = _ensure_scope_models_locked(stats_scope_id, all_options)
+            active_options = _active_options(all_options) if pool_enabled else all_options
+            eligible = _eligible_options(active_options, required_capability=required)
+            configured_match = _eligible_options(all_options, required_capability=required)
+            if not eligible and active_options and (not pool_enabled or not configured_match):
+                eligible = active_options
+            queue_candidates = eligible or _eligible_options(all_options, required_capability=required) or all_options
+            queued_option = _choose_queue_target(queue_candidates, stats)
             queued_model_id = queued_option.id
             stats[queued_model_id].queued += 1
             stats[queued_model_id].last_status = "queued"
@@ -310,25 +398,41 @@ async def acquire_model_lease(
                     _decrement_queued_locked(stats_scope_id, queued_model_id)
             return None
         async with _condition:
-            # Concurrency is governed per model by max_concurrency; there is no
-            # shared global gate, so one scan saturating its preferred model can
-            # never starve another scan's idle-but-eligible models.
+            all_options = model_options(cli_config, global_concurrency=hard_global_concurrency)
+            active_options = _active_options(all_options) if pool_enabled else all_options
+            eligible = _eligible_options(active_options, required_capability=required)
+            configured_match = _eligible_options(all_options, required_capability=required)
+            if not eligible and active_options and (not pool_enabled or not configured_match):
+                # Configuration is too restrictive for the requested capability.
+                # Fall back to all currently time-eligible models rather than
+                # using a model outside its configured window.
+                eligible = active_options
+            if stats_scope_id:
+                _ensure_scope_models_locked(stats_scope_id, all_options)
             option = None
-            if queued_model_id:
+            if queued_model_id and eligible:
                 assigned = [candidate for candidate in eligible if candidate.id == queued_model_id]
                 if assigned:
-                    option = _choose_available(assigned, prefer_high=prefer_high)
-            if option is None:
+                    option = _choose_available(
+                        assigned,
+                        global_concurrency=hard_global_concurrency,
+                        prefer_high=prefer_high,
+                    )
+            if option is None and eligible:
                 # Queued-target model is busy: take any other eligible model
                 # with free capacity instead of idling behind the pinned one.
-                option = _choose_available(eligible, prefer_high=prefer_high)
+                option = _choose_available(
+                    eligible,
+                    global_concurrency=hard_global_concurrency,
+                    prefer_high=prefer_high,
+                )
             if option is not None:
                 _global_running += 1
                 _running_by_model[option.id] = _running_by_model.get(option.id, 0) + 1
                 _last_used[option.id] = time.monotonic()
                 started_at = time.monotonic()
                 if stats_scope_id:
-                    stats = _ensure_scope_models_locked(stats_scope_id, options)
+                    stats = _ensure_scope_models_locked(stats_scope_id, all_options)
                     if queued_model_id:
                         _decrement_queued_locked(stats_scope_id, queued_model_id)
                     item = stats[option.id]

@@ -196,10 +196,12 @@ class AgentConfigTests(unittest.TestCase):
                         {
                             "id": "fast",
                             "model": "fast-model",
+                            "use_default_model": True,
                             "capability": "low",
                             "weight": 3,
                             "max_concurrency": 2,
                             "enabled": True,
+                            "time_windows": [{"start": "09:00", "end": "18:00"}],
                         },
                         {
                             "id": "deep",
@@ -227,13 +229,18 @@ class AgentConfigTests(unittest.TestCase):
 
         self.assertEqual(cfg.opencode_concurrency, 4)
         self.assertEqual(cfg.opencode.models[0].id, "fast")
+        self.assertEqual(cfg.opencode.models[0].model, "")
+        self.assertTrue(cfg.opencode.models[0].use_default_model)
         self.assertEqual(cfg.opencode.models[0].capability, "low")
         self.assertEqual(cfg.opencode.models[0].weight, 3)
+        self.assertEqual(cfg.opencode.models[0].time_windows, [{"start": "09:00", "end": "18:00"}])
         self.assertIsNotNone(cfg.fp_review_cli)
         self.assertEqual(cfg.fp_review_cli.models[0].id, "judge")
 
         remote = remote_config_dict(cfg)
         self.assertEqual(remote["opencode_concurrency"], 4)
+        self.assertTrue(remote["opencode"]["models"][0]["use_default_model"])
+        self.assertEqual(remote["opencode"]["models"][0]["time_windows"][0]["start"], "09:00")
         self.assertEqual(remote["opencode"]["models"][1]["model"], "deep-model")
         self.assertEqual(remote["fp_review_cli"]["models"][0]["capability"], "high")
 
@@ -251,6 +258,7 @@ class AgentConfigTests(unittest.TestCase):
                                     "capability": "unknown",
                                     "weight": 0,
                                     "max_concurrency": 0,
+                                    "time_windows": "bad",
                                 }
                             ]
                         },
@@ -266,6 +274,7 @@ class AgentConfigTests(unittest.TestCase):
             self.assertEqual(cfg.opencode.models[0].capability, "high")
             self.assertEqual(cfg.opencode.models[0].weight, 1)
             self.assertEqual(cfg.opencode.models[0].max_concurrency, 1)
+            self.assertEqual(cfg.opencode.models[0].time_windows, [])
 
 
 if __name__ == "__main__":

@@ -2,6 +2,8 @@
 
 ## 2026-06-24
 
+- **新增** 客户端配置内独立「模型池」页签：OpenCode/兼容 CLI 审计工具不再单独编辑模型字段，模型统一在审计/去误报模型池中配置，并支持默认模型行、模型能力、每日使用时间窗口、单模型并发和工具覆盖
+- **变更** 模型池启用后 `opencode_concurrency` 改为所有模型合计运行数的硬上限；调度同时受单模型 `max_concurrency` 与每日 `time_windows` 限制，满足能力但不在当前时间窗口的模型会排队等待而不是降级使用低能力模型
 - **优化** checker 静态阶段按 `code_scan_path` 收敛 DB 函数范围：新增 `CodeDatabase.get_functions_by_path_prefix()` 与公共 `scoped_functions()`，`npd`、`chain_npd`、`oob`、`sensitive_clear` 不再先遍历整库函数后事后丢弃范围外候选；`npd`、`chain_npd` 同步补齐静态进度上报
 - **新增** 静态候选跨规则去重：`checker.yaml` 支持 `family`，默认开启 `static_dedup`，同 `family + file + function` 只保留一个代表候选进入 AI 审计，并通过 `metadata.merged_from` 记录合并来源
 - **优化** OpenCode 初始候选描述改为最小审计问题：只保留函数、变量/表达式和问题类型，静态分析规则、命中路径和工具细节不再写入 `description`

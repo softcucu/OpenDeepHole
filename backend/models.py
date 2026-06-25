@@ -398,6 +398,7 @@ class AgentLLMApiConfig(BaseModel):
 class AgentOpenCodeModelConfig(BaseModel):
     id: str = ""
     model: str = ""
+    use_default_model: bool = False
     capability: str = "high"
     weight: float = 1.0
     max_concurrency: int = 1
@@ -406,6 +407,7 @@ class AgentOpenCodeModelConfig(BaseModel):
     executable: str = ""
     timeout: int | None = None
     max_retries: int | None = None
+    time_windows: list[dict[str, str]] = []
 
 
 class AgentOpenCodeConfig(BaseModel):

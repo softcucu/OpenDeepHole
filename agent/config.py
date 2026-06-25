@@ -34,6 +34,7 @@ class LLMApiConfig:
 class OpenCodeModelConfig:
     id: str = ""
     model: str = ""
+    use_default_model: bool = False
     capability: str = "high"       # low | medium | high
     weight: float = 1.0
     max_concurrency: int = 1
@@ -42,6 +43,7 @@ class OpenCodeModelConfig:
     executable: str = ""           # optional per-model override
     timeout: int | None = None
     max_retries: int | None = None
+    time_windows: list[dict[str, str]] = field(default_factory=list)
 
 
 @dataclass
@@ -107,13 +109,26 @@ def normalize_cli_config(config: OpenCodeConfig) -> OpenCodeConfig:
         if model_tool and not model_executable:
             model_cfg.executable = _DEFAULT_EXECUTABLES[model_tool]
         if not model_cfg.id:
-            model_cfg.id = model_cfg.model or f"model-{index + 1}"
+            model_cfg.id = model_cfg.model or ("default" if model_cfg.use_default_model else f"model-{index + 1}")
+        model_cfg.use_default_model = _bool_value(model_cfg.use_default_model, False)
+        if model_cfg.use_default_model:
+            model_cfg.model = ""
         if model_cfg.capability not in {"low", "medium", "high"}:
             model_cfg.capability = "high"
         if model_cfg.weight <= 0:
             model_cfg.weight = 1.0
         if model_cfg.max_concurrency < 1:
             model_cfg.max_concurrency = 1
+        if not isinstance(model_cfg.time_windows, list):
+            model_cfg.time_windows = []
+        model_cfg.time_windows = [
+            {
+                "start": str(item.get("start", "")).strip(),
+                "end": str(item.get("end", "")).strip(),
+            }
+            for item in model_cfg.time_windows
+            if isinstance(item, dict)
+        ]
         normalized_models.append(model_cfg)
     config.models = normalized_models
     return config
