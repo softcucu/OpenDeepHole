@@ -335,8 +335,18 @@ def _choose_queue_target(options: list[ModelOption], stats: dict[str, ModelRunti
     )
 
 
+def _stats_config_matches(current: ModelRuntimeStats, option: ModelOption) -> bool:
+    return (
+        current.model == option.model
+        and current.capability == option.capability
+        and current.weight == option.weight
+        and current.max_concurrency == option.max_concurrency
+    )
+
+
 def _ensure_scope_models_locked(scope_id: str, options: list[ModelOption]) -> dict[str, ModelRuntimeStats]:
     stats = _stats_by_scope.setdefault(scope_id, {})
+    changed = False
     for option in options:
         current = stats.get(option.id)
         if current is None:
@@ -347,18 +357,25 @@ def _ensure_scope_models_locked(scope_id: str, options: list[ModelOption]) -> di
                 weight=option.weight,
                 max_concurrency=option.max_concurrency,
             )
-        else:
+            changed = True
+        elif not _stats_config_matches(current, option):
             current.model = option.model
             current.capability = option.capability
             current.weight = option.weight
             current.max_concurrency = option.max_concurrency
-    _scope_updated_at[scope_id] = _now_iso()
+            changed = True
+    if changed:
+        _scope_updated_at[scope_id] = _now_iso()
     return stats
 
 
 def _ensure_global_models_locked(options: list[ModelOption]) -> dict[str, ModelRuntimeStats]:
     global _global_updated_at
+    changed = False
     for option in options:
+        previous_option = _options_by_id.get(option.id)
+        if previous_option != option:
+            changed = True
         _options_by_id[option.id] = option
         current = _global_stats_by_model.get(option.id)
         if current is None:
@@ -369,12 +386,15 @@ def _ensure_global_models_locked(options: list[ModelOption]) -> dict[str, ModelR
                 weight=option.weight,
                 max_concurrency=option.max_concurrency,
             )
-        else:
+            changed = True
+        elif not _stats_config_matches(current, option):
             current.model = option.model
             current.capability = option.capability
             current.weight = option.weight
             current.max_concurrency = option.max_concurrency
-    _global_updated_at = _now_iso()
+            changed = True
+    if changed:
+        _global_updated_at = _now_iso()
     return _global_stats_by_model
 
 

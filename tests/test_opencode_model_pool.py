@@ -208,6 +208,55 @@ def test_model_pool_snapshot_tracks_scope_queue_and_outcomes() -> None:
     asyncio.run(run())
 
 
+def test_waiting_lease_does_not_refresh_snapshot_timestamp() -> None:
+    async def run():
+        cfg = SimpleNamespace(
+            models=[
+                {"id": "deep", "model": "deep-model", "capability": "high", "max_concurrency": 1},
+            ],
+        )
+        scope = "scope-stable-wait"
+        cancel_event = asyncio.Event()
+
+        first = await acquire_model_lease(
+            cfg,
+            global_concurrency=1,
+            required_capability="high",
+            stats_scope_id=scope,
+        )
+        second_task = asyncio.create_task(
+            acquire_model_lease(
+                cfg,
+                global_concurrency=1,
+                required_capability="high",
+                stats_scope_id=scope,
+                cancel_event=cancel_event,
+            )
+        )
+        try:
+            await asyncio.sleep(0.05)
+            first_snapshot = model_pool_snapshot(scope)
+            first_global_snapshot = model_pool_snapshot()
+            assert first_snapshot["global_queued"] == 1
+
+            await asyncio.sleep(0.35)
+            later_snapshot = model_pool_snapshot(scope)
+            later_global_snapshot = model_pool_snapshot()
+
+            assert later_snapshot["global_queued"] == 1
+            assert later_snapshot["updated_at"] == first_snapshot["updated_at"]
+            assert later_global_snapshot["updated_at"] == first_global_snapshot["updated_at"]
+        finally:
+            cancel_event.set()
+            async with model_pool_module._condition:
+                model_pool_module._condition.notify_all()
+            if not second_task.done():
+                await asyncio.wait_for(second_task, timeout=1)
+            await release_model_lease(first)
+
+    asyncio.run(run())
+
+
 def test_global_concurrency_is_hard_gate_across_models() -> None:
     """The top-level concurrency is a hard cap over all model-pool leases."""
 
