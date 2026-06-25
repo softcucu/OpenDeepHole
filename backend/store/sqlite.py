@@ -9,6 +9,7 @@ from pathlib import Path
 
 from backend.scan_metrics import VulnStat
 from backend.models import (
+    AgentOpenCodePoolStatus,
     Candidate,
     FeedbackEntry,
     FpReviewJob,
@@ -16,6 +17,7 @@ from backend.models import (
     FpReviewStageOutput,
     FpReviewStatus,
     HistoryPattern,
+    OpenCodePoolModelStats,
     OpenCodePoolStatus,
     ScanEvent,
     ScanItemStatus,
@@ -209,6 +211,38 @@ CREATE TABLE IF NOT EXISTS users (
     agent_token   TEXT NOT NULL,
     created_at    TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS agent_opencode_pool_models (
+    agent_name      TEXT NOT NULL,
+    user_id         TEXT NOT NULL DEFAULT '',
+    agent_session_id TEXT NOT NULL,
+    model_id        TEXT NOT NULL,
+    model           TEXT NOT NULL DEFAULT '',
+    use_default_model INTEGER NOT NULL DEFAULT 0,
+    capability      TEXT NOT NULL DEFAULT '',
+    weight          REAL NOT NULL DEFAULT 1.0,
+    max_concurrency INTEGER NOT NULL DEFAULT 1,
+    enabled         INTEGER NOT NULL DEFAULT 1,
+    available       INTEGER NOT NULL DEFAULT 1,
+    time_windows    TEXT NOT NULL DEFAULT '[]',
+    running         INTEGER NOT NULL DEFAULT 0,
+    queued          INTEGER NOT NULL DEFAULT 0,
+    total           INTEGER NOT NULL DEFAULT 0,
+    success         INTEGER NOT NULL DEFAULT 0,
+    failure         INTEGER NOT NULL DEFAULT 0,
+    timeout         INTEGER NOT NULL DEFAULT 0,
+    cancelled       INTEGER NOT NULL DEFAULT 0,
+    total_duration_seconds REAL NOT NULL DEFAULT 0.0,
+    last_status     TEXT NOT NULL DEFAULT '',
+    last_started_at TEXT NOT NULL DEFAULT '',
+    last_finished_at TEXT NOT NULL DEFAULT '',
+    active_tasks    TEXT NOT NULL DEFAULT '[]',
+    updated_at      TEXT NOT NULL DEFAULT '',
+    PRIMARY KEY(agent_name, user_id, agent_session_id, model_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_agent_opencode_pool_lookup
+ON agent_opencode_pool_models(agent_name, user_id);
 """
 
 
@@ -586,6 +620,179 @@ class SqliteScanStore(ScanStoreBase):
                 (status.model_dump_json(), scan_id),
             )
             self._conn.commit()
+
+    def upsert_agent_opencode_pool_status(
+        self,
+        *,
+        agent_name: str,
+        user_id: str,
+        agent_session_id: str,
+        status: OpenCodePoolStatus,
+    ) -> None:
+        now = status.updated_at or ""
+        rows = []
+        for model in status.models:
+            completed = model.success + model.failure + model.timeout + model.cancelled
+            rows.append((
+                agent_name,
+                user_id or "",
+                agent_session_id or status.agent_session_id or "",
+                model.id,
+                model.model,
+                1 if model.use_default_model else 0,
+                model.capability,
+                model.weight,
+                model.max_concurrency,
+                1 if model.enabled else 0,
+                1 if model.available else 0,
+                json.dumps(model.time_windows, ensure_ascii=False),
+                model.running,
+                model.queued,
+                model.total,
+                model.success,
+                model.failure,
+                model.timeout,
+                model.cancelled,
+                float(model.avg_duration_seconds or 0.0) * completed,
+                model.last_status,
+                model.last_started_at,
+                model.last_finished_at,
+                json.dumps(model.active_tasks, ensure_ascii=False),
+                now,
+            ))
+        if not rows:
+            return
+        with self._lock:
+            self._conn.executemany(
+                """\
+                INSERT INTO agent_opencode_pool_models (
+                    agent_name, user_id, agent_session_id, model_id, model,
+                    use_default_model, capability, weight, max_concurrency,
+                    enabled, available, time_windows, running, queued, total,
+                    success, failure, timeout, cancelled, total_duration_seconds,
+                    last_status, last_started_at, last_finished_at, active_tasks, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(agent_name, user_id, agent_session_id, model_id) DO UPDATE SET
+                    model = excluded.model,
+                    use_default_model = excluded.use_default_model,
+                    capability = excluded.capability,
+                    weight = excluded.weight,
+                    max_concurrency = excluded.max_concurrency,
+                    enabled = excluded.enabled,
+                    available = excluded.available,
+                    time_windows = excluded.time_windows,
+                    running = excluded.running,
+                    queued = excluded.queued,
+                    total = excluded.total,
+                    success = excluded.success,
+                    failure = excluded.failure,
+                    timeout = excluded.timeout,
+                    cancelled = excluded.cancelled,
+                    total_duration_seconds = excluded.total_duration_seconds,
+                    last_status = excluded.last_status,
+                    last_started_at = excluded.last_started_at,
+                    last_finished_at = excluded.last_finished_at,
+                    active_tasks = excluded.active_tasks,
+                    updated_at = excluded.updated_at
+                """,
+                rows,
+            )
+            self._conn.commit()
+
+    def get_agent_opencode_pool_status(
+        self,
+        *,
+        agent_name: str,
+        user_id: str,
+        agent_id: str = "",
+        agent_session_id: str = "",
+        online: bool = False,
+    ) -> AgentOpenCodePoolStatus:
+        cur = self._conn.execute(
+            """\
+            SELECT *
+            FROM agent_opencode_pool_models
+            WHERE agent_name = ? AND user_id = ?
+            ORDER BY updated_at ASC
+            """,
+            (agent_name, user_id or ""),
+        )
+        aggregate: dict[str, dict] = {}
+        updated_at = ""
+        for row in cur.fetchall():
+            model_id = row["model_id"]
+            item = aggregate.setdefault(
+                model_id,
+                {
+                    "id": model_id,
+                    "model": row["model"] or "",
+                    "use_default_model": bool(row["use_default_model"]),
+                    "capability": row["capability"] or "",
+                    "weight": float(row["weight"] or 1.0),
+                    "max_concurrency": int(row["max_concurrency"] or 1),
+                    "enabled": bool(row["enabled"]),
+                    "available": bool(row["available"]),
+                    "time_windows": [],
+                    "queued": 0,
+                    "running": 0,
+                    "total": 0,
+                    "success": 0,
+                    "failure": 0,
+                    "timeout": 0,
+                    "cancelled": 0,
+                    "_duration": 0.0,
+                    "last_status": "",
+                    "last_started_at": "",
+                    "last_finished_at": "",
+                    "active_tasks": [],
+                },
+            )
+            for key in ("running", "queued", "total", "success", "failure", "timeout", "cancelled"):
+                item[key] += int(row[key] or 0)
+            item["_duration"] += float(row["total_duration_seconds"] or 0.0)
+            item.update({
+                "model": row["model"] or item["model"],
+                "use_default_model": bool(row["use_default_model"]),
+                "capability": row["capability"] or item["capability"],
+                "weight": float(row["weight"] or item["weight"]),
+                "max_concurrency": int(row["max_concurrency"] or item["max_concurrency"]),
+                "enabled": bool(row["enabled"]),
+                "available": bool(row["available"]),
+                "last_status": row["last_status"] or item["last_status"],
+                "last_started_at": row["last_started_at"] or item["last_started_at"],
+                "last_finished_at": row["last_finished_at"] or item["last_finished_at"],
+            })
+            try:
+                windows = json.loads(row["time_windows"] or "[]")
+                if isinstance(windows, list):
+                    item["time_windows"] = windows
+            except Exception:
+                pass
+            try:
+                active_tasks = json.loads(row["active_tasks"] or "[]")
+                if isinstance(active_tasks, list):
+                    item["active_tasks"].extend(active_tasks)
+            except Exception:
+                pass
+            updated_at = row["updated_at"] or updated_at
+
+        models = []
+        for item in aggregate.values():
+            completed = item["success"] + item["failure"] + item["timeout"] + item["cancelled"]
+            duration = item.pop("_duration")
+            item["avg_duration_seconds"] = duration / completed if completed else 0.0
+            models.append(OpenCodePoolModelStats(**item))
+        return AgentOpenCodePoolStatus(
+            agent_id=agent_id,
+            agent_name=agent_name,
+            agent_session_id=agent_session_id,
+            online=online,
+            global_running=sum(model.running for model in models),
+            global_queued=sum(model.queued for model in models),
+            models=sorted(models, key=lambda model: model.id),
+            updated_at=updated_at,
+        )
 
     def delete_scan(self, scan_id: str) -> bool:
         with self._lock:

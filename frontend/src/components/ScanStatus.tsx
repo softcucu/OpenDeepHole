@@ -1212,11 +1212,12 @@ function ModelPoolDashboard({ pool }: { pool: OpenCodePoolStatus | null }) {
       </div>
 
       <div className="overflow-x-auto rounded-lg border border-slate-800">
-        <table className="w-full min-w-[56rem] text-sm">
+        <table className="w-full min-w-[68rem] text-sm">
           <thead className="bg-slate-950">
             <tr>
               <th className={thCls}>模型</th>
               <th className={thCls}>能力</th>
+              <th className={thCls}>可用</th>
               <th className={thCls}>权重</th>
               <th className={thCls}>运行/上限</th>
               <th className={thCls}>排队</th>
@@ -1226,6 +1227,7 @@ function ModelPoolDashboard({ pool }: { pool: OpenCodePoolStatus | null }) {
               <th className={thCls}>超时</th>
               <th className={thCls}>取消</th>
               <th className={thCls}>平均耗时</th>
+              <th className={thCls}>当前任务</th>
               <th className={thCls}>最近状态</th>
             </tr>
           </thead>
@@ -1239,6 +1241,11 @@ function ModelPoolDashboard({ pool }: { pool: OpenCodePoolStatus | null }) {
                   </div>
                 </td>
                 <td className={tdCls}>{capabilityLabel(model.capability)}</td>
+                <td className={tdCls}>
+                  <span className={model.enabled && model.available ? "text-green-300" : "text-slate-500"}>
+                    {model.enabled ? (model.available ? "可用" : "时间窗外") : "禁用"}
+                  </span>
+                </td>
                 <td className={tdCls}>{model.weight}</td>
                 <td className={tdCls}>{model.running}/{model.max_concurrency}</td>
                 <td className={tdCls}>{model.queued}</td>
@@ -1248,6 +1255,9 @@ function ModelPoolDashboard({ pool }: { pool: OpenCodePoolStatus | null }) {
                 <td className={`${tdCls} text-amber-300`}>{model.timeout}</td>
                 <td className={`${tdCls} text-slate-300`}>{model.cancelled}</td>
                 <td className={tdCls}>{formatDuration(model.avg_duration_seconds)}</td>
+                <td className={`${tdCls} max-w-64 truncate text-slate-400`}>
+                  {modelTaskLabel(model.active_tasks?.[0])}
+                </td>
                 <td className={tdCls}>
                   <div className={statusClass(model.last_status)}>
                     {statusLabel(model.last_status)}
@@ -1316,6 +1326,17 @@ function statusClass(value: string): string {
   if (value === "failure") return `${base} border-red-500/30 bg-red-500/10 text-red-300`;
   if (value === "timeout" || value === "queued") return `${base} border-amber-500/30 bg-amber-500/10 text-amber-300`;
   return `${base} border-slate-700 bg-slate-800 text-slate-400`;
+}
+
+function modelTaskLabel(task: Record<string, unknown> | undefined): string {
+  if (!task) return "-";
+  const taskType = String(task.task_type || "audit");
+  const stage = task.stage ? `/${String(task.stage)}` : "";
+  const checker = task.checker ? String(task.checker) : "";
+  const file = task.file ? String(task.file) : "";
+  const line = task.line ? `:${String(task.line)}` : "";
+  const target = file ? `${file}${line}` : checker;
+  return [taskType + stage, target].filter(Boolean).join(" ");
 }
 
 function formatDuration(seconds: number): string {

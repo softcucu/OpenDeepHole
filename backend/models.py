@@ -303,9 +303,13 @@ class SkillReport(BaseModel):
 class OpenCodePoolModelStats(BaseModel):
     id: str
     model: str = ""
+    use_default_model: bool = False
     capability: str = ""
     weight: float = 1.0
     max_concurrency: int = 1
+    enabled: bool = True
+    available: bool = True
+    time_windows: list[dict[str, str]] = []
     queued: int = 0
     running: int = 0
     total: int = 0
@@ -317,14 +321,22 @@ class OpenCodePoolModelStats(BaseModel):
     last_status: str = ""
     last_started_at: str = ""
     last_finished_at: str = ""
+    active_tasks: list[dict] = []
 
 
 class OpenCodePoolStatus(BaseModel):
     scope_id: str = ""
+    agent_name: str = ""
+    agent_session_id: str = ""
     global_running: int = 0
     global_queued: int = 0
     models: list[OpenCodePoolModelStats] = []
     updated_at: str = ""
+
+
+class AgentOpenCodePoolStatus(OpenCodePoolStatus):
+    agent_id: str = ""
+    online: bool = False
 
 
 class ScanStatus(BaseModel):
@@ -383,6 +395,7 @@ class AgentInfo(BaseModel):
     last_seen: str
     user_id: str = ""
     runtime_hash: str = ""
+    agent_session_id: str = ""
 
 
 class AgentLLMApiConfig(BaseModel):

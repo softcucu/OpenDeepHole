@@ -117,10 +117,13 @@ async def _handle_command(msg: dict, config, task_manager, reporter) -> dict | N
             from agent.fp_reviewer import update_local_feedback
             update_local_feedback(entry)
     elif cmd_type == "config":
-        from agent.config import apply_network_env, apply_remote_config, save_config
+        from agent.config import apply_remote_config, save_config
         if msg.get("config"):
             apply_remote_config(config, msg["config"])
-            apply_network_env(config)
+            try:
+                await _apply_live_config_update(config)
+            except Exception as e:
+                print(f"Config updated from server (warning: live runtime refresh failed: {e})")
             try:
                 save_config(config)
                 print("Config updated from server and persisted to agent.yaml")
@@ -148,6 +151,24 @@ async def _handle_command(msg: dict, config, task_manager, reporter) -> dict | N
     else:
         print(f"Unknown command type: {cmd_type!r}")
     return None
+
+
+async def _apply_live_config_update(config) -> None:
+    """Apply server-managed model/API config to already loaded backend state."""
+    from agent.config import apply_network_env
+    from agent.scanner import refresh_backend_runtime_config
+    from backend.opencode.model_pool import (
+        notify_model_pool_config_changed,
+        refresh_configured_model_pool,
+    )
+
+    apply_network_env(config)
+    refresh_backend_runtime_config(config)
+    await refresh_configured_model_pool(
+        config.opencode,
+        global_concurrency=config.opencode_concurrency,
+    )
+    await notify_model_pool_config_changed()
 
 
 async def _ws_loop(config, task_manager, reporter) -> None:
@@ -181,6 +202,7 @@ async def _ws_loop(config, task_manager, reporter) -> None:
                     "name": name,
                     "config": remote_config_dict(config),
                     "runtime_hash": compute_runtime_hash(),
+                    "agent_session_id": reporter.agent_session_id,
                     "active_scans": task_manager.active_snapshots() + pending_scan_snapshots(),
                     "active_fp_reviews": agent_server.active_fp_review_snapshots(),
                 }
@@ -197,11 +219,15 @@ async def _ws_loop(config, task_manager, reporter) -> None:
 
                 agent_id = welcome["agent_id"]
                 agent_server._agent_id = agent_id
+                reporter.set_agent_id(agent_id)
 
                 if welcome.get("config"):
                     from agent.config import save_config
                     apply_remote_config(config, welcome["config"])
-                    apply_network_env(config)
+                    try:
+                        await _apply_live_config_update(config)
+                    except Exception as e:
+                        print(f"Config received from server (warning: live runtime refresh failed: {e})")
                     try:
                         save_config(config)
                     except Exception as e:
@@ -246,9 +272,13 @@ async def _ws_loop(config, task_manager, reporter) -> None:
                         except Exception as e:
                             print(f"Error handling command: {e}")
 
+                pool_status_stop = asyncio.Event()
                 heartbeat_task = asyncio.create_task(_heartbeat())
                 watchdog_task = asyncio.create_task(_watchdog())
                 worker_task = asyncio.create_task(_command_worker())
+                pool_status_task = asyncio.create_task(
+                    reporter.publish_agent_opencode_pool_until(pool_status_stop)
+                )
 
                 try:
                     for command in pending_commands:
@@ -265,11 +295,13 @@ async def _ws_loop(config, task_manager, reporter) -> None:
                             continue
                         await command_queue.put(msg)
                 finally:
+                    pool_status_stop.set()
                     heartbeat_task.cancel()
                     watchdog_task.cancel()
+                    pool_status_task.cancel()
                     await command_queue.put(None)
                     worker_task.cancel()
-                    for task in (heartbeat_task, watchdog_task, worker_task):
+                    for task in (heartbeat_task, watchdog_task, worker_task, pool_status_task):
                         try:
                             await task
                         except asyncio.CancelledError:

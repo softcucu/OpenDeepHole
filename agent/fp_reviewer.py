@@ -264,13 +264,7 @@ async def run_fp_review(
         review_queue: asyncio.Queue[tuple[int, dict]] = asyncio.Queue()
         for item in enumerate(vulnerabilities):
             review_queue.put_nowait(item)
-        from backend.opencode.model_pool import total_model_capacity
-        review_capacity = total_model_capacity(
-            fp_cli,
-            global_concurrency=config.opencode_concurrency,
-            required_capability="high",
-        )
-        review_concurrency = max(1, min(review_capacity, len(vulnerabilities) or 1))
+        review_concurrency = max(1, min(8, len(vulnerabilities) or 1))
 
         async def review_one(position: int, vuln: dict) -> None:
             nonlocal processed_reviews
@@ -317,6 +311,7 @@ async def run_fp_review(
                 variant_of = str(vuln.get("variant_of") or "")
                 matched_high = False
                 if history_patterns or variant_of:
+                    current_fp_cli = effective_fp_review_cli_config(config)
                     history_match = await _run_fp_review_stage(
                         stage="history_match",
                         scan_id=scan_id,
@@ -328,9 +323,9 @@ async def run_fp_review(
                         output_markdown_path=artifact_dir / "history-match.md",
                         vuln=vuln,
                         project_id_for_prompt=project_id_for_prompt,
-                        timeout=fp_cli.timeout,
+                        timeout=current_fp_cli.timeout,
                         cancel_event=cancel_event,
-                        cli_config=fp_cli,
+                        cli_config=current_fp_cli,
                         project=project,
                         candidate=fake_candidate,
                         ai_analysis_path=ai_analysis_path,
@@ -366,6 +361,7 @@ async def run_fp_review(
                         )
 
                 if not matched_high:
+                    current_fp_cli = effective_fp_review_cli_config(config)
                     prove_bug = await _run_fp_review_stage(
                         stage="prove_bug",
                         scan_id=scan_id,
@@ -377,9 +373,9 @@ async def run_fp_review(
                         output_markdown_path=artifact_dir / "prove-bug.md",
                         vuln=vuln,
                         project_id_for_prompt=project_id_for_prompt,
-                        timeout=fp_cli.timeout,
+                        timeout=current_fp_cli.timeout,
                         cancel_event=cancel_event,
-                        cli_config=fp_cli,
+                        cli_config=current_fp_cli,
                         project=project,
                         candidate=fake_candidate,
                         ai_analysis_path=ai_analysis_path,
@@ -410,6 +406,7 @@ async def run_fp_review(
                             f"[{position + 1}] FALSE POSITIVE（正方未证明问题，提前判定误报）severity=low",
                         )
                     else:
+                        current_fp_cli = effective_fp_review_cli_config(config)
                         prove_fp = await _run_fp_review_stage(
                             stage="prove_fp",
                             scan_id=scan_id,
@@ -422,9 +419,9 @@ async def run_fp_review(
                             input_markdown_paths=[artifact_dir / "prove-bug.md"],
                             vuln=vuln,
                             project_id_for_prompt=project_id_for_prompt,
-                            timeout=fp_cli.timeout,
+                            timeout=current_fp_cli.timeout,
                             cancel_event=cancel_event,
-                            cli_config=fp_cli,
+                            cli_config=current_fp_cli,
                             project=project,
                             candidate=fake_candidate,
                             prove_bug=prove_bug,
@@ -435,6 +432,7 @@ async def run_fp_review(
                         stage_outputs["prove_fp"] = _stage_markdown_or_placeholder("prove_fp", prove_fp)
                         await reporter.push_fp_stage_output(scan_id, review_id, vuln_index, "prove_fp", stage_outputs["prove_fp"])
 
+                        current_fp_cli = effective_fp_review_cli_config(config)
                         final_judge = await _run_fp_review_stage(
                             stage="final_judge",
                             scan_id=scan_id,
@@ -450,9 +448,9 @@ async def run_fp_review(
                             ],
                             vuln=vuln,
                             project_id_for_prompt=project_id_for_prompt,
-                            timeout=fp_cli.timeout,
+                            timeout=current_fp_cli.timeout,
                             cancel_event=cancel_event,
-                            cli_config=fp_cli,
+                            cli_config=current_fp_cli,
                             project=project,
                             candidate=fake_candidate,
                             prove_bug=prove_bug,
@@ -637,6 +635,16 @@ async def _run_fp_review_stage(
                 model_capability="high",
                 prefer_high_model=True,
                 stats_scope_id=scan_id,
+                task_context={
+                    "task_type": "fp_review",
+                    "review_id": review_id,
+                    "stage": stage,
+                    "vuln_index": vuln_index,
+                    "checker": vuln.get("vuln_type", ""),
+                    "file": vuln.get("file", ""),
+                    "line": vuln.get("line", 0),
+                    "function": vuln.get("function", ""),
+                },
             )
         except asyncio.CancelledError:
             raise

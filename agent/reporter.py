@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import time
+from uuid import uuid4
 from typing import Optional
 
 import httpx
@@ -26,8 +27,13 @@ class Reporter:
     def __init__(self, server_url: str, dry_run: bool = False) -> None:
         self.server_url = server_url.rstrip("/")
         self.dry_run = dry_run
+        self.agent_id = ""
+        self.agent_session_id = uuid4().hex
         self._client = httpx.AsyncClient(timeout=30.0)
         self._static_progress_warning_at: dict[str, float] = {}
+
+    def set_agent_id(self, agent_id: str) -> None:
+        self.agent_id = agent_id
 
     # ---------------------------------------------------------------------------
     # Config fetch (used before each scan to get latest server-managed settings)
@@ -258,6 +264,59 @@ class Reporter:
             ):
                 return
             if await self.push_opencode_pool_status(scan_id, snapshot):
+                last_signature = signature
+                last_sent_at = now
+
+        try:
+            while not stop_event.is_set():
+                await publish_if_needed()
+                try:
+                    await asyncio.wait_for(stop_event.wait(), timeout=interval_seconds)
+                except asyncio.TimeoutError:
+                    pass
+        finally:
+            await publish_if_needed(force=True)
+
+    async def push_agent_opencode_pool_status(self, snapshot: dict) -> bool:
+        """Push the latest Agent-wide OpenCode model-pool status snapshot."""
+        if self.dry_run or not self.agent_id:
+            return True
+        payload = dict(snapshot)
+        payload["agent_session_id"] = self.agent_session_id
+        try:
+            await self._client.post(
+                f"{self.server_url}/api/agent/{self.agent_id}/opencode-pool",
+                json=payload,
+                timeout=5.0,
+            )
+            return True
+        except Exception:
+            return False
+
+    async def publish_agent_opencode_pool_until(
+        self,
+        stop_event: asyncio.Event,
+        interval_seconds: float = 1.0,
+        unchanged_heartbeat_seconds: float = OPENCODE_POOL_UNCHANGED_HEARTBEAT_SECONDS,
+    ) -> None:
+        """Publish Agent-wide model-pool stats until *stop_event* is set."""
+        from backend.opencode.model_pool import model_pool_snapshot
+
+        last_signature: str | None = None
+        last_sent_at = 0.0
+
+        async def publish_if_needed(*, force: bool = False) -> None:
+            nonlocal last_signature, last_sent_at
+            snapshot = model_pool_snapshot()
+            signature = _snapshot_signature(snapshot)
+            now = time.monotonic()
+            if (
+                not force
+                and signature == last_signature
+                and now - last_sent_at < unchanged_heartbeat_seconds
+            ):
+                return
+            if await self.push_agent_opencode_pool_status(snapshot):
                 last_signature = signature
                 last_sent_at = now
 

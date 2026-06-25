@@ -1,5 +1,5 @@
 import axios from "axios";
-import type { AgentConfigTestResult, AgentInfo, AgentRemoteConfig, CheckerCatalogItem, CheckerDashboardResponse, CheckerInfo, FeedbackEntry, FpReviewJob, HistoryPattern, IndexStatus, ScanStatus, ScanStartResponse, ScanSummary, SkillCreateJob, SkillImportFile, SkillReport, TokenResponse, User, UserFeedbackVerdict } from "../types";
+import type { AgentConfigTestResult, AgentInfo, AgentOpenCodePoolStatus, AgentRemoteConfig, CheckerCatalogItem, CheckerDashboardResponse, CheckerInfo, FeedbackEntry, FpReviewJob, HistoryPattern, IndexStatus, ScanStatus, ScanStartResponse, ScanSummary, SkillCreateJob, SkillImportFile, SkillReport, TokenResponse, User, UserFeedbackVerdict } from "../types";
 
 const api = axios.create({ baseURL: "/" });
 
@@ -508,6 +508,11 @@ export async function getCheckerDashboard(product?: string): Promise<CheckerDash
 
 export async function getAgentConfig(agentId: string): Promise<AgentRemoteConfig> {
   const { data } = await api.get<AgentRemoteConfig>(`/api/agent/${agentId}/config`);
+  return data;
+}
+
+export async function getAgentOpenCodePool(agentId: string): Promise<AgentOpenCodePoolStatus> {
+  const { data } = await api.get<AgentOpenCodePoolStatus>(`/api/agent/${agentId}/opencode-pool`);
   return data;
 }
 

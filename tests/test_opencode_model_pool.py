@@ -9,6 +9,7 @@ from backend.opencode.model_pool import (
     model_options,
     model_pool_snapshot,
     release_model_lease,
+    refresh_configured_model_pool,
     total_model_capacity,
 )
 
@@ -22,7 +23,11 @@ def _reset_model_pool():
     model_pool_module._global_running = 0
     model_pool_module._last_used.clear()
     model_pool_module._stats_by_scope.clear()
+    model_pool_module._global_stats_by_model.clear()
+    model_pool_module._options_by_id.clear()
     model_pool_module._scope_updated_at.clear()
+    model_pool_module._global_updated_at = ""
+    model_pool_module._active_tasks.clear()
     yield
 
 
@@ -317,5 +322,66 @@ def test_acquire_queues_when_matching_model_is_outside_time_window(monkeypatch: 
         assert lease is not None
         assert lease.option.id == "night"
         await release_model_lease(lease, outcome="success", duration_seconds=0.1)
+
+    asyncio.run(run())
+
+
+def test_refresh_configured_model_pool_updates_snapshot_and_wakes_waiters() -> None:
+    async def run():
+        initial = SimpleNamespace(
+            models=[
+                {"id": "day", "model": "day-model", "capability": "low", "max_concurrency": 1},
+            ],
+        )
+        updated = SimpleNamespace(
+            models=[
+                {"id": "day", "model": "day-model-v2", "capability": "medium", "max_concurrency": 2},
+                {"id": "night", "model": "night-model", "capability": "high", "max_concurrency": 1},
+            ],
+        )
+
+        await refresh_configured_model_pool(initial, global_concurrency=1)
+        before = {item["id"]: item for item in model_pool_snapshot()["models"]}
+        assert before["day"]["model"] == "day-model"
+
+        await refresh_configured_model_pool(updated, global_concurrency=3)
+        after = {item["id"]: item for item in model_pool_snapshot()["models"]}
+        assert after["day"]["model"] == "day-model-v2"
+        assert after["day"]["capability"] == "medium"
+        assert after["day"]["max_concurrency"] == 2
+        assert after["night"]["model"] == "night-model"
+
+    asyncio.run(run())
+
+
+def test_model_pool_snapshot_includes_active_task_context() -> None:
+    async def run():
+        cfg = SimpleNamespace(
+            models=[
+                {"id": "deep", "model": "deep-model", "capability": "high", "max_concurrency": 1},
+            ],
+        )
+        lease = await acquire_model_lease(
+            cfg,
+            global_concurrency=1,
+            required_capability="high",
+            stats_scope_id="scan-active",
+            task_context={
+                "task_type": "audit",
+                "checker": "npd",
+                "file": "src/a.c",
+                "line": 42,
+            },
+        )
+        try:
+            snapshot = model_pool_snapshot("scan-active")
+            model = snapshot["models"][0]
+            assert model["running"] == 1
+            assert model["active_tasks"][0]["task_type"] == "audit"
+            assert model["active_tasks"][0]["checker"] == "npd"
+            assert model["active_tasks"][0]["file"] == "src/a.c"
+            assert model["active_tasks"][0]["line"] == 42
+        finally:
+            await release_model_lease(lease, outcome="success", duration_seconds=1.0)
 
     asyncio.run(run())

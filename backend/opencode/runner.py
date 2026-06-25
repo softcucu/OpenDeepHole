@@ -196,6 +196,7 @@ async def _run_audit_via_opencode(
                 project_dir=project_dir,
                 model_capability=getattr(checker_entry, "model_capability", "any"),
                 stats_scope_id=project_id,
+                task_context=_candidate_task_context(candidate),
             )
         except asyncio.TimeoutError:
             # Timeout — no retry; check if result was submitted before kill
@@ -302,6 +303,7 @@ async def run_project_audit(
                 project_dir=project_dir,
                 model_capability=getattr(checker_entry, "model_capability", "any"),
                 stats_scope_id=project_id,
+                task_context=_candidate_task_context(candidate, "project_audit"),
             )
         except asyncio.TimeoutError:
             logger.error("%s project audit timed out for %s (timeout=%ds)", tool, candidate.vuln_type, effective_timeout)
@@ -500,6 +502,7 @@ async def run_sensitive_clear_audit(
                 project_dir=project_dir,
                 model_capability=getattr(checker_entry, "model_capability", "any"),
                 stats_scope_id=project_id,
+                task_context=_candidate_task_context(candidate, "sensitive_clear"),
             )
         except asyncio.TimeoutError:
             logger.error("%s sensitive_clear audit timed out for %s", tool, candidate.file)
@@ -669,6 +672,7 @@ async def run_project_report_audit(
                 writable_paths=[report_dir],
                 model_capability=getattr(checker_entry, "model_capability", "any"),
                 stats_scope_id=project_id,
+                task_context=_candidate_task_context(candidate, "report_audit"),
             )
         except asyncio.TimeoutError:
             logger.error(
@@ -727,6 +731,16 @@ def _effective_cli_config(cli_config, model_option) -> dict:
     if model_option.max_retries is not None:
         data["max_retries"] = model_option.max_retries
     return data
+
+
+def _candidate_task_context(candidate: Candidate, task_type: str = "audit") -> dict:
+    return {
+        "task_type": task_type,
+        "checker": candidate.vuln_type,
+        "file": candidate.file,
+        "line": candidate.line,
+        "function": candidate.function,
+    }
 
 
 def _normalize_tool(config_obj) -> str:
@@ -1124,6 +1138,7 @@ async def _invoke_opencode(
     model_capability: str = "any",
     prefer_high_model: bool = False,
     stats_scope_id: str = "",
+    task_context: dict | None = None,
 ) -> None:
     """Invoke the configured AI CLI, stream output line-by-line, write to log file.
 
@@ -1133,14 +1148,22 @@ async def _invoke_opencode(
     environments regardless of Python version).
     """
     config = get_config()
+    explicit_cli_config = cli_config is not None
     cli_config = cli_config or config.opencode
+    lease_cli_config = cli_config if explicit_cli_config else (lambda: get_config().opencode)
+    lease_global_concurrency = (
+        (lambda: configured_global_concurrency(get_config()))
+        if not explicit_cli_config
+        else configured_global_concurrency(config)
+    )
     lease = await acquire_model_lease(
-        cli_config,
-        global_concurrency=configured_global_concurrency(config),
+        lease_cli_config,
+        global_concurrency=lease_global_concurrency,
         required_capability=model_capability,
         prefer_high=prefer_high_model,
         cancel_event=cancel_event,
         stats_scope_id=stats_scope_id,
+        task_context=task_context,
     )
     if lease is None:
         return
@@ -1148,6 +1171,8 @@ async def _invoke_opencode(
     duration_seconds: float | None = None
     try:
         invoke_started = lease.started_at or time.monotonic()
+        if not explicit_cli_config:
+            cli_config = get_config().opencode
         effective_cli_config = _effective_cli_config(cli_config, lease.option)
         timeout = int(_cfg_value(effective_cli_config, "timeout", timeout) or timeout)
         tool = _normalize_tool(effective_cli_config)

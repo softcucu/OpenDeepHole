@@ -7,6 +7,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
+from uuid import uuid4
 
 
 CAPABILITY_ORDER = {"low": 0, "medium": 1, "high": 2}
@@ -34,6 +35,7 @@ class ModelLease:
     global_running: int
     stats_scope_id: str = ""
     started_at: float = 0.0
+    task_id: str = ""
 
 
 @dataclass
@@ -61,7 +63,11 @@ _running_by_model: dict[str, int] = {}
 _global_running = 0
 _last_used: dict[str, float] = {}
 _stats_by_scope: dict[str, dict[str, ModelRuntimeStats]] = {}
+_global_stats_by_model: dict[str, ModelRuntimeStats] = {}
+_options_by_id: dict[str, ModelOption] = {}
 _scope_updated_at: dict[str, str] = {}
+_global_updated_at: str = ""
+_active_tasks: dict[str, dict[str, Any]] = {}
 
 
 def _now_iso() -> str:
@@ -350,6 +356,28 @@ def _ensure_scope_models_locked(scope_id: str, options: list[ModelOption]) -> di
     return stats
 
 
+def _ensure_global_models_locked(options: list[ModelOption]) -> dict[str, ModelRuntimeStats]:
+    global _global_updated_at
+    for option in options:
+        _options_by_id[option.id] = option
+        current = _global_stats_by_model.get(option.id)
+        if current is None:
+            _global_stats_by_model[option.id] = ModelRuntimeStats(
+                id=option.id,
+                model=option.model,
+                capability=option.capability,
+                weight=option.weight,
+                max_concurrency=option.max_concurrency,
+            )
+        else:
+            current.model = option.model
+            current.capability = option.capability
+            current.weight = option.weight
+            current.max_concurrency = option.max_concurrency
+    _global_updated_at = _now_iso()
+    return _global_stats_by_model
+
+
 def _decrement_queued_locked(scope_id: str, model_id: str) -> None:
     stats = _stats_by_scope.get(scope_id)
     if not stats:
@@ -363,22 +391,32 @@ def _decrement_queued_locked(scope_id: str, model_id: str) -> None:
 async def acquire_model_lease(
     cli_config: Any,
     *,
-    global_concurrency: int,
+    global_concurrency: int | Any,
     required_capability: str = "any",
     prefer_high: bool = False,
     cancel_event=None,
     stats_scope_id: str = "",
+    task_context: dict[str, Any] | None = None,
 ) -> ModelLease | None:
+    def current_cli_config() -> Any:
+        return cli_config() if callable(cli_config) else cli_config
+
+    def current_global_concurrency() -> int:
+        value = global_concurrency() if callable(global_concurrency) else global_concurrency
+        return max(1, int(value or 1))
+
     required = normalize_requirement(required_capability)
-    hard_global_concurrency = max(1, global_concurrency)
-    pool_enabled = _configured_model_pool_enabled(cli_config)
-    all_options = model_options(cli_config, global_concurrency=hard_global_concurrency)
+    active_cli_config = current_cli_config()
+    hard_global_concurrency = current_global_concurrency()
+    pool_enabled = _configured_model_pool_enabled(active_cli_config)
+    all_options = model_options(active_cli_config, global_concurrency=hard_global_concurrency)
 
     global _global_running
     queued_model_id = ""
     if stats_scope_id:
         async with _condition:
             stats = _ensure_scope_models_locked(stats_scope_id, all_options)
+            _ensure_global_models_locked(all_options)
             active_options = _active_options(all_options) if pool_enabled else all_options
             eligible = _eligible_options(active_options, required_capability=required)
             configured_match = _eligible_options(all_options, required_capability=required)
@@ -398,7 +436,11 @@ async def acquire_model_lease(
                     _decrement_queued_locked(stats_scope_id, queued_model_id)
             return None
         async with _condition:
-            all_options = model_options(cli_config, global_concurrency=hard_global_concurrency)
+            active_cli_config = current_cli_config()
+            hard_global_concurrency = current_global_concurrency()
+            pool_enabled = _configured_model_pool_enabled(active_cli_config)
+            all_options = model_options(active_cli_config, global_concurrency=hard_global_concurrency)
+            _ensure_global_models_locked(all_options)
             active_options = _active_options(all_options) if pool_enabled else all_options
             eligible = _eligible_options(active_options, required_capability=required)
             configured_match = _eligible_options(all_options, required_capability=required)
@@ -431,6 +473,20 @@ async def acquire_model_lease(
                 _running_by_model[option.id] = _running_by_model.get(option.id, 0) + 1
                 _last_used[option.id] = time.monotonic()
                 started_at = time.monotonic()
+                started_at_iso = _now_iso()
+                task_id = uuid4().hex
+                global_item = _global_stats_by_model[option.id]
+                global_item.running += 1
+                global_item.total += 1
+                global_item.last_status = "running"
+                global_item.last_started_at = started_at_iso
+                _active_tasks[task_id] = {
+                    "task_id": task_id,
+                    "model_id": option.id,
+                    "scope_id": stats_scope_id,
+                    "started_at": started_at_iso,
+                    "context": dict(task_context or {}),
+                }
                 if stats_scope_id:
                     stats = _ensure_scope_models_locked(stats_scope_id, all_options)
                     if queued_model_id:
@@ -439,14 +495,17 @@ async def acquire_model_lease(
                     item.running += 1
                     item.total += 1
                     item.last_status = "running"
-                    item.last_started_at = _now_iso()
+                    item.last_started_at = started_at_iso
                     _scope_updated_at[stats_scope_id] = item.last_started_at
+                global _global_updated_at
+                _global_updated_at = started_at_iso
                 return ModelLease(
                     option=option,
                     running=_running_by_model[option.id],
                     global_running=_global_running,
                     stats_scope_id=stats_scope_id,
                     started_at=started_at,
+                    task_id=task_id,
                 )
             try:
                 await asyncio.wait_for(_condition.wait(), timeout=0.2)
@@ -464,24 +523,45 @@ async def release_model_lease(
         return
     global _global_running
     async with _condition:
+        finished_at = _now_iso()
         _global_running = max(0, _global_running - 1)
         current = _running_by_model.get(lease.option.id, 0)
         if current <= 1:
             _running_by_model.pop(lease.option.id, None)
         else:
             _running_by_model[lease.option.id] = current - 1
+        global_item = _global_stats_by_model.get(lease.option.id)
+        if global_item is None:
+            global_item = ModelRuntimeStats(
+                id=lease.option.id,
+                model=lease.option.model,
+                capability=lease.option.capability,
+                weight=lease.option.weight,
+                max_concurrency=lease.option.max_concurrency,
+            )
+            _global_stats_by_model[lease.option.id] = global_item
+        global_item.running = max(0, global_item.running - 1)
+        normalized_outcome = outcome if outcome in {"success", "failure", "timeout", "cancelled"} else ""
+        if normalized_outcome:
+            setattr(global_item, normalized_outcome, getattr(global_item, normalized_outcome) + 1)
+            global_item.last_status = normalized_outcome
+        if duration_seconds is not None and duration_seconds >= 0:
+            global_item.total_duration_seconds += duration_seconds
+        global_item.last_finished_at = finished_at
+        _active_tasks.pop(lease.task_id, None)
         if lease.stats_scope_id:
             stats = _ensure_scope_models_locked(lease.stats_scope_id, [lease.option])
             item = stats[lease.option.id]
             item.running = max(0, item.running - 1)
-            normalized_outcome = outcome if outcome in {"success", "failure", "timeout", "cancelled"} else ""
             if normalized_outcome:
                 setattr(item, normalized_outcome, getattr(item, normalized_outcome) + 1)
                 item.last_status = normalized_outcome
             if duration_seconds is not None and duration_seconds >= 0:
                 item.total_duration_seconds += duration_seconds
-            item.last_finished_at = _now_iso()
+            item.last_finished_at = finished_at
             _scope_updated_at[lease.stats_scope_id] = item.last_finished_at
+        global _global_updated_at
+        _global_updated_at = finished_at
         _condition.notify_all()
 
 
@@ -489,14 +569,43 @@ def _completed_count(item: ModelRuntimeStats) -> int:
     return item.success + item.failure + item.timeout + item.cancelled
 
 
-def _stats_item_snapshot(item: ModelRuntimeStats) -> dict[str, Any]:
+def _format_time_windows(windows: tuple[tuple[int, int], ...]) -> list[dict[str, str]]:
+    return [
+        {
+            "start": f"{start // 60:02d}:{start % 60:02d}",
+            "end": f"{end // 60:02d}:{end % 60:02d}",
+        }
+        for start, end in windows
+    ]
+
+
+def _stats_item_snapshot(
+    item: ModelRuntimeStats,
+    *,
+    option: ModelOption | None = None,
+    scope_id: str = "",
+) -> dict[str, Any]:
     completed = _completed_count(item)
+    active_tasks = [
+        {
+            "task_id": task["task_id"],
+            "scope_id": task.get("scope_id", ""),
+            "started_at": task.get("started_at", ""),
+            **dict(task.get("context") or {}),
+        }
+        for task in _active_tasks.values()
+        if task.get("model_id") == item.id and (not scope_id or task.get("scope_id") == scope_id)
+    ]
     return {
         "id": item.id,
         "model": item.model,
+        "use_default_model": option.use_default_model if option is not None else False,
         "capability": item.capability,
         "weight": item.weight,
         "max_concurrency": item.max_concurrency,
+        "enabled": option is not None,
+        "available": _option_available_now(option) if option is not None else True,
+        "time_windows": _format_time_windows(option.time_windows) if option is not None else [],
         "queued": item.queued,
         "running": item.running,
         "total": item.total,
@@ -508,13 +617,17 @@ def _stats_item_snapshot(item: ModelRuntimeStats) -> dict[str, Any]:
         "last_status": item.last_status,
         "last_started_at": item.last_started_at,
         "last_finished_at": item.last_finished_at,
+        "active_tasks": active_tasks,
     }
 
 
 def model_pool_snapshot(scope_id: str = "") -> dict[str, Any]:
     if scope_id:
         stats = _stats_by_scope.get(scope_id, {})
-        models = [_stats_item_snapshot(item) for item in stats.values()]
+        models = [
+            _stats_item_snapshot(item, option=_options_by_id.get(item.id), scope_id=scope_id)
+            for item in stats.values()
+        ]
         return {
             "scope_id": scope_id,
             "global_running": sum(item.running for item in stats.values()),
@@ -522,7 +635,47 @@ def model_pool_snapshot(scope_id: str = "") -> dict[str, Any]:
             "models": sorted(models, key=lambda item: item["id"]),
             "updated_at": _scope_updated_at.get(scope_id, ""),
         }
+    stats = _global_stats_by_model
+    models = [_stats_item_snapshot(item, option=_options_by_id.get(item.id)) for item in stats.values()]
     return {
         "global_running": _global_running,
-        "models": dict(_running_by_model),
+        "global_queued": 0,
+        "models": sorted(models, key=lambda item: item["id"]),
+        "updated_at": _global_updated_at,
     }
+
+
+async def refresh_configured_model_pool(cli_config: Any, *, global_concurrency: int) -> None:
+    """Refresh configured model rows without waiting for the next CLI lease.
+
+    Config changes should become visible to queued leases and dashboards
+    immediately. Runtime counters are preserved for models that keep the same id.
+    """
+    global _global_updated_at
+    async with _condition:
+        options = model_options(cli_config, global_concurrency=max(1, global_concurrency))
+        configured_ids = {option.id for option in options}
+        for model_id in list(_options_by_id):
+            if model_id not in configured_ids:
+                _options_by_id.pop(model_id, None)
+        _ensure_global_models_locked(options)
+        now = _now_iso()
+        _global_updated_at = now
+        for scope_id, stats in _stats_by_scope.items():
+            _ensure_scope_models_locked(scope_id, options)
+            for model_id in list(stats):
+                if model_id not in configured_ids and stats[model_id].running <= 0:
+                    stats[model_id].last_status = "disabled"
+            _scope_updated_at[scope_id] = now
+        _condition.notify_all()
+
+
+async def notify_model_pool_config_changed() -> None:
+    """Wake queued tasks and force snapshot signatures to change after config edits."""
+    global _global_updated_at
+    async with _condition:
+        now = _now_iso()
+        _global_updated_at = now
+        for scope_id in list(_stats_by_scope):
+            _scope_updated_at[scope_id] = now
+        _condition.notify_all()

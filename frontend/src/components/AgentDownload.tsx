@@ -1,10 +1,12 @@
 import { useEffect, useState } from "react";
-import { getAgents, getAgentConfig, testAgentConfig, updateAgentConfig } from "../api/client";
+import { getAgentOpenCodePool, getAgents, getAgentConfig, testAgentConfig, updateAgentConfig } from "../api/client";
 import type {
   AgentGitHistoryConfig,
   AgentInfo,
+  AgentOpenCodePoolStatus,
   AgentOpenCodeConfig,
   AgentOpenCodeModelConfig,
+  OpenCodePoolModelStats,
   AgentPatternFilterConfig,
   AgentRemoteConfig,
 } from "../types";
@@ -148,12 +150,34 @@ function validateModelPool(title: string, models: AgentOpenCodeModelConfig[]): s
   return null;
 }
 
+function formatDurationSeconds(value: number): string {
+  if (!value || value < 0) return "—";
+  if (value < 60) return `${Math.round(value)}s`;
+  const minutes = Math.floor(value / 60);
+  const seconds = Math.round(value % 60);
+  if (minutes < 60) return `${minutes}m ${seconds}s`;
+  const hours = Math.floor(minutes / 60);
+  return `${hours}h ${minutes % 60}m`;
+}
+
+function compactTaskLabel(task: Record<string, unknown> | undefined): string {
+  if (!task) return "—";
+  const taskType = String(task.task_type || "audit");
+  const stage = task.stage ? `/${String(task.stage)}` : "";
+  const checker = task.checker ? String(task.checker) : "";
+  const file = task.file ? String(task.file) : "";
+  const line = task.line ? `:${String(task.line)}` : "";
+  const target = file ? `${file}${line}` : checker;
+  return [taskType + stage, target].filter(Boolean).join(" ");
+}
+
 interface AgentConfigPanelProps {
   agent: AgentInfo;
 }
 
 function AgentConfigPanel({ agent }: AgentConfigPanelProps) {
   const [open, setOpen] = useState(false);
+  const [pool, setPool] = useState<AgentOpenCodePoolStatus | null>(null);
   const [activeTab, setActiveTab] = useState<"base" | "models">("base");
   const [cfg, setCfg] = useState<AgentRemoteConfig>(deepClone(DEFAULT_CONFIG));
   const [loading, setLoading] = useState(false);
@@ -162,6 +186,27 @@ function AgentConfigPanel({ agent }: AgentConfigPanelProps) {
   const [testResult, setTestResult] = useState<{ ok: boolean; message: string } | null>(null);
   const [saved, setSaved] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    const refresh = async () => {
+      try {
+        const data = await getAgentOpenCodePool(agent.agent_id);
+        if (!cancelled) setPool(data);
+      } catch {
+        if (!cancelled) setPool(null);
+      }
+    };
+    refresh();
+    const id = setInterval(() => {
+      if (document.visibilityState === "hidden") return;
+      refresh();
+    }, 5000);
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+    };
+  }, [agent.agent_id]);
 
   const handleOpen = async () => {
     setOpen(true);
@@ -312,6 +357,8 @@ function AgentConfigPanel({ agent }: AgentConfigPanelProps) {
           配置
         </button>
       </div>
+
+      <AgentModelUsage pool={pool} />
 
       {/* Config form */}
       {open && (
@@ -558,6 +605,76 @@ function AgentConfigPanel({ agent }: AgentConfigPanelProps) {
         </div>
       )}
     </div>
+  );
+}
+
+function AgentModelUsage({ pool }: { pool: AgentOpenCodePoolStatus | null }) {
+  const models = pool?.models ?? [];
+  if (!pool || models.length === 0) {
+    return (
+      <div className="border-t border-slate-700/60 px-4 py-3 text-xs text-slate-500">
+        暂无模型使用数据
+      </div>
+    );
+  }
+  const total = models.reduce((sum, model) => sum + model.total, 0);
+  const success = models.reduce((sum, model) => sum + model.success, 0);
+  return (
+    <div className="border-t border-slate-700/60 px-4 py-3">
+      <div className="mb-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-slate-400">
+        <span>运行中 <b className="text-cyan-300">{pool.global_running}</b></span>
+        <span>排队 <b className="text-amber-300">{pool.global_queued}</b></span>
+        <span>成功 <b className="text-green-300">{success}</b> / {total}</span>
+      </div>
+      <div className="overflow-x-auto">
+        <table className="w-full min-w-[52rem] text-xs">
+          <thead>
+            <tr className="text-left text-slate-500">
+              <th className="px-2 py-1 font-medium">模型</th>
+              <th className="px-2 py-1 font-medium">能力</th>
+              <th className="px-2 py-1 font-medium">可用</th>
+              <th className="px-2 py-1 font-medium">运行/上限</th>
+              <th className="px-2 py-1 font-medium">成功</th>
+              <th className="px-2 py-1 font-medium">失败/超时</th>
+              <th className="px-2 py-1 font-medium">平均时间</th>
+              <th className="px-2 py-1 font-medium">当前任务</th>
+            </tr>
+          </thead>
+          <tbody>
+            {models.map((model) => (
+              <AgentModelUsageRow key={model.id} model={model} />
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+function AgentModelUsageRow({ model }: { model: OpenCodePoolModelStats }) {
+  const active = model.active_tasks?.[0];
+  return (
+    <tr className="border-t border-slate-700/50 text-slate-300">
+      <td className="px-2 py-1.5">
+        <div className="font-medium text-slate-100">{model.id}</div>
+        <div className="max-w-40 truncate font-mono text-[11px] text-slate-500">
+          {model.model || "(默认模型)"}
+        </div>
+      </td>
+      <td className="px-2 py-1.5">{model.capability || "—"}</td>
+      <td className="px-2 py-1.5">
+        <span className={model.enabled && model.available ? "text-green-300" : "text-slate-500"}>
+          {model.enabled ? (model.available ? "可用" : "时间窗外") : "禁用"}
+        </span>
+      </td>
+      <td className="px-2 py-1.5">{model.running}/{model.max_concurrency}</td>
+      <td className="px-2 py-1.5 text-green-300">{model.success}</td>
+      <td className="px-2 py-1.5 text-amber-300">{model.failure + model.timeout}</td>
+      <td className="px-2 py-1.5">{formatDurationSeconds(model.avg_duration_seconds)}</td>
+      <td className="px-2 py-1.5 max-w-64 truncate text-slate-400">
+        {compactTaskLabel(active)}
+      </td>
+    </tr>
   );
 }
 

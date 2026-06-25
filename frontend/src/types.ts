@@ -153,9 +153,13 @@ export interface ScanEvent {
 export interface OpenCodePoolModelStats {
   id: string;
   model: string;
+  use_default_model: boolean;
   capability: string;
   weight: number;
   max_concurrency: number;
+  enabled: boolean;
+  available: boolean;
+  time_windows: { start: string; end: string }[];
   queued: number;
   running: number;
   total: number;
@@ -167,14 +171,22 @@ export interface OpenCodePoolModelStats {
   last_status: string;
   last_started_at: string;
   last_finished_at: string;
+  active_tasks: Record<string, unknown>[];
 }
 
 export interface OpenCodePoolStatus {
   scope_id: string;
+  agent_name?: string;
+  agent_session_id?: string;
   global_running: number;
   global_queued: number;
   models: OpenCodePoolModelStats[];
   updated_at: string;
+}
+
+export interface AgentOpenCodePoolStatus extends OpenCodePoolStatus {
+  agent_id: string;
+  online: boolean;
 }
 
 export interface ScanStatus {
@@ -259,6 +271,7 @@ export interface AgentInfo {
   port?: number;
   last_seen: string;
   online: boolean;
+  agent_session_id?: string;
 }
 
 export interface AgentLLMApiConfig {

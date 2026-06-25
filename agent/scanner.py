@@ -464,9 +464,7 @@ def _replace_sqlite_db(temp_path: Path, final_path: Path) -> None:
     _remove_sqlite_files(temp_path)
 
 
-def _configure_backend(config: AgentConfig, scan_dir: Path) -> None:
-    """Write a temporary backend config and reset singletons so all backend
-    modules use the agent's settings (LLM API key, scans_dir, etc.)."""
+def _backend_runtime_sections(config: AgentConfig, scan_dir: Path | None = None) -> dict:
     opencode_config = dataclasses.asdict(config.opencode)
     opencode_config["mock"] = False
     raw = {
@@ -493,26 +491,57 @@ def _configure_backend(config: AgentConfig, scan_dir: Path) -> None:
             "enabled": config.pattern_filter.enabled,
             "scope": config.pattern_filter.scope,
         },
-        # AGENT_PROJECT_DIR tells MCP to find code_index.db in the project dir.
-        # Keep result JSON files isolated inside this scan's directory so the
-        # MCP submit path and opencode result read path cannot cross scans.
-        "storage": {
-            "projects_dir": str(scan_dir.parent),
-            "scans_dir": str(scan_dir),
-        },
-        "logging": {
-            "level": "INFO",
-            "file": str(scan_dir / "agent.log"),
-        },
         "mcp_server": {
             "port": 8100,  # placeholder; overridden by local_mcp if opencode mode
         },
         "no_proxy": config.no_proxy,
     }
+    if scan_dir is not None:
+        # AGENT_PROJECT_DIR tells MCP to find code_index.db in the project dir.
+        # Keep result JSON files isolated inside this scan's directory so the
+        # MCP submit path and opencode result read path cannot cross scans.
+        raw["storage"] = {
+            "projects_dir": str(scan_dir.parent),
+            "scans_dir": str(scan_dir),
+        }
+        raw["logging"] = {
+            "level": "INFO",
+            "file": str(scan_dir / "agent.log"),
+        }
     if config.fp_review_cli is not None:
         fp_review_cli_config = dataclasses.asdict(config.fp_review_cli)
         fp_review_cli_config["mock"] = False
         raw["fp_review_cli"] = fp_review_cli_config
+    return raw
+
+
+def refresh_backend_runtime_config(config: AgentConfig) -> None:
+    """Apply live AI/model config changes without changing scan storage paths."""
+    apply_network_env(config)
+    import backend.config as _cfg
+
+    current = _cfg._config
+    if current is None:
+        return
+    raw = _backend_runtime_sections(config)
+    current.llm_api = _cfg.LLMApiConfig(**raw["llm_api"])
+    current.opencode = _cfg.OpenCodeConfig(**raw["opencode"])
+    current.opencode_concurrency = int(raw["opencode_concurrency"])
+    current.memory_api_discovery = _cfg.MemoryApiDiscoveryConfig(**raw["memory_api_discovery"])
+    current.static_dedup = bool(raw["static_dedup"])
+    current.pattern_filter = _cfg.PatternFilterConfig(**raw["pattern_filter"])
+    current.no_proxy = str(raw.get("no_proxy") or "")
+    current.fp_review_cli = (
+        _cfg.OpenCodeConfig(**raw["fp_review_cli"])
+        if isinstance(raw.get("fp_review_cli"), dict)
+        else None
+    )
+
+
+def _configure_backend(config: AgentConfig, scan_dir: Path) -> None:
+    """Write a temporary backend config and reset singletons so all backend
+    modules use the agent's settings (LLM API key, scans_dir, etc.)."""
+    raw = _backend_runtime_sections(config, scan_dir)
     config_path = scan_dir / "config.yaml"
     config_path.write_text(yaml.dump(raw), encoding="utf-8")
     os.environ["CONFIG_PATH"] = str(config_path)
@@ -1038,11 +1067,7 @@ async def run_scan(
             await emit("auditing", f"Audit order: {_audit_order_summary(remaining)}")
 
         cancelled = False
-        from backend.opencode.model_pool import total_model_capacity
-        audit_capacity = total_model_capacity(
-            config.opencode, global_concurrency=config.opencode_concurrency
-        )
-        audit_concurrency = max(1, min(audit_capacity, len(remaining) or 1))
+        audit_concurrency = max(1, min(8, len(remaining) or 1))
         result_lock = asyncio.Lock()
         rejected_patterns: set[tuple[object, ...]] = set()
         queue: asyncio.Queue[tuple[int, Candidate]] = asyncio.Queue()

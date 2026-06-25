@@ -46,6 +46,7 @@ from backend.config import get_config
 from backend.logger import get_logger
 from backend.models import (
     AgentGitHistory,
+    AgentOpenCodePoolStatus,
     AgentInfo,
     AgentRemoteConfig,
     AgentScanFinish,
@@ -77,6 +78,7 @@ _agent_disconnect_tasks: dict[str, asyncio.Task] = {}
 
 # Agent configs persisted by agent_name (survives agent reconnects)
 _agent_configs: dict[str, AgentRemoteConfig] = {}
+_agent_opencode_pool_latest: dict[str, OpenCodePoolStatus] = {}
 
 
 @dataclass(frozen=True)
@@ -484,6 +486,7 @@ async def agent_websocket(websocket: WebSocket) -> None:
             last_seen=now,
             user_id=user_id,
             runtime_hash=str(msg.get("runtime_hash") or ""),
+            agent_session_id=str(msg.get("agent_session_id") or agent_id),
         )
         _registered_agents[agent_id] = agent_info
         _agent_ws[agent_id] = websocket
@@ -536,6 +539,7 @@ async def agent_websocket(websocket: WebSocket) -> None:
             _schedule_agent_disconnect_cancel(agent_id)
             _agent_ws.pop(agent_id, None)
             _agent_ws_locks.pop(agent_id, None)
+            _agent_opencode_pool_latest.pop(agent_id, None)
             _registered_agents.pop(agent_id, None)
             logger.info("Agent disconnected: %s", agent_id)
 
@@ -609,6 +613,76 @@ async def agent_heartbeat(agent_id: str) -> dict:
     return {"ok": True}
 
 
+@router.post("/{agent_id}/opencode-pool")
+async def update_agent_opencode_pool(agent_id: str, status: OpenCodePoolStatus) -> dict:
+    """Agent pushes its Agent-wide OpenCode model-pool status snapshot."""
+    agent = _registered_agents.get(agent_id)
+    if agent is None:
+        raise HTTPException(status_code=404, detail="Agent not found")
+    status.agent_name = agent.name
+    status.agent_session_id = status.agent_session_id or agent.agent_session_id
+    _agent_opencode_pool_latest[agent_id] = status
+    store = get_scan_store()
+    if hasattr(store, "upsert_agent_opencode_pool_status"):
+        store.upsert_agent_opencode_pool_status(
+            agent_name=agent.name,
+            user_id=agent.user_id,
+            agent_session_id=status.agent_session_id,
+            status=status,
+        )
+    return {"ok": True}
+
+
+@router.get("/{agent_id}/opencode-pool", response_model=AgentOpenCodePoolStatus)
+async def get_agent_opencode_pool(
+    agent_id: str,
+    current_user: User = Depends(get_current_user),
+) -> AgentOpenCodePoolStatus:
+    """Return persisted per-model usage for one Agent plus current active tasks."""
+    agent = _registered_agents.get(agent_id)
+    if agent is None:
+        raise HTTPException(status_code=404, detail="Agent not found")
+    if current_user.role != "admin" and agent.user_id != current_user.user_id:
+        raise HTTPException(status_code=403, detail="Access denied")
+    online = _is_agent_online(agent)
+    store = get_scan_store()
+    if hasattr(store, "get_agent_opencode_pool_status"):
+        result = store.get_agent_opencode_pool_status(
+            agent_name=agent.name,
+            user_id=agent.user_id,
+            agent_id=agent_id,
+            agent_session_id=agent.agent_session_id,
+            online=online,
+        )
+    else:
+        result = AgentOpenCodePoolStatus(
+            agent_id=agent_id,
+            agent_name=agent.name,
+            agent_session_id=agent.agent_session_id,
+            online=online,
+        )
+    latest = _agent_opencode_pool_latest.get(agent_id)
+    if latest is not None:
+        active_by_model = {model.id: model.active_tasks for model in latest.models}
+        live_by_model = {model.id: model for model in latest.models}
+        for model in result.models:
+            live = live_by_model.get(model.id)
+            if live is not None:
+                model.running = live.running
+                model.queued = live.queued
+                model.available = live.available
+                model.enabled = live.enabled
+                model.active_tasks = active_by_model.get(model.id, [])
+        known_ids = {model.id for model in result.models}
+        for model in latest.models:
+            if model.id not in known_ids:
+                result.models.append(model)
+        result.global_running = latest.global_running
+        result.global_queued = latest.global_queued
+        result.updated_at = latest.updated_at or result.updated_at
+    return result
+
+
 @router.delete("/{agent_id}")
 async def agent_unregister(agent_id: str) -> dict:
     """Agent calls this on graceful shutdown."""
@@ -619,6 +693,7 @@ async def agent_unregister(agent_id: str) -> dict:
     _registered_agents.pop(agent_id, None)
     _agent_ws.pop(agent_id, None)
     _agent_ws_locks.pop(agent_id, None)
+    _agent_opencode_pool_latest.pop(agent_id, None)
     logger.info("Agent unregistered: %s", agent_id)
     return {"ok": True}
 

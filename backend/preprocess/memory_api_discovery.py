@@ -202,7 +202,7 @@ async def ensure_memory_api_artifact(
     queue: asyncio.Queue[tuple[int, list[MemoryApiCandidate], Path]] = asyncio.Queue()
     for item in batch_items:
         queue.put_nowait(item)
-    concurrency = max(1, min(configured_global_concurrency(get_config()), len(batch_items) or 1))
+    concurrency = max(1, min(8, len(batch_items) or 1))
 
     async def _run_worker() -> None:
         while not queue.empty():
@@ -451,6 +451,11 @@ async def _run_memory_api_batch(
         writable_paths=[output_path.parent],
         model_capability="any",
         stats_scope_id=project_id,
+        task_context={
+            "task_type": "memory_api_discovery",
+            "batch_index": batch_index,
+            "batch_count": batch_count,
+        },
     )
 
 

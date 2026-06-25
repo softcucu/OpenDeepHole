@@ -1,6 +1,7 @@
 import tempfile
 import unittest
 import sqlite3
+import os
 from pathlib import Path
 
 from agent.scanner import (
@@ -15,9 +16,12 @@ from agent.scanner import (
     _order_candidates_for_audit,
     _round_robin_by_pattern,
     _resolve_scan_paths,
+    _configure_backend,
     build_project_level_candidate,
     is_project_level_candidate,
+    refresh_backend_runtime_config,
 )
+from agent.config import AgentConfig
 from backend.models import Candidate, OpenCodePoolStatus, ScanItemStatus, ScanMeta, ScanStatus
 from backend.store.sqlite import SqliteScanStore
 
@@ -281,6 +285,36 @@ class AgentAuditOrderingTests(unittest.TestCase):
 
 
 class ScanStoreCodeScanPathTests(unittest.TestCase):
+    def test_refresh_backend_runtime_config_updates_loaded_backend_config(self) -> None:
+        import backend.config as backend_config
+
+        old_config_path = os.environ.get("CONFIG_PATH")
+        old_config = backend_config._config
+        with tempfile.TemporaryDirectory() as tmp:
+            try:
+                scan_dir = Path(tmp) / "scan"
+                scan_dir.mkdir()
+                cfg = AgentConfig()
+                cfg.opencode.model = "old-model"
+                cfg.opencode_concurrency = 1
+                _configure_backend(cfg, scan_dir)
+                loaded = backend_config.get_config()
+                self.assertEqual(loaded.opencode.model, "old-model")
+                self.assertEqual(loaded.opencode_concurrency, 1)
+
+                cfg.opencode.model = "new-model"
+                cfg.opencode_concurrency = 4
+                refresh_backend_runtime_config(cfg)
+
+                self.assertEqual(loaded.opencode.model, "new-model")
+                self.assertEqual(loaded.opencode_concurrency, 4)
+            finally:
+                if old_config_path is None:
+                    os.environ.pop("CONFIG_PATH", None)
+                else:
+                    os.environ["CONFIG_PATH"] = old_config_path
+                backend_config._config = old_config
+
     def test_scan_meta_persists_code_scan_path(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             store = SqliteScanStore(Path(tmp) / "scans.db")
@@ -401,6 +435,75 @@ class ScanStoreCodeScanPathTests(unittest.TestCase):
             self.assertEqual(pool.global_queued, 2)
             self.assertEqual(pool.models[0].id, "fast")
             self.assertEqual(pool.models[0].success, 3)
+
+    def test_agent_opencode_pool_status_aggregates_sessions(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = SqliteScanStore(Path(tmp) / "scans.db")
+
+            store.upsert_agent_opencode_pool_status(
+                agent_name="agent-a",
+                user_id="user-1",
+                agent_session_id="session-1",
+                status=OpenCodePoolStatus(
+                    agent_session_id="session-1",
+                    global_running=0,
+                    models=[
+                        {
+                            "id": "fast",
+                            "model": "fast-model",
+                            "capability": "low",
+                            "max_concurrency": 2,
+                            "total": 3,
+                            "success": 2,
+                            "failure": 1,
+                            "avg_duration_seconds": 10,
+                            "last_status": "failure",
+                        }
+                    ],
+                    updated_at="2026-01-01T00:00:10+00:00",
+                ),
+            )
+            store.upsert_agent_opencode_pool_status(
+                agent_name="agent-a",
+                user_id="user-1",
+                agent_session_id="session-2",
+                status=OpenCodePoolStatus(
+                    agent_session_id="session-2",
+                    global_running=1,
+                    models=[
+                        {
+                            "id": "fast",
+                            "model": "fast-model",
+                            "capability": "low",
+                            "max_concurrency": 2,
+                            "running": 1,
+                            "total": 2,
+                            "success": 2,
+                            "avg_duration_seconds": 20,
+                            "active_tasks": [{"task_type": "audit", "checker": "npd"}],
+                            "last_status": "running",
+                        }
+                    ],
+                    updated_at="2026-01-01T00:00:20+00:00",
+                ),
+            )
+
+            status = store.get_agent_opencode_pool_status(
+                agent_name="agent-a",
+                user_id="user-1",
+                agent_id="agent-id",
+                agent_session_id="session-2",
+                online=True,
+            )
+
+            self.assertEqual(status.agent_id, "agent-id")
+            self.assertTrue(status.online)
+            self.assertEqual(status.models[0].total, 5)
+            self.assertEqual(status.models[0].success, 4)
+            self.assertEqual(status.models[0].failure, 1)
+            self.assertEqual(status.models[0].running, 1)
+            self.assertEqual(status.models[0].avg_duration_seconds, 14)
+            self.assertEqual(status.models[0].active_tasks[0]["checker"], "npd")
 
     def test_old_scan_database_migrates_product_column(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
