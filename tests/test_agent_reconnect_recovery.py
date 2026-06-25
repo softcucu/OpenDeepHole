@@ -13,6 +13,7 @@ from backend.models import (
     AgentInfo,
     AgentScanFinish,
     FpReviewStatus,
+    OpenCodePoolStatus,
     ScanEvent,
     ScanItemStatus,
     ScanMeta,
@@ -351,6 +352,22 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
             self.assertTrue(status_events)
             self.assertTrue(status_events[-1]["static_analysis_done"])
 
+    def test_auditing_event_does_not_advance_processed_count_from_candidate_index(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = SqliteScanStore(Path(tmp) / "scans.db")
+            scan = _scan("scan-1", ScanItemStatus.ANALYZING, total=20, processed=4)
+            store.save_scan(scan, _meta())
+            agent_api._running_scans["scan-1"] = scan
+
+            event = ScanEvent.create("auditing", "[10/20] NPD z.c:1 — z", candidate_index=9)
+            with patch("backend.api.agent.get_scan_store", return_value=store):
+                asyncio.run(agent_api.agent_scan_event("scan-1", event))
+
+            stored = store.load_scan("scan-1")[0]
+            self.assertEqual(stored.status, ScanItemStatus.AUDITING)
+            self.assertEqual(stored.processed_candidates, 4)
+            self.assertEqual(stored.progress, 0.2)
+
     def test_static_progress_done_moves_scan_to_auditing_and_publishes_static_state(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             store = SqliteScanStore(Path(tmp) / "scans.db")
@@ -452,6 +469,42 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
             stored = store.load_scan("scan-1")[0]
             self.assertEqual(stored.processed_candidates, 2)
             self.assertEqual(stored.progress, 0.5)
+
+    def test_late_opencode_pool_snapshot_is_cleared_for_completed_scan(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = SqliteScanStore(Path(tmp) / "scans.db")
+            scan = _scan("scan-1", ScanItemStatus.COMPLETE, total=4, processed=4)
+            store.save_scan(scan, _meta())
+            body = OpenCodePoolStatus(
+                scope_id="scan-1",
+                global_running=1,
+                global_queued=2,
+                models=[
+                    {
+                        "id": "deep",
+                        "model": "deep-model",
+                        "capability": "high",
+                        "max_concurrency": 1,
+                        "running": 1,
+                        "queued": 2,
+                        "total": 3,
+                        "success": 2,
+                        "last_status": "running",
+                        "active_tasks": [{"task_type": "audit"}],
+                    }
+                ],
+            )
+
+            with patch("backend.api.agent.get_scan_store", return_value=store):
+                asyncio.run(agent_api.agent_push_opencode_pool("scan-1", body))
+
+            pool = store.load_scan("scan-1")[0].opencode_pool
+            self.assertIsNotNone(pool)
+            self.assertEqual(pool.global_running, 0)
+            self.assertEqual(pool.global_queued, 0)
+            self.assertEqual(pool.models[0].running, 0)
+            self.assertEqual(pool.models[0].queued, 0)
+            self.assertEqual(pool.models[0].active_tasks, [])
 
     def test_resume_preserves_total_candidate_count(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -622,12 +675,62 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
                         total_candidates=8,
                         processed_candidates=4,
                     ),
+                    SimpleNamespace(base_url="http://testserver/"),
                 ))
 
             stored = store.load_scan("scan-1")[0]
             self.assertEqual(stored.status, ScanItemStatus.CANCELLED)
             self.assertEqual(stored.total_candidates, 8)
             self.assertEqual(stored.processed_candidates, 4)
+
+    def test_finish_scan_clears_transient_opencode_pool_state(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = SqliteScanStore(Path(tmp) / "scans.db")
+            scan = _scan("scan-1", ScanItemStatus.AUDITING, total=4, processed=2)
+            pool = OpenCodePoolStatus(
+                scope_id="scan-1",
+                global_running=1,
+                global_queued=1,
+                models=[
+                    {
+                        "id": "deep",
+                        "model": "deep-model",
+                        "capability": "high",
+                        "max_concurrency": 1,
+                        "running": 1,
+                        "queued": 1,
+                        "total": 2,
+                        "success": 1,
+                        "last_status": "running",
+                        "active_tasks": [{"task_type": "audit"}],
+                    }
+                ],
+            )
+            scan.opencode_pool = pool
+            store.save_scan(scan, _meta())
+            store.update_opencode_pool_status("scan-1", pool)
+            agent_api._running_scans["scan-1"] = scan
+
+            with patch("backend.api.agent.get_scan_store", return_value=store):
+                asyncio.run(agent_api.agent_finish_scan(
+                    "scan-1",
+                    AgentScanFinish(
+                        vulnerabilities=[],
+                        status="complete",
+                        total_candidates=4,
+                        processed_candidates=4,
+                    ),
+                    SimpleNamespace(base_url="http://testserver/"),
+                ))
+
+            stored = store.load_scan("scan-1")[0]
+            self.assertEqual(stored.status, ScanItemStatus.COMPLETE)
+            self.assertIsNotNone(stored.opencode_pool)
+            self.assertEqual(stored.opencode_pool.global_running, 0)
+            self.assertEqual(stored.opencode_pool.global_queued, 0)
+            self.assertEqual(stored.opencode_pool.models[0].running, 0)
+            self.assertEqual(stored.opencode_pool.models[0].queued, 0)
+            self.assertEqual(stored.opencode_pool.models[0].active_tasks, [])
 
     def test_active_fp_review_hello_reattaches_disconnect_errored_review(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

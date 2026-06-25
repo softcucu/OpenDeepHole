@@ -501,9 +501,9 @@ class ScanStoreCodeScanPathTests(unittest.TestCase):
             self.assertEqual(status.models[0].total, 5)
             self.assertEqual(status.models[0].success, 4)
             self.assertEqual(status.models[0].failure, 1)
-            self.assertEqual(status.models[0].running, 1)
+            self.assertEqual(status.models[0].running, 0)
             self.assertEqual(status.models[0].avg_duration_seconds, 14)
-            self.assertEqual(status.models[0].active_tasks[0]["checker"], "npd")
+            self.assertEqual(status.models[0].active_tasks, [])
 
     def test_old_scan_database_migrates_product_column(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

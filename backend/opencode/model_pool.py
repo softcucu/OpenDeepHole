@@ -413,21 +413,6 @@ async def acquire_model_lease(
 
     global _global_running
     queued_model_id = ""
-    if stats_scope_id:
-        async with _condition:
-            stats = _ensure_scope_models_locked(stats_scope_id, all_options)
-            _ensure_global_models_locked(all_options)
-            active_options = _active_options(all_options) if pool_enabled else all_options
-            eligible = _eligible_options(active_options, required_capability=required)
-            configured_match = _eligible_options(all_options, required_capability=required)
-            if not eligible and active_options and (not pool_enabled or not configured_match):
-                eligible = active_options
-            queue_candidates = eligible or _eligible_options(all_options, required_capability=required) or all_options
-            queued_option = _choose_queue_target(queue_candidates, stats)
-            queued_model_id = queued_option.id
-            stats[queued_model_id].queued += 1
-            stats[queued_model_id].last_status = "queued"
-            _scope_updated_at[stats_scope_id] = _now_iso()
 
     while True:
         if cancel_event is not None and cancel_event.is_set():
@@ -450,7 +435,9 @@ async def acquire_model_lease(
                 # using a model outside its configured window.
                 eligible = active_options
             if stats_scope_id:
-                _ensure_scope_models_locked(stats_scope_id, all_options)
+                stats = _ensure_scope_models_locked(stats_scope_id, all_options)
+            else:
+                stats = {}
             option = None
             if queued_model_id and eligible:
                 assigned = [candidate for candidate in eligible if candidate.id == queued_model_id]
@@ -507,6 +494,13 @@ async def acquire_model_lease(
                     started_at=started_at,
                     task_id=task_id,
                 )
+            if stats_scope_id and not queued_model_id:
+                queue_candidates = eligible or _eligible_options(all_options, required_capability=required) or all_options
+                queued_option = _choose_queue_target(queue_candidates, stats)
+                queued_model_id = queued_option.id
+                stats[queued_model_id].queued += 1
+                stats[queued_model_id].last_status = "queued"
+                _scope_updated_at[stats_scope_id] = _now_iso()
             try:
                 await asyncio.wait_for(_condition.wait(), timeout=0.2)
             except asyncio.TimeoutError:

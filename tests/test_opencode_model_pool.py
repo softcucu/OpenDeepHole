@@ -90,6 +90,31 @@ def test_acquire_model_lease_filters_by_capability_and_releases() -> None:
     asyncio.run(run())
 
 
+def test_immediate_lease_does_not_count_as_queued() -> None:
+    async def run():
+        cfg = SimpleNamespace(
+            models=[
+                {"id": "deep", "model": "deep-model", "capability": "high", "max_concurrency": 1},
+            ],
+        )
+        lease = await acquire_model_lease(
+            cfg,
+            global_concurrency=1,
+            required_capability="high",
+            stats_scope_id="scope-immediate",
+        )
+        try:
+            snapshot = model_pool_snapshot("scope-immediate")
+            assert snapshot["global_running"] == 1
+            assert snapshot["global_queued"] == 0
+            assert snapshot["models"][0]["running"] == 1
+            assert snapshot["models"][0]["queued"] == 0
+        finally:
+            await release_model_lease(lease, outcome="success", duration_seconds=0.1)
+
+    asyncio.run(run())
+
+
 def test_acquire_model_lease_prefers_weighted_fast_model_for_any_capability() -> None:
     async def run():
         cfg = SimpleNamespace(

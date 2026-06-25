@@ -407,6 +407,22 @@ def _ensure_running_scan(scan_id: str) -> ScanStatus | None:
     return scan
 
 
+def _terminal_opencode_pool_status(status: OpenCodePoolStatus | None) -> OpenCodePoolStatus | None:
+    """Clear transient model-pool state while preserving historical counters."""
+    if status is None:
+        return None
+    cleared = status.model_copy(deep=True)
+    cleared.global_running = 0
+    cleared.global_queued = 0
+    for model in cleared.models:
+        model.running = 0
+        model.queued = 0
+        model.active_tasks = []
+        if model.last_status in {"running", "queued"}:
+            model.last_status = ""
+    return cleared
+
+
 # ---------------------------------------------------------------------------
 # WebSocket — preferred connection method (v2)
 # ---------------------------------------------------------------------------
@@ -834,14 +850,6 @@ async def agent_scan_event(scan_id: str, event: ScanEvent) -> dict:
         if not scan.static_analysis_done:
             scan.static_analysis_done = True
             progress_kwargs["static_analysis_done"] = True
-        if event.candidate_index is not None:
-            processed = event.candidate_index + 1
-            if processed > scan.processed_candidates:
-                scan.processed_candidates = processed
-                progress_kwargs["processed_candidates"] = processed
-                if scan.total_candidates > 0:
-                    scan.progress = processed / scan.total_candidates
-                    progress_kwargs["progress"] = scan.progress
 
     if progress_kwargs:
         store.update_scan_progress(scan_id, **progress_kwargs)
@@ -985,12 +993,18 @@ async def agent_finish_scan(scan_id: str, body: AgentScanFinish, request: Reques
     )
 
     scan = _running_scans.get(scan_id)
+    final_pool = _terminal_opencode_pool_status(
+        scan.opencode_pool if scan is not None else (existing_scan.opencode_pool if existing_scan is not None else None)
+    )
+    if final_pool is not None:
+        store.update_opencode_pool_status(scan_id, final_pool)
     if scan is not None:
         scan.status = final_status
         if body.vulnerabilities and existing_count == 0:
             scan.vulnerabilities = body.vulnerabilities
         scan.total_candidates = final_total
         scan.processed_candidates = final_processed
+        scan.opencode_pool = final_pool
         if body.error_message:
             scan.error_message = body.error_message
         if final_status == ScanItemStatus.COMPLETE:
@@ -999,6 +1013,13 @@ async def agent_finish_scan(scan_id: str, body: AgentScanFinish, request: Reques
         _scan_owners.pop(scan_id, None)
 
     from backend.sse import publish
+    publish(scan_id, "scan_status", {
+        "status": final_status,
+        "progress": 1.0 if final_status == ScanItemStatus.COMPLETE else (existing_scan.progress if existing_scan else None),
+        "total_candidates": final_total,
+        "processed_candidates": final_processed,
+        "opencode_pool": final_pool.model_dump() if final_pool is not None else None,
+    })
     publish(scan_id, "scan_finish", {
         "status": body.status,
         "error_message": body.error_message,
@@ -1172,11 +1193,14 @@ async def agent_push_static_progress(scan_id: str, body: _StaticProgressBody) ->
 async def agent_push_opencode_pool(scan_id: str, body: OpenCodePoolStatus) -> dict:
     """Agent pushes the latest OpenCode model-pool status for one scan."""
     store = get_scan_store()
-    store.update_opencode_pool_status(scan_id, body)
+    loaded = store.load_scan(scan_id)
+    terminal = loaded is not None and loaded[0].status not in _RUNNING_SCAN_STATUSES
+    status = _terminal_opencode_pool_status(body) if terminal else body
+    store.update_opencode_pool_status(scan_id, status)
 
-    scan = _ensure_running_scan(scan_id)
+    scan = None if terminal else _ensure_running_scan(scan_id)
     if scan is not None:
-        scan.opencode_pool = body
+        scan.opencode_pool = status
 
     from backend.sse import publish
     publish(scan_id, "scan_status", {
@@ -1187,7 +1211,7 @@ async def agent_push_opencode_pool(scan_id: str, body: OpenCodePoolStatus) -> di
         "static_total_files": scan.static_total_files if scan else None,
         "static_scanned_files": scan.static_scanned_files if scan else None,
         "static_analysis_done": scan.static_analysis_done if scan else None,
-        "opencode_pool": body.model_dump(),
+        "opencode_pool": status.model_dump(),
     })
     return {"ok": True}
 

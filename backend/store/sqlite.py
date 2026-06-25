@@ -748,7 +748,7 @@ class SqliteScanStore(ScanStoreBase):
                     "active_tasks": [],
                 },
             )
-            for key in ("running", "queued", "total", "success", "failure", "timeout", "cancelled"):
+            for key in ("total", "success", "failure", "timeout", "cancelled"):
                 item[key] += int(row[key] or 0)
             item["_duration"] += float(row["total_duration_seconds"] or 0.0)
             item.update({
@@ -767,12 +767,6 @@ class SqliteScanStore(ScanStoreBase):
                 windows = json.loads(row["time_windows"] or "[]")
                 if isinstance(windows, list):
                     item["time_windows"] = windows
-            except Exception:
-                pass
-            try:
-                active_tasks = json.loads(row["active_tasks"] or "[]")
-                if isinstance(active_tasks, list):
-                    item["active_tasks"].extend(active_tasks)
             except Exception:
                 pass
             updated_at = row["updated_at"] or updated_at
