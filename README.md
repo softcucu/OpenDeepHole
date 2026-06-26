@@ -53,6 +53,27 @@
 - **代表点排除方式**：进入 AI 审计队列前会按模式 key 做轮转排序，尽量先让每种模式都有代表点被审计。某个候选实际调用 AI 后，只有结果为 `confirmed=false` 且 `ai_verdict == "not_confirmed"`，才把该模式加入已否决集合；超时、无结果、异常或确认存在问题都不会传播排除。
 - **后续候选处理**：后续候选开始处理时，如果命中已否决模式，会跳过 LLM 调用，直接上报一条 `confirmed=false`、`ai_verdict="filtered_same_pattern"` 的结果，分析文本标记为“同模式代表点已被 AI 审计否决，自动过滤（未调用 LLM）”，并记录为已处理，保证进度和恢复状态一致。
 
+内置 checker 当前的 `subject` 取值如下。只有“写入 `metadata.subject`”列为“是”的 checker，才会在 AI 否决后触发同模式过滤；其他 checker 即使描述里有类似 subject 的文本，也会被视为不可传播的独立候选。
+
+| Checker | 写入 `metadata.subject` | 当前 subject 取值方式 |
+|---------|--------------------------|------------------------|
+| `npd` | 是 | 被解引用且缺少判空的变量名 `var_name` |
+| `chain_npd` | 是 | 链式指针表达式 `expr_text`，例如 `ctx->a->b` |
+| `oob` | 是 | 函数名 `func_name`，这是函数级 OOB 候选 |
+| `sensitive_clear` | 是 | 疑似敏感变量名去重后用逗号拼接 |
+| `safe_mem_oob` | 否 | 描述中使用 `call_name`，否则 `dst_expr`，否则“安全内存函数调用” |
+| `loop_mut_idx_oob` | 否 | 描述中使用循环变化索引 `idx_expr`，否则“循环索引” |
+| `bufoverflow` | 否 | 描述中依次取 `idx_expr`、`field_name`、`buf_name`、`ptr_name`、`type_name`，否则“缓冲区访问” |
+| `intoverflow` | 否 | 描述中使用可疑整数运算 `arith_expr`，否则危险使用点 `sink_expr`，否则“整数运算” |
+| `mp_npd` | 否 | 描述中使用多层指针 `ptr_expr`，否则 `root->field1`/`root`，否则“多层指针” |
+| `npd_funcret` | 否 | 描述中使用接收返回值或输出参数赋值的指针 `ptr_name` |
+| `memleak` | 否 | 函数级分组候选，描述中列出该函数内多个泄漏位置和变量 |
+| `resleak` | 否 | 描述中使用 cppcheck 资源符号 `symbol`，或锁类资源类型 `res_types` |
+| `multi_ptr_leak2` | 否 | 描述中使用释放调用点、释放实参、结构体和指针成员列表 |
+| `mp_resouce_leak` | 否 | 描述中依次取多层成员 `field_expr`、资源获取 `acq`、根对象 `root`，否则“资源成员” |
+| `double_free` | 否 | 描述中依次取 `ptr_name`、`obj_name->field_name`、`field_name`、`obj_name`，否则“指针/资源” |
+| `inf_loop` | 否 | 描述中使用循环控制变量 `loop_var`；没有控制变量时只按函数/规则类别描述 |
+
 ## 快速开始
 
 ### 部署服务器
