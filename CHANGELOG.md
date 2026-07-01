@@ -10,7 +10,7 @@
 - **新增** Agent 模型池配置页支持从当前 serve 服务端读取模型列表，勾选后导入审计或去误报模型池；刷新模型列表复用既有 serve 进程
 - **修复** serve 模式发送审计消息前会从 `/experimental/tool/ids` 读取当前 OpenCode/nga 实例的全部可用工具并显式传入 message payload，确保 `read`、`grep`、`glob` 以及已配置 MCP 工具在 serve API 调用中可见；工具发现失败时回退到原行为，不影响扫描继续执行
 - **修复** serve 模式不再把本地配置目录作为 `workspace` 查询参数传给 OpenCode，避免新版 serve 将其当作 workspace ID 解析导致 `/session` 500；模型提示中会打印真实项目根目录，读取源码时使用该目录下的路径
-- **优化** Agent 本地终端输出补齐 LLM API 直调的 prompt/SKILL 来源、每轮请求响应、工具调用、工具返回和 LLM 回复；MCP 工具日志同步提高关键内容输出上限，便于排查模型池并发时的实际输出来源
+- **优化** Agent 本地终端输出补齐 LLM/API 与 OpenCode serve 会话的中间文本输出；工具调用统一压缩为单行摘要，MCP/API 工具返回正文不再刷屏，便于并发审计时观察模型进度和实际调用
 - **优化** OpenCode/兼容 CLI 默认总并发从 1 调整为 4，新 Agent 和默认配置会并发审计候选；已有远程保存的 Agent 配置仍以用户设置为准
 
 ## 2026-06-29

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import json
 import os
 import shutil
 import socket
@@ -22,6 +24,7 @@ logger = get_logger(__name__)
 _SERVE_START_TIMEOUT_SECONDS = 30.0
 _SERVE_STOP_TIMEOUT_SECONDS = 5.0
 _SERVE_REQUEST_TIMEOUT_SECONDS = 20.0
+_SERVE_EVENT_PREVIEW_LIMIT = 500
 
 
 @dataclass(frozen=True)
@@ -96,6 +99,148 @@ def _extract_text(value: Any) -> list[str]:
             if key in value:
                 lines.extend(_extract_text(value[key]))
     return lines
+
+
+def _one_line_preview(value: object, limit: int = _SERVE_EVENT_PREVIEW_LIMIT) -> str:
+    text = "" if value is None else str(value)
+    text = " ".join(text.split())
+    if len(text) <= limit:
+        return text
+    return f"{text[:limit]}...[truncated {len(text) - limit} chars]"
+
+
+def _json_one_line(value: object, limit: int = _SERVE_EVENT_PREVIEW_LIMIT) -> str:
+    try:
+        text = json.dumps(value, ensure_ascii=False, separators=(",", ":"), default=str)
+    except Exception:
+        text = str(value)
+    return _one_line_preview(text, limit)
+
+
+def _tool_content_summary(value: object) -> str:
+    if not isinstance(value, list):
+        return "content=0"
+    text_chars = 0
+    files = 0
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        if item.get("type") == "text":
+            text_chars += len(str(item.get("text") or ""))
+        elif item.get("type") == "file":
+            files += 1
+    return f"content_items={len(value)} text_chars={text_chars} files={files}"
+
+
+class _BufferedEventEmitter:
+    def __init__(self, on_line, prefix: str) -> None:
+        self._on_line = on_line
+        self._prefix = prefix
+        self._buffer = ""
+
+    def append(self, text: str) -> bool:
+        if not text:
+            return False
+        self._buffer += text
+        emitted = False
+        while "\n" in self._buffer:
+            line, self._buffer = self._buffer.split("\n", 1)
+            if line.strip():
+                self._on_line(f"{self._prefix} {line.strip()}")
+                emitted = True
+        return emitted
+
+    def flush(self) -> bool:
+        text = self._buffer.strip()
+        self._buffer = ""
+        if not text:
+            return False
+        self._on_line(f"{self._prefix} {text}")
+        return True
+
+
+class _ServeEventState:
+    def __init__(self, tool: str, session_id: str, on_line) -> None:
+        self.tool = tool
+        self.session_id = session_id
+        self.on_line = on_line
+        self.emitted_text = False
+        self.seen_next_event = False
+        self.text = _BufferedEventEmitter(on_line, f"[{tool} serve llm]")
+        self.reasoning = _BufferedEventEmitter(on_line, f"[{tool} serve reasoning]")
+
+    def flush(self) -> None:
+        self.emitted_text = self.text.flush() or self.emitted_text
+        self.emitted_text = self.reasoning.flush() or self.emitted_text
+
+
+def _event_properties(event: object) -> tuple[str, dict[str, Any]]:
+    if not isinstance(event, dict):
+        return "", {}
+    event_type = str(event.get("type") or "")
+    properties = event.get("properties")
+    if isinstance(properties, dict):
+        return event_type, properties
+    return event_type, {}
+
+
+def _handle_serve_event(event: object, state: _ServeEventState) -> None:
+    event_type, props = _event_properties(event)
+    if props.get("sessionID") != state.session_id:
+        return
+
+    if event_type.startswith("session.next."):
+        state.seen_next_event = True
+
+    if event_type == "session.next.text.delta":
+        state.emitted_text = state.text.append(str(props.get("delta") or "")) or state.emitted_text
+    elif event_type == "session.next.text.ended":
+        state.emitted_text = state.text.flush() or state.emitted_text
+    elif event_type == "session.next.reasoning.delta":
+        state.emitted_text = state.reasoning.append(str(props.get("delta") or "")) or state.emitted_text
+    elif event_type == "session.next.reasoning.ended":
+        state.emitted_text = state.reasoning.flush() or state.emitted_text
+    elif event_type == "session.next.tool.called":
+        state.on_line(
+            f"[{state.tool} serve tool] call name={props.get('tool') or ''} "
+            f"id={props.get('callID') or ''} input={_json_one_line(props.get('input') or {})}"
+        )
+    elif event_type == "session.next.tool.success":
+        state.on_line(
+            f"[{state.tool} serve tool] success id={props.get('callID') or ''} "
+            f"{_tool_content_summary(props.get('content'))}"
+        )
+    elif event_type == "session.next.tool.failed":
+        state.on_line(
+            f"[{state.tool} serve tool] failed id={props.get('callID') or ''} "
+            f"error={_one_line_preview(props.get('error') or '')}"
+        )
+    elif event_type == "message.part.delta" and not state.seen_next_event:
+        field = str(props.get("field") or "")
+        if field in {"text", "content"}:
+            state.emitted_text = state.text.append(str(props.get("delta") or "")) or state.emitted_text
+
+
+async def _stream_sse_events(response: httpx.Response):
+    data_lines: list[str] = []
+    async for raw_line in response.aiter_lines():
+        line = raw_line.strip("\r")
+        if not line:
+            if data_lines:
+                payload = "\n".join(data_lines)
+                data_lines = []
+                try:
+                    yield json.loads(payload)
+                except Exception:
+                    continue
+            continue
+        if line.startswith("data:"):
+            data_lines.append(line[5:].lstrip())
+    if data_lines:
+        try:
+            yield json.loads("\n".join(data_lines))
+        except Exception:
+            return
 
 
 def _extract_tool_ids(value: Any) -> list[str]:
@@ -216,6 +361,8 @@ class OpenCodeServeManager:
         key = OpenCodeServeKey(tool=tool, executable=executable)
         await self._acquire_session(key)
         session_id = ""
+        event_task: asyncio.Task | None = None
+        event_state: _ServeEventState | None = None
         try:
             request_directory = config_workspace or directory
             params = _serve_context_params(request_directory)
@@ -226,6 +373,8 @@ class OpenCodeServeManager:
                 if on_line:
                     source_note = f" source={directory}" if request_directory != directory else ""
                     on_line(f"[{tool} serve] session={session_id} directory={request_directory}{source_note}")
+                    event_state = _ServeEventState(tool, session_id, on_line)
+                    event_task = asyncio.create_task(self._stream_session_events(params, event_state))
                 payload: dict[str, Any] = {
                     "parts": [{"type": "text", "text": prompt}],
                 }
@@ -258,12 +407,20 @@ class OpenCodeServeManager:
                         request.cancel()
                     raise
                 response.raise_for_status()
+                if event_state:
+                    event_state.flush()
                 lines = _extract_text(response.json())
                 for line in lines:
-                    if on_line:
+                    if on_line and not (event_state and event_state.emitted_text):
                         on_line(line)
                 return lines
         finally:
+            if event_task is not None:
+                event_task.cancel()
+                with contextlib.suppress(BaseException):
+                    await event_task
+            if event_state:
+                event_state.flush()
             if session_id:
                 await self._delete_session(session_id, params)
             async with self._idle:
@@ -419,6 +576,18 @@ class OpenCodeServeManager:
             await client.post(f"/session/{session_id}/abort", params=params, timeout=5.0)
         except Exception as exc:
             logger.warning("Failed to abort OpenCode session %s: %s", session_id, exc)
+
+    async def _stream_session_events(self, params: dict[str, str], state: _ServeEventState) -> None:
+        try:
+            async with httpx.AsyncClient(base_url=self.base_url, timeout=None) as client:
+                async with client.stream("GET", "/event", params=params) as response:
+                    response.raise_for_status()
+                    async for event in _stream_sse_events(response):
+                        _handle_serve_event(event, state)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.debug("OpenCode serve event stream unavailable: %s", exc)
 
     async def _delete_session(self, session_id: str, params: dict[str, str]) -> None:
         try:

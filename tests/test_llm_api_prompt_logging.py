@@ -153,7 +153,22 @@ def test_api_tool_log_helpers_render_tool_names_and_capped_arguments() -> None:
     assert llm_api_runner._tool_names_for_log(tools) == "view_function_code, submit_result"
     logged = llm_api_runner._json_for_log(args)
     assert '"content"' in logged
-    assert "[API log truncated: " in logged
+    assert "\n" not in logged
+    assert "<chars=" in logged
+    assert "preview=" in logged
+
+
+def test_api_stream_printer_emits_middle_llm_output() -> None:
+    outputs: list[str] = []
+    printer = llm_api_runner._ApiStreamPrinter(outputs.append, "test-model")
+
+    printer.append("first line\nsecond")
+    printer.append(" line")
+    printer.flush()
+
+    logged = "\n".join(outputs)
+    assert "[model=test-model] [API] LLM 流式输出: first line" in logged
+    assert "[model=test-model] [API] LLM 流式输出: second line" in logged
 
 
 def test_user_prompt_uses_agent_project_dir_code_index(tmp_path, monkeypatch) -> None:

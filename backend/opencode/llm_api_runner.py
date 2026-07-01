@@ -162,12 +162,35 @@ def _cap_log_text(text: object, limit: int = _API_LOG_TEXT_LIMIT) -> str:
     return f"{value[:limit]}\n[API log truncated: {remaining} chars omitted, total={len(value)}]"
 
 
-def _json_for_log(value: object, limit: int = _API_LOG_ARGS_LIMIT) -> str:
+def _one_line(text: object, limit: int = _API_LOG_ARGS_LIMIT) -> str:
+    value = "" if text is None else str(text)
+    value = " ".join(value.split())
+    if len(value) <= limit:
+        return value
+    return f"{value[:limit]}...[truncated {len(value) - limit} chars]"
+
+
+def _summarize_log_value(value: object, *, max_string: int = 240) -> object:
+    if isinstance(value, dict):
+        return {str(key): _summarize_log_value(item, max_string=max_string) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_summarize_log_value(item, max_string=max_string) for item in value]
+    if isinstance(value, str):
+        text = _one_line(value, max_string)
+        if len(value) > max_string or "\n" in value:
+            return f"<chars={len(value)} preview={text}>"
+        return text
+    return value
+
+
+def _json_for_log(value: object, limit: int = _API_LOG_ARGS_LIMIT, *, summarize: bool = True) -> str:
+    if summarize:
+        value = _summarize_log_value(value)
     try:
-        text = json.dumps(value, ensure_ascii=False, indent=2, default=str)
+        text = json.dumps(value, ensure_ascii=False, separators=(",", ":"), default=str)
     except Exception:
         text = str(value)
-    return _cap_log_text(text, limit)
+    return _one_line(text, limit)
 
 
 def _tool_names_for_log(tools: list | None) -> str:
@@ -195,6 +218,31 @@ def _emit_api_section(
         _emit_api_output(on_output, model, f"{title}\n{body_text}")
     else:
         _emit_api_output(on_output, model, title)
+
+
+class _ApiStreamPrinter:
+    def __init__(self, on_output, model: str) -> None:
+        self._on_output = on_output
+        self._model = model
+        self._buffer = ""
+        self.emitted = False
+
+    def append(self, text: str) -> None:
+        if not text:
+            return
+        self._buffer += text
+        while "\n" in self._buffer:
+            line, self._buffer = self._buffer.split("\n", 1)
+            if line.strip():
+                _emit_api_output(self._on_output, self._model, f"[API] LLM 流式输出: {line.strip()}")
+                self.emitted = True
+
+    def flush(self) -> None:
+        text = self._buffer.strip()
+        self._buffer = ""
+        if text:
+            _emit_api_output(self._on_output, self._model, f"[API] LLM 流式输出: {text}")
+            self.emitted = True
 
 
 def _client_kwargs(llm_cfg, *, timeout_override: float | None = None) -> dict:
@@ -857,11 +905,13 @@ async def run_audit_via_api(
                 f"[API] 第 {round_idx + 1}/{max_rounds} 轮请求 messages={len(messages)} stream={llm_cfg.stream}",
             )
             _cancel_fn = cancel_event.is_set if cancel_event else None
+            stream_printer = _ApiStreamPrinter(on_output, model_label) if llm_cfg.stream and on_output else None
             llm_task = asyncio.create_task(asyncio.to_thread(
                 _call_llm, client, llm_cfg.model, messages,
                 llm_cfg.temperature, llm_cfg.max_retries, tools,
                 cancel_check=_cancel_fn,
                 stream=llm_cfg.stream,
+                on_content_delta=stream_printer.append if stream_printer else None,
             ))
             if cancel_event:
                 async def _wait_cancel():
@@ -879,6 +929,8 @@ async def run_audit_via_api(
                 resp = llm_task.result()
             else:
                 resp = await llm_task
+            if stream_printer:
+                stream_printer.flush()
         except Exception as e:
             if cancel_event and cancel_event.is_set():
                 return None
@@ -902,7 +954,7 @@ async def run_audit_via_api(
         messages.append(message.model_dump(exclude_none=True))
 
         # 始终输出 LLM 的文本内容（分析过程）
-        if message.content:
+        if message.content and not (llm_cfg.stream and on_output):
             _emit_api_section(on_output, model_label, "[API] LLM 回复", message.content)
 
         # 如果没有 tool_calls，说明 LLM 直接返回了文本
@@ -925,25 +977,17 @@ async def run_audit_via_api(
             except json.JSONDecodeError:
                 func_args = {}
 
-            _emit_api_section(
+            _emit_api_output(
                 on_output,
                 model_label,
-                f"[API] 工具调用: {func_name}",
                 (
-                    f"tool_call_id={tool_call.id}\n"
-                    f"arguments={_json_for_log(func_args if func_args else raw_arguments)}"
+                    f"[API] tool_call name={func_name} id={tool_call.id} "
+                    f"args={_json_for_log(func_args if func_args else raw_arguments)}"
                 ),
-                limit=_API_LOG_ARGS_LIMIT,
             )
 
             result_text, is_submit = _execute_tool(
                 func_name, func_args, project_id, result_id, project_dir=project_dir,
-            )
-            _emit_api_section(
-                on_output,
-                model_label,
-                f"[API] 工具返回: {func_name}",
-                result_text,
             )
 
             if is_submit:
@@ -976,7 +1020,7 @@ async def run_audit_via_api(
     return result
 
 
-def _accumulate_stream(stream_iter, model: str, cancel_check=None):
+def _accumulate_stream(stream_iter, model: str, cancel_check=None, on_content_delta=None):
     """消费流式响应迭代器，累积为完整的 ChatCompletion 对象。"""
     from openai.types.chat import ChatCompletion, ChatCompletionMessage
     from openai.types.chat.chat_completion import Choice
@@ -1000,6 +1044,8 @@ def _accumulate_stream(stream_iter, model: str, cancel_check=None):
 
         if delta.content:
             content_parts.append(delta.content)
+            if on_content_delta:
+                on_content_delta(delta.content)
 
         if delta.tool_calls:
             for tc_delta in delta.tool_calls:
@@ -1052,7 +1098,17 @@ def _accumulate_stream(stream_iter, model: str, cancel_check=None):
     )
 
 
-def _call_llm(client, model: str, messages: list, temperature: float, max_retries: int, tools: list | None = None, cancel_check=None, stream: bool = False):
+def _call_llm(
+    client,
+    model: str,
+    messages: list,
+    temperature: float,
+    max_retries: int,
+    tools: list | None = None,
+    cancel_check=None,
+    stream: bool = False,
+    on_content_delta=None,
+):
     """同步调用 LLM API（在 asyncio.to_thread 中执行）。"""
     if tools is None:
         tools = TOOLS
@@ -1069,7 +1125,7 @@ def _call_llm(client, model: str, messages: list, temperature: float, max_retrie
                     temperature=temperature,
                     stream=True,
                 )
-                return _accumulate_stream(stream_iter, model, cancel_check)
+                return _accumulate_stream(stream_iter, model, cancel_check, on_content_delta)
             else:
                 return client.chat.completions.create(
                     model=model,
@@ -1276,11 +1332,13 @@ async def run_batch_audit_via_api(
                 model_label,
                 f"[API] 第 {round_idx + 1}/{max_rounds} 轮请求 messages={len(messages)} stream={llm_cfg.stream}",
             )
+            stream_printer = _ApiStreamPrinter(on_output, model_label) if llm_cfg.stream and on_output else None
             llm_task = asyncio.create_task(asyncio.to_thread(
                 _call_llm, client, llm_cfg.model, messages,
                 llm_cfg.temperature, llm_cfg.max_retries, TOOLS_BATCH,
                 cancel_check=cancel_event.is_set if cancel_event else None,
                 stream=llm_cfg.stream,
+                on_content_delta=stream_printer.append if stream_printer else None,
             ))
             if cancel_event:
                 async def _wait_cancel():
@@ -1298,6 +1356,8 @@ async def run_batch_audit_via_api(
                 resp = llm_task.result()
             else:
                 resp = await llm_task
+            if stream_printer:
+                stream_printer.flush()
         except Exception as e:
             if cancel_event and cancel_event.is_set():
                 return [None] * len(candidates)
@@ -1319,7 +1379,7 @@ async def run_batch_audit_via_api(
         messages.append(message.model_dump(exclude_none=True))
 
         # 始终输出 LLM 的文本内容（分析过程）
-        if message.content:
+        if message.content and not (llm_cfg.stream and on_output):
             _emit_api_section(on_output, model_label, "[API] LLM 回复", message.content)
 
         if not message.tool_calls:
@@ -1333,27 +1393,19 @@ async def run_batch_audit_via_api(
             except json.JSONDecodeError:
                 func_args = {}
 
-            _emit_api_section(
+            _emit_api_output(
                 on_output,
                 model_label,
-                f"[API] 工具调用: {func_name_tc}",
                 (
-                    f"tool_call_id={tool_call.id}\n"
-                    f"arguments={_json_for_log(func_args if func_args else raw_arguments)}"
+                    f"[API] tool_call name={func_name_tc} id={tool_call.id} "
+                    f"args={_json_for_log(func_args if func_args else raw_arguments)}"
                 ),
-                limit=_API_LOG_ARGS_LIMIT,
             )
 
             result_text, is_submit = _execute_batch_tool(
                 func_name_tc, func_args, project_id,
                 result_id_map, config.storage.scans_dir,
                 project_dir=project_dir,
-            )
-            _emit_api_section(
-                on_output,
-                model_label,
-                f"[API] 工具返回: {func_name_tc}",
-                result_text,
             )
 
             if is_submit:

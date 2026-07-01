@@ -83,8 +83,8 @@ def test_mcp_tool_log_includes_caller_model(tmp_path, capsys) -> None:
 
     assert "return 1" in result
     output = capsys.readouterr().out
-    assert "[MCP ▶] model=anthropic/claude-sonnet view_function_code" in output
-    assert "[MCP ◀] model=anthropic/claude-sonnet view_function_code" in output
+    assert "[MCP] model=anthropic/claude-sonnet tool_call name=view_function_code" in output
+    assert "return 1" not in output
     clear_db_cache()
 
 
@@ -99,8 +99,36 @@ def test_mcp_tool_log_defaults_unknown_model(tmp_path, capsys) -> None:
     mcp.tools["view_function_code"]("scan-a", "target")
 
     output = capsys.readouterr().out
-    assert "[MCP ▶] model=unknown view_function_code" in output
+    assert "[MCP] model=unknown tool_call name=view_function_code" in output
     clear_db_cache()
+
+
+def test_mcp_submit_log_summarizes_long_fields(tmp_path, monkeypatch, capsys) -> None:
+    class FakeStorage:
+        scans_dir = str(tmp_path / "scans")
+
+    class FakeConfig:
+        storage = FakeStorage()
+
+    monkeypatch.setattr("mcp_server.tools._get_config", lambda: FakeConfig())
+    mcp = _FakeMCP()
+    register_tools(mcp, project_dir=tmp_path)
+
+    mcp.tools["submit_result"](
+        "result-1",
+        True,
+        "high",
+        "desc",
+        "line 1\n" + "A" * 500,
+        vulnerability_report="report\n" + "B" * 500,
+        caller_model="model-a",
+    )
+
+    output = capsys.readouterr().out
+    assert output.count("tool_call name=submit_result") == 1
+    assert "<chars=" in output
+    assert "AAAAA" in output
+    assert "\n  [MCP]" not in output.strip()
 
 
 def test_code_index_cache_reopens_after_db_replacement(tmp_path) -> None:
