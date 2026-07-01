@@ -93,6 +93,7 @@ class _RuntimeDownload:
 # Short-lived tokens used by online agents to fetch runtime update archives.
 _runtime_download_tokens: dict[str, _RuntimeDownload] = {}
 _config_test_waiters: dict[str, asyncio.Future] = {}
+_opencode_model_waiters: dict[str, asyncio.Future] = {}
 
 # In-memory index progress store: scan_id → {status, parsed_files, total_files}
 _scan_index_statuses: dict[str, dict] = {}
@@ -540,6 +541,12 @@ async def agent_websocket(websocket: WebSocket) -> None:
                 if waiter is not None and not waiter.done():
                     waiter.set_result(incoming)
                 continue
+            if isinstance(incoming, dict) and incoming.get("type") == "opencode_models_result":
+                request_id = str(incoming.get("request_id") or "")
+                waiter = _opencode_model_waiters.pop(request_id, None)
+                if waiter is not None and not waiter.done():
+                    waiter.set_result(incoming)
+                continue
             if isinstance(incoming, dict) and incoming.get("type") == "skill_create_result":
                 from backend.api.skills import handle_skill_create_result
 
@@ -597,6 +604,20 @@ class _AgentRegisterBody(BaseModel):
 class _AgentConfigTestResponse(BaseModel):
     ok: bool
     message: str = ""
+
+
+class _AgentOpenCodeModelInfo(BaseModel):
+    id: str
+    model: str
+    provider_id: str = ""
+    model_id: str = ""
+    name: str = ""
+
+
+class _AgentOpenCodeModelsResponse(BaseModel):
+    ok: bool
+    message: str = ""
+    models: list[_AgentOpenCodeModelInfo] = []
 
 
 @router.post("/register")
@@ -697,6 +718,49 @@ async def get_agent_opencode_pool(
         result.global_queued = latest.global_queued
         result.updated_at = latest.updated_at or result.updated_at
     return result
+
+
+@router.get("/{agent_id}/opencode/models", response_model=_AgentOpenCodeModelsResponse)
+async def get_agent_opencode_models(
+    agent_id: str,
+    refresh: bool = False,
+    current_user: User = Depends(get_current_user),
+) -> _AgentOpenCodeModelsResponse:
+    """Ask an online Agent for models visible to its OpenCode-compatible serve process."""
+    agent = _registered_agents.get(agent_id)
+    if agent is None:
+        raise HTTPException(status_code=404, detail="Agent not found")
+    if current_user.role != "admin" and agent.user_id != current_user.user_id:
+        raise HTTPException(status_code=403, detail="Access denied")
+    if agent_id not in _agent_ws:
+        raise HTTPException(status_code=400, detail="Agent is offline")
+
+    request_id = uuid.uuid4().hex
+    loop = asyncio.get_running_loop()
+    waiter = loop.create_future()
+    _opencode_model_waiters[request_id] = waiter
+    ok = await send_agent_command(agent_id, {
+        "type": "opencode_models",
+        "request_id": request_id,
+        "refresh": refresh,
+    })
+    if not ok:
+        _opencode_model_waiters.pop(request_id, None)
+        raise HTTPException(status_code=502, detail="Agent not connected")
+    try:
+        result = await asyncio.wait_for(waiter, timeout=60.0)
+    except asyncio.TimeoutError:
+        _opencode_model_waiters.pop(request_id, None)
+        raise HTTPException(status_code=504, detail="OpenCode model listing timed out")
+    return _AgentOpenCodeModelsResponse(
+        ok=bool(result.get("ok")),
+        message=str(result.get("message") or ""),
+        models=[
+            _AgentOpenCodeModelInfo(**item)
+            for item in (result.get("models") or [])
+            if isinstance(item, dict)
+        ],
+    )
 
 
 @router.delete("/{agent_id}")

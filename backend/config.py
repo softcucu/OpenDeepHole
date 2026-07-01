@@ -47,6 +47,7 @@ class OpenCodeModelConfig(BaseModel):
 class OpenCodeConfig(BaseModel):
     tool: str = "opencode"
     executable: str = "opencode"  # CLI executable name or full path
+    invocation_mode: str = "serve"  # serve | cli
     model: str = "anthropic/claude-sonnet-4-20250514"
     timeout: int = 1200
     max_retries: int = 2  # retry on transient errors (not timeout)
@@ -185,6 +186,8 @@ def load_config(config_path: str | None = None) -> AppConfig:
 def _normalize_cli_section(section: object) -> None:
     if not isinstance(section, dict):
         return
+    invocation_mode = str(section.get("invocation_mode") or "").strip().lower()
+    section["invocation_mode"] = invocation_mode if invocation_mode in {"serve", "cli"} else "serve"
     tool = str(section.get("tool") or "").strip().lower()
     if tool in _AI_CLI_TOOLS:
         section["tool"] = tool

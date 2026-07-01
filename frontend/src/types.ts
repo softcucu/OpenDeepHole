@@ -287,6 +287,7 @@ export interface AgentLLMApiConfig {
 export interface AgentOpenCodeConfig {
   tool: "nga" | "opencode" | "hac" | "claude" | string;
   executable: string;
+  invocation_mode?: "serve" | "cli" | string;
   model: string;
   timeout: number;
   max_retries: number;
@@ -343,6 +344,20 @@ export interface AgentRemoteConfig {
 export interface AgentConfigTestResult {
   ok: boolean;
   message: string;
+}
+
+export interface AgentOpenCodeModelListItem {
+  id: string;
+  model: string;
+  provider_id: string;
+  model_id: string;
+  name?: string;
+}
+
+export interface AgentOpenCodeModelsResult {
+  ok: boolean;
+  message: string;
+  models: AgentOpenCodeModelListItem[];
 }
 
 export type FpReviewStatus = "pending" | "running" | "complete" | "error" | "cancelled";

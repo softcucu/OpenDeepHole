@@ -23,6 +23,7 @@ from backend.opencode.model_pool import (
     configured_global_concurrency,
     release_model_lease,
 )
+from backend.opencode.serve_client import get_serve_manager
 
 logger = get_logger(__name__)
 
@@ -715,6 +716,7 @@ def _effective_cli_config(cli_config, model_option) -> dict:
         "tool": _cfg_value(cli_config, "tool", ""),
         "executable": _cfg_value(cli_config, "executable", ""),
         "model": _cfg_value(cli_config, "model", ""),
+        "invocation_mode": _cfg_value(cli_config, "invocation_mode", "serve"),
         "timeout": _cfg_value(cli_config, "timeout", 1200),
         "max_retries": _cfg_value(cli_config, "max_retries", 2),
         "models": _cfg_value(cli_config, "models", []),
@@ -789,6 +791,11 @@ def _resolve_cli_executable(config_obj) -> str:
         f"{tool} executable '{name}' not found in PATH. "
         "Check the Agent CLI tool executable setting in agent.yaml."
     )
+
+
+def _invocation_mode(config_obj) -> str:
+    mode = str(_cfg_value(config_obj, "invocation_mode", "serve") or "serve").strip().lower()
+    return mode if mode in {"serve", "cli"} else "serve"
 
 
 def _read_opencode_config(workspace: Path) -> dict:
@@ -1187,6 +1194,39 @@ async def _invoke_opencode(
                 f"[{tool}] model={lease.option.id} capability={lease.option.capability} "
                 f"required={capability_note} running={lease.running}/{lease.global_running}"
             )
+        if _invocation_mode(effective_cli_config) == "serve" and tool in {"nga", "opencode"}:
+            config_workspace = _prepare_cli_workspace(
+                workspace,
+                tool,
+                runtime_cwd=cwd,
+                writable_paths=writable_paths,
+            )
+            try:
+                log_lines = await get_serve_manager().run_prompt(
+                    tool=tool,
+                    executable=executable,
+                    directory=config_workspace,
+                    prompt=prompt,
+                    model=model,
+                    timeout=timeout,
+                    on_line=on_line,
+                    cancel_event=cancel_event,
+                )
+            except asyncio.CancelledError:
+                if cancel_event and cancel_event.is_set():
+                    outcome = "cancelled"
+                    return
+                raise
+            except asyncio.TimeoutError:
+                outcome = "timeout"
+                raise
+            if log_path and log_lines:
+                try:
+                    log_path.write_text("\n".join(log_lines), encoding="utf-8")
+                except Exception:
+                    pass
+            outcome = "success"
+            return
         prompt_file: Path | None = None
         # When the prompt is very long, pass a short file-reference message instead
         # of the full command-line argument to avoid hitting the Windows

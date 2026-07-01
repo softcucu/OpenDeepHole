@@ -295,6 +295,47 @@ async def handle_config_test(request_id: str, remote_config: dict) -> dict:
     }
 
 
+async def handle_opencode_models(request_id: str, refresh: bool = False) -> dict:
+    """Return models visible to the Agent's OpenCode-compatible serve process."""
+    try:
+        from backend.opencode.serve_client import get_serve_manager
+
+        if _config is None:
+            raise RuntimeError("Agent config is not initialized")
+        tool = str(getattr(_config.opencode, "tool", "") or "opencode").strip().lower() or "opencode"
+        executable = str(getattr(_config.opencode, "executable", "") or tool)
+        if tool not in {"opencode", "nga"}:
+            raise RuntimeError(f"{tool} does not support serve model listing")
+        models = await get_serve_manager().list_models(
+            tool=tool,
+            executable=executable,
+            refresh=refresh,
+        )
+        return {
+            "type": "opencode_models_result",
+            "request_id": request_id,
+            "ok": True,
+            "models": [
+                {
+                    "id": item.id,
+                    "model": item.id,
+                    "provider_id": item.provider_id,
+                    "model_id": item.model_id,
+                    "name": item.name,
+                }
+                for item in models
+            ],
+        }
+    except Exception as exc:
+        return {
+            "type": "opencode_models_result",
+            "request_id": request_id,
+            "ok": False,
+            "message": str(exc),
+            "models": [],
+        }
+
+
 async def handle_skill_create(
     request_id: str,
     name: str,

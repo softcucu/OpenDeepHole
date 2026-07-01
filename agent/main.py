@@ -134,6 +134,11 @@ async def _handle_command(msg: dict, config, task_manager, reporter) -> dict | N
             request_id=msg.get("request_id", ""),
             remote_config=msg.get("config") or {},
         )
+    elif cmd_type == "opencode_models":
+        return await agent_server.handle_opencode_models(
+            request_id=msg.get("request_id", ""),
+            refresh=bool(msg.get("refresh")),
+        )
     elif cmd_type == "skill_create":
         from agent.updater import ensure_runtime_updated
         await ensure_runtime_updated(msg.get("agent_runtime_update"), msg)
@@ -161,8 +166,10 @@ async def _apply_live_config_update(config) -> None:
         notify_model_pool_config_changed,
         refresh_configured_model_pool,
     )
+    from backend.opencode.serve_client import mark_serve_config_dirty
 
     apply_network_env(config)
+    mark_serve_config_dirty()
     refresh_backend_runtime_config(config)
     await refresh_configured_model_pool(
         config.opencode,
@@ -352,6 +359,11 @@ async def _main() -> None:
     try:
         await _ws_loop(config, task_manager, reporter)
     finally:
+        try:
+            from backend.opencode.serve_client import get_serve_manager
+            await get_serve_manager().shutdown()
+        except Exception as exc:
+            print(f"Warning: failed to stop OpenCode serve: {exc}")
         await reporter.close()
 
 

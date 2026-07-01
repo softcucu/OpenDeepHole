@@ -16,6 +16,7 @@ from backend.opencode.runner import (
     _build_cli_env,
     _cleanup_prompt_file,
     _effective_cli_config,
+    _invoke_opencode,
     _prompt_file_message,
     _prepare_cli_workspace,
     _select_cli_cwd,
@@ -66,6 +67,7 @@ def test_effective_cli_config_can_select_cli_default_model() -> None:
         model="configured-model",
         timeout=1200,
         max_retries=2,
+        invocation_mode="cli",
         models=[],
     )
     option = SimpleNamespace(
@@ -78,6 +80,7 @@ def test_effective_cli_config_can_select_cli_default_model() -> None:
     )
 
     assert _effective_cli_config(cfg, option)["model"] == ""
+    assert _effective_cli_config(cfg, option)["invocation_mode"] == "cli"
 
 
 def test_long_prompt_file_reference_is_passed_as_message(tmp_path: Path) -> None:
@@ -144,6 +147,72 @@ def test_opencode_runtime_cwd_can_be_namespaced_per_invocation(tmp_path: Path) -
 
     assert runtime_cwd == project / ".opendeephole" / "opencode" / "fast_model_1"
     assert runtime_cwd.is_dir()
+
+
+def test_invoke_opencode_uses_serve_manager_when_configured(tmp_path: Path) -> None:
+    async def run() -> None:
+        workspace = tmp_path / "workspace"
+        project = tmp_path / "project"
+        skills = workspace / ".opencode" / "skills"
+        skills.mkdir(parents=True)
+        project.mkdir()
+        (workspace / "opencode.json").write_text(
+            json.dumps({
+                "mcp": {"deephole-code": {"url": "http://127.0.0.1:9123/mcp"}},
+                "skills": {"paths": [str(skills)]},
+            }),
+            encoding="utf-8",
+        )
+        option = SimpleNamespace(
+            id="anthropic/claude-sonnet",
+            capability="high",
+            tool="",
+            executable="",
+            model="anthropic/claude-sonnet",
+            use_default_model=False,
+            timeout=None,
+            max_retries=None,
+        )
+        lease = SimpleNamespace(
+            option=option,
+            running=1,
+            global_running=1,
+            started_at=time.monotonic(),
+        )
+        cfg = SimpleNamespace(
+            tool="opencode",
+            executable="opencode",
+            invocation_mode="serve",
+            model="",
+            timeout=30,
+            max_retries=0,
+            models=[],
+        )
+        fake_manager = SimpleNamespace(run_prompt=AsyncMock(return_value=["done"]))
+
+        with patch("backend.opencode.runner.acquire_model_lease", AsyncMock(return_value=lease)), \
+            patch("backend.opencode.runner.release_model_lease", AsyncMock()) as release, \
+            patch("backend.opencode.runner._resolve_cli_executable", return_value="opencode"), \
+            patch("backend.opencode.runner.get_serve_manager", return_value=fake_manager), \
+            patch("backend.opencode.runner.subprocess.Popen", side_effect=AssertionError("CLI should not run")):
+            await _invoke_opencode(
+                workspace,
+                "hello",
+                timeout=30,
+                cli_config=cfg,
+                project_dir=project,
+            )
+
+        fake_manager.run_prompt.assert_awaited_once()
+        kwargs = fake_manager.run_prompt.await_args.kwargs
+        assert kwargs["tool"] == "opencode"
+        assert kwargs["model"] == "anthropic/claude-sonnet"
+        assert kwargs["directory"].is_dir()
+        assert (kwargs["directory"] / "opencode.json").is_file()
+        release.assert_awaited_once()
+        assert release.await_args.kwargs["outcome"] == "success"
+
+    asyncio.run(run())
 
 
 def test_runtime_writable_paths_include_windows_slash_variants() -> None:

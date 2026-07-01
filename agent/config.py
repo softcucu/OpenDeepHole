@@ -50,6 +50,7 @@ class OpenCodeModelConfig:
 class OpenCodeConfig:
     tool: str = "opencode"
     executable: str = "opencode"  # CLI executable name or full path
+    invocation_mode: str = "serve"  # serve | cli
     model: str = ""
     timeout: int = 1200
     max_retries: int = 2          # retry on transient errors (not timeout)
@@ -84,6 +85,8 @@ def normalize_cli_config(config: OpenCodeConfig) -> OpenCodeConfig:
     """Normalize a CLI config in place while keeping legacy executable values."""
     tool = (config.tool or "").strip().lower()
     executable = (config.executable or "").strip()
+    invocation_mode = (getattr(config, "invocation_mode", "") or "").strip().lower()
+    config.invocation_mode = invocation_mode if invocation_mode in {"serve", "cli"} else "serve"
     if tool not in AI_CLI_TOOLS:
         inferred = Path(executable).name.lower() if executable else ""
         if inferred in AI_CLI_TOOLS:

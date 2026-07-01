@@ -426,6 +426,7 @@ class AgentOpenCodeModelConfig(BaseModel):
 class AgentOpenCodeConfig(BaseModel):
     tool: str = "opencode"
     executable: str = "opencode"
+    invocation_mode: str = "serve"
     model: str = ""
     timeout: int = 1200
     max_retries: int = 2

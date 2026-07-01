@@ -1,8 +1,9 @@
 import { useEffect, useState } from "react";
-import { getAgentOpenCodePool, getAgents, getAgentConfig, testAgentConfig, updateAgentConfig } from "../api/client";
+import { getAgentOpenCodeModels, getAgentOpenCodePool, getAgents, getAgentConfig, testAgentConfig, updateAgentConfig } from "../api/client";
 import type {
   AgentGitHistoryConfig,
   AgentInfo,
+  AgentOpenCodeModelListItem,
   AgentOpenCodePoolStatus,
   AgentOpenCodeConfig,
   AgentOpenCodeModelConfig,
@@ -43,6 +44,7 @@ const DEFAULT_CONFIG: AgentRemoteConfig = {
   opencode: {
     tool: "opencode",
     executable: "opencode",
+    invocation_mode: "serve",
     model: "",
     timeout: 1200,
     max_retries: 2,
@@ -186,6 +188,14 @@ function AgentConfigPanel({ agent }: AgentConfigPanelProps) {
   const [testResult, setTestResult] = useState<{ ok: boolean; message: string } | null>(null);
   const [saved, setSaved] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [modelPicker, setModelPicker] = useState<{
+    section: "opencode" | "fp_review_cli";
+    title: string;
+    loading: boolean;
+    error: string | null;
+    models: AgentOpenCodeModelListItem[];
+    selected: string[];
+  } | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -329,6 +339,69 @@ function AgentConfigPanel({ agent }: AgentConfigPanelProps) {
     });
   };
 
+  const openModelPicker = async (section: "opencode" | "fp_review_cli", title: string, refresh = false) => {
+    setModelPicker({
+      section,
+      title,
+      loading: true,
+      error: null,
+      models: [],
+      selected: [],
+    });
+    try {
+      const result = await getAgentOpenCodeModels(agent.agent_id, refresh);
+      if (!result.ok) {
+        throw new Error(result.message || "读取模型失败");
+      }
+      setModelPicker({
+        section,
+        title,
+        loading: false,
+        error: null,
+        models: result.models,
+        selected: [],
+      });
+    } catch (exc) {
+      setModelPicker((prev) => prev && {
+        ...prev,
+        loading: false,
+        error: exc instanceof Error ? exc.message : "读取模型失败",
+      });
+    }
+  };
+
+  const refreshModelPicker = () => {
+    if (!modelPicker) return;
+    void openModelPicker(modelPicker.section, modelPicker.title, true);
+  };
+
+  const togglePickedModel = (id: string) => {
+    setModelPicker((prev) => {
+      if (!prev) return prev;
+      const selected = prev.selected.includes(id)
+        ? prev.selected.filter((item) => item !== id)
+        : [...prev.selected, id];
+      return { ...prev, selected };
+    });
+  };
+
+  const importPickedModels = () => {
+    if (!modelPicker) return;
+    const picked = modelPicker.models.filter((model) => modelPicker.selected.includes(model.id));
+    updateModelPool(modelPicker.section, (current) => {
+      const existing = new Set(current.map((model) => model.id));
+      const additions = picked
+        .filter((model) => !existing.has(model.id))
+        .map((model) => ({
+          ...DEFAULT_MODEL,
+          id: model.id,
+          model: model.model || model.id,
+        }));
+      return [...current, ...additions];
+    });
+    setModelPicker(null);
+  };
+
   return (
     <div className="bg-slate-800/60 border border-slate-700 rounded-xl overflow-hidden">
       {/* Agent row */}
@@ -457,6 +530,14 @@ function AgentConfigPanel({ agent }: AgentConfigPanelProps) {
                       ))}
                     </select>
                   </Field>
+                  <Field label="调用方式">
+                    <select value={cfg.opencode.invocation_mode || "serve"}
+                      onChange={(e) => setOC("invocation_mode", e.target.value)}
+                      className={inputCls}>
+                      <option value="serve">serve API（默认）</option>
+                      <option value="cli">CLI run</option>
+                    </select>
+                  </Field>
                   <Field label="可执行文件" hint="CLI 名称或完整路径">
                     <input type="text" value={cfg.opencode.executable}
                       onChange={(e) => setOC("executable", e.target.value)}
@@ -498,6 +579,14 @@ function AgentConfigPanel({ agent }: AgentConfigPanelProps) {
                         {TOOL_OPTIONS.map((item) => (
                           <option key={item.value} value={item.value}>{item.label}</option>
                         ))}
+                      </select>
+                    </Field>
+                    <Field label="调用方式">
+                      <select value={cfg.fp_review_cli.invocation_mode || "serve"}
+                        onChange={(e) => setFpCli("invocation_mode", e.target.value)}
+                        className={inputCls}>
+                        <option value="serve">serve API（默认）</option>
+                        <option value="cli">CLI run</option>
                       </select>
                     </Field>
                     <Field label="可执行文件" hint="CLI 名称或完整路径">
@@ -547,6 +636,7 @@ function AgentConfigPanel({ agent }: AgentConfigPanelProps) {
                     title="审计模型池"
                     models={cfg.opencode.models || []}
                     onChange={(models) => updateModelPool("opencode", () => models)}
+                    onImport={() => openModelPicker("opencode", "审计模型池")}
                   />
                   <div>
                     <h3 className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-3">AI 去误报模型池</h3>
@@ -564,6 +654,7 @@ function AgentConfigPanel({ agent }: AgentConfigPanelProps) {
                         title="去误报模型池"
                         models={cfg.fp_review_cli.models || []}
                         onChange={(models) => updateModelPool("fp_review_cli", () => models)}
+                        onImport={() => openModelPicker("fp_review_cli", "去误报模型池")}
                       />
                     )}
                   </div>
@@ -602,6 +693,69 @@ function AgentConfigPanel({ agent }: AgentConfigPanelProps) {
               </div>
             </div>
           )}
+        </div>
+      )}
+      {modelPicker && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 px-4">
+          <div className="w-full max-w-2xl rounded-lg border border-slate-700 bg-slate-900 p-4 shadow-xl">
+            <div className="mb-3 flex items-center justify-between gap-3">
+              <h3 className="text-sm font-semibold text-white">从 serve 导入到{modelPicker.title}</h3>
+              <button
+                type="button"
+                onClick={() => setModelPicker(null)}
+                className="px-2 py-1 text-xs text-slate-300 hover:text-white"
+              >
+                关闭
+              </button>
+            </div>
+            <div className="max-h-[24rem] overflow-y-auto rounded-md border border-slate-700">
+              {modelPicker.loading ? (
+                <div className="px-3 py-6 text-center text-sm text-slate-400">读取中…</div>
+              ) : modelPicker.error ? (
+                <div className="px-3 py-6 text-center text-sm text-red-300">{modelPicker.error}</div>
+              ) : modelPicker.models.length === 0 ? (
+                <div className="px-3 py-6 text-center text-sm text-slate-400">serve 未返回可用模型</div>
+              ) : (
+                <div className="divide-y divide-slate-700">
+                  {modelPicker.models.map((model) => (
+                    <label key={model.id} className="flex items-center gap-3 px-3 py-2 text-sm text-slate-200 hover:bg-slate-800">
+                      <input
+                        type="checkbox"
+                        checked={modelPicker.selected.includes(model.id)}
+                        onChange={() => togglePickedModel(model.id)}
+                        className="h-4 w-4 rounded border-slate-600 bg-slate-900 text-blue-600 focus:ring-blue-500"
+                      />
+                      <span className="min-w-0 flex-1">
+                        <span className="block truncate font-mono text-xs text-slate-100">{model.id}</span>
+                        {model.name && <span className="block truncate text-xs text-slate-500">{model.name}</span>}
+                      </span>
+                    </label>
+                  ))}
+                </div>
+              )}
+            </div>
+            <div className="mt-3 flex flex-wrap items-center justify-between gap-2">
+              <span className="text-xs text-slate-500">已选择 {modelPicker.selected.length} 个模型</span>
+              <div className="flex gap-2">
+                <button
+                  type="button"
+                  onClick={refreshModelPicker}
+                  disabled={modelPicker.loading}
+                  className="px-3 py-1.5 text-xs text-slate-100 bg-slate-700 hover:bg-slate-600 disabled:opacity-50 rounded-md transition-colors"
+                >
+                  刷新
+                </button>
+                <button
+                  type="button"
+                  onClick={importPickedModels}
+                  disabled={modelPicker.loading || modelPicker.selected.length === 0}
+                  className="px-3 py-1.5 text-xs text-white bg-blue-600 hover:bg-blue-500 disabled:opacity-50 rounded-md transition-colors"
+                >
+                  导入
+                </button>
+              </div>
+            </div>
+          </div>
         </div>
       )}
     </div>
@@ -685,10 +839,12 @@ function ModelPoolEditor({
   title,
   models,
   onChange,
+  onImport,
 }: {
   title: string;
   models: AgentOpenCodeModelConfig[];
   onChange: (models: AgentOpenCodeModelConfig[]) => void;
+  onImport?: () => void;
 }) {
   const updateAt = (index: number, patch: Partial<AgentOpenCodeModelConfig>) => {
     onChange(models.map((model, i) => (i === index ? { ...model, ...patch } : model)));
@@ -723,6 +879,15 @@ function ModelPoolEditor({
       <div className="flex items-center justify-between gap-3">
         <span className="text-xs font-semibold text-slate-300">{title}</span>
         <div className="flex gap-2">
+          {onImport && (
+            <button
+              type="button"
+              onClick={onImport}
+              className="px-2.5 py-1 text-xs text-slate-100 bg-slate-700 hover:bg-slate-600 rounded-md transition-colors"
+            >
+              从 serve 读取
+            </button>
+          )}
           <button
             type="button"
             onClick={addDefaultModel}
