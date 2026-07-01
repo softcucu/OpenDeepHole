@@ -8,6 +8,7 @@
 - **新增** OpenCode/nga 调用支持 `serve` API 模式并作为默认调用方式；Agent 进程复用一个 `opencode serve`/`nga serve` 服务端，每次审计、去误报或任务调用创建独立 session，保留配置切回原 CLI `run` 模式的能力
 - **新增** Agent 模型池配置页支持从当前 serve 服务端读取模型列表，勾选后导入审计或去误报模型池；配置刷新会标记 serve 在当前 session 结束后重启，以加载启动时模型/API 配置
 - **修复** serve 模式发送审计消息前会从 `/experimental/tool/ids` 读取当前 OpenCode/nga 实例的全部可用工具并显式传入 message payload，确保 `read`、`grep`、`glob` 以及已配置 MCP 工具在 serve API 调用中可见；工具发现失败时回退到原行为，不影响扫描继续执行
+- **修复** serve 模式将 session `directory` 传回真实项目根目录，同时通过 `OPENCODE_CONFIG_CONTENT` 注入隔离运行目录中的配置，避免内置 `read`/`grep` 工具只看到 `.opendeephole` 运行目录而读不到被扫描源码
 - **优化** 清理所有 SKILL 中的代码阅读类 MCP 工具说明，仅保留提交结果类工具要求；Agent 本地终端输出为 OpenCode/LLM API 与 MCP 工具调用统一标记模型名，便于排查模型池并发时的实际输出来源
 
 ## 2026-06-29

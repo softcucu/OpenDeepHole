@@ -1384,7 +1384,8 @@ async def _invoke_opencode(
                 log_lines = await get_serve_manager().run_prompt(
                     tool=tool,
                     executable=executable,
-                    directory=config_workspace,
+                    directory=project_dir or workspace,
+                    config_workspace=config_workspace,
                     prompt=prompt,
                     model=model,
                     timeout=timeout,

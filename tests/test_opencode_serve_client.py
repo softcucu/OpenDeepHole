@@ -80,11 +80,17 @@ def test_run_prompt_sends_all_discovered_tools(monkeypatch, tmp_path: Path) -> N
         manager = OpenCodeServeManager()
         manager._port = 12345
         manager._acquire_session = AsyncMock()
+        project = tmp_path / "project"
+        config_workspace = tmp_path / "runtime"
+        project.mkdir()
+        config_workspace.mkdir()
+        (config_workspace / "opencode.json").write_text('{"mcp": {}}', encoding="utf-8")
 
         lines = await manager.run_prompt(
             tool="opencode",
             executable="opencode",
-            directory=tmp_path,
+            directory=project,
+            config_workspace=config_workspace,
             prompt="hello",
             model="anthropic/claude-sonnet",
             timeout=30,
@@ -96,6 +102,12 @@ def test_run_prompt_sends_all_discovered_tools(monkeypatch, tmp_path: Path) -> N
             item for item in session_client.posts
             if item["path"] == "/session/session-1/message"
         )
+        assert manager._acquire_session.await_args.args[0].config_content == '{"mcp": {}}'
+        assert session_client.posts[0]["params"] == {"directory": str(project)}
+        assert session_client.gets[0]["params"] == {"directory": str(project)}
+        assert message["params"] == {"directory": str(project)}
+        cleanup_client = _FakeAsyncClient.instances[1]
+        assert cleanup_client.deletes[0]["params"] == {"directory": str(project)}
         assert message["json"]["tools"] == {
             "read": True,
             "grep": True,
@@ -122,11 +134,13 @@ def test_run_prompt_continues_when_tool_discovery_fails(monkeypatch, tmp_path: P
         manager = OpenCodeServeManager()
         manager._port = 12345
         manager._acquire_session = AsyncMock()
+        project = tmp_path / "project"
+        project.mkdir()
 
         lines = await manager.run_prompt(
             tool="opencode",
             executable="opencode",
-            directory=tmp_path,
+            directory=project,
             prompt="hello",
             model="",
             timeout=30,
@@ -139,5 +153,38 @@ def test_run_prompt_continues_when_tool_discovery_fails(monkeypatch, tmp_path: P
             if item["path"] == "/session/session-1/message"
         )
         assert "tools" not in message["json"]
+
+    asyncio.run(run())
+
+
+def test_list_models_passes_directory_to_provider_requests(monkeypatch, tmp_path: Path) -> None:
+    async def run() -> None:
+        _FakeAsyncClient.instances = []
+        monkeypatch.setattr(
+            "backend.opencode.serve_client.httpx.AsyncClient",
+            _FakeAsyncClient,
+        )
+
+        manager = OpenCodeServeManager()
+        manager._port = 12345
+        manager._ensure_started = AsyncMock()
+        project = tmp_path / "project"
+        project.mkdir()
+
+        assert await manager.list_models(
+            tool="opencode",
+            executable="opencode",
+            directory=project,
+        ) == []
+
+        client = _FakeAsyncClient.instances[0]
+        assert client.gets[0] == {
+            "path": "/provider",
+            "params": {"directory": str(project)},
+        }
+        assert client.gets[1] == {
+            "path": "/config/providers",
+            "params": {"directory": str(project)},
+        }
 
     asyncio.run(run())

@@ -28,6 +28,7 @@ _SERVE_REQUEST_TIMEOUT_SECONDS = 20.0
 class OpenCodeServeKey:
     tool: str
     executable: str
+    config_content: str = ""
 
 
 @dataclass(frozen=True)
@@ -203,13 +204,18 @@ class OpenCodeServeManager:
         tool: str,
         executable: str,
         directory: Path,
+        config_workspace: Path | None = None,
         prompt: str,
         model: str,
         timeout: int,
         on_line=None,
         cancel_event=None,
     ) -> list[str]:
-        key = OpenCodeServeKey(tool=tool, executable=executable)
+        key = OpenCodeServeKey(
+            tool=tool,
+            executable=executable,
+            config_content=_read_config_content(config_workspace),
+        )
         await self._acquire_session(key)
         session_id = ""
         try:
@@ -265,17 +271,30 @@ class OpenCodeServeManager:
                 if self._active_sessions == 0:
                     self._idle.notify_all()
 
-    async def list_models(self, *, tool: str, executable: str, refresh: bool = False) -> list[OpenCodeModelInfo]:
-        key = OpenCodeServeKey(tool=tool, executable=executable)
+    async def list_models(
+        self,
+        *,
+        tool: str,
+        executable: str,
+        directory: Path | None = None,
+        config_workspace: Path | None = None,
+        refresh: bool = False,
+    ) -> list[OpenCodeModelInfo]:
+        key = OpenCodeServeKey(
+            tool=tool,
+            executable=executable,
+            config_content=_read_config_content(config_workspace),
+        )
         if refresh:
             self.mark_dirty()
         await self._ensure_started(key)
+        params = {"directory": str(directory)} if directory is not None else None
         async with httpx.AsyncClient(base_url=self.base_url, timeout=_SERVE_REQUEST_TIMEOUT_SECONDS) as client:
-            response = await client.get("/provider")
+            response = await client.get("/provider", params=params)
             response.raise_for_status()
             data = response.json()
             try:
-                config_response = await client.get("/config/providers")
+                config_response = await client.get("/config/providers", params=params)
                 config_response.raise_for_status()
                 config_data = config_response.json()
             except Exception:
@@ -353,7 +372,10 @@ class OpenCodeServeManager:
         port = _free_port()
         env = dict(os.environ)
         env["NODE_TLS_REJECT_UNAUTHORIZED"] = "0"
-        env.pop("OPENCODE_CONFIG_CONTENT", None)
+        if key.config_content:
+            env["OPENCODE_CONFIG_CONTENT"] = key.config_content
+        else:
+            env.pop("OPENCODE_CONFIG_CONTENT", None)
         env.pop("OPENCODE_SERVER_PASSWORD", None)
         env.pop("OPENCODE_SERVER_USERNAME", None)
         cmd = [
@@ -430,6 +452,15 @@ class OpenCodeServeManager:
 
 
 _manager = OpenCodeServeManager()
+
+
+def _read_config_content(config_workspace: Path | None) -> str:
+    if config_workspace is None:
+        return ""
+    try:
+        return (Path(config_workspace) / "opencode.json").read_text(encoding="utf-8")
+    except OSError:
+        return ""
 
 
 def get_serve_manager() -> OpenCodeServeManager:

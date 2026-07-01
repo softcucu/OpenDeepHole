@@ -209,8 +209,9 @@ def test_invoke_opencode_uses_serve_manager_when_configured(tmp_path: Path) -> N
         kwargs = fake_manager.run_prompt.await_args.kwargs
         assert kwargs["tool"] == "opencode"
         assert kwargs["model"] == "anthropic/claude-sonnet"
-        assert kwargs["directory"].is_dir()
-        assert (kwargs["directory"] / "opencode.json").is_file()
+        assert kwargs["directory"] == project
+        assert kwargs["config_workspace"].is_dir()
+        assert (kwargs["config_workspace"] / "opencode.json").is_file()
         assert "caller_model" in kwargs["prompt"]
         assert "anthropic/claude-sonnet" in kwargs["prompt"]
         assert output_lines
