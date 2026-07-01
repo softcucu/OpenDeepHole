@@ -70,6 +70,23 @@ class Candidate(BaseModel):
     metadata: dict = Field(default_factory=dict)
 
 
+class OutputSource(BaseModel):
+    """Metadata describing which runtime produced an AI-visible output."""
+    agent_id: str = ""
+    agent_name: str = ""
+    agent_session_id: str = ""
+    backend: str = ""              # "cli" | "api" | "system"
+    tool: str = ""
+    model_id: str = ""
+    model: str = ""
+    use_default_model: bool = False
+    capability: str = ""
+    required_capability: str = ""
+    task_id: str = ""
+    attempt: int = 0
+    started_at: str = ""
+
+
 class Vulnerability(BaseModel):
     """A confirmed or assessed vulnerability after AI analysis."""
     file: str
@@ -80,7 +97,8 @@ class Vulnerability(BaseModel):
     description: str
     ai_analysis: str
     confirmed: bool
-    ai_verdict: str = ""                     # "confirmed" | "not_confirmed" | "timeout" | "no_result"
+    ai_verdict: str = ""                     # "confirmed" | "not_confirmed" | "timeout" | "no_result" | "failed" | "filtered_same_pattern"
+    failure_reason: str = ""                 # OpenCode/runner output for retryable failures
     user_verdict: str | None = None          # "confirmed" | "false_positive" | "pending_analysis" | None
     user_verdict_reason: str | None = None   # 用户填写的理由
     ticket_submitted: bool = False           # 是否已提问题单
@@ -88,6 +106,7 @@ class Vulnerability(BaseModel):
     function_source: str = ""
     function_start_line: int | None = None
     variant_of: str = ""                     # 同类变体排查命中时，来源历史问题模式（根因摘要+出处提交/文件）
+    output_source: OutputSource = Field(default_factory=OutputSource)
 
 
 # --- API request/response models ---
@@ -298,6 +317,7 @@ class SkillReport(BaseModel):
     title: str = ""
     content: str
     created_at: str = ""
+    output_source: OutputSource = Field(default_factory=OutputSource)
 
 
 class OpenCodePoolModelStats(BaseModel):
@@ -627,6 +647,8 @@ class FpReviewResult(BaseModel):
     stage_outputs: dict[str, str] = {}
     match_reference: str = ""  # 命中历史问题模式或其它函数校验时，对应的修复/校验描述
     match_type: str = ""       # "history" | "validation" | ""（命中类型）
+    stage_output_sources: dict[str, OutputSource] = Field(default_factory=dict)
+    output_source: OutputSource = Field(default_factory=OutputSource)
     created_at: str
 
 
@@ -636,6 +658,7 @@ class FpReviewStageOutput(BaseModel):
     vuln_index: int
     stage: str
     markdown: str
+    output_source: OutputSource = Field(default_factory=OutputSource)
     created_at: str
     updated_at: str
 
@@ -670,6 +693,8 @@ class AgentFpReviewResult(BaseModel):
     stage_outputs: dict[str, str] = {}
     match_reference: str = ""
     match_type: str = ""
+    stage_output_sources: dict[str, OutputSource] = Field(default_factory=dict)
+    output_source: OutputSource = Field(default_factory=OutputSource)
 
 
 class AgentFpReviewStageOutput(BaseModel):
@@ -678,6 +703,7 @@ class AgentFpReviewStageOutput(BaseModel):
     vuln_index: int
     stage: str
     markdown: str
+    output_source: OutputSource = Field(default_factory=OutputSource)
 
 
 class AgentFpReviewProgress(BaseModel):

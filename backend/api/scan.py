@@ -158,17 +158,26 @@ def _merge_latest_fp_review_results(job: FpReviewJob, scan_id: str) -> FpReviewJ
     store = get_scan_store()
     latest_map = _latest_fp_review_result_map(scan_id)
     stage_outputs_map: dict[int, dict[str, str]] = {}
+    stage_output_sources_map: dict[int, dict] = {}
     stage_updated_at: dict[int, str] = {}
     for output in store.list_fp_review_stage_outputs_by_review(job.review_id):
         stage_outputs_map.setdefault(output.vuln_index, {})[output.stage] = output.markdown
+        stage_output_sources_map.setdefault(output.vuln_index, {})[output.stage] = output.output_source
         stage_updated_at[output.vuln_index] = output.updated_at
 
     merged: list[FpReviewResult] = []
     for vuln_index, result in latest_map.items():
         current_stages = stage_outputs_map.pop(vuln_index, None)
+        current_stage_sources = stage_output_sources_map.pop(vuln_index, None)
         if current_stages:
             result = result.model_copy(
-                update={"stage_outputs": {**result.stage_outputs, **current_stages}}
+                update={
+                    "stage_outputs": {**result.stage_outputs, **current_stages},
+                    "stage_output_sources": {
+                        **(result.stage_output_sources or {}),
+                        **(current_stage_sources or {}),
+                    },
+                }
             )
         merged.append(result)
     for vuln_index, stages in stage_outputs_map.items():
@@ -181,6 +190,7 @@ def _merge_latest_fp_review_results(job: FpReviewJob, scan_id: str) -> FpReviewJ
             reason="",
             vulnerability_report="",
             stage_outputs=stages,
+            stage_output_sources=stage_output_sources_map.get(vuln_index, {}),
             created_at=stage_updated_at.get(vuln_index, job.created_at),
         ))
     merged.sort(key=lambda result: result.vuln_index)
@@ -262,7 +272,7 @@ def _checker_packages_for(names: list[str]) -> list[dict[str, str]]:
     return build_checker_packages(registry, names)
 
 
-_RETRYABLE_AI_VERDICTS = {"timeout", "no_result"}
+_RETRYABLE_AI_VERDICTS = {"timeout", "no_result", "failed"}
 
 
 def _candidate_key(candidate: Candidate) -> tuple[str, int, str, str]:
@@ -854,6 +864,16 @@ def _safe_filename_part(text: str) -> str:
     return cleaned.strip("._") or "item"
 
 
+def _format_output_source(source) -> str:
+    if source is None:
+        return ""
+    agent = source.agent_name or source.agent_id or ""
+    tool = source.tool or source.backend or ""
+    model = "CLI 默认模型" if source.use_default_model else (source.model or source.model_id or "")
+    parts = [part for part in [agent, tool, model] if part]
+    return " / ".join(parts)
+
+
 def _vuln_report_markdown(idx, vuln, fp_result: FpReviewResult | None) -> str:
     """Render a single vulnerability (AI analysis + FP-review stages) as Markdown."""
     lines: list[str] = []
@@ -869,6 +889,9 @@ def _vuln_report_markdown(idx, vuln, fp_result: FpReviewResult | None) -> str:
     lines.append(f"| AI 判定 | {vuln.ai_verdict or ('confirmed' if vuln.confirmed else '')} |")
     if getattr(vuln, "variant_of", ""):
         lines.append(f"| 同类变体来源 | {vuln.variant_of} |")
+    source_text = _format_output_source(getattr(vuln, "output_source", None))
+    if source_text:
+        lines.append(f"| AI 输出来源 | {source_text} |")
     if vuln.user_verdict:
         lines.append(f"| 用户判定 | {vuln.user_verdict} |")
     lines.append("")
@@ -899,6 +922,9 @@ def _vuln_report_markdown(idx, vuln, fp_result: FpReviewResult | None) -> str:
             lines.append(f"- **匹配类型**：{match_label}")
         if getattr(fp_result, "match_reference", ""):
             lines.append(f"- **对应修复/校验**：{fp_result.match_reference}")
+        fp_source_text = _format_output_source(fp_result.output_source)
+        if fp_source_text:
+            lines.append(f"- **最终输出来源**：{fp_source_text}")
         if fp_result.reason:
             lines.append(f"- **理由**：{fp_result.reason}")
         lines.append("")
@@ -908,6 +934,10 @@ def _vuln_report_markdown(idx, vuln, fp_result: FpReviewResult | None) -> str:
                 continue
             lines.append(f"### 阶段：{title}")
             lines.append("")
+            stage_source = _format_output_source((fp_result.stage_output_sources or {}).get(key))
+            if stage_source:
+                lines.append(f"> 输出来源：{stage_source}")
+                lines.append("")
             lines.append(stage_md)
             lines.append("")
 
@@ -1502,6 +1532,8 @@ async def agent_fp_review_result(scan_id: str, body: AgentFpReviewResult) -> dic
         stage_outputs=body.stage_outputs,
         match_reference=body.match_reference,
         match_type=body.match_type,
+        stage_output_sources=body.stage_output_sources,
+        output_source=body.output_source,
         created_at=now,
     )
     store.add_fp_review_result(body.review_id, result)
@@ -1513,6 +1545,10 @@ async def agent_fp_review_result(scan_id: str, body: AgentFpReviewResult) -> dic
         "stage_outputs": result.stage_outputs,
         "match_reference": result.match_reference,
         "match_type": result.match_type,
+        "stage_output_sources": {
+            key: value.model_dump() for key, value in result.stage_output_sources.items()
+        },
+        "output_source": result.output_source.model_dump(),
     })
     logger.debug("FP review result for %s vuln[%d]: %s", scan_id, body.vuln_index, body.verdict)
     return {"ok": True}
@@ -1539,6 +1575,7 @@ async def agent_fp_review_stage_output(scan_id: str, body: AgentFpReviewStageOut
         body.stage,
         body.markdown,
         now,
+        body.output_source,
     )
     from backend.sse import publish
     publish(scan_id, "fp_review_stage_output", {
@@ -1546,6 +1583,7 @@ async def agent_fp_review_stage_output(scan_id: str, body: AgentFpReviewStageOut
         "vuln_index": body.vuln_index,
         "stage": body.stage,
         "markdown": body.markdown,
+        "output_source": body.output_source.model_dump(),
     })
     logger.debug("FP review stage output for %s vuln[%d]: %s", scan_id, body.vuln_index, body.stage)
     return {"ok": True}

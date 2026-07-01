@@ -541,10 +541,10 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
             self.assertEqual(stored.processed_candidates, 4)
             self.assertEqual(stored.status, ScanItemStatus.PENDING)
 
-    def test_retry_incomplete_scan_dispatches_only_timeout_and_no_result_candidates(self) -> None:
+    def test_retry_incomplete_scan_dispatches_retryable_failed_candidates(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             store = SqliteScanStore(Path(tmp) / "scans.db")
-            scan = _scan("scan-1", ScanItemStatus.COMPLETE, total=3, processed=3)
+            scan = _scan("scan-1", ScanItemStatus.COMPLETE, total=4, processed=4)
             meta = _meta()
             store.save_scan(scan, meta)
             vulns = [
@@ -581,6 +581,18 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
                     confirmed=False,
                     ai_verdict="no_result",
                 ),
+                Vulnerability(
+                    file="failed.c",
+                    line=4,
+                    function="broken",
+                    vuln_type="npd",
+                    severity="unknown",
+                    description="failed",
+                    ai_analysis="OpenCode completed without submitting a result",
+                    confirmed=False,
+                    ai_verdict="failed",
+                    failure_reason="raw opencode output",
+                ),
             ]
             for vuln in vulns:
                 store.add_vulnerability("scan-1", vuln)
@@ -616,11 +628,11 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
             self.assertEqual(stored.processed_candidates, 1)
             self.assertEqual(len(store.get_processed_keys("scan-1")), 1)
             self.assertEqual(sent["type"], "resume")
-            self.assertEqual(sent["retry_total_candidates"], 3)
+            self.assertEqual(sent["retry_total_candidates"], 4)
             self.assertEqual(sent["retry_processed_offset"], 1)
             self.assertEqual(
                 [(c["file"], c["line"], c["function"]) for c in sent["retry_candidates"]],
-                [("timeout.c", 2, "slow"), ("none.c", 3, "missing")],
+                [("timeout.c", 2, "slow"), ("none.c", 3, "missing"), ("failed.c", 4, "broken")],
             )
 
     def test_upsert_incomplete_vulnerability_replaces_existing_result(self) -> None:
@@ -634,9 +646,10 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
                 vuln_type="npd",
                 severity="unknown",
                 description="old",
-                ai_analysis="Analysis timed out",
+                ai_analysis="OpenCode completed without submitting a result",
                 confirmed=False,
-                ai_verdict="timeout",
+                ai_verdict="failed",
+                failure_reason="old opencode output",
             )
             store.add_vulnerability("scan-1", timeout_vuln)
             replacement = Vulnerability(
@@ -658,6 +671,7 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
             self.assertEqual(len(stored), 1)
             self.assertEqual(stored[0].description, "new")
             self.assertEqual(stored[0].ai_verdict, "confirmed")
+            self.assertEqual(stored[0].failure_reason, "")
             self.assertTrue(stored[0].confirmed)
 
     def test_cancel_finish_preserves_total_but_accepts_lower_processed_count(self) -> None:

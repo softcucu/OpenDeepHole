@@ -349,6 +349,7 @@ async def _main() -> None:
     import agent.server as agent_server
 
     reporter = Reporter(config.server_url)
+    reporter.set_agent_name(name)
     task_manager = TaskManager()
 
     # Inject globals into agent.server module

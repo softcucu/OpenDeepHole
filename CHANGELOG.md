@@ -2,6 +2,9 @@
 
 ## 2026-07-01
 
+- **新增** AI 输出来源追踪：漏洞 AI 分析、报告型 SKILL Markdown、AI 去误报阶段输出和最终结论都会记录 Agent、工具、模型池 ID、实际模型、能力和调用尝试等元数据
+- **优化** 扫描详情页、SKILL 报告面板和 Markdown 导出展示输出来源，便于追溯每个结果由哪个 Agent、哪个模型生成；历史数据无来源时保持兼容不显示空占位
+
 - **新增** OpenCode/nga 调用支持 `serve` API 模式并作为默认调用方式；Agent 进程复用一个 `opencode serve`/`nga serve` 服务端，每次审计、去误报或任务调用创建独立 session，保留配置切回原 CLI `run` 模式的能力
 - **新增** Agent 模型池配置页支持从当前 serve 服务端读取模型列表，勾选后导入审计或去误报模型池；配置刷新会标记 serve 在当前 session 结束后重启，以加载启动时模型/API 配置
 - **修复** serve 模式发送审计消息前会从 `/experimental/tool/ids` 读取当前 OpenCode/nga 实例的全部可用工具并显式传入 message payload，确保 `read`、`grep`、`glob` 以及已配置 MCP 工具在 serve API 调用中可见；工具发现失败时回退到原行为，不影响扫描继续执行

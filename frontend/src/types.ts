@@ -98,6 +98,22 @@ export interface ScanStartResponse {
 export type UserFeedbackVerdict = "confirmed" | "false_positive" | "pending_analysis";
 export type FeedbackEntryVerdict = "confirmed" | "false_positive";
 
+export interface OutputSource {
+  agent_id?: string;
+  agent_name?: string;
+  agent_session_id?: string;
+  backend?: "cli" | "api" | "system" | "" | string;
+  tool?: string;
+  model_id?: string;
+  model?: string;
+  use_default_model?: boolean;
+  capability?: string;
+  required_capability?: string;
+  task_id?: string;
+  attempt?: number;
+  started_at?: string;
+}
+
 export interface Vulnerability {
   file: string;
   line: number;
@@ -107,7 +123,8 @@ export interface Vulnerability {
   description: string;
   ai_analysis: string;
   confirmed: boolean;
-  ai_verdict?: "confirmed" | "not_confirmed" | "timeout" | "no_result" | "";
+  ai_verdict?: "confirmed" | "not_confirmed" | "timeout" | "no_result" | "failed" | "filtered_same_pattern" | "";
+  failure_reason?: string;
   user_verdict?: UserFeedbackVerdict | null;
   user_verdict_reason?: string | null;
   ticket_submitted?: boolean;
@@ -115,6 +132,7 @@ export interface Vulnerability {
   function_source?: string;
   function_start_line?: number | null;
   variant_of?: string;
+  output_source?: OutputSource;
 }
 
 export interface HistoryPattern {
@@ -133,6 +151,7 @@ export interface SkillReport {
   title: string;
   content: string;
   created_at: string;
+  output_source?: OutputSource;
 }
 
 export interface Candidate {
@@ -369,6 +388,8 @@ export interface FpReviewResult {
   reason: string;
   vulnerability_report: string;
   stage_outputs?: Record<string, string>;
+  stage_output_sources?: Record<string, OutputSource>;
+  output_source?: OutputSource;
   match_reference?: string;
   match_type?: "history" | "validation" | "" | string;
   created_at: string;

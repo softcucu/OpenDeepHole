@@ -994,6 +994,7 @@ async def agent_replace_skill_reports(scan_id: str, body: dict) -> dict:
             title=str(item.get("title") or ""),
             content=str(item.get("content") or ""),
             created_at=str(item.get("created_at") or datetime.now(timezone.utc).isoformat()),
+            output_source=item.get("output_source") or {},
         )
         for item in raw_reports
         if isinstance(item, dict) and str(item.get("filename") or "").strip()

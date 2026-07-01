@@ -35,6 +35,7 @@ class ModelLease:
     global_running: int
     stats_scope_id: str = ""
     started_at: float = 0.0
+    started_at_iso: str = ""
     task_id: str = ""
 
 
@@ -512,6 +513,7 @@ async def acquire_model_lease(
                     global_running=_global_running,
                     stats_scope_id=stats_scope_id,
                     started_at=started_at,
+                    started_at_iso=started_at_iso,
                     task_id=task_id,
                 )
             if stats_scope_id and not queued_model_id:

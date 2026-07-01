@@ -256,6 +256,7 @@ class ScanStoreBase(ABC):
         stage: str,
         markdown: str,
         timestamp: str,
+        output_source=None,
     ) -> None:
         """Create or replace one FP review stage Markdown output."""
 

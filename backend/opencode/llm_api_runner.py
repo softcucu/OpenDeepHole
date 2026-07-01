@@ -17,7 +17,7 @@ from uuid import uuid4
 
 from backend.config import get_config
 from backend.logger import get_logger
-from backend.models import Candidate, Vulnerability
+from backend.models import Candidate, OutputSource, Vulnerability
 
 logger = get_logger(__name__)
 
@@ -118,6 +118,17 @@ def _api_config_key(llm_cfg) -> tuple[str, str, str, float]:
         api_key_hash,
         _cfg_value(llm_cfg, "model", "gpt-4o-mini") or "gpt-4o-mini",
         timeout,
+    )
+
+
+def _api_output_source(llm_cfg) -> OutputSource:
+    return OutputSource(
+        backend="api",
+        tool="llm_api",
+        model_id="llm_api",
+        model=_cfg_value(llm_cfg, "model", "gpt-4o-mini") or "gpt-4o-mini",
+        capability="high",
+        required_capability="any",
     )
 
 
@@ -849,7 +860,10 @@ async def run_audit_via_api(
 
     # 读取结果文件（与 opencode 模式共用 _read_result）
     from backend.opencode.runner import _read_result
-    return _read_result(result_id, candidate)
+    result = _read_result(result_id, candidate)
+    if result is not None:
+        result.output_source = _api_output_source(llm_cfg)
+    return result
 
 
 def _accumulate_stream(stream_iter, model: str, cancel_check=None):
@@ -1213,9 +1227,12 @@ async def run_batch_audit_via_api(
     # 读取各候选的结果文件
     from backend.opencode.runner import _read_result
     results = []
+    source = _api_output_source(llm_cfg)
     for c in candidates:
         rid = result_id_map[c.line]
         vuln = _read_result(rid, c)
+        if vuln is not None:
+            vuln.output_source = source
         results.append(vuln)
 
     return results

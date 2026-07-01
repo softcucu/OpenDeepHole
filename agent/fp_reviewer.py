@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Optional
 from uuid import uuid4
 
-from backend.models import ScanEvent
+from backend.models import OutputSource, ScanEvent
 from agent.config import effective_fp_review_cli_config
 
 
@@ -52,6 +52,7 @@ class _FpStageResult:
     result: object | None
     payload: dict
     markdown: str = ""
+    output_source: OutputSource = dataclasses.field(default_factory=OutputSource)
 
 
 class _FpStageFailure(RuntimeError):
@@ -63,6 +64,7 @@ class _FpStageFailure(RuntimeError):
         artifact_path: Path,
         log_path: Path,
         reason: str,
+        output_source: OutputSource | None = None,
     ) -> None:
         super().__init__(reason)
         self.stage = stage
@@ -70,6 +72,7 @@ class _FpStageFailure(RuntimeError):
         self.artifact_path = artifact_path
         self.log_path = log_path
         self.reason = reason
+        self.output_source = output_source or OutputSource()
 
 
 def load_local_feedback() -> dict:
@@ -299,6 +302,7 @@ async def run_fp_review(
                 ai_analysis_path = artifact_dir / "original-ai-analysis.txt"
                 ai_analysis_path.write_text(vuln.get("ai_analysis", ""), encoding="utf-8")
                 stage_outputs: dict[str, str] = {}
+                stage_output_sources: dict[str, OutputSource] = {}
 
                 # --- Stage 0: 历史/校验匹配 ---
                 # 若候选能与某条历史问题模式或其它函数里把校验做对了的站点对应上，
@@ -331,7 +335,17 @@ async def run_fp_review(
                     if cancel_event is not None and cancel_event.is_set():
                         return
                     stage_outputs["history_match"] = _stage_markdown_or_placeholder("history_match", history_match)
-                    await reporter.push_fp_stage_output(scan_id, review_id, vuln_index, "history_match", stage_outputs["history_match"])
+                    stage_output_sources["history_match"] = (
+                        history_match.output_source if history_match is not None else OutputSource()
+                    )
+                    await reporter.push_fp_stage_output(
+                        scan_id,
+                        review_id,
+                        vuln_index,
+                        "history_match",
+                        stage_outputs["history_match"],
+                        output_source=stage_output_sources["history_match"],
+                    )
                     if history_match is not None and history_match.result is not None and history_match.result.confirmed:
                         match_type = str(history_match.payload.get("match_type") or "") or ("history" if variant_of else "history")
                         match_reference = str(history_match.payload.get("match_reference") or variant_of)
@@ -348,6 +362,8 @@ async def run_fp_review(
                             stage_outputs=stage_outputs,
                             match_reference=match_reference,
                             match_type=match_type,
+                            stage_output_sources=stage_output_sources,
+                            output_source=stage_output_sources["history_match"],
                         )
                         result_submitted = True
                         matched_high = True
@@ -380,7 +396,15 @@ async def run_fp_review(
                         return
 
                     stage_outputs["prove_bug"] = _stage_markdown_or_placeholder("prove_bug", prove_bug)
-                    await reporter.push_fp_stage_output(scan_id, review_id, vuln_index, "prove_bug", stage_outputs["prove_bug"])
+                    stage_output_sources["prove_bug"] = prove_bug.output_source if prove_bug is not None else OutputSource()
+                    await reporter.push_fp_stage_output(
+                        scan_id,
+                        review_id,
+                        vuln_index,
+                        "prove_bug",
+                        stage_outputs["prove_bug"],
+                        output_source=stage_output_sources["prove_bug"],
+                    )
 
                     if prove_bug is not None and prove_bug.result is not None and not prove_bug.result.confirmed:
                         # 正方论证已判定非问题：正式早退，直接记录误报结果，
@@ -395,6 +419,8 @@ async def run_fp_review(
                             reason,
                             "",
                             stage_outputs=stage_outputs,
+                            stage_output_sources=stage_output_sources,
+                            output_source=stage_output_sources["prove_bug"],
                         )
                         result_submitted = True
                         await emit(
@@ -426,7 +452,15 @@ async def run_fp_review(
                         if cancel_event is not None and cancel_event.is_set():
                             return
                         stage_outputs["prove_fp"] = _stage_markdown_or_placeholder("prove_fp", prove_fp)
-                        await reporter.push_fp_stage_output(scan_id, review_id, vuln_index, "prove_fp", stage_outputs["prove_fp"])
+                        stage_output_sources["prove_fp"] = prove_fp.output_source if prove_fp is not None else OutputSource()
+                        await reporter.push_fp_stage_output(
+                            scan_id,
+                            review_id,
+                            vuln_index,
+                            "prove_fp",
+                            stage_outputs["prove_fp"],
+                            output_source=stage_output_sources["prove_fp"],
+                        )
 
                         current_fp_cli = effective_fp_review_cli_config(config)
                         final_judge = await _run_fp_review_stage(
@@ -456,7 +490,15 @@ async def run_fp_review(
                         if cancel_event is not None and cancel_event.is_set():
                             return
                         stage_outputs["final_judge"] = _stage_markdown_or_placeholder("final_judge", final_judge)
-                        await reporter.push_fp_stage_output(scan_id, review_id, vuln_index, "final_judge", stage_outputs["final_judge"])
+                        stage_output_sources["final_judge"] = final_judge.output_source if final_judge is not None else OutputSource()
+                        await reporter.push_fp_stage_output(
+                            scan_id,
+                            review_id,
+                            vuln_index,
+                            "final_judge",
+                            stage_outputs["final_judge"],
+                            output_source=stage_output_sources["final_judge"],
+                        )
 
                         if final_judge is None or final_judge.result is None:
                             await emit("fp_review", f"[{position + 1}] Final-judge returned no result — preserving any previous review result")
@@ -471,6 +513,8 @@ async def run_fp_review(
                                 reason,
                                 vulnerability_report,
                                 stage_outputs=stage_outputs,
+                                stage_output_sources=stage_output_sources,
+                                output_source=stage_output_sources["final_judge"],
                             )
                             result_submitted = True
                             await emit(
@@ -488,6 +532,7 @@ async def run_fp_review(
                     vuln_index,
                     exc.stage,
                     markdown,
+                    output_source=exc.output_source,
                 )
                 await emit("fp_review", f"[{position + 1}] {exc.stage} failed: {exc.reason}")
             except Exception as exc:
@@ -584,9 +629,17 @@ async def _run_fp_review_stage(
 
     max_retries = max(0, int(getattr(cli_config, "max_retries", 0) or 0))
     last_failure: _FpStageFailure | None = None
+    last_source: OutputSource | None = None
 
     for attempt in range(1, max_retries + 2):
+        attempt_source: OutputSource | None = None
         result_id = uuid4().hex
+
+        def capture_source(source: OutputSource) -> None:
+            nonlocal attempt_source, last_source
+            attempt_source = source
+            last_source = source
+
         prompt = _build_fp_review_prompt(
             stage=stage,
             vuln=vuln,
@@ -639,6 +692,8 @@ async def _run_fp_review_stage(
                     "line": vuln.get("line", 0),
                     "function": vuln.get("function", ""),
                 },
+                attempt=attempt,
+                on_invocation_metadata=capture_source,
             )
         except asyncio.CancelledError:
             raise
@@ -649,6 +704,7 @@ async def _run_fp_review_stage(
                 artifact_path=output_markdown_path,
                 log_path=log_path,
                 reason=f"CLI invocation failed on attempt {attempt}/{max_retries + 1}: {exc}",
+                output_source=attempt_source,
             )
             continue
 
@@ -665,6 +721,7 @@ async def _run_fp_review_stage(
                 result=result,
                 payload=_read_fp_result_payload(result_id),
                 markdown=markdown,
+                output_source=attempt_source or OutputSource(),
             )
 
         last_failure = _FpStageFailure(
@@ -676,6 +733,7 @@ async def _run_fp_review_stage(
                 f"Missing {' and '.join(missing)} on attempt "
                 f"{attempt}/{max_retries + 1}"
             ),
+            output_source=attempt_source,
         )
 
     if last_failure is not None:
@@ -686,6 +744,7 @@ async def _run_fp_review_stage(
         artifact_path=output_markdown_path,
         log_path=review_dir,
         reason="Stage did not run",
+        output_source=last_source,
     )
 
 

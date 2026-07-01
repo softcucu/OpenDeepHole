@@ -10,7 +10,7 @@ from typing import Optional
 
 import httpx
 
-from backend.models import FeedbackEntry, HistoryPattern, ScanEvent, Vulnerability
+from backend.models import FeedbackEntry, HistoryPattern, OutputSource, ScanEvent, Vulnerability
 
 
 OPENCODE_POOL_UNCHANGED_HEARTBEAT_SECONDS = 15.0
@@ -28,12 +28,26 @@ class Reporter:
         self.server_url = server_url.rstrip("/")
         self.dry_run = dry_run
         self.agent_id = ""
+        self.agent_name = ""
         self.agent_session_id = uuid4().hex
         self._client = httpx.AsyncClient(timeout=30.0)
         self._static_progress_warning_at: dict[str, float] = {}
 
     def set_agent_id(self, agent_id: str) -> None:
         self.agent_id = agent_id
+
+    def set_agent_name(self, agent_name: str) -> None:
+        self.agent_name = agent_name
+
+    def _with_agent_source(self, source: OutputSource | None) -> OutputSource:
+        next_source = source.model_copy() if source is not None else OutputSource()
+        if self.agent_id and not next_source.agent_id:
+            next_source.agent_id = self.agent_id
+        if self.agent_name and not next_source.agent_name:
+            next_source.agent_name = self.agent_name
+        if self.agent_session_id and not next_source.agent_session_id:
+            next_source.agent_session_id = self.agent_session_id
+        return next_source
 
     # ---------------------------------------------------------------------------
     # Config fetch (used before each scan to get latest server-managed settings)
@@ -61,6 +75,7 @@ class Reporter:
             marker = "[VULN]" if vuln.confirmed else "[  FP]"
             print(f"  {marker} {vuln.vuln_type.upper()} {vuln.file}:{vuln.line} ({vuln.function})")
             return
+        vuln.output_source = self._with_agent_source(vuln.output_source)
         try:
             await self._client.post(
                 f"{self.server_url}/api/agent/scan/{scan_id}/vulnerability",
@@ -76,9 +91,16 @@ class Reporter:
             print(f"  [REPORT] {checker_name}: {len(reports)} markdown report(s)")
             return
         try:
+            payload_reports = []
+            for report in reports:
+                item = dict(report)
+                raw_source = item.get("output_source")
+                source = raw_source if isinstance(raw_source, OutputSource) else OutputSource(**raw_source) if isinstance(raw_source, dict) else OutputSource()
+                item["output_source"] = self._with_agent_source(source).model_dump()
+                payload_reports.append(item)
             await self._client.post(
                 f"{self.server_url}/api/agent/scan/{scan_id}/skill-report",
-                json={"checker_name": checker_name, "reports": reports},
+                json={"checker_name": checker_name, "reports": payload_reports},
                 timeout=30.0,
             )
         except Exception as e:
@@ -402,12 +424,19 @@ class Reporter:
         stage_outputs: dict[str, str] | None = None,
         match_reference: str = "",
         match_type: str = "",
+        stage_output_sources: dict[str, OutputSource] | None = None,
+        output_source: OutputSource | None = None,
     ) -> None:
         """Push a single FP review result to the server."""
         if self.dry_run:
             marker = "FP" if verdict == "fp" else "TP"
             print(f"  [fp_review] [{marker}/{severity}] vuln[{vuln_index}]: {reason[:80]}")
             return
+        result_source = self._with_agent_source(output_source)
+        result_stage_sources = {
+            key: self._with_agent_source(value).model_dump()
+            for key, value in (stage_output_sources or {}).items()
+        }
         try:
             await self._client.post(
                 f"{self.server_url}/api/scan/{scan_id}/fp_review/result",
@@ -421,6 +450,8 @@ class Reporter:
                     "stage_outputs": stage_outputs or {},
                     "match_reference": match_reference,
                     "match_type": match_type,
+                    "stage_output_sources": result_stage_sources,
+                    "output_source": result_source.model_dump(),
                 },
                 timeout=10.0,
             )
@@ -434,11 +465,13 @@ class Reporter:
         vuln_index: int,
         stage: str,
         markdown: str,
+        output_source: OutputSource | None = None,
     ) -> None:
         """Push one FP review stage Markdown output to the server."""
         if self.dry_run:
             print(f"  [fp_review] [{stage}] vuln[{vuln_index}] markdown ready ({len(markdown)} chars)")
             return
+        source = self._with_agent_source(output_source)
         try:
             await self._client.post(
                 f"{self.server_url}/api/scan/{scan_id}/fp_review/stage-output",
@@ -447,6 +480,7 @@ class Reporter:
                     "vuln_index": vuln_index,
                     "stage": stage,
                     "markdown": markdown,
+                    "output_source": source.model_dump(),
                 },
                 timeout=10.0,
             )
