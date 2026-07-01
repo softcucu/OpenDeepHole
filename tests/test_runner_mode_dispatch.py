@@ -189,6 +189,7 @@ def test_invoke_opencode_uses_serve_manager_when_configured(tmp_path: Path) -> N
             models=[],
         )
         fake_manager = SimpleNamespace(run_prompt=AsyncMock(return_value=["done"]))
+        output_lines: list[str] = []
 
         with patch("backend.opencode.runner.acquire_model_lease", AsyncMock(return_value=lease)), \
             patch("backend.opencode.runner.release_model_lease", AsyncMock()) as release, \
@@ -201,6 +202,7 @@ def test_invoke_opencode_uses_serve_manager_when_configured(tmp_path: Path) -> N
                 timeout=30,
                 cli_config=cfg,
                 project_dir=project,
+                on_line=output_lines.append,
             )
 
         fake_manager.run_prompt.assert_awaited_once()
@@ -209,6 +211,10 @@ def test_invoke_opencode_uses_serve_manager_when_configured(tmp_path: Path) -> N
         assert kwargs["model"] == "anthropic/claude-sonnet"
         assert kwargs["directory"].is_dir()
         assert (kwargs["directory"] / "opencode.json").is_file()
+        assert "caller_model" in kwargs["prompt"]
+        assert "anthropic/claude-sonnet" in kwargs["prompt"]
+        assert output_lines
+        assert all(line.startswith("[model=anthropic/claude-sonnet]") for line in output_lines)
         release.assert_awaited_once()
         assert release.await_args.kwargs["outcome"] == "success"
 
@@ -546,6 +552,37 @@ def test_llm_api_health_check_uses_minimal_request_and_caches(monkeypatch) -> No
     assert len(requests) == 1
     assert requests[0]["model"] == "fake-model"
     assert requests[0]["max_tokens"] == 1
+
+
+def test_llm_api_health_check_output_includes_model(monkeypatch) -> None:
+    class FakeCompletions:
+        def create(self, **kwargs):
+            return object()
+
+    class FakeOpenAI:
+        def __init__(self, **kwargs):
+            self.chat = SimpleNamespace(completions=FakeCompletions())
+
+    config = SimpleNamespace(
+        llm_api=SimpleNamespace(
+            base_url="https://example.test/v1",
+            api_key="secret",
+            model="fake-model",
+            timeout=30,
+        )
+    )
+    lines: list[str] = []
+
+    openai_module = ModuleType("openai")
+    openai_module.OpenAI = FakeOpenAI
+    monkeypatch.setitem(sys.modules, "openai", openai_module)
+    llm_api_runner._api_health_cache.clear()
+
+    with patch("backend.opencode.llm_api_runner.get_config", return_value=config):
+        asyncio.run(llm_api_runner.ensure_llm_api_available(on_output=lines.append))
+
+    assert lines
+    assert all(line.startswith("[model=fake-model]") for line in lines)
 
 
 def test_llm_api_health_check_failure_is_cached(monkeypatch) -> None:

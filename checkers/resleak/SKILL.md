@@ -34,18 +34,15 @@ description: 验证各类资源泄露候选漏洞（文件/套接字/锁/内存/
 
 ## 可用工具
 
-- `view_function_code(project_id, function_name)` — 查看函数完整源码（**第一步必调**）
-- `view_struct_code(project_id, struct_name)` — 查看结构体/类定义
-- `view_global_variable_definition(project_id, var_name)` — 查看全局变量定义
 - `submit_result(result_id, confirmed, severity, description, ai_analysis)` — 提交分析结论（**必须调用**）
 
 ## 分析步骤
 
 ```
-第 1 步  view_function_code(project_id, function_name)   → 查看完整函数源码
+第 1 步  阅读完整函数源码
 第 2 步  定位候选描述中的资源获取点，确认变量类型和获取方式
 第 3 步  追踪每个退出路径（return / goto / continue）上的释放行为
-第 4 步  检查自定义释放函数的语义（如有必要，用 view_function_code 查看）
+第 4 步  检查自定义释放函数的语义
 第 5 步  判断是否存在所有权转移或其他释放机制
 第 6 步  调用 submit_result 提交结论
 ```

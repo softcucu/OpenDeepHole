@@ -15,9 +15,6 @@ description: 管理员测试用项目级 SKILL-only checker，用于验证无 an
 
 ## 可用工具
 
-- `view_function_code(project_id, function_name, file_path="")` - 查看指定函数源码
-- `view_struct_code(project_id, struct_name)` - 查看结构体、类或联合体定义
-- `view_global_variable_definition(project_id, global_variable_name)` - 查看全局变量定义
 - `submit_result(result_id, confirmed, severity, description, ai_analysis, file="", line=0, function="")` - 提交审计结果
 
 ## 审计要求

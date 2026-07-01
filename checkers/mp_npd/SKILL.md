@@ -21,16 +21,13 @@ description: 验证多层指针空指针解引用候选漏洞（CWE-476），判
 
 ## 可用工具
 
-- `view_function_code(project_id, function_name)` — 查看函数完整源码（必查；尤其重点看函数入口处的参数校验、调用前的 if 块、宏调用）
-- `view_struct_code(project_id, struct_name)` — 查看结构体定义（确认 `$ROOT`、`$ROOT->$F1` 的类型；判断中间层指针是否在结构体中始终被初始化为非 NULL）
-- `find_function_references(project_id, function_name)` — 查找候选函数的所有调用方（核心：判断调用方是否已经保证根指针 / 中间层非空）
 - `submit_result(result_id, confirmed, severity, description, ai_analysis)` — 提交分析结论（必须调用)
 
 ## 分析步骤
 
 ### Step 1 — 读取完整函数体
 
-用 `view_function_code` 获取 candidate 所在函数的完整源码。候选描述只给了少量上下文，**必须**看到完整函数才能判断：
+阅读 candidate 所在函数的完整源码。候选描述只给了少量上下文，**必须**看到完整函数才能判断：
 
 - 函数入口处是否对 `$ROOT` 或 `$ROOT->$F1` 做了校验（包括 `if (!ctx || !ctx->session) return -1;`、`assert(ctx && ctx->session)`、`CHECK_PTR(ctx->session)` 等宏）
 - 该使用点上方是否存在初筛因形式不同而漏掉的判空（如 `if (likely(p))`、`if ((p) != ((void *)0))`、`switch` 语句、`?:` 三目表达式）
@@ -64,22 +61,22 @@ description: 验证多层指针空指针解引用候选漏洞（CWE-476），判
   - **宏校验**：`CHECK_NULL_RETURN(ctx, -1); CHECK_NULL_RETURN(ctx->session, -1);`
   - **inline 函数封装**：`validate_ctx(ctx)` 内部 abort/return
   - **switch / 三目运算符 / 短路逻辑链**：`(!ctx || !ctx->session) ? bail() : 0;`
-  - **判空发生在更上层 caller**：当前函数仅是 hot path，caller 早已经检查（需 `find_function_references` 确认）
+  - **判空发生在更上层 caller**：当前函数仅是 hot path，caller 早已经检查（需确认）
   - **结构体不变量**：根对象类型设计上保证某字段构造后永不为 NULL（例如指向静态全局，或在构造函数中分配）
   - **assert / BUG_ON 之外的防御宏**：`VOS_ASSERT(p)`、`PRINT_ON_FAIL(p)` 等项目自定义防御宏
 
 排查方法：
 - 在函数体内全文搜索 `$ROOT` 与 `$F1`（如 `ctx`、`session`），看是否出现在自定义防御宏 / inline 函数 / 短路链中
-- 进入嫌疑宏/函数（`view_function_code`）确认是否触发 return/abort 路径
-- 用 `find_function_references` 查 caller，判断 caller 是否一定已经检查
+- 进入嫌疑宏/函数确认是否触发 return/abort 路径
+- 查看 caller，判断 caller 是否一定已经检查
 
 ### Step 5 — 判断中间层指针的"不变量"
 
 最关键的判定问题：`$ROOT->$F1` 在到达使用点时是否可能为 NULL？
 
-- **结构体定义层面**：`view_struct_code` 查根类型；若 `$F1` 是 `struct session *session;` 且初始化路径不明，则可能为空；若是通过 `create_ctx` 内部 `ctx->session = alloc()` 必填，则正常不为空（但要看是否有失败路径设置为 NULL，或 reset 函数置空）
+- **结构体定义层面**：查看根类型；若 `$F1` 是 `struct session *session;` 且初始化路径不明，则可能为空；若是通过 `create_ctx` 内部 `ctx->session = alloc()` 必填，则正常不为空（但要看是否有失败路径设置为 NULL，或 reset 函数置空）
 - **生命周期分析**：在 `init / reset / destroy / detach` 等阶段，`$F1` 可能短暂为 NULL；如果当前函数可能在这些阶段被并发调用（多线程）或在错误路径上被调用，则风险存在
-- **caller 上下文**：用 `find_function_references` 查找当前函数的调用方；若全部 caller 都在持有有效 session 时调用（如 `if (s = get_session()) handle(s)`），则误报概率高
+- **caller 上下文**：查找当前函数的调用方；若全部 caller 都在持有有效 session 时调用（如 `if (s = get_session()) handle(s)`），则误报概率高
 
 ### Step 6 — 多层指针作为函数参数的特殊情形
 
@@ -100,7 +97,7 @@ description: 验证多层指针空指针解引用候选漏洞（CWE-476），判
 ### 判为误报（confirmed=false）的情形
 
 1. **入口集中校验**：函数顶部已校验 `$ROOT` 与 `$ROOT->$F1`（含通过宏 / inline 函数），语法初筛未识别
-2. **caller 已校验**：所有 caller 都在持有有效 `$ROOT->$F1` 时才调用当前函数（通过 `find_function_references` 全量确认）
+2. **caller 已校验**：所有 caller 都在持有有效 `$ROOT->$F1` 时才调用当前函数（通过全量调用方确认）
 3. **结构体不变量保证**：`$ROOT->$F1` 在该类型生命周期内不为 NULL（构造函数必填、destroy 之外无置空路径），且当前函数不可能在 destroy 后被调用
 4. **宏 / inline 函数完成判空**：语法初筛看不到的防御机制存在
 5. **路径不可达**：触发空指针访问的具体上下文在正常运行中不可能成立
@@ -136,7 +133,7 @@ description: 验证多层指针空指针解引用候选漏洞（CWE-476），判
   1. 多层指针表达式与所在函数性质（入口 / 业务 / cleanup / callback）
   2. 函数内 / 函数前是否有判空（具体行号或宏名）
   3. 根指针 `$ROOT` 与中间层 `$ROOT->$F1` 的来源与不变量分析（结构体定义、初始化路径）
-  4. caller 端是否承担校验责任（`find_function_references` 结论）
+  4. caller 端是否承担校验责任（调用方分析结论）
   5. 是否存在通过宏 / inline 函数 / 不变量完成的隐式校验
   6. 最终判定理由
 
@@ -144,4 +141,4 @@ description: 验证多层指针空指针解引用候选漏洞（CWE-476），判
   - **【赋值点】** 中间层指针 `$ROOT->$F1`（或根指针）**被赋值的确切位置**（文件:行号）及为何可能为 NULL；
     若赋值来自其它函数（返回值/输出参数），读取该函数确认它确实可能写出 / 返回 NULL；
   - **【无判空路径】** 从赋值点到解引用点的每条可达路径上均无有效判空的证明；
-  - **【调用链/调用过程】** 从赋值点到解引用点的调用链或执行路径（跨函数时给出 `caller → callee`，可用 `find_function_references` 佐证），并标注关键行号。
+  - **【调用链/调用过程】** 从赋值点到解引用点的调用链或执行路径（跨函数时给出 `caller → callee`），并标注关键行号。

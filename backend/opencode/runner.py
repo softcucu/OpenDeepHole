@@ -1133,6 +1133,49 @@ def _prompt_file_message(prompt_path: Path) -> str:
     )
 
 
+def _invocation_model_label(option, model: str) -> str:
+    for value in (
+        model,
+        getattr(option, "model", ""),
+        getattr(option, "id", ""),
+    ):
+        label = str(value or "").strip()
+        if label:
+            return label
+    return "default"
+
+
+def _with_caller_model_instruction(prompt: str, model_label: str) -> str:
+    return (
+        prompt.rstrip()
+        + "\n\n运行时日志要求：调用任何 MCP 工具时，必须传入 "
+        + f"`caller_model` 参数，值固定为 `{model_label}`。"
+    )
+
+
+def _with_model_prefix(line: str, model_label: str) -> str:
+    prefix = f"[model={model_label}]"
+    if line.startswith(prefix):
+        return line
+    parts = line.splitlines()
+    if not parts:
+        return f"{prefix} {line}"
+    return "\n".join(
+        part if part.startswith(prefix) else f"{prefix} {part}"
+        for part in parts
+    )
+
+
+def _model_line_emitter(on_line, model_label: str):
+    if not on_line:
+        return None
+
+    def emit(line: str) -> None:
+        on_line(_with_model_prefix(line, model_label))
+
+    return emit
+
+
 def _cleanup_prompt_file(prompt_file: Path | None) -> None:
     if prompt_file is None:
         return
@@ -1309,6 +1352,9 @@ async def _invoke_opencode(
         tool = _normalize_tool(effective_cli_config)
         executable = _resolve_cli_executable(effective_cli_config)
         model = str(_cfg_value(effective_cli_config, "model", "") or "")
+        model_label = _invocation_model_label(lease.option, model)
+        prompt = _with_caller_model_instruction(prompt, model_label)
+        emit_line = _model_line_emitter(on_line, model_label)
         if on_invocation_metadata:
             on_invocation_metadata(
                 _output_source_from_invocation(
@@ -1321,9 +1367,9 @@ async def _invoke_opencode(
             )
         runtime_namespace = f"{lease.option.id}-{uuid4().hex[:8]}"
         cwd = _select_cli_cwd(workspace, tool, project_dir, runtime_namespace=runtime_namespace)
-        if on_line:
+        if emit_line:
             capability_note = model_capability or "any"
-            on_line(
+            emit_line(
                 f"[{tool}] model={lease.option.id} capability={lease.option.capability} "
                 f"required={capability_note} running={lease.running}/{lease.global_running}"
             )
@@ -1342,7 +1388,7 @@ async def _invoke_opencode(
                     prompt=prompt,
                     model=model,
                     timeout=timeout,
-                    on_line=on_line,
+                    on_line=emit_line,
                     cancel_event=cancel_event,
                 )
             except asyncio.CancelledError:
@@ -1472,8 +1518,8 @@ async def _invoke_opencode(
                     break
                 log_lines.append(line)
                 logger.debug("[%s] %s", tool, line)
-                if on_line:
-                    on_line(line)
+                if emit_line:
+                    emit_line(line)
         finally:
             if watcher:
                 watcher.cancel()

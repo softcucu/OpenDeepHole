@@ -27,7 +27,7 @@ description: >
 
 
 ```
-第 1 步  view_function_code(project_id, function_name)         → 获取函数完整代码
+第 1 步  阅读函数完整代码
 第 2 步  按下方"六场景初筛表"扫描函数体，登记所有命中点
 第 3 步  对每个命中场景，view references/<场景文件>.md，按其规则深度分析
 第 4 步  汇总所有风险点，调用一次 submit_result(...)
@@ -53,13 +53,10 @@ description: >
 
 ---
 
-## 可用 MCP 工具
+## 可用工具
 
 | 工具 | 何时调用 |
 |------|---------|
-| `view_function_code(project_id, function_name)` | **每次对话第一步必调**，获取函数体 |
-| `view_struct_code(project_id, struct_name)` | dest / src / 数组是结构体成员时 |
-| `view_global_variable_definition(project_id, global_variable_name)` | 变量是 `g_` 开头或明显是全局变量时 |
 | `submit_result(result_id, confirmed, severity, description, ai_analysis)` | **审计完成后必须调用一次** |
 
 **调用链追踪上限：向上 2 层。** 超过则在分析中标记信息不足。
@@ -72,7 +69,7 @@ description: >
 
 ### 第 1 步：获取函数代码
 
-调用 `view_function_code(project_id, function_name)`。通读函数体，建立整体理解：参数、局部变量、
+通读函数体，建立整体理解：参数、局部变量、
 涉及的结构体、循环结构、函数内调用了哪些其他函数。
 
 ### 第 2 步：六场景初筛（只扫描登记，不深度分析）

@@ -22,16 +22,13 @@ description: 验证多层指针成员资源泄露候选漏洞（CWE-401 / CWE-77
 
 ## 可用工具
 
-- `view_function_code(project_id, function_name)` — 查看函数完整源码（必查；尤其重点看返回路径 / 错误路径 / 是否有 destroy/free 包装函数被调用）
-- `view_struct_code(project_id, struct_name)` — 查看结构体定义（确认根对象 `ctx`、中间层 `session` 的类型；判断是否存在配套的 destroy/free 函数）
-- `find_function_references(project_id, function_name)` — 查找候选函数的所有调用方；用于判断"调用方是否在 fail 路径上调用 destroy(ctx)"等托管语义
 - `submit_result(result_id, confirmed, severity, description, ai_analysis)` — 提交分析结论（必须调用）
 
 ## 分析步骤
 
 ### Step 1 — 读取完整函数体
 
-用 `view_function_code` 获取 candidate 所在函数的完整源码。候选描述只给了少量上下文，**必须**看到完整函数才能判断：
+阅读 candidate 所在函数的完整源码。候选描述只给了少量上下文，**必须**看到完整函数才能判断：
 
 - 函数是否还有其他位置释放了该多层成员（初筛仅以字面包含该字段的调用 `$ANY($FIELD, ...)` 算作释放，会错过 wrapper 调用或宏调用）
 - 函数返回前是否调用了 `destroy_ctx(ctx)` / `free_session(ctx->session)` 等 wrapper，统一释放包括该成员在内的所有资源
@@ -52,8 +49,8 @@ ctx ─owns─► session ─owns─► buf
 3. **泄露**：当前函数赋值后既没有自己释放，也没有任何 destroy 函数会到达 `ctx->session->buf`。**这才是真实漏洞。**
 
 判断架构需要：
-- `view_struct_code` 看 `ctx`、`session` 是什么类型
-- `find_function_references` 找该函数的调用方，看调用方在错误路径是否调用 destroy
+- 查看 `ctx`、`session` 是什么类型
+- 查找该函数的调用方，看调用方在错误路径是否调用 destroy
 - 在项目里找配套的 `destroy_<type>` / `free_<type>` / `<type>_release` 函数，看它是否级联释放
 
 ### Step 3 — 根据候选形态聚焦核心验证问题
@@ -78,7 +75,7 @@ ctx ─owns─► session ─owns─► buf
 
 排查方法：
 - 全函数搜索 `destroy / free / release / cleanup / fini / close / put / drop` 类的调用
-- 对每个嫌疑调用，用 `view_function_code` 进入其实现，看是否级联释放
+- 对每个嫌疑调用，进入其实现，看是否级联释放
 - 看根对象类型，是否有配套的 destroy 函数；如果有，候选函数可能依赖 caller 调 destroy
 
 ### Step 5 — 判断所有权归属
@@ -97,7 +94,7 @@ ctx ─owns─► session ─owns─► buf
 `x = realloc(x, n)` 是经典反模式：失败时 realloc 返回 NULL，但旧 `x` 仍指向有效内存。直接覆盖会丢失旧指针。
 
 - 看项目使用的是标准 `realloc` 还是 wrapper（如 `g_realloc` 失败时 abort；某些 wrapper 失败时保留旧值并返回旧值）
-- 如果是 wrapper：`view_function_code` 看其失败语义
+- 如果是 wrapper：查看其失败语义
 - 如果是标准 realloc：基本判定为真实漏洞，severity=high（OOM 时确定泄露）
 
 ### Step 7 — 调用链 / 触发可达性
@@ -142,6 +139,6 @@ ctx ─owns─► session ─owns─► buf
   1. 多层成员的具体表达式与所在函数性质（init / reset / cleanup / 业务）
   2. 资源获取方式（直接 alloc / wrapper / realloc / 临时变量转交）
   3. owner 链销毁函数是否存在、是否级联释放该成员（具体函数名 + 看到的代码）
-  4. caller 端的销毁责任（来自 `find_function_references` 的结论）
+  4. caller 端的销毁责任（来自调用方分析的结论）
   5. 是否存在通过宏 / wrapper 完成的隐式释放
   6. 最终判定理由

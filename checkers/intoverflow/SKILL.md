@@ -18,8 +18,6 @@ description: 验证整数溢出/翻转候选漏洞
 
 ## 可用工具
 
-- `view_function_code(project_id, function_name)` - 查看函数完整代码
-- `view_struct_code(project_id, struct_name)` - 查看结构体定义
 - `submit_result(result_id, confirmed, severity, description, ai_analysis)` - 提交结论，必须调用
 
 ## 分析方法

@@ -132,6 +132,24 @@ def _api_output_source(llm_cfg) -> OutputSource:
     )
 
 
+def _api_model_label(llm_cfg) -> str:
+    return _cfg_value(llm_cfg, "model", "gpt-4o-mini") or "gpt-4o-mini"
+
+
+def _emit_api_output(on_output, model: str, line: str) -> None:
+    if not on_output:
+        return
+    prefix = f"[model={model}]"
+    parts = line.splitlines()
+    if not parts:
+        on_output(f"{prefix} {line}")
+        return
+    on_output("\n".join(
+        part if part.startswith(prefix) else f"{prefix} {part}"
+        for part in parts
+    ))
+
+
 def _client_kwargs(llm_cfg, *, timeout_override: float | None = None) -> dict:
     kwargs: dict = {}
     base_url = _cfg_value(llm_cfg, "base_url", "") or ""
@@ -207,8 +225,8 @@ async def ensure_llm_api_available(on_output=None) -> None:
             return
         raise LLMApiUnavailableError(reason)
 
-    if on_output:
-        on_output("[API] 正在检测 API 配置可用性...")
+    model = _api_model_label(llm_cfg)
+    _emit_api_output(on_output, model, "[API] 正在检测 API 配置可用性...")
 
     available, reason = _probe_llm_api(llm_cfg)
     with _api_health_lock:
@@ -217,11 +235,10 @@ async def ensure_llm_api_available(on_output=None) -> None:
     if not available:
         raise LLMApiUnavailableError(reason)
 
-    if on_output:
-        on_output("[API] API 配置可用")
+    _emit_api_output(on_output, model, "[API] API 配置可用")
 
 
-def _emit_initial_api_prompt(on_output, messages: list[dict]) -> None:
+def _emit_initial_api_prompt(on_output, messages: list[dict], model: str) -> None:
     """Print the complete initial prompt sent to the LLM API."""
     if not on_output:
         return
@@ -231,7 +248,7 @@ def _emit_initial_api_prompt(on_output, messages: list[dict]) -> None:
         role = message.get("role", "unknown")
         content = message.get("content") or ""
         sections.append(f"--- {role} ---\n{content}")
-    on_output("\n".join(sections))
+    _emit_api_output(on_output, model, "\n".join(sections))
 
 
 # ---------------------------------------------------------------------------
@@ -724,6 +741,7 @@ async def run_audit_via_api(
     """通过 LLM API + function calling 审计单个候选漏洞。"""
     config = get_config()
     llm_cfg = config.llm_api
+    model_label = _api_model_label(llm_cfg)
     result_id = uuid4().hex
 
     # 检查该 checker 是否为 single_pass 模式（单次 API 调用，仅 submit_result）
@@ -752,9 +770,8 @@ async def run_audit_via_api(
         {"role": "user", "content": user_prompt},
     ]
 
-    if on_output:
-        on_output(f"[API] 开始审计 {candidate.file}:{candidate.line}")
-    _emit_initial_api_prompt(on_output, messages)
+    _emit_api_output(on_output, model_label, f"[API] 开始审计 {candidate.file}:{candidate.line}")
+    _emit_initial_api_prompt(on_output, messages, model_label)
 
     # 选择工具集：single_pass 模式仅提供 submit_result
     tools = TOOLS_SINGLE_PASS if single_pass else TOOLS
@@ -794,8 +811,7 @@ async def run_audit_via_api(
             if cancel_event and cancel_event.is_set():
                 return None
             logger.error("LLM API 调用失败: %s", e)
-            if on_output:
-                on_output(f"[API] LLM 调用失败: {e}")
+            _emit_api_output(on_output, model_label, f"[API] LLM 调用失败: {e}")
             reason = f"LLM API 调用失败: {e}"
             mark_llm_api_unavailable(reason)
             raise LLMApiUnavailableError(reason) from e
@@ -807,8 +823,8 @@ async def run_audit_via_api(
         messages.append(message.model_dump(exclude_none=True))
 
         # 始终输出 LLM 的文本内容（分析过程）
-        if on_output and message.content:
-            on_output(f"[API] {message.content[:200]}")
+        if message.content:
+            _emit_api_output(on_output, model_label, f"[API] {message.content[:200]}")
 
         # 如果没有 tool_calls，说明 LLM 直接返回了文本
         if not message.tool_calls:
@@ -827,8 +843,11 @@ async def run_audit_via_api(
             except json.JSONDecodeError:
                 func_args = {}
 
-            if on_output:
-                on_output(f"[API] 调用工具: {func_name}({json.dumps(func_args, ensure_ascii=False)[:100]})")
+            _emit_api_output(
+                on_output,
+                model_label,
+                f"[API] 调用工具: {func_name}({json.dumps(func_args, ensure_ascii=False)[:100]})",
+            )
 
             result_text, is_submit = _execute_tool(
                 func_name, func_args, project_id, result_id, project_dir=project_dir,
@@ -836,8 +855,7 @@ async def run_audit_via_api(
 
             if is_submit:
                 submitted = True
-                if on_output:
-                    on_output(f"[API] 结果已提交")
+                _emit_api_output(on_output, model_label, "[API] 结果已提交")
                 break
 
             # 追加 tool 结果到消息历史
@@ -855,8 +873,7 @@ async def run_audit_via_api(
             "LLM 未调用 submit_result: %s:%d (result_id=%s)",
             candidate.file, candidate.line, result_id,
         )
-        if on_output:
-            on_output(f"[API] 警告: LLM 未提交结果")
+        _emit_api_output(on_output, model_label, "[API] 警告: LLM 未提交结果")
 
     # 读取结果文件（与 opencode 模式共用 _read_result）
     from backend.opencode.runner import _read_result
@@ -1097,6 +1114,7 @@ async def run_batch_audit_via_api(
     """通过 LLM API + function calling 批量审计同一函数内的多个候选。"""
     config = get_config()
     llm_cfg = config.llm_api
+    model_label = _api_model_label(llm_cfg)
 
     # 为每个候选生成 result_id，建立 line -> result_id 映射
     result_id_map: dict[int, str] = {}
@@ -1130,9 +1148,8 @@ async def run_batch_audit_via_api(
         {"role": "user", "content": user_prompt},
     ]
 
-    if on_output:
-        on_output(f"[API] 批量审计 {file_path}:{func_name}（{len(candidates)} 个候选）")
-    _emit_initial_api_prompt(on_output, messages)
+    _emit_api_output(on_output, model_label, f"[API] 批量审计 {file_path}:{func_name}（{len(candidates)} 个候选）")
+    _emit_initial_api_prompt(on_output, messages, model_label)
 
     submitted = False
     max_rounds = 10
@@ -1168,8 +1185,7 @@ async def run_batch_audit_via_api(
             if cancel_event and cancel_event.is_set():
                 return [None] * len(candidates)
             logger.error("LLM API 批量调用失败: %s", e)
-            if on_output:
-                on_output(f"[API] LLM 调用失败: {e}")
+            _emit_api_output(on_output, model_label, f"[API] LLM 调用失败: {e}")
             reason = f"LLM API 批量调用失败: {e}"
             mark_llm_api_unavailable(reason)
             raise LLMApiUnavailableError(reason) from e
@@ -1179,8 +1195,8 @@ async def run_batch_audit_via_api(
         messages.append(message.model_dump(exclude_none=True))
 
         # 始终输出 LLM 的文本内容（分析过程）
-        if on_output and message.content:
-            on_output(f"[API] {message.content[:200]}")
+        if message.content:
+            _emit_api_output(on_output, model_label, f"[API] {message.content[:200]}")
 
         if not message.tool_calls:
             break
@@ -1192,8 +1208,11 @@ async def run_batch_audit_via_api(
             except json.JSONDecodeError:
                 func_args = {}
 
-            if on_output:
-                on_output(f"[API] 调用工具: {func_name_tc}({json.dumps(func_args, ensure_ascii=False)[:100]})")
+            _emit_api_output(
+                on_output,
+                model_label,
+                f"[API] 调用工具: {func_name_tc}({json.dumps(func_args, ensure_ascii=False)[:100]})",
+            )
 
             result_text, is_submit = _execute_batch_tool(
                 func_name_tc, func_args, project_id,
@@ -1203,8 +1222,7 @@ async def run_batch_audit_via_api(
 
             if is_submit:
                 submitted = True
-                if on_output:
-                    on_output(f"[API] 批量结果已提交")
+                _emit_api_output(on_output, model_label, "[API] 批量结果已提交")
                 break
 
             messages.append({
@@ -1221,8 +1239,7 @@ async def run_batch_audit_via_api(
             "LLM 未调用 submit_batch_result: %s:%s",
             file_path, func_name,
         )
-        if on_output:
-            on_output(f"[API] 警告: LLM 未提交批量结果")
+        _emit_api_output(on_output, model_label, "[API] 警告: LLM 未提交批量结果")
 
     # 读取各候选的结果文件
     from backend.opencode.runner import _read_result

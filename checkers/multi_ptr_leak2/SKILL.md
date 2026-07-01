@@ -25,18 +25,15 @@ receiver（`obj->destroy()` 中的 `obj`），而**不是**显式参数；如果
 
 ## 可用工具
 
-- `view_function_code(project_id, function_name, file_path="")` - 查看候选函数或释放函数完整源码
-- `view_struct_code(project_id, struct_name)` - 查看结构体、类或联合体定义
-- `find_function_references(project_id, function_name)` - 查看释放函数或候选函数调用位置
 - `submit_result(result_id, confirmed, severity, description, ai_analysis)` - 提交结论，必须调用
 
 ## 必查步骤
 
-1. 先调用 `view_function_code` 查看 candidate 所在函数完整源码。不要只根据 candidate 描述中的上下文片段下结论。
-2. 查看 candidate 描述中的释放调用，例如 `free(ctx)`、`destroy_ctx(ctx)`、`delete obj`。如果释放函数是项目内 wrapper，继续调用 `view_function_code` 查看释放函数实现。
-3. 调用 `view_struct_code` 查看候选结构体定义，确认指针成员的语义：是 owned resource、borrowed pointer、缓存别名、嵌套 owner，还是固定外部生命周期对象。
+1. 先阅读 candidate 所在函数完整源码。不要只根据 candidate 描述中的上下文片段下结论。
+2. 查看 candidate 描述中的释放调用，例如 `free(ctx)`、`destroy_ctx(ctx)`、`delete obj`。如果释放函数是项目内 wrapper，继续阅读释放函数实现。
+3. 查看候选结构体定义，确认指针成员的语义：是 owned resource、borrowed pointer、缓存别名、嵌套 owner，还是固定外部生命周期对象。
 4. 如果释放函数调用了其他 cleanup/destroy/free wrapper，继续查看这些 wrapper 是否级联释放了候选结构体的指针成员。
-5. 必要时用 `find_function_references` 查看释放函数的调用方，判断该函数是否就是该类型的唯一析构路径，以及 caller 是否额外释放成员。
+5. 必要时查看释放函数的调用方，判断该函数是否就是该类型的唯一析构路径，以及 caller 是否额外释放成员。
 
 ## 判定重点
 

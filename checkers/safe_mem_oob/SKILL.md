@@ -30,9 +30,6 @@ description: 判断安全内存函数调用是否存在真实的越界写风险
 
 ## 可用工具
 
-- `view_function_code(project_id, function_name, file_path="")` - 读取完整函数
-- `view_struct_code(project_id, struct_name)` - 读取结构体或类定义
-- `view_global_variable_definition(project_id, global_variable_name)` - 读取全局变量定义
 - `submit_result(result_id, confirmed, severity, description, ai_analysis)` - 审计完成后必须调用
 
 ## 标准流程

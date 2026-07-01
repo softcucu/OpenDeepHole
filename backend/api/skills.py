@@ -88,12 +88,6 @@ def _fixed_skill_rules() -> str:
 
 以下规则由 OpenDeepHole 固定注入，用户不能修改。
 
-### 可用 MCP 工具
-
-- `view_function_code(project_id, function_name, file_path="")`: 查看指定函数源码。
-- `view_struct_code(project_id, struct_name)`: 查看结构体、类或联合体定义。
-- `view_global_variable_definition(project_id, global_variable_name)`: 查看全局变量定义。
-
 ### Markdown 报告保存规则
 
 - 本 SKILL 只输出 Markdown 报告，不调用 `submit_result`，不生成结构化漏洞结果。

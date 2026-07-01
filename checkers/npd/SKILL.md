@@ -14,31 +14,24 @@ pointer variable involved) that may contain an NPD. Treat it only as a lead — 
 independently determine whether this is a **real vulnerability** or a **false positive**
 by analyzing the code in depth.
 
-## Available MCP Tools
+## Available Tools
 
-Use these tools to examine the source code (always pass the `project_id` provided in the prompt):
-
-- `read_file(project_id, path)` — Read a source file
-- `search_code(project_id, pattern, file_glob)` — Search for patterns across files
-- `get_context(project_id, path, line, radius)` — Get code around a specific line
-- `get_function(project_id, func_name)` — Get a complete function body from the code index
-- `get_callers(project_id, func_name)` — Find all call sites of a function
 - `submit_result(result_id, confirmed, severity, description, ai_analysis)` — **Submit your final result (required)**
 
 ## Analysis Steps
 
-1. **Read the dereference location**: Use `get_context` to examine the code around the candidate line.
-2. **Understand the function**: Use `get_function` to read the complete function containing the dereference.
+1. **Read the dereference location**: Examine the code around the candidate line.
+2. **Understand the function**: Read the complete function containing the dereference.
 3. **定位赋值点 (Locate the assignment site) — required if you intend to confirm**:
    找到该指针**被赋值的确切位置**（`malloc`/`calloc`/`realloc` 的返回值、某个函数的返回值、
    输出参数 `&p`、结构体成员赋值、由调用方作为参数传入等）。给出赋值点的文件与行号。
-   若赋值发生在另一个函数（返回值/输出参数），用 `get_function` 读取该函数，确认它**确实可能返回 / 写出 NULL**。
+   若赋值发生在另一个函数（返回值/输出参数），读取该函数，确认它**确实可能返回 / 写出 NULL**。
 4. **证明赋值到解引用之间全程无判空 (Prove no NULL check on the path)**:
    沿着**从赋值点到解引用点的每一条可达控制流路径**逐步检查，证明这些路径上
    **没有任何有效判空**（`if (p)`、`if (!p) return`、`assert`、`BUG_ON`、判空宏、
    在被调函数/调用方完成的判空都算）。只要存在一条有效判空覆盖该路径，即判为**误报**。
 5. **构建调用链 (Build the call chain)**:
-   若赋值与解引用跨函数，用 `get_callers` / `get_function` 还原 `caller → callee` 的
+   若赋值与解引用跨函数，还原 `caller → callee` 的
    调用过程，给出从“赋值点 → 解引用点”的完整调用链 / 执行路径，并标注关键文件:行号。
 6. **Check related definitions**: Look for struct definitions, macro definitions, or helper functions that affect the pointer's value.
 

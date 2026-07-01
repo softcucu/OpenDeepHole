@@ -17,15 +17,13 @@ description: 验证死循环候选漏洞（CWE-835），判断是否为真实可
 
 ## 可用工具
 
-- `view_function_code(project_id, function_name)` — 查看函数完整源码
-- `view_struct_code(project_id, struct_name)` — 查看结构体/类定义
 - `submit_result(result_id, confirmed, severity, description, ai_analysis)` — 提交分析结论（必须调用）
 
 ## 分析步骤
 
 ### Step 1 — 读取完整函数体
 
-用 `view_function_code` 获取 candidate 所在函数的完整源码。注意：候选描述只给了少量上下文，不足以判断，必须看整个函数。
+阅读 candidate 所在函数的完整源码。注意：候选描述只给了少量上下文，不足以判断，必须看整个函数。
 
 ### Step 2 — 判断候选形态，明确验证目标
 
@@ -50,13 +48,13 @@ description: 验证死循环候选漏洞（CWE-835），判断是否为真实可
 检查循环内是否有初筛遗漏的退出或推进机制：
 
 - **显式退出**：`break` / `return` / `throw` / `goto` / `exit()` 是否覆盖了所有可达路径？
-- **子函数内的隐式更新**：continue 前调用的子函数是否在内部推进了状态（如 `buf = next_record(buf)`）？用 `view_function_code` 查看可疑的子函数。
+- **子函数内的隐式更新**：continue 前调用的子函数是否在内部推进了状态（如 `buf = next_record(buf)`）？查看可疑的子函数。
 - **间接更新**：循环变量是否是指针/引用，通过 `ptr = ptr->next` 或被子函数修改其指向内容？
 - **外部 flag**：循环条件是否依赖外部变量（`g_running`、`timeout`），由其他线程/信号更新？
 
 ### Step 4 — 向上追溯调用链
 
-根据 candidate 描述中的调用链线索，用 `view_function_code` 查看关键调用方，重点确认：
+根据 candidate 描述中的调用链线索查看关键调用方，重点确认：
 
 - **循环控制变量的来源**：若变量是函数参数（规则类型含 `param`），调用方传入的值是什么？是固定值、外部输入还是计算结果？
 - **触发问题路径的前提条件**：调用方在什么情况下会让代码走入 continue 分支？这个条件是否现实可达？

@@ -67,6 +67,42 @@ def test_bound_project_dir_isolated_from_agent_project_env(tmp_path, monkeypatch
     clear_db_cache()
 
 
+def test_mcp_tool_log_includes_caller_model(tmp_path, capsys) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    _write_code_index(project, "int target(void) { return 1; }")
+
+    mcp = _FakeMCP()
+    register_tools(mcp, project_dir=project)
+
+    result = mcp.tools["view_function_code"](
+        "scan-a",
+        "target",
+        caller_model="anthropic/claude-sonnet",
+    )
+
+    assert "return 1" in result
+    output = capsys.readouterr().out
+    assert "[MCP ▶] model=anthropic/claude-sonnet view_function_code" in output
+    assert "[MCP ◀] model=anthropic/claude-sonnet view_function_code" in output
+    clear_db_cache()
+
+
+def test_mcp_tool_log_defaults_unknown_model(tmp_path, capsys) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    _write_code_index(project, "int target(void) { return 1; }")
+
+    mcp = _FakeMCP()
+    register_tools(mcp, project_dir=project)
+
+    mcp.tools["view_function_code"]("scan-a", "target")
+
+    output = capsys.readouterr().out
+    assert "[MCP ▶] model=unknown view_function_code" in output
+    clear_db_cache()
+
+
 def test_code_index_cache_reopens_after_db_replacement(tmp_path) -> None:
     project = tmp_path / "project"
     replacement = tmp_path / "replacement"
