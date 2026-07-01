@@ -217,14 +217,15 @@ class OpenCodeServeManager:
         await self._acquire_session(key)
         session_id = ""
         try:
-            params = _serve_context_params(directory, config_workspace)
+            request_directory = config_workspace or directory
+            params = _serve_context_params(request_directory)
             async with httpx.AsyncClient(base_url=self.base_url, timeout=_SERVE_REQUEST_TIMEOUT_SECONDS) as client:
                 created = await client.post("/session", params=params, json={"title": "OpenDeepHole task"})
                 created.raise_for_status()
                 session_id = _session_id(created.json())
                 if on_line:
-                    workspace_note = f" workspace={config_workspace}" if config_workspace else ""
-                    on_line(f"[{tool} serve] session={session_id} directory={directory}{workspace_note}")
+                    source_note = f" source={directory}" if request_directory != directory else ""
+                    on_line(f"[{tool} serve] session={session_id} directory={request_directory}{source_note}")
                 payload: dict[str, Any] = {
                     "parts": [{"type": "text", "text": prompt}],
                 }
@@ -281,7 +282,8 @@ class OpenCodeServeManager:
     ) -> list[OpenCodeModelInfo]:
         key = OpenCodeServeKey(tool=tool, executable=executable)
         await self._ensure_started(key)
-        params = _serve_context_params(directory, config_workspace)
+        request_directory = config_workspace or directory
+        params = _serve_context_params(request_directory)
         async with httpx.AsyncClient(base_url=self.base_url, timeout=_SERVE_REQUEST_TIMEOUT_SECONDS) as client:
             response = await client.get("/provider", params=params)
             response.raise_for_status()
@@ -447,13 +449,10 @@ _manager = OpenCodeServeManager()
 
 def _serve_context_params(
     directory: Path | None,
-    config_workspace: Path | None = None,
 ) -> dict[str, str] | None:
     params: dict[str, str] = {}
     if directory is not None:
         params["directory"] = str(directory)
-    if config_workspace is not None:
-        params["workspace"] = str(config_workspace)
     return params or None
 
 

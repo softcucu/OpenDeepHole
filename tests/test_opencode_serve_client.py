@@ -106,7 +106,7 @@ def test_run_prompt_sends_all_discovered_tools(monkeypatch, tmp_path: Path) -> N
             tool="opencode",
             executable="opencode",
         )
-        expected_params = {"directory": str(project), "workspace": str(config_workspace)}
+        expected_params = {"directory": str(config_workspace)}
         assert session_client.posts[0]["params"] == expected_params
         assert session_client.gets[0]["params"] == expected_params
         assert message["params"] == expected_params
@@ -161,7 +161,7 @@ def test_run_prompt_continues_when_tool_discovery_fails(monkeypatch, tmp_path: P
     asyncio.run(run())
 
 
-def test_list_models_passes_directory_and_workspace_to_provider_requests(monkeypatch, tmp_path: Path) -> None:
+def test_list_models_uses_config_workspace_as_request_directory(monkeypatch, tmp_path: Path) -> None:
     async def run() -> None:
         _FakeAsyncClient.instances = []
         monkeypatch.setattr(
@@ -185,7 +185,7 @@ def test_list_models_passes_directory_and_workspace_to_provider_requests(monkeyp
         ) == []
 
         client = _FakeAsyncClient.instances[0]
-        expected_params = {"directory": str(project), "workspace": str(config_workspace)}
+        expected_params = {"directory": str(config_workspace)}
         assert client.gets[0] == {
             "path": "/provider",
             "params": expected_params,

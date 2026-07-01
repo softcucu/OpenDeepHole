@@ -1153,6 +1153,17 @@ def _with_caller_model_instruction(prompt: str, model_label: str) -> str:
     )
 
 
+def _with_project_root_instruction(prompt: str, project_dir: Path | None) -> str:
+    if project_dir is None:
+        return prompt
+    return (
+        prompt.rstrip()
+        + "\n\n真实项目根目录："
+        + f"`{project_dir.resolve()}`。所有源码相对路径都以这个目录为基准；"
+        + "如果需要用内置文件工具读取源码，请读取该目录下的绝对路径。"
+    )
+
+
 def _with_model_prefix(line: str, model_label: str) -> str:
     prefix = f"[model={model_label}]"
     if line.startswith(prefix):
@@ -1353,6 +1364,7 @@ async def _invoke_opencode(
         executable = _resolve_cli_executable(effective_cli_config)
         model = str(_cfg_value(effective_cli_config, "model", "") or "")
         model_label = _invocation_model_label(lease.option, model)
+        prompt = _with_project_root_instruction(prompt, project_dir)
         prompt = _with_caller_model_instruction(prompt, model_label)
         emit_line = _model_line_emitter(on_line, model_label)
         if on_invocation_metadata:

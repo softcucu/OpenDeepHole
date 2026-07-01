@@ -212,6 +212,8 @@ def test_invoke_opencode_uses_serve_manager_when_configured(tmp_path: Path) -> N
         assert kwargs["directory"] == project
         assert kwargs["config_workspace"].is_dir()
         assert (kwargs["config_workspace"] / "opencode.json").is_file()
+        assert "真实项目根目录" in kwargs["prompt"]
+        assert str(project.resolve()) in kwargs["prompt"]
         assert "caller_model" in kwargs["prompt"]
         assert "anthropic/claude-sonnet" in kwargs["prompt"]
         assert output_lines
