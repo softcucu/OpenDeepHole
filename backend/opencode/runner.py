@@ -1,6 +1,7 @@
 """opencode CLI runner — invokes opencode for AI-powered vulnerability analysis."""
 
 import asyncio
+import hashlib
 import json
 import os
 import re
@@ -1234,6 +1235,11 @@ def _select_cli_cwd(
     return workspace
 
 
+def _serve_runtime_namespace(workspace: Path) -> str:
+    digest = hashlib.sha256(str(workspace.resolve()).encode("utf-8")).hexdigest()[:12]
+    return f"serve-{digest}"
+
+
 def _close_process_stdout(proc: subprocess.Popen) -> None:
     try:
         if proc.stdout is not None:
@@ -1377,7 +1383,12 @@ async def _invoke_opencode(
                     attempt=attempt,
                 )
             )
-        runtime_namespace = f"{lease.option.id}-{uuid4().hex[:8]}"
+        invocation_mode = _invocation_mode(effective_cli_config)
+        runtime_namespace = (
+            _serve_runtime_namespace(workspace)
+            if invocation_mode == "serve" and tool in {"nga", "opencode"}
+            else f"{lease.option.id}-{uuid4().hex[:8]}"
+        )
         cwd = _select_cli_cwd(workspace, tool, project_dir, runtime_namespace=runtime_namespace)
         if emit_line:
             capability_note = model_capability or "any"
@@ -1385,19 +1396,21 @@ async def _invoke_opencode(
                 f"[{tool}] model={lease.option.id} capability={lease.option.capability} "
                 f"required={capability_note} running={lease.running}/{lease.global_running}"
             )
-        if _invocation_mode(effective_cli_config) == "serve" and tool in {"nga", "opencode"}:
+        if invocation_mode == "serve" and tool in {"nga", "opencode"}:
             config_workspace = _prepare_cli_workspace(
                 workspace,
                 tool,
                 runtime_cwd=cwd,
                 writable_paths=writable_paths,
             )
+            serve_env = _build_cli_env(config_workspace, tool, writable_paths=writable_paths)
             try:
                 log_lines = await get_serve_manager().run_prompt(
                     tool=tool,
                     executable=executable,
                     directory=project_dir or workspace,
                     config_workspace=config_workspace,
+                    config_content=serve_env.get("OPENCODE_CONFIG_CONTENT"),
                     prompt=prompt,
                     model=model,
                     timeout=timeout,

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 import json
 import os
 import shutil
@@ -13,7 +14,7 @@ import subprocess
 import sys
 import tempfile
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -37,6 +38,8 @@ _SERVE_MARKER_OWNER = "opendeephole-agent-serve-v1"
 class OpenCodeServeKey:
     tool: str
     executable: str
+    config_hash: str = ""
+    config_content: str = field(default="", compare=False, repr=False)
 
 
 @dataclass(frozen=True)
@@ -103,6 +106,7 @@ def _write_marker(path: Path, *, proc: subprocess.Popen, key: OpenCodeServeKey, 
         "port": int(port),
         "tool": key.tool,
         "executable": key.executable,
+        "config_hash": key.config_hash,
         "created_at": time.time(),
     }
     try:
@@ -201,6 +205,13 @@ def _session_id(data: Any) -> str:
             if value:
                 return str(value)
     raise RuntimeError(f"OpenCode serve did not return a session id: {data!r}")
+
+
+def _config_hash(config_content: str | None) -> str:
+    content = (config_content or "").strip()
+    if not content:
+        return ""
+    return hashlib.sha256(content.encode("utf-8")).hexdigest()
 
 
 def _extract_text(value: Any) -> list[str]:
@@ -373,57 +384,6 @@ async def _stream_sse_events(response: httpx.Response):
             return
 
 
-def _extract_tool_ids(value: Any) -> list[str]:
-    """Return tool ids from the shapes exposed by OpenCode serve versions."""
-    raw_items: Any
-    if isinstance(value, list):
-        raw_items = value
-    elif isinstance(value, dict):
-        for key in ("ids", "tools", "all"):
-            items = value.get(key)
-            if isinstance(items, list):
-                raw_items = items
-                break
-        else:
-            raw_items = [
-                key for key, enabled in value.items()
-                if isinstance(key, str) and enabled is not False
-            ]
-    else:
-        raw_items = []
-
-    ids: list[str] = []
-    seen: set[str] = set()
-    for item in raw_items:
-        if isinstance(item, str):
-            tool_id = item.strip()
-        elif isinstance(item, dict):
-            tool_id = str(item.get("id") or item.get("name") or "").strip()
-        else:
-            continue
-        if tool_id and tool_id not in seen:
-            ids.append(tool_id)
-            seen.add(tool_id)
-    return ids
-
-
-async def _message_tools_payload(
-    client: httpx.AsyncClient,
-    *,
-    params: dict[str, str],
-    tool: str,
-) -> dict[str, bool]:
-    try:
-        response = await client.get("/experimental/tool/ids", params=params)
-        response.raise_for_status()
-    except Exception as exc:
-        logger.warning("Failed to list %s serve tools; using default tool set: %s", tool, exc)
-        return {}
-
-    tool_ids = _extract_tool_ids(response.json())
-    return {tool_id: True for tool_id in tool_ids}
-
-
 def _provider_models(provider: dict[str, Any]) -> list[OpenCodeModelInfo]:
     provider_id = str(provider.get("id") or provider.get("providerID") or provider.get("name") or "").strip()
     models = provider.get("models") or {}
@@ -483,35 +443,45 @@ class OpenCodeServeManager:
         executable: str,
         directory: Path,
         config_workspace: Path | None = None,
+        config_content: str | None = None,
+        agent: str = "build",
         prompt: str,
         model: str,
         timeout: int,
         on_line=None,
         cancel_event=None,
     ) -> list[str]:
-        key = OpenCodeServeKey(tool=tool, executable=executable)
+        key = OpenCodeServeKey(
+            tool=tool,
+            executable=executable,
+            config_hash=_config_hash(config_content),
+            config_content=config_content or "",
+        )
         await self._acquire_session(key)
         session_id = ""
         event_task: asyncio.Task | None = None
         event_state: _ServeEventState | None = None
+        params = _serve_context_params(directory)
+        headers = _serve_context_headers(directory)
         try:
-            request_directory = config_workspace or directory
-            params = _serve_context_params(request_directory)
             async with httpx.AsyncClient(base_url=self.base_url, timeout=_SERVE_REQUEST_TIMEOUT_SECONDS) as client:
-                created = await client.post("/session", params=params, json={"title": "OpenDeepHole task"})
+                created = await client.post(
+                    "/session",
+                    params=params,
+                    headers=headers,
+                    json={"title": "OpenDeepHole task"},
+                )
                 created.raise_for_status()
                 session_id = _session_id(created.json())
                 if on_line:
-                    source_note = f" source={directory}" if request_directory != directory else ""
-                    on_line(f"[{tool} serve] session={session_id} directory={request_directory}{source_note}")
+                    config_note = f" config={config_workspace}" if config_workspace else ""
+                    on_line(f"[{tool} serve] session={session_id} directory={directory}{config_note}")
                     event_state = _ServeEventState(tool, session_id, on_line)
-                    event_task = asyncio.create_task(self._stream_session_events(params, event_state))
+                    event_task = asyncio.create_task(self._stream_session_events(params, headers, event_state))
                 payload: dict[str, Any] = {
+                    "agent": agent,
                     "parts": [{"type": "text", "text": prompt}],
                 }
-                tools = await _message_tools_payload(client, params=params, tool=tool)
-                if tools:
-                    payload["tools"] = tools
                 if model:
                     provider_id, model_id = split_model_id(model)
                     payload["model"] = {"providerID": provider_id, "modelID": model_id}
@@ -520,6 +490,7 @@ class OpenCodeServeManager:
                     client.post(
                         f"/session/{session_id}/message",
                         params=params,
+                        headers=headers,
                         json=payload,
                         timeout=timeout + 30,
                     )
@@ -530,6 +501,7 @@ class OpenCodeServeManager:
                         request=request,
                         session_id=session_id,
                         params=params,
+                        headers=headers,
                         timeout=timeout,
                         cancel_event=cancel_event,
                     )
@@ -552,8 +524,6 @@ class OpenCodeServeManager:
                     await event_task
             if event_state:
                 event_state.flush()
-            if session_id:
-                await self._delete_session(session_id, params)
             async with self._idle:
                 self._active_sessions = max(0, self._active_sessions - 1)
                 if self._active_sessions == 0:
@@ -566,18 +536,24 @@ class OpenCodeServeManager:
         executable: str,
         directory: Path | None = None,
         config_workspace: Path | None = None,
+        config_content: str | None = None,
         refresh: bool = False,
     ) -> list[OpenCodeModelInfo]:
-        key = OpenCodeServeKey(tool=tool, executable=executable)
+        key = OpenCodeServeKey(
+            tool=tool,
+            executable=executable,
+            config_hash=_config_hash(config_content),
+            config_content=config_content or "",
+        )
         await self._ensure_started(key)
-        request_directory = config_workspace or directory
-        params = _serve_context_params(request_directory)
+        params = _serve_context_params(directory)
+        headers = _serve_context_headers(directory)
         async with httpx.AsyncClient(base_url=self.base_url, timeout=_SERVE_REQUEST_TIMEOUT_SECONDS) as client:
-            response = await client.get("/provider", params=params)
+            response = await client.get("/provider", params=params, headers=headers)
             response.raise_for_status()
             data = response.json()
             try:
-                config_response = await client.get("/config/providers", params=params)
+                config_response = await client.get("/config/providers", params=params, headers=headers)
                 config_response.raise_for_status()
                 config_data = config_response.json()
             except Exception:
@@ -615,6 +591,7 @@ class OpenCodeServeManager:
         request: asyncio.Task[httpx.Response],
         session_id: str,
         params: dict[str, str],
+        headers: dict[str, str],
         timeout: int,
         cancel_event,
     ) -> httpx.Response:
@@ -623,10 +600,10 @@ class OpenCodeServeManager:
             if request.done():
                 return await request
             if cancel_event and cancel_event.is_set():
-                await self._abort_session(client, session_id, params)
+                await self._abort_session(client, session_id, params, headers)
                 raise asyncio.CancelledError()
             if time.monotonic() - started > timeout:
-                await self._abort_session(client, session_id, params)
+                await self._abort_session(client, session_id, params, headers)
                 raise asyncio.TimeoutError()
             await asyncio.sleep(0.2)
 
@@ -662,7 +639,10 @@ class OpenCodeServeManager:
             )
         env = dict(os.environ)
         env["NODE_TLS_REJECT_UNAUTHORIZED"] = "0"
-        env.pop("OPENCODE_CONFIG_CONTENT", None)
+        if key.config_content:
+            env["OPENCODE_CONFIG_CONTENT"] = key.config_content
+        else:
+            env.pop("OPENCODE_CONFIG_CONTENT", None)
         env.pop("OPENCODE_SERVER_PASSWORD", None)
         env.pop("OPENCODE_SERVER_USERNAME", None)
         cmd = [
@@ -693,7 +673,8 @@ class OpenCodeServeManager:
         except Exception:
             await self._stop_locked()
             raise
-        logger.info("Started %s serve on 127.0.0.1:%s", key.tool, port)
+        config_note = f" config_hash={key.config_hash[:12]}" if key.config_hash else ""
+        logger.info("Started %s serve on 127.0.0.1:%s%s", key.tool, port, config_note)
 
     async def _stop_owned_serve_on_port(self, port: int) -> None:
         marker = _read_marker(self._marker_path)
@@ -730,16 +711,32 @@ class OpenCodeServeManager:
                 await asyncio.sleep(0.2)
         raise TimeoutError("OpenCode serve did not become healthy")
 
-    async def _abort_session(self, client: httpx.AsyncClient, session_id: str, params: dict[str, str]) -> None:
+    async def _abort_session(
+        self,
+        client: httpx.AsyncClient,
+        session_id: str,
+        params: dict[str, str],
+        headers: dict[str, str],
+    ) -> None:
         try:
-            await client.post(f"/session/{session_id}/abort", params=params, timeout=5.0)
+            await client.post(
+                f"/session/{session_id}/abort",
+                params=params,
+                headers=headers,
+                timeout=5.0,
+            )
         except Exception as exc:
             logger.warning("Failed to abort OpenCode session %s: %s", session_id, exc)
 
-    async def _stream_session_events(self, params: dict[str, str], state: _ServeEventState) -> None:
+    async def _stream_session_events(
+        self,
+        params: dict[str, str],
+        headers: dict[str, str],
+        state: _ServeEventState,
+    ) -> None:
         try:
             async with httpx.AsyncClient(base_url=self.base_url, timeout=None) as client:
-                async with client.stream("GET", "/event", params=params) as response:
+                async with client.stream("GET", "/event", params=params, headers=headers) as response:
                     response.raise_for_status()
                     async for event in _stream_sse_events(response):
                         _handle_serve_event(event, state)
@@ -747,13 +744,6 @@ class OpenCodeServeManager:
             raise
         except Exception as exc:
             logger.debug("OpenCode serve event stream unavailable: %s", exc)
-
-    async def _delete_session(self, session_id: str, params: dict[str, str]) -> None:
-        try:
-            async with httpx.AsyncClient(base_url=self.base_url, timeout=5.0) as client:
-                await client.delete("/session/" + session_id, params=params)
-        except Exception:
-            pass
 
     async def _stop_locked(self) -> None:
         proc = self._proc
@@ -782,11 +772,17 @@ _manager = OpenCodeServeManager()
 
 def _serve_context_params(
     directory: Path | None,
-) -> dict[str, str] | None:
+) -> dict[str, str]:
     params: dict[str, str] = {}
     if directory is not None:
         params["directory"] = str(directory)
-    return params or None
+    return params
+
+
+def _serve_context_headers(directory: Path | None) -> dict[str, str]:
+    if directory is None:
+        return {}
+    return {"x-opencode-directory": str(directory)}
 
 
 def get_serve_manager() -> OpenCodeServeManager:

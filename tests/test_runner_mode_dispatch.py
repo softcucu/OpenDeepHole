@@ -19,6 +19,7 @@ from backend.opencode.runner import (
     _invoke_opencode,
     _prompt_file_message,
     _prepare_cli_workspace,
+    _serve_runtime_namespace,
     _select_cli_cwd,
     _with_writable_paths,
     _write_prompt_file,
@@ -210,8 +211,14 @@ def test_invoke_opencode_uses_serve_manager_when_configured(tmp_path: Path) -> N
         assert kwargs["tool"] == "opencode"
         assert kwargs["model"] == "anthropic/claude-sonnet"
         assert kwargs["directory"] == project
+        assert kwargs["config_workspace"] == (
+            project / ".opendeephole" / "opencode" / _serve_runtime_namespace(workspace)
+        )
         assert kwargs["config_workspace"].is_dir()
         assert (kwargs["config_workspace"] / "opencode.json").is_file()
+        assert json.loads(kwargs["config_content"]) == json.loads(
+            (kwargs["config_workspace"] / "opencode.json").read_text(encoding="utf-8")
+        )
         assert "真实项目根目录" in kwargs["prompt"]
         assert str(project.resolve()) in kwargs["prompt"]
         assert "caller_model" in kwargs["prompt"]

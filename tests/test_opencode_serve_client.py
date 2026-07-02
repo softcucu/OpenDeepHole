@@ -1,11 +1,12 @@
 import asyncio
+import hashlib
 import json
 from pathlib import Path
 from unittest.mock import AsyncMock
 
 import pytest
 
-from backend.opencode.serve_client import OpenCodeServeKey, OpenCodeServeManager, _extract_tool_ids, _serve_port
+from backend.opencode.serve_client import OpenCodeServeKey, OpenCodeServeManager, _serve_port
 
 
 class _FakeResponse:
@@ -39,7 +40,6 @@ class _FakeStreamContext:
 
 class _FakeAsyncClient:
     instances: list["_FakeAsyncClient"] = []
-    tool_ids_response = _FakeResponse([])
     event_lines: list[str] = []
 
     def __init__(self, *args, **kwargs) -> None:
@@ -57,8 +57,6 @@ class _FakeAsyncClient:
 
     async def get(self, path: str, **kwargs):
         self.gets.append({"path": path, **kwargs})
-        if path == "/experimental/tool/ids":
-            return self.tool_ids_response
         return _FakeResponse({})
 
     async def post(self, path: str, **kwargs):
@@ -79,26 +77,10 @@ class _FakeAsyncClient:
         return _FakeStreamContext(self.event_lines)
 
 
-def test_extract_tool_ids_accepts_serve_response_shapes() -> None:
-    assert _extract_tool_ids(["read", {"id": "grep"}, {"name": "deephole_view"}]) == [
-        "read",
-        "grep",
-        "deephole_view",
-    ]
-    assert _extract_tool_ids({"ids": ["read", "read", "grep"]}) == ["read", "grep"]
-    assert _extract_tool_ids({"read": True, "write": False, "grep": True}) == ["read", "grep"]
-
-
-def test_run_prompt_sends_all_discovered_tools(monkeypatch, tmp_path: Path) -> None:
+def test_run_prompt_uses_project_directory_and_default_tools(monkeypatch, tmp_path: Path) -> None:
     async def run() -> None:
         _FakeAsyncClient.instances = []
         _FakeAsyncClient.event_lines = []
-        _FakeAsyncClient.tool_ids_response = _FakeResponse([
-            "read",
-            "grep",
-            "glob",
-            "deephole-code_view_function_code",
-        ])
         monkeypatch.setattr(
             "backend.opencode.serve_client.httpx.AsyncClient",
             _FakeAsyncClient,
@@ -111,13 +93,15 @@ def test_run_prompt_sends_all_discovered_tools(monkeypatch, tmp_path: Path) -> N
         config_workspace = tmp_path / "runtime"
         project.mkdir()
         config_workspace.mkdir()
-        (config_workspace / "opencode.json").write_text('{"mcp": {}}', encoding="utf-8")
+        config_content = '{"mcp": {}}'
+        (config_workspace / "opencode.json").write_text(config_content, encoding="utf-8")
 
         lines = await manager.run_prompt(
             tool="opencode",
             executable="opencode",
             directory=project,
             config_workspace=config_workspace,
+            config_content=config_content,
             prompt="hello",
             model="anthropic/claude-sonnet",
             timeout=30,
@@ -129,23 +113,23 @@ def test_run_prompt_sends_all_discovered_tools(monkeypatch, tmp_path: Path) -> N
             item for item in session_client.posts
             if item["path"] == "/session/session-1/message"
         )
+        expected_hash = hashlib.sha256(config_content.encode("utf-8")).hexdigest()
         assert manager._acquire_session.await_args.args[0] == OpenCodeServeKey(
             tool="opencode",
             executable="opencode",
+            config_hash=expected_hash,
         )
-        expected_params = {"directory": str(config_workspace)}
+        expected_params = {"directory": str(project)}
+        expected_headers = {"x-opencode-directory": str(project)}
         assert session_client.posts[0]["path"] == "/session"
         assert session_client.posts[0]["params"] == expected_params
-        assert session_client.gets[0]["params"] == expected_params
+        assert session_client.posts[0]["headers"] == expected_headers
         assert message["params"] == expected_params
-        cleanup_client = _FakeAsyncClient.instances[1]
-        assert cleanup_client.deletes[0]["params"] == expected_params
-        assert message["json"]["tools"] == {
-            "read": True,
-            "grep": True,
-            "glob": True,
-            "deephole-code_view_function_code": True,
-        }
+        assert message["headers"] == expected_headers
+        assert message["json"]["agent"] == "build"
+        assert "tools" not in message["json"]
+        assert session_client.gets == []
+        assert all(not client.deletes for client in _FakeAsyncClient.instances)
         assert message["json"]["model"] == {
             "providerID": "anthropic",
             "modelID": "claude-sonnet",
@@ -154,11 +138,10 @@ def test_run_prompt_sends_all_discovered_tools(monkeypatch, tmp_path: Path) -> N
     asyncio.run(run())
 
 
-def test_run_prompt_continues_when_tool_discovery_fails(monkeypatch, tmp_path: Path) -> None:
+def test_run_prompt_omits_tools_field_without_tool_discovery(monkeypatch, tmp_path: Path) -> None:
     async def run() -> None:
         _FakeAsyncClient.instances = []
         _FakeAsyncClient.event_lines = []
-        _FakeAsyncClient.tool_ids_response = _FakeResponse({}, error=RuntimeError("not supported"))
         monkeypatch.setattr(
             "backend.opencode.serve_client.httpx.AsyncClient",
             _FakeAsyncClient,
@@ -186,11 +169,12 @@ def test_run_prompt_continues_when_tool_discovery_fails(monkeypatch, tmp_path: P
             if item["path"] == "/session/session-1/message"
         )
         assert "tools" not in message["json"]
+        assert session_client.gets == []
 
     asyncio.run(run())
 
 
-def test_list_models_uses_config_workspace_as_request_directory(monkeypatch, tmp_path: Path) -> None:
+def test_list_models_uses_project_directory_context(monkeypatch, tmp_path: Path) -> None:
     async def run() -> None:
         _FakeAsyncClient.instances = []
         _FakeAsyncClient.event_lines = []
@@ -215,14 +199,17 @@ def test_list_models_uses_config_workspace_as_request_directory(monkeypatch, tmp
         ) == []
 
         client = _FakeAsyncClient.instances[0]
-        expected_params = {"directory": str(config_workspace)}
+        expected_params = {"directory": str(project)}
+        expected_headers = {"x-opencode-directory": str(project)}
         assert client.gets[0] == {
             "path": "/provider",
             "params": expected_params,
+            "headers": expected_headers,
         }
         assert client.gets[1] == {
             "path": "/config/providers",
             "params": expected_params,
+            "headers": expected_headers,
         }
 
     asyncio.run(run())
@@ -231,7 +218,6 @@ def test_list_models_uses_config_workspace_as_request_directory(monkeypatch, tmp
 def test_run_prompt_streams_session_events_without_tool_result_body(monkeypatch, tmp_path: Path) -> None:
     async def run() -> None:
         _FakeAsyncClient.instances = []
-        _FakeAsyncClient.tool_ids_response = _FakeResponse([])
         _FakeAsyncClient.event_lines = [
             'data: {"type":"session.next.text.delta","properties":{"sessionID":"other","delta":"ignore"}}',
             "",
@@ -298,6 +284,7 @@ def test_start_locked_uses_fixed_port_and_writes_marker(monkeypatch, tmp_path: P
                 return None
 
         commands: list[list[str]] = []
+        envs: list[dict[str, str]] = []
         marker_path = tmp_path / "serve-marker.json"
         monkeypatch.setenv("OPENCODE_SERVE_MARKER", str(marker_path))
         monkeypatch.delenv("OPENCODE_SERVE_PORT", raising=False)
@@ -306,6 +293,7 @@ def test_start_locked_uses_fixed_port_and_writes_marker(monkeypatch, tmp_path: P
 
         def fake_popen(cmd, **kwargs):
             commands.append(cmd)
+            envs.append(kwargs["env"])
             return FakeProc()
 
         monkeypatch.setattr("backend.opencode.serve_client.subprocess.Popen", fake_popen)
@@ -313,7 +301,12 @@ def test_start_locked_uses_fixed_port_and_writes_marker(monkeypatch, tmp_path: P
         manager = OpenCodeServeManager()
         manager._wait_health_locked = AsyncMock()
 
-        await manager._start_locked(OpenCodeServeKey(tool="opencode", executable="opencode"))
+        await manager._start_locked(OpenCodeServeKey(
+            tool="opencode",
+            executable="opencode",
+            config_hash="abc123",
+            config_content='{"mcp": {}}',
+        ))
 
         assert commands[0] == [
             "/bin/opencode",
@@ -327,6 +320,8 @@ def test_start_locked_uses_fixed_port_and_writes_marker(monkeypatch, tmp_path: P
         assert marker["pid"] == 12345
         assert marker["port"] == 4096
         assert marker["tool"] == "opencode"
+        assert marker["config_hash"] == "abc123"
+        assert envs[0]["OPENCODE_CONFIG_CONTENT"] == '{"mcp": {}}'
 
     asyncio.run(run())
 
@@ -409,5 +404,35 @@ def test_dirty_config_does_not_restart_same_serve_process() -> None:
         manager._start_locked.assert_not_awaited()
         assert manager._port == 12345
         assert manager._dirty is False
+
+    asyncio.run(run())
+
+
+def test_config_hash_change_restarts_after_active_sessions_drain() -> None:
+    async def run() -> None:
+        class FakeProc:
+            def poll(self):
+                return None
+
+        manager = OpenCodeServeManager()
+        manager._proc = FakeProc()
+        manager._port = 12345
+        manager._key = OpenCodeServeKey(
+            tool="opencode",
+            executable="opencode",
+            config_hash="old",
+        )
+        manager._stop_locked = AsyncMock()
+        manager._start_locked = AsyncMock()
+
+        await manager._ensure_started_locked(OpenCodeServeKey(
+            tool="opencode",
+            executable="opencode",
+            config_hash="new",
+            config_content='{"mcp": {}}',
+        ))
+
+        manager._stop_locked.assert_awaited_once()
+        manager._start_locked.assert_awaited_once()
 
     asyncio.run(run())

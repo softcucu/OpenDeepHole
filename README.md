@@ -653,8 +653,9 @@ fp_review:
 
 CLI 工具调用约定：
 
-- `nga` / `opencode`：每个扫描或复核任务使用隔离的 OpenCode 配置目录，并通过 `OPENCODE_CONFIG_CONTENT` 注入当前任务的 MCP URL 和 SKILL 路径；`--dir` 仍指向真实项目根目录，不复制源码；CLI 进程的运行目录为目标项目下的 `.opendeephole/opencode/<task>/`，用于收敛工具自身生成的临时日志并避免多并发覆盖运行时配置。
-- `nga` / `opencode` 默认通过 serve API 调用，单个 Agent 复用一个固定端口的 serve 进程；默认端口为 `4096`，可用 `OPENCODE_SERVE_PORT` 覆盖。Agent 启动新 serve 前只会清理自身标记的旧 serve，端口被其它进程占用时会报错。
+- `nga` / `opencode`：每个扫描或复核任务使用隔离的 OpenCode 配置目录，并通过 `OPENCODE_CONFIG_CONTENT` 在 serve 启动时注入当前任务的 MCP URL、SKILL 路径和权限配置；API `directory` 始终指向真实项目根目录，不复制源码。
+- `nga` / `opencode` 默认通过 serve API 调用，单个 Agent 复用一个固定端口的 serve 进程；默认端口为 `4096`，可用 `OPENCODE_SERVE_PORT` 覆盖。发送 message 时不显式传 `tools`，由 OpenCode 按启动配置和 agent 默认能力暴露内置工具与 MCP 工具；配置内容变化时会等当前 session 结束后重启 serve。
+- OpenCode/nga serve 会话会保留在真实项目目录下，便于用 `opencode session list` 查看历史；Agent 只在取消或超时时 abort session，不在正常完成后删除 session。
 - `hac`：按 Gemini CLI 兼容方式运行，Agent 会在任务隔离配置目录写入 `.gemini/settings.json` 的 MCP server，并把技能复制到 `.gemini/skills/`。
 - `claude`：按 Claude Code 兼容方式运行，Agent 会在任务隔离配置目录写入 `.claude/opendeephole-mcp.json` 并通过 `--mcp-config` 注入 MCP，同时把技能复制到 `.claude/skills/`。
 
