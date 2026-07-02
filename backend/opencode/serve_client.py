@@ -7,9 +7,11 @@ import contextlib
 import json
 import os
 import shutil
+import signal
 import socket
 import subprocess
 import sys
+import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -25,6 +27,10 @@ _SERVE_START_TIMEOUT_SECONDS = 30.0
 _SERVE_STOP_TIMEOUT_SECONDS = 5.0
 _SERVE_REQUEST_TIMEOUT_SECONDS = 20.0
 _SERVE_EVENT_PREVIEW_LIMIT = 500
+_DEFAULT_SERVE_PORT = 4096
+_SERVE_PORT_ENV = "OPENCODE_SERVE_PORT"
+_SERVE_MARKER_ENV = "OPENCODE_SERVE_MARKER"
+_SERVE_MARKER_OWNER = "opendeephole-agent-serve-v1"
 
 
 @dataclass(frozen=True)
@@ -49,10 +55,134 @@ def split_model_id(model: str) -> tuple[str, str]:
     return provider, model_id
 
 
-def _free_port() -> int:
+def _serve_port() -> int:
+    raw = os.environ.get(_SERVE_PORT_ENV, "").strip()
+    if raw:
+        try:
+            port = int(raw)
+        except ValueError as exc:
+            raise ValueError(f"{_SERVE_PORT_ENV} must be an integer port: {raw!r}") from exc
+        if 1 <= port <= 65535:
+            return port
+        raise ValueError(f"{_SERVE_PORT_ENV} must be between 1 and 65535: {raw!r}")
+    return _DEFAULT_SERVE_PORT
+
+
+def _port_is_in_use(port: int) -> bool:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-        sock.bind(("127.0.0.1", 0))
-        return int(sock.getsockname()[1])
+        sock.settimeout(0.2)
+        return sock.connect_ex(("127.0.0.1", port)) == 0
+
+
+def _serve_marker_path() -> Path:
+    configured = os.environ.get(_SERVE_MARKER_ENV, "").strip()
+    if configured:
+        return Path(configured)
+    try:
+        suffix = str(os.getuid())
+    except AttributeError:
+        suffix = os.environ.get("USERNAME") or os.environ.get("USER") or "user"
+    return Path(tempfile.gettempdir()) / f"opendeephole-opencode-serve-{suffix}.json"
+
+
+def _read_marker(path: Path) -> dict[str, Any] | None:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return None
+    except Exception as exc:
+        logger.warning("Failed to read OpenCode serve marker %s: %s", path, exc)
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _write_marker(path: Path, *, proc: subprocess.Popen, key: OpenCodeServeKey, port: int) -> None:
+    data = {
+        "owner": _SERVE_MARKER_OWNER,
+        "pid": int(proc.pid),
+        "port": int(port),
+        "tool": key.tool,
+        "executable": key.executable,
+        "created_at": time.time(),
+    }
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    except Exception as exc:
+        logger.warning("Failed to write OpenCode serve marker %s: %s", path, exc)
+
+
+def _remove_marker(path: Path) -> None:
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        pass
+    except Exception as exc:
+        logger.debug("Failed to remove OpenCode serve marker %s: %s", path, exc)
+
+
+def _remove_marker_for_pid(path: Path, pid: int | None) -> None:
+    marker = _read_marker(path)
+    if marker is None:
+        return
+    if pid is None or int(marker.get("pid") or 0) == int(pid):
+        _remove_marker(path)
+
+
+def _pid_is_running(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def _pid_cmdline(pid: int) -> list[str] | None:
+    path = Path("/proc") / str(pid) / "cmdline"
+    try:
+        raw = path.read_bytes()
+    except FileNotFoundError:
+        return None
+    except Exception:
+        return None
+    return [item.decode(errors="ignore") for item in raw.split(b"\0") if item]
+
+
+def _marker_matches_serve_process(marker: dict[str, Any]) -> bool:
+    if marker.get("owner") != _SERVE_MARKER_OWNER:
+        return False
+    pid = int(marker.get("pid") or 0)
+    cmdline = _pid_cmdline(pid)
+    if cmdline is None:
+        return True
+    lowered = [Path(item).name.lower() for item in cmdline] + [" ".join(cmdline).lower()]
+    return any("serve" == item or item.endswith(" serve") or " serve " in item for item in lowered)
+
+
+def _terminate_pid(pid: int, timeout: float = _SERVE_STOP_TIMEOUT_SECONDS) -> None:
+    if not _pid_is_running(pid):
+        return
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return
+    except Exception as exc:
+        logger.warning("Failed to terminate old OpenCode serve pid %s: %s", pid, exc)
+        return
+
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if not _pid_is_running(pid):
+            return
+        time.sleep(0.1)
+    try:
+        os.kill(pid, signal.SIGKILL if hasattr(signal, "SIGKILL") else signal.SIGTERM)
+    except Exception:
+        pass
 
 
 def _resolve_executable(name: str) -> str:
@@ -330,6 +460,7 @@ class OpenCodeServeManager:
         self._proc: subprocess.Popen | None = None
         self._key: OpenCodeServeKey | None = None
         self._port: int | None = None
+        self._marker_path = _serve_marker_path()
         self._active_sessions = 0
         self._dirty = False
 
@@ -522,7 +653,13 @@ class OpenCodeServeManager:
 
     async def _start_locked(self, key: OpenCodeServeKey) -> None:
         executable = _resolve_executable(key.executable)
-        port = _free_port()
+        port = _serve_port()
+        await self._stop_owned_serve_on_port(port)
+        if _port_is_in_use(port):
+            raise RuntimeError(
+                f"OpenCode serve port 127.0.0.1:{port} is already in use by a process "
+                "not owned by this Agent; stop it or set OPENCODE_SERVE_PORT."
+            )
         env = dict(os.environ)
         env["NODE_TLS_REJECT_UNAUTHORIZED"] = "0"
         env.pop("OPENCODE_CONFIG_CONTENT", None)
@@ -550,12 +687,34 @@ class OpenCodeServeManager:
         )
         self._key = key
         self._port = port
+        _write_marker(self._marker_path, proc=self._proc, key=key, port=port)
         try:
             await self._wait_health_locked()
         except Exception:
             await self._stop_locked()
             raise
         logger.info("Started %s serve on 127.0.0.1:%s", key.tool, port)
+
+    async def _stop_owned_serve_on_port(self, port: int) -> None:
+        marker = _read_marker(self._marker_path)
+        if marker is None:
+            return
+        if int(marker.get("port") or 0) != int(port):
+            return
+        pid = int(marker.get("pid") or 0)
+        if not _pid_is_running(pid):
+            _remove_marker(self._marker_path)
+            return
+        if not _marker_matches_serve_process(marker):
+            return
+        logger.info(
+            "Stopping previous Agent-owned %s serve pid %s on 127.0.0.1:%s",
+            marker.get("tool") or "opencode",
+            pid,
+            port,
+        )
+        await asyncio.to_thread(_terminate_pid, pid)
+        _remove_marker(self._marker_path)
 
     async def _wait_health_locked(self) -> None:
         deadline = time.monotonic() + _SERVE_START_TIMEOUT_SECONDS
@@ -601,7 +760,10 @@ class OpenCodeServeManager:
         self._proc = None
         self._port = None
         self._key = None
-        if proc is None or proc.poll() is not None:
+        if proc is None:
+            return
+        if proc.poll() is not None:
+            _remove_marker_for_pid(self._marker_path, getattr(proc, "pid", None))
             return
         try:
             proc.terminate()
@@ -611,6 +773,8 @@ class OpenCodeServeManager:
                 proc.kill()
             except Exception:
                 pass
+        finally:
+            _remove_marker_for_pid(self._marker_path, getattr(proc, "pid", None))
 
 
 _manager = OpenCodeServeManager()

@@ -126,9 +126,23 @@ _MCP_LOG_DETAIL_LIMIT = 500
 _MCP_LOG_ARGS_LIMIT = 1_000
 
 
-def _mcp_log(tool: str, detail: str, caller_model: str = "") -> None:
+def _mcp_log(direction: str, tool: str, detail: str, caller_model: str = "") -> None:
     model = str(caller_model or "unknown").strip() or "unknown"
-    print(f"  [MCP] model={model} tool_call name={tool} args={_preview(detail)}", flush=True)
+    preview = _preview(detail)
+    suffix = f" | {preview}" if preview else ""
+    print(f"  [MCP {direction}] model={model} {tool}{suffix}", flush=True)
+
+
+def _mcp_log_call(tool: str, detail: str, caller_model: str = "") -> None:
+    _mcp_log("▶", tool, detail, caller_model)
+
+
+def _mcp_log_return(tool: str, detail: str, caller_model: str = "") -> None:
+    _mcp_log("◀", tool, detail, caller_model)
+
+
+def _mcp_result_summary(count_label: str, count: int, result: str) -> str:
+    return f"{count} {count_label}, {len(result)} chars"
 
 
 def _preview(text: object, max_chars: int = _MCP_LOG_DETAIL_LIMIT) -> str:
@@ -209,20 +223,23 @@ def register_tools(mcp: FastMCP, project_dir: Path | str | None = None) -> None:
         detail = f"function_name={function_name!r}"
         if file_path:
             detail += f", file_path={file_path!r}"
-        _mcp_log("view_function_code", detail, caller_model)
+        _mcp_log_call("view_function_code", detail, caller_model)
         db = _get_db(project_id, bound_project_dir)
         if db is None:
             result = f"项目 {project_id} 的代码索引不可用。"
+            _mcp_log_return("view_function_code", result, caller_model)
             return result
         rows = db.get_functions_by_name(function_name, file_path=file_path or None)
         if not rows:
             result = f"未找到函数 '{function_name}'。"
+            _mcp_log_return("view_function_code", result, caller_model)
             return result
         parts = [
             f"// {row['file_path']}:{row['start_line']}-{row['end_line']}\n{row['body']}"
             for row in rows
         ]
         result = "\n\n".join(parts)
+        _mcp_log_return("view_function_code", _mcp_result_summary("match(es)", len(rows), result), caller_model)
         return result
 
     @mcp.tool()
@@ -238,20 +255,23 @@ def register_tools(mcp: FastMCP, project_dir: Path | str | None = None) -> None:
         返回：
             结构体定义代码（包含文件路径和行号信息），未找到则返回提示。
         """
-        _mcp_log("view_struct_code", f"struct_name={struct_name!r}", caller_model)
+        _mcp_log_call("view_struct_code", f"struct_name={struct_name!r}", caller_model)
         db = _get_db(project_id, bound_project_dir)
         if db is None:
             result = f"项目 {project_id} 的代码索引不可用。"
+            _mcp_log_return("view_struct_code", result, caller_model)
             return result
         rows = db.get_structs_by_name(struct_name)
         if not rows:
             result = f"未找到结构体 '{struct_name}'。"
+            _mcp_log_return("view_struct_code", result, caller_model)
             return result
         parts = [
             f"// {row['file_path']}:{row['start_line']}-{row['end_line']}\n{row['definition']}"
             for row in rows
         ]
         result = "\n\n".join(parts)
+        _mcp_log_return("view_struct_code", _mcp_result_summary("match(es)", len(rows), result), caller_model)
         return result
 
     @mcp.tool()
@@ -270,20 +290,27 @@ def register_tools(mcp: FastMCP, project_dir: Path | str | None = None) -> None:
         返回：
             全局变量定义代码，未找到则返回提示。
         """
-        _mcp_log("view_global_variable_definition", f"name={global_variable_name!r}", caller_model)
+        _mcp_log_call("view_global_variable_definition", f"name={global_variable_name!r}", caller_model)
         db = _get_db(project_id, bound_project_dir)
         if db is None:
             result = f"项目 {project_id} 的代码索引不可用。"
+            _mcp_log_return("view_global_variable_definition", result, caller_model)
             return result
         rows = db.get_global_variables_by_name(global_variable_name)
         if not rows:
             result = f"未找到全局变量 '{global_variable_name}'。"
+            _mcp_log_return("view_global_variable_definition", result, caller_model)
             return result
         parts = [
             f"// {row['file_path']}:{row['start_line']}\n{row['definition']}"
             for row in rows
         ]
         result = "\n\n".join(parts)
+        _mcp_log_return(
+            "view_global_variable_definition",
+            _mcp_result_summary("match(es)", len(rows), result),
+            caller_model,
+        )
         return result
 
     # Kept for future reuse, but intentionally not registered as an MCP tool.
@@ -298,10 +325,11 @@ def register_tools(mcp: FastMCP, project_dir: Path | str | None = None) -> None:
         返回：
             每行一个调用位置，格式为 "调用者函数名  文件路径:行号"。
         """
-        _mcp_log("find_function_references", f"function_name={function_name!r}", caller_model)
+        _mcp_log_call("find_function_references", f"function_name={function_name!r}", caller_model)
         db = _get_db(project_id, bound_project_dir)
         if db is None:
             result = f"项目 {project_id} 的代码索引不可用。"
+            _mcp_log_return("find_function_references", result, caller_model)
             return result
         rows = db.get_call_sites_by_name(function_name)
         short_name_fallback = False
@@ -311,6 +339,7 @@ def register_tools(mcp: FastMCP, project_dir: Path | str | None = None) -> None:
             short_name_fallback = bool(rows)
         if not rows:
             result = f"未找到函数 '{function_name}' 的引用位置。"
+            _mcp_log_return("find_function_references", result, caller_model)
             return result
         lines = []
         if short_name_fallback:
@@ -322,6 +351,7 @@ def register_tools(mcp: FastMCP, project_dir: Path | str | None = None) -> None:
             for row in rows
         )
         result = "\n".join(lines)
+        _mcp_log_return("find_function_references", _mcp_result_summary("reference(s)", len(rows), result), caller_model)
         return result
 
     # Kept for future reuse, but intentionally not registered as an MCP tool.
@@ -340,18 +370,25 @@ def register_tools(mcp: FastMCP, project_dir: Path | str | None = None) -> None:
         返回：
             每行一个引用，格式为 "引用函数名  文件路径:行号  访问类型  引用代码行"。
         """
-        _mcp_log("find_global_variable_references", f"name={global_variable_name!r}", caller_model)
+        _mcp_log_call("find_global_variable_references", f"name={global_variable_name!r}", caller_model)
         db = _get_db(project_id, bound_project_dir)
         if db is None:
             result = f"项目 {project_id} 的代码索引不可用。"
+            _mcp_log_return("find_global_variable_references", result, caller_model)
             return result
         rows = db.get_global_variable_reference_by_name(global_variable_name)
         if not rows:
             result = f"未找到全局变量 '{global_variable_name}' 的引用。"
+            _mcp_log_return("find_global_variable_references", result, caller_model)
             return result
         result = "\n".join(
             f"{row['function_name'] or '未知'}  {row['file_path']}:{row['line']}  [{row['access_type']}]  {row['context']}"
             for row in rows
+        )
+        _mcp_log_return(
+            "find_global_variable_references",
+            _mcp_result_summary("reference(s)", len(rows), result),
+            caller_model,
         )
         return result
 
@@ -385,7 +422,7 @@ def register_tools(mcp: FastMCP, project_dir: Path | str | None = None) -> None:
         返回：
             提交成功的确认消息。
         """
-        _mcp_log("submit_result", _json_preview({
+        _mcp_log_call("submit_result", _json_preview({
             "result_id": result_id,
             "confirmed": confirmed,
             "severity": severity,
@@ -409,6 +446,7 @@ def register_tools(mcp: FastMCP, project_dir: Path | str | None = None) -> None:
             "line": line,
             "function": function,
         })
+        _mcp_log_return("submit_result", f"saved -> {result_path}", caller_model)
         return f"结果已提交（result_id={result_id}）。"
 
     @mcp.tool()
@@ -435,7 +473,7 @@ def register_tools(mcp: FastMCP, project_dir: Path | str | None = None) -> None:
         返回：
             提交成功的确认消息。
         """
-        _mcp_log("submit_history_pattern", _json_preview({
+        _mcp_log_call("submit_history_pattern", _json_preview({
             "result_id": result_id,
             "security_related": security_related,
             "pattern": pattern,
@@ -455,6 +493,7 @@ def register_tools(mcp: FastMCP, project_dir: Path | str | None = None) -> None:
             "files": file_list,
             "rationale": rationale,
         }, ensure_ascii=False), encoding="utf-8")
+        _mcp_log_return("submit_history_pattern", f"saved -> {result_path}", caller_model)
         return f"历史问题模式已提交（result_id={result_id}）。"
 
     @mcp.tool()
@@ -483,7 +522,7 @@ def register_tools(mcp: FastMCP, project_dir: Path | str | None = None) -> None:
         返回：
             提交成功的确认消息。
         """
-        _mcp_log("submit_variant_finding", _json_preview({
+        _mcp_log_call("submit_variant_finding", _json_preview({
             "result_id": result_id,
             "file": file,
             "line": line,
@@ -504,6 +543,7 @@ def register_tools(mcp: FastMCP, project_dir: Path | str | None = None) -> None:
             "description": description,
             "rationale": rationale,
         })
+        _mcp_log_return("submit_variant_finding", f"saved -> {result_path}", caller_model)
         return f"变体站点已提交（result_id={result_id}）。"
 
     @mcp.tool()
@@ -533,7 +573,7 @@ def register_tools(mcp: FastMCP, project_dir: Path | str | None = None) -> None:
         返回：
             提交成功的确认消息。
         """
-        _mcp_log("submit_match_result", _json_preview({
+        _mcp_log_call("submit_match_result", _json_preview({
             "result_id": result_id,
             "matched": matched,
             "match_type": match_type,
@@ -558,4 +598,5 @@ def register_tools(mcp: FastMCP, project_dir: Path | str | None = None) -> None:
             "line": 0,
             "function": "",
         }, ensure_ascii=False), encoding="utf-8")
+        _mcp_log_return("submit_match_result", f"saved -> {result_path}", caller_model)
         return f"匹配结论已提交（result_id={result_id}）。"

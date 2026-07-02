@@ -1,8 +1,11 @@
 import asyncio
+import json
 from pathlib import Path
 from unittest.mock import AsyncMock
 
-from backend.opencode.serve_client import OpenCodeServeKey, OpenCodeServeManager, _extract_tool_ids
+import pytest
+
+from backend.opencode.serve_client import OpenCodeServeKey, OpenCodeServeManager, _extract_tool_ids, _serve_port
 
 
 class _FakeResponse:
@@ -131,6 +134,7 @@ def test_run_prompt_sends_all_discovered_tools(monkeypatch, tmp_path: Path) -> N
             executable="opencode",
         )
         expected_params = {"directory": str(config_workspace)}
+        assert session_client.posts[0]["path"] == "/session"
         assert session_client.posts[0]["params"] == expected_params
         assert session_client.gets[0]["params"] == expected_params
         assert message["params"] == expected_params
@@ -269,6 +273,118 @@ def test_run_prompt_streams_session_events_without_tool_result_body(monkeypatch,
         assert "secret source body" not in logged
         assert "ignore" not in logged
         assert "done" not in logged
+
+    asyncio.run(run())
+
+
+def test_serve_port_defaults_to_fixed_port(monkeypatch) -> None:
+    monkeypatch.delenv("OPENCODE_SERVE_PORT", raising=False)
+
+    assert _serve_port() == 4096
+
+
+def test_serve_port_accepts_env_override(monkeypatch) -> None:
+    monkeypatch.setenv("OPENCODE_SERVE_PORT", "4100")
+
+    assert _serve_port() == 4100
+
+
+def test_start_locked_uses_fixed_port_and_writes_marker(monkeypatch, tmp_path: Path) -> None:
+    async def run() -> None:
+        class FakeProc:
+            pid = 12345
+
+            def poll(self):
+                return None
+
+        commands: list[list[str]] = []
+        marker_path = tmp_path / "serve-marker.json"
+        monkeypatch.setenv("OPENCODE_SERVE_MARKER", str(marker_path))
+        monkeypatch.delenv("OPENCODE_SERVE_PORT", raising=False)
+        monkeypatch.setattr("backend.opencode.serve_client._resolve_executable", lambda name: "/bin/opencode")
+        monkeypatch.setattr("backend.opencode.serve_client._port_is_in_use", lambda port: False)
+
+        def fake_popen(cmd, **kwargs):
+            commands.append(cmd)
+            return FakeProc()
+
+        monkeypatch.setattr("backend.opencode.serve_client.subprocess.Popen", fake_popen)
+
+        manager = OpenCodeServeManager()
+        manager._wait_health_locked = AsyncMock()
+
+        await manager._start_locked(OpenCodeServeKey(tool="opencode", executable="opencode"))
+
+        assert commands[0] == [
+            "/bin/opencode",
+            "serve",
+            "--hostname",
+            "127.0.0.1",
+            "--port",
+            "4096",
+        ]
+        marker = json.loads(marker_path.read_text(encoding="utf-8"))
+        assert marker["pid"] == 12345
+        assert marker["port"] == 4096
+        assert marker["tool"] == "opencode"
+
+    asyncio.run(run())
+
+
+def test_start_locked_stops_previous_agent_owned_marker(monkeypatch, tmp_path: Path) -> None:
+    async def run() -> None:
+        class FakeProc:
+            pid = 22222
+
+            def poll(self):
+                return None
+
+        marker_path = tmp_path / "serve-marker.json"
+        marker_path.write_text(
+            json.dumps({
+                "owner": "opendeephole-agent-serve-v1",
+                "pid": 11111,
+                "port": 4096,
+                "tool": "opencode",
+                "executable": "opencode",
+            }),
+            encoding="utf-8",
+        )
+        terminated: list[int] = []
+        async def fake_to_thread(func, *args, **kwargs):
+            return func(*args, **kwargs)
+
+        monkeypatch.setenv("OPENCODE_SERVE_MARKER", str(marker_path))
+        monkeypatch.setattr("backend.opencode.serve_client._resolve_executable", lambda name: "/bin/opencode")
+        monkeypatch.setattr("backend.opencode.serve_client._pid_is_running", lambda pid: pid == 11111)
+        monkeypatch.setattr("backend.opencode.serve_client._marker_matches_serve_process", lambda marker: True)
+        monkeypatch.setattr("backend.opencode.serve_client._terminate_pid", lambda pid: terminated.append(pid))
+        monkeypatch.setattr("backend.opencode.serve_client._port_is_in_use", lambda port: False)
+        monkeypatch.setattr("backend.opencode.serve_client.asyncio.to_thread", fake_to_thread)
+        monkeypatch.setattr("backend.opencode.serve_client.subprocess.Popen", lambda *args, **kwargs: FakeProc())
+
+        manager = OpenCodeServeManager()
+        manager._wait_health_locked = AsyncMock()
+
+        await manager._start_locked(OpenCodeServeKey(tool="opencode", executable="opencode"))
+
+        assert terminated == [11111]
+        marker = json.loads(marker_path.read_text(encoding="utf-8"))
+        assert marker["pid"] == 22222
+
+    asyncio.run(run())
+
+
+def test_start_locked_refuses_unowned_port(monkeypatch, tmp_path: Path) -> None:
+    async def run() -> None:
+        monkeypatch.setenv("OPENCODE_SERVE_MARKER", str(tmp_path / "missing-marker.json"))
+        monkeypatch.setattr("backend.opencode.serve_client._resolve_executable", lambda name: "/bin/opencode")
+        monkeypatch.setattr("backend.opencode.serve_client._port_is_in_use", lambda port: True)
+
+        manager = OpenCodeServeManager()
+
+        with pytest.raises(RuntimeError, match="already in use"):
+            await manager._start_locked(OpenCodeServeKey(tool="opencode", executable="opencode"))
 
     asyncio.run(run())
 

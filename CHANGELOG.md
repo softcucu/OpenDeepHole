@@ -2,6 +2,10 @@
 
 ## 2026-07-01
 
+- **修复** MCP 工具调用日志恢复为 `[MCP ▶]` / `[MCP ◀]` 双向格式并保留调用模型标识，返回日志只输出匹配数量、字符数或保存路径等摘要，避免源码正文和完整报告刷屏
+- **修复** OpenCode/nga serve 模式固定使用单 Agent 一个服务端实例；默认端口为 `4096`（可用 `OPENCODE_SERVE_PORT` 覆盖），启动前会清理本 Agent 标记的旧 serve，端口被其它进程占用时明确报错
+- **修复** serve API 调用显式保持先创建 `/session`，再使用返回的 session 调用 `/session/{sessionID}/message`，并在 session 创建、工具发现、消息发送和清理时传递一致的 `directory` 参数
+
 - **新增** AI 输出来源追踪：漏洞 AI 分析、报告型 SKILL Markdown、AI 去误报阶段输出和最终结论都会记录 Agent、工具、模型池 ID、实际模型、能力和调用尝试等元数据
 - **优化** 扫描详情页、SKILL 报告面板和 Markdown 导出展示输出来源，便于追溯每个结果由哪个 Agent、哪个模型生成；历史数据无来源时保持兼容不显示空占位
 
