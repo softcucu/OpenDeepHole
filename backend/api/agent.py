@@ -50,6 +50,7 @@ from backend.models import (
     AgentInfo,
     AgentRemoteConfig,
     AgentScanFinish,
+    AgentVulnerabilityValidationUpdate,
     FpReviewStatus,
     HistoryPattern,
     OpenCodePoolStatus,
@@ -58,6 +59,7 @@ from backend.models import (
     SkillReport,
     User,
     Vulnerability,
+    VulnerabilityValidation,
 )
 from backend.store import get_scan_store
 
@@ -956,6 +958,63 @@ async def agent_report_vulnerability(scan_id: str, vuln: Vulnerability) -> dict:
         "Vulnerability reported for scan %s: %s %s:%d confirmed=%s",
         scan_id, vuln.vuln_type, vuln.file, vuln.line, vuln.confirmed,
     )
+    report_markdown = ""
+    if vuln.confirmed or vuln.ai_verdict == "confirmed":
+        try:
+            from backend.api.scan import _scan_fp_result_map, _vuln_report_markdown
+
+            report_markdown = _vuln_report_markdown(
+                vuln_index,
+                vuln,
+                _scan_fp_result_map(scan_id).get(vuln_index),
+            )
+        except Exception as exc:
+            logger.warning(
+                "Failed to render vulnerability report for validation scan=%s idx=%s: %s",
+                scan_id,
+                vuln_index,
+                exc,
+            )
+    return {"ok": True, "index": vuln_index, "report_markdown": report_markdown}
+
+
+@router.post("/scan/{scan_id}/validation")
+async def agent_report_vulnerability_validation(
+    scan_id: str,
+    body: AgentVulnerabilityValidationUpdate,
+) -> dict:
+    """Agent pushes local validation script progress/results for one vulnerability."""
+    validation = VulnerabilityValidation(
+        scan_id=scan_id,
+        vuln_index=body.vuln_index,
+        status=body.status,
+        running=body.running,
+        validation_code=body.validation_code,
+        validation_output=body.validation_output,
+        intermediate_output=body.intermediate_output,
+        started_at=body.started_at,
+        finished_at=body.finished_at,
+        updated_at=body.updated_at,
+    )
+    store = get_scan_store()
+    validation = store.upsert_vulnerability_validation(scan_id, validation)
+
+    scan = _ensure_running_scan(scan_id)
+    if scan is not None:
+        existing = next(
+            (idx for idx, item in enumerate(scan.validations) if item.vuln_index == validation.vuln_index),
+            None,
+        )
+        if existing is None:
+            scan.validations.append(validation)
+            scan.validations.sort(key=lambda item: item.vuln_index)
+        else:
+            scan.validations[existing] = validation
+
+    from backend.sse import publish
+    publish(scan_id, "vulnerability_validation", {
+        "validation": validation.model_dump(),
+    })
     return {"ok": True}
 
 
@@ -1323,7 +1382,7 @@ _AGENT_ROOT_FILES = [
     "run_agent.bat",
     "requirements-agent.txt",
 ]
-_AGENT_SKIP_DIRS = {"__pycache__", ".git", ".mypy_cache", ".pytest_cache", "static", "system_skills"}
+_AGENT_SKIP_DIRS = {"__pycache__", ".git", ".mypy_cache", ".pytest_cache", "static", "system_skills", "vulnerability_validation"}
 _AGENT_SKIP_SUFFIXES = {".pyc", ".pyo"}
 
 

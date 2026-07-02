@@ -135,6 +135,19 @@ export interface Vulnerability {
   output_source?: OutputSource;
 }
 
+export interface VulnerabilityValidation {
+  scan_id?: string;
+  vuln_index: number;
+  status: string;
+  running: boolean;
+  validation_code: string;
+  validation_output: string;
+  intermediate_output: string;
+  started_at: string;
+  finished_at: string;
+  updated_at: string;
+}
+
 export interface HistoryPattern {
   pattern: string;
   source: string;
@@ -220,6 +233,7 @@ export interface ScanStatus {
   processed_candidates: number;
   vulnerabilities: Vulnerability[];
   skill_reports: SkillReport[];
+  validations?: VulnerabilityValidation[];
   events: ScanEvent[];
   current_candidate: Candidate | null;
   error_message: string | null;
@@ -348,6 +362,13 @@ export interface AgentPatternFilterConfig {
   scope: "directory" | "file" | "repo" | string;
 }
 
+export interface AgentVulnerabilityValidationConfig {
+  enabled: boolean;
+  script_path: string;
+  command: string;
+  timeout_seconds: number;
+}
+
 export interface AgentRemoteConfig {
   no_proxy: string;
   opencode_concurrency: number;
@@ -358,6 +379,7 @@ export interface AgentRemoteConfig {
   git_history?: AgentGitHistoryConfig;
   static_dedup?: boolean;
   pattern_filter?: AgentPatternFilterConfig;
+  vulnerability_validation?: AgentVulnerabilityValidationConfig;
 }
 
 export interface AgentConfigTestResult {

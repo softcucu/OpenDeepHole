@@ -26,6 +26,7 @@ from backend.models import (
     SkillReport,
     UserInDB,
     Vulnerability,
+    VulnerabilityValidation,
 )
 
 
@@ -118,6 +119,18 @@ class ScanStoreBase(ABC):
     @abstractmethod
     def get_vulnerabilities(self, scan_id: str) -> list[Vulnerability]:
         """Return all vulnerabilities for a scan, ordered by index."""
+
+    @abstractmethod
+    def upsert_vulnerability_validation(
+        self,
+        scan_id: str,
+        validation: VulnerabilityValidation,
+    ) -> VulnerabilityValidation:
+        """Create or update validation status for one vulnerability."""
+
+    @abstractmethod
+    def list_vulnerability_validations(self, scan_id: str) -> list[VulnerabilityValidation]:
+        """Return validation statuses for a scan, ordered by vulnerability index."""
 
     @abstractmethod
     def get_vuln_stats_by_scans(self, scan_ids: list[str]) -> dict[str, list[VulnStat]]:

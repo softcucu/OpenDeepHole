@@ -31,6 +31,7 @@ class AgentRuntimePackageTests(unittest.TestCase):
         self.assertNotIn("run_agent.bat", names)
         self.assertFalse(any(name.startswith("backend/static/") for name in names))
         self.assertFalse(any(name.startswith("backend/system_skills/") for name in names))
+        self.assertFalse(any("/vulnerability_validation/" in name for name in names))
 
     def test_agent_download_zip_includes_launchers_config_and_bundled_ctags(self) -> None:
         data = agent_api._build_agent_zip("http://server.example", "owner-token")
@@ -116,6 +117,20 @@ class AgentRuntimePackageTests(unittest.TestCase):
                 "name: deephole-skill-creator\nchanged\n",
                 encoding="utf-8",
             )
+
+            self.assertEqual(before, compute_runtime_hash(root))
+
+    def test_runtime_hash_ignores_local_validation_script_changes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "agent").mkdir()
+            (root / "agent" / "main.py").write_text("print('agent')\n", encoding="utf-8")
+            validator_dir = root / "agent" / "vulnerability_validation"
+            validator_dir.mkdir()
+            (validator_dir / "validator.py").write_text("print('v1')\n", encoding="utf-8")
+
+            before = compute_runtime_hash(root)
+            (validator_dir / "validator.py").write_text("print('v2')\n", encoding="utf-8")
 
             self.assertEqual(before, compute_runtime_hash(root))
 

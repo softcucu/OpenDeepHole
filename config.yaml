@@ -10,6 +10,12 @@ pattern_filter:
   enabled: true     # AI 否决代表点后，自动过滤同模式后续候选
   scope: "directory"  # directory | file | repo
 
+vulnerability_validation:
+  enabled: true     # Agent 本地验证脚本；脚本文件不随远端 runtime/checker 同步
+  script_path: ""   # 留空时使用 ~/.opendeephole/vulnerability_validation/validator.py
+  command: ""       # 可选自定义命令；会追加 --report <file> --output <file>
+  timeout_seconds: 300
+
 server:
   host: "0.0.0.0"
   port: 8000

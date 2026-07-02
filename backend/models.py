@@ -320,6 +320,20 @@ class SkillReport(BaseModel):
     output_source: OutputSource = Field(default_factory=OutputSource)
 
 
+class VulnerabilityValidation(BaseModel):
+    """Runtime validation status and artifacts for one vulnerability."""
+    scan_id: str = ""
+    vuln_index: int
+    status: str = "pending"              # pending | running | verified | failed | error | timeout | skipped
+    running: bool = False
+    validation_code: str = ""
+    validation_output: str = ""
+    intermediate_output: str = ""
+    started_at: str = ""
+    finished_at: str = ""
+    updated_at: str = ""
+
+
 class OpenCodePoolModelStats(BaseModel):
     id: str
     model: str = ""
@@ -371,6 +385,7 @@ class ScanStatus(BaseModel):
     processed_candidates: int
     vulnerabilities: list[Vulnerability]
     skill_reports: list[SkillReport] = []
+    validations: list[VulnerabilityValidation] = []
     events: list[ScanEvent] = []
     current_candidate: Candidate | None = None
     error_message: str | None = None
@@ -404,6 +419,19 @@ class AgentScanFinish(BaseModel):
     total_candidates: int
     processed_candidates: int
     error_message: str | None = None
+
+
+class AgentVulnerabilityValidationUpdate(BaseModel):
+    """Sent by the agent while a local vulnerability validation script runs."""
+    vuln_index: int
+    status: str = "pending"
+    running: bool = False
+    validation_code: str = ""
+    validation_output: str = ""
+    intermediate_output: str = ""
+    started_at: str = ""
+    finished_at: str = ""
+    updated_at: str = ""
 
 
 class AgentInfo(BaseModel):
@@ -473,6 +501,13 @@ class AgentPatternFilterConfig(BaseModel):
     scope: str = "directory"
 
 
+class AgentVulnerabilityValidationConfig(BaseModel):
+    enabled: bool = True
+    script_path: str = ""
+    command: str = ""
+    timeout_seconds: int = 300
+
+
 class AgentRemoteConfig(BaseModel):
     """Agent configuration managed from the server Web UI."""
     no_proxy: str = "10.0.0.0/8"
@@ -484,6 +519,7 @@ class AgentRemoteConfig(BaseModel):
     git_history: AgentGitHistoryConfig = AgentGitHistoryConfig()
     static_dedup: bool = True
     pattern_filter: AgentPatternFilterConfig = AgentPatternFilterConfig()
+    vulnerability_validation: AgentVulnerabilityValidationConfig = AgentVulnerabilityValidationConfig()
 
 
 class CreateScanRequest(BaseModel):

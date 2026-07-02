@@ -81,6 +81,14 @@ class PatternFilterConfig:
     scope: str = "directory"  # directory | file | repo
 
 
+@dataclass
+class VulnerabilityValidationConfig:
+    enabled: bool = True
+    script_path: str = ""
+    command: str = ""
+    timeout_seconds: int = 300
+
+
 def normalize_cli_config(config: OpenCodeConfig) -> OpenCodeConfig:
     """Normalize a CLI config in place while keeping legacy executable values."""
     tool = (config.tool or "").strip().lower()
@@ -188,6 +196,7 @@ class AgentConfig:
     git_history: GitHistoryConfig = field(default_factory=GitHistoryConfig)
     static_dedup: bool = True
     pattern_filter: PatternFilterConfig = field(default_factory=PatternFilterConfig)
+    vulnerability_validation: VulnerabilityValidationConfig = field(default_factory=VulnerabilityValidationConfig)
     # Runtime-only: path to the loaded config file (not serialized)
     config_file: Optional[Path] = field(default=None, repr=False, compare=False)
 
@@ -244,6 +253,21 @@ def apply_remote_config(config: AgentConfig, remote: dict) -> None:
         config.pattern_filter.enabled = _bool_value(config.pattern_filter.enabled, True)
         if config.pattern_filter.scope not in {"directory", "file", "repo"}:
             config.pattern_filter.scope = "directory"
+    section = remote.get("vulnerability_validation") or {}
+    if isinstance(section, dict):
+        for f in dataclasses.fields(config.vulnerability_validation):
+            if f.name in section and section[f.name] is not None:
+                setattr(config.vulnerability_validation, f.name, section[f.name])
+        config.vulnerability_validation.enabled = _bool_value(
+            config.vulnerability_validation.enabled,
+            True,
+        )
+        config.vulnerability_validation.timeout_seconds = _bounded_int(
+            config.vulnerability_validation.timeout_seconds,
+            300,
+            1,
+            86400,
+        )
 
 
 def apply_network_env(config: AgentConfig) -> None:
@@ -282,6 +306,10 @@ def remote_config_dict(config: AgentConfig) -> dict:
             f.name: getattr(config.pattern_filter, f.name)
             for f in dataclasses.fields(config.pattern_filter)
         },
+        "vulnerability_validation": {
+            f.name: getattr(config.vulnerability_validation, f.name)
+            for f in dataclasses.fields(config.vulnerability_validation)
+        },
     }
 
 
@@ -307,6 +335,7 @@ def load_config(path: Optional[Path] = None) -> AgentConfig:
     model_fields = {f.name for f in dataclasses.fields(OpenCodeModelConfig)}
     memory_api_fields = {f.name for f in dataclasses.fields(MemoryApiDiscoveryConfig)}
     pattern_filter_fields = {f.name for f in dataclasses.fields(PatternFilterConfig)}
+    validation_fields = {f.name for f in dataclasses.fields(VulnerabilityValidationConfig)}
 
     llm_raw = {k: v for k, v in raw.get("llm_api", {}).items() if k in llm_fields}
     oc_raw = {k: v for k, v in raw.get("opencode", {}).items() if k in oc_fields}
@@ -328,6 +357,10 @@ def load_config(path: Optional[Path] = None) -> AgentConfig:
     pattern_filter_raw = {
         k: v for k, v in raw.get("pattern_filter", {}).items()
         if k in pattern_filter_fields
+    }
+    validation_raw = {
+        k: v for k, v in raw.get("vulnerability_validation", {}).items()
+        if k in validation_fields
     }
     if "tool" not in oc_raw and "executable" in oc_raw:
         oc_raw["tool"] = ""
@@ -360,11 +393,22 @@ def load_config(path: Optional[Path] = None) -> AgentConfig:
         git_history=GitHistoryConfig(**git_history_raw),
         static_dedup=_bool_value(raw.get("static_dedup", True), True),
         pattern_filter=PatternFilterConfig(**pattern_filter_raw),
+        vulnerability_validation=VulnerabilityValidationConfig(**validation_raw),
         config_file=path,
     )
     cfg.pattern_filter.enabled = _bool_value(cfg.pattern_filter.enabled, True)
     if cfg.pattern_filter.scope not in {"directory", "file", "repo"}:
         cfg.pattern_filter.scope = "directory"
+    cfg.vulnerability_validation.enabled = _bool_value(
+        cfg.vulnerability_validation.enabled,
+        True,
+    )
+    cfg.vulnerability_validation.timeout_seconds = _bounded_int(
+        cfg.vulnerability_validation.timeout_seconds,
+        300,
+        1,
+        86400,
+    )
     return cfg
 
 
@@ -403,6 +447,10 @@ def save_config(config: AgentConfig) -> None:
     raw["pattern_filter"] = {
         f.name: getattr(config.pattern_filter, f.name)
         for f in dataclasses.fields(config.pattern_filter)
+    }
+    raw["vulnerability_validation"] = {
+        f.name: getattr(config.vulnerability_validation, f.name)
+        for f in dataclasses.fields(config.vulnerability_validation)
     }
     with open(path, "w", encoding="utf-8") as f:
         yaml.dump(raw, f, allow_unicode=True, default_flow_style=False)

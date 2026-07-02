@@ -33,6 +33,8 @@ class AgentConfigTests(unittest.TestCase):
         self.assertTrue(cfg.static_dedup)
         self.assertTrue(cfg.pattern_filter.enabled)
         self.assertEqual(cfg.pattern_filter.scope, "directory")
+        self.assertTrue(cfg.vulnerability_validation.enabled)
+        self.assertEqual(cfg.vulnerability_validation.timeout_seconds, 300)
         self.assertEqual(cfg.opencode_concurrency, 4)
 
     def test_apply_remote_config_overwrites_falsey_values(self) -> None:
@@ -62,6 +64,12 @@ class AgentConfigTests(unittest.TestCase):
                 },
                 "static_dedup": False,
                 "pattern_filter": {"enabled": False, "scope": "repo"},
+                "vulnerability_validation": {
+                    "enabled": False,
+                    "script_path": "/tmp/validator.py",
+                    "command": "python3 /tmp/validator.py",
+                    "timeout_seconds": 90,
+                },
             },
         )
 
@@ -83,6 +91,10 @@ class AgentConfigTests(unittest.TestCase):
         self.assertFalse(cfg.static_dedup)
         self.assertFalse(cfg.pattern_filter.enabled)
         self.assertEqual(cfg.pattern_filter.scope, "repo")
+        self.assertFalse(cfg.vulnerability_validation.enabled)
+        self.assertEqual(cfg.vulnerability_validation.script_path, "/tmp/validator.py")
+        self.assertEqual(cfg.vulnerability_validation.command, "python3 /tmp/validator.py")
+        self.assertEqual(cfg.vulnerability_validation.timeout_seconds, 90)
 
     def test_remote_config_dict_exports_managed_fields(self) -> None:
         cfg = AgentConfig()
@@ -107,6 +119,10 @@ class AgentConfigTests(unittest.TestCase):
         self.assertEqual(remote["memory_api_discovery"]["max_candidates"], 200)
         self.assertTrue(remote["static_dedup"])
         self.assertEqual(remote["pattern_filter"], {"enabled": True, "scope": "directory"})
+        self.assertEqual(
+            remote["vulnerability_validation"],
+            {"enabled": True, "script_path": "", "command": "", "timeout_seconds": 300},
+        )
 
     def test_save_config_persists_remote_managed_fields(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -134,6 +150,7 @@ class AgentConfigTests(unittest.TestCase):
                     "memory_api_discovery": {"enabled": True, "batch_size": 10, "timeout_seconds": 240},
                     "static_dedup": False,
                     "pattern_filter": {"enabled": False, "scope": "file"},
+                    "vulnerability_validation": {"enabled": True, "script_path": "/local/validator.py", "timeout_seconds": 600},
                 },
             )
             save_config(cfg)
@@ -158,6 +175,8 @@ class AgentConfigTests(unittest.TestCase):
             self.assertEqual(raw["memory_api_discovery"]["timeout_seconds"], 240)
             self.assertFalse(raw["static_dedup"])
             self.assertEqual(raw["pattern_filter"], {"enabled": False, "scope": "file"})
+            self.assertEqual(raw["vulnerability_validation"]["script_path"], "/local/validator.py")
+            self.assertEqual(raw["vulnerability_validation"]["timeout_seconds"], 600)
 
     def test_invalid_pattern_filter_scope_falls_back_to_directory(self) -> None:
         cfg = AgentConfig()

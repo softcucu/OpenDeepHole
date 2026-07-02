@@ -8,6 +8,7 @@ import type {
   ScanEvent,
   ScanStatus,
   Vulnerability,
+  VulnerabilityValidation,
 } from "../types";
 
 /* ------------------------------------------------------------------ */
@@ -81,6 +82,10 @@ interface FpReviewFinishEvent {
   error_message: string | null;
 }
 
+interface VulnerabilityValidationEvent {
+  validation: VulnerabilityValidation;
+}
+
 /* ------------------------------------------------------------------ */
 /*  Handler map                                                        */
 /* ------------------------------------------------------------------ */
@@ -95,6 +100,7 @@ export interface ScanSSEHandlers {
   onFpReviewStageOutput?: (data: FpReviewStageOutputEvent) => void;
   onFpReviewResult?: (data: FpReviewResultEvent) => void;
   onFpReviewFinish?: (data: FpReviewFinishEvent) => void;
+  onVulnerabilityValidation?: (data: VulnerabilityValidationEvent) => void;
   onIndexStatus?: (data: IndexStatus) => void;
 }
 
@@ -200,6 +206,7 @@ export function useScanSSE(
     handle<FpReviewStageOutputEvent>("fp_review_stage_output", (d) => handlersRef.current.onFpReviewStageOutput?.(d));
     handle<FpReviewResultEvent>("fp_review_result", (d) => handlersRef.current.onFpReviewResult?.(d));
     handle<FpReviewFinishEvent>("fp_review_finish", (d) => handlersRef.current.onFpReviewFinish?.(d));
+    handle<VulnerabilityValidationEvent>("vulnerability_validation", (d) => handlersRef.current.onVulnerabilityValidation?.(d));
     handle<IndexStatus>("index_status", (d) => handlersRef.current.onIndexStatus?.(d));
 
     es.onopen = () => {

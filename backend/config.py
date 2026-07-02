@@ -80,6 +80,13 @@ class PatternFilterConfig(BaseModel):
     scope: str = "directory"        # directory | file | repo
 
 
+class VulnerabilityValidationConfig(BaseModel):
+    enabled: bool = True
+    script_path: str = ""
+    command: str = ""
+    timeout_seconds: int = 300
+
+
 class StorageConfig(BaseModel):
     projects_dir: str = str(_DEFAULT_DATA_ROOT / "projects")
     scans_dir: str = str(_DEFAULT_DATA_ROOT / "scans")
@@ -136,6 +143,7 @@ class AppConfig(BaseModel):
     git_history: GitHistoryConfig = GitHistoryConfig()
     static_dedup: bool = True
     pattern_filter: PatternFilterConfig = PatternFilterConfig()
+    vulnerability_validation: VulnerabilityValidationConfig = VulnerabilityValidationConfig()
     storage: StorageConfig = StorageConfig()
     scan: ScanConfig = ScanConfig()
     logging: LoggingConfig = LoggingConfig()

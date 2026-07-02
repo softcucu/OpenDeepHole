@@ -28,6 +28,7 @@ from backend.models import (
     SkillReport,
     UserInDB,
     Vulnerability,
+    VulnerabilityValidation,
 )
 
 from .base import ScanStoreBase
@@ -128,6 +129,20 @@ CREATE TABLE IF NOT EXISTS vulnerabilities (
     variant_of          TEXT NOT NULL DEFAULT '',
     output_source       TEXT NOT NULL DEFAULT '{}',
     UNIQUE(scan_id, idx)
+);
+
+CREATE TABLE IF NOT EXISTS vulnerability_validations (
+    scan_id             TEXT NOT NULL REFERENCES scans(scan_id) ON DELETE CASCADE,
+    vuln_index          INTEGER NOT NULL,
+    status              TEXT NOT NULL DEFAULT 'pending',
+    running             INTEGER NOT NULL DEFAULT 0,
+    validation_code     TEXT NOT NULL DEFAULT '',
+    validation_output   TEXT NOT NULL DEFAULT '',
+    intermediate_output TEXT NOT NULL DEFAULT '',
+    started_at          TEXT NOT NULL DEFAULT '',
+    finished_at         TEXT NOT NULL DEFAULT '',
+    updated_at          TEXT NOT NULL DEFAULT '',
+    PRIMARY KEY(scan_id, vuln_index)
 );
 
 CREATE TABLE IF NOT EXISTS events (
@@ -238,6 +253,7 @@ CREATE TABLE IF NOT EXISTS fp_review_stage_outputs (
 
 CREATE INDEX IF NOT EXISTS idx_fp_review_scan ON fp_review_jobs(scan_id);
 CREATE INDEX IF NOT EXISTS idx_vulnerabilities_scan ON vulnerabilities(scan_id);
+CREATE INDEX IF NOT EXISTS idx_vulnerability_validations_scan ON vulnerability_validations(scan_id);
 CREATE INDEX IF NOT EXISTS idx_events_scan ON events(scan_id);
 CREATE INDEX IF NOT EXISTS idx_fp_review_results_review ON fp_review_results(review_id);
 
@@ -502,6 +518,23 @@ class SqliteScanStore(ScanStoreBase):
             self._conn.execute(
                 "ALTER TABLE fp_review_stage_outputs ADD COLUMN output_source TEXT NOT NULL DEFAULT '{}'"
             )
+        self._conn.executescript("""\
+            CREATE TABLE IF NOT EXISTS vulnerability_validations (
+                scan_id             TEXT NOT NULL REFERENCES scans(scan_id) ON DELETE CASCADE,
+                vuln_index          INTEGER NOT NULL,
+                status              TEXT NOT NULL DEFAULT 'pending',
+                running             INTEGER NOT NULL DEFAULT 0,
+                validation_code     TEXT NOT NULL DEFAULT '',
+                validation_output   TEXT NOT NULL DEFAULT '',
+                intermediate_output TEXT NOT NULL DEFAULT '',
+                started_at          TEXT NOT NULL DEFAULT '',
+                finished_at         TEXT NOT NULL DEFAULT '',
+                updated_at          TEXT NOT NULL DEFAULT '',
+                PRIMARY KEY(scan_id, vuln_index)
+            );
+            CREATE INDEX IF NOT EXISTS idx_vulnerability_validations_scan
+                ON vulnerability_validations(scan_id);
+        """)
         # git 历史问题模式表（旧库补建）
         self._conn.executescript("""\
             CREATE TABLE IF NOT EXISTS git_history_patterns (
@@ -540,6 +573,7 @@ class SqliteScanStore(ScanStoreBase):
             processed_candidates=row["processed_candidates"],
             vulnerabilities=self.get_vulnerabilities(row["scan_id"]),
             skill_reports=self.list_skill_reports(row["scan_id"]),
+            validations=self.list_vulnerability_validations(row["scan_id"]),
             events=self.get_events(row["scan_id"]),
             current_candidate=current,
             error_message=row["error_message"],
@@ -1241,6 +1275,71 @@ class SqliteScanStore(ScanStoreBase):
                 function_start_line=r["function_start_line"],
                 variant_of=(r["variant_of"] if "variant_of" in r.keys() else "") or "",
                 output_source=_output_source(r["output_source"] if "output_source" in r.keys() else "{}"),
+            )
+            for r in cur.fetchall()
+        ]
+
+    def upsert_vulnerability_validation(
+        self,
+        scan_id: str,
+        validation: VulnerabilityValidation,
+    ) -> VulnerabilityValidation:
+        with self._lock:
+            self._conn.execute(
+                """\
+                INSERT INTO vulnerability_validations
+                    (scan_id, vuln_index, status, running, validation_code,
+                     validation_output, intermediate_output, started_at,
+                     finished_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(scan_id, vuln_index) DO UPDATE SET
+                    status = excluded.status,
+                    running = excluded.running,
+                    validation_code = excluded.validation_code,
+                    validation_output = excluded.validation_output,
+                    intermediate_output = excluded.intermediate_output,
+                    started_at = excluded.started_at,
+                    finished_at = excluded.finished_at,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    scan_id,
+                    validation.vuln_index,
+                    validation.status,
+                    1 if validation.running else 0,
+                    validation.validation_code,
+                    validation.validation_output,
+                    validation.intermediate_output,
+                    validation.started_at,
+                    validation.finished_at,
+                    validation.updated_at,
+                ),
+            )
+            self._conn.commit()
+        return validation.model_copy(update={"scan_id": scan_id})
+
+    def list_vulnerability_validations(self, scan_id: str) -> list[VulnerabilityValidation]:
+        cur = self._conn.execute(
+            """\
+            SELECT *
+            FROM vulnerability_validations
+            WHERE scan_id = ?
+            ORDER BY vuln_index
+            """,
+            (scan_id,),
+        )
+        return [
+            VulnerabilityValidation(
+                scan_id=r["scan_id"],
+                vuln_index=r["vuln_index"],
+                status=r["status"] or "pending",
+                running=bool(r["running"]),
+                validation_code=r["validation_code"] or "",
+                validation_output=r["validation_output"] or "",
+                intermediate_output=r["intermediate_output"] or "",
+                started_at=r["started_at"] or "",
+                finished_at=r["finished_at"] or "",
+                updated_at=r["updated_at"] or "",
             )
             for r in cur.fetchall()
         ]

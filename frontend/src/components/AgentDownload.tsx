@@ -29,6 +29,13 @@ const DEFAULT_GIT_HISTORY: AgentGitHistoryConfig = {
   variant_hunt: true,
 };
 
+const DEFAULT_VULNERABILITY_VALIDATION = {
+  enabled: true,
+  script_path: "",
+  command: "",
+  timeout_seconds: 300,
+};
+
 const DEFAULT_CONFIG: AgentRemoteConfig = {
   no_proxy: "10.0.0.0/8",
   opencode_concurrency: 1,
@@ -60,6 +67,7 @@ const DEFAULT_CONFIG: AgentRemoteConfig = {
   git_history: DEFAULT_GIT_HISTORY,
   static_dedup: true,
   pattern_filter: DEFAULT_PATTERN_FILTER,
+  vulnerability_validation: DEFAULT_VULNERABILITY_VALIDATION,
 };
 
 const DEFAULT_MODEL: AgentOpenCodeModelConfig = {
@@ -116,6 +124,10 @@ function normalizeConfig(config: AgentRemoteConfig): AgentRemoteConfig {
     git_history: { ...DEFAULT_GIT_HISTORY, ...config.git_history },
     static_dedup: config.static_dedup ?? base.static_dedup,
     pattern_filter: { ...DEFAULT_PATTERN_FILTER, ...config.pattern_filter },
+    vulnerability_validation: {
+      ...DEFAULT_VULNERABILITY_VALIDATION,
+      ...config.vulnerability_validation,
+    },
     llm_api: { ...base.llm_api, ...config.llm_api },
   };
 }

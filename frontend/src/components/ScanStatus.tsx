@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { getScanStatus, stopScan, downloadScanReport, downloadScanReportZip, getCheckers, updateScanFeedback, getSkillContent, triggerFpReview, stopFpReview, getFpReview, getFpReviewSkill, getScanGitHistory, getSkillReports, retryIncompleteScan } from "../api/client";
-import type { Candidate, FpReviewJob, HistoryPattern, IndexStatus, ScanItemStatus, ScanStatus as ScanStatusType, ScanEvent, CheckerInfo, SkillReport, OpenCodePoolStatus, Vulnerability, OutputSource } from "../types";
+import type { Candidate, FpReviewJob, HistoryPattern, IndexStatus, ScanItemStatus, ScanStatus as ScanStatusType, ScanEvent, CheckerInfo, SkillReport, OpenCodePoolStatus, Vulnerability, OutputSource, VulnerabilityValidation } from "../types";
 import { useScanSSE } from "../hooks/useScanSSE";
 import type { ScanSSEHandlers, SSEStateSetters } from "../hooks/useScanSSE";
 import VulnerabilityList from "./VulnerabilityList";
@@ -216,6 +216,20 @@ export default function ScanStatus({ scanId, onBack }: Props) {
         const vulns = [...prev.vulnerabilities];
         vulns[data.index] = data.vulnerability;
         return { ...prev, vulnerabilities: vulns };
+      });
+    },
+    onVulnerabilityValidation: (data) => {
+      setScan((prev) => {
+        if (!prev) return prev;
+        const validations = [...(prev.validations ?? [])];
+        const existingIndex = validations.findIndex((item) => item.vuln_index === data.validation.vuln_index);
+        if (existingIndex >= 0) {
+          validations[existingIndex] = data.validation;
+        } else {
+          validations.push(data.validation);
+          validations.sort((a, b) => a.vuln_index - b.vuln_index);
+        }
+        return { ...prev, validations };
       });
     },
     onScanEvent: (data) => {
@@ -583,7 +597,7 @@ export default function ScanStatus({ scanId, onBack }: Props) {
   const indexProgress = formatIndexProgress(indexStatus, scan);
   const threatEvents = filterEvents(scan.events, ["init", "mcp_ready", "static_analysis", "git_history"]);
   const miningEvents = filterEvents(scan.events, ["variant_hunt", "auditing", "opencode_output"]);
-  const validationEvents = filterEvents(scan.events, ["fp_review"]);
+  const validationEvents = filterEvents(scan.events, ["validation", "fp_review"]);
   const issuesView = scan.vulnerabilities.length === 0 && isDone ? (
     <div className="flex items-center justify-center h-64 text-slate-400">
       <div className="text-center">
@@ -896,9 +910,9 @@ export default function ScanStatus({ scanId, onBack }: Props) {
           </TabbedPanel>
         )}
         {activeTab === "validation" && (
-          <PlaceholderPanel
-            title="漏洞验证"
-            description="漏洞验证任务入口已预留。当前可在顶部继续使用 AI 去误报复核，并在发现的问题页签查看复核结果。"
+          <ValidationPanel
+            vulnerabilities={scan.vulnerabilities}
+            validations={scan.validations ?? []}
             events={validationEvents}
           />
         )}
@@ -1564,15 +1578,130 @@ function VariantHuntPanel({
   );
 }
 
-function PlaceholderPanel({ title, description, events }: { title: string; description: string; events: ScanEvent[] }) {
+function ValidationPanel({
+  vulnerabilities,
+  validations,
+  events,
+}: {
+  vulnerabilities: Vulnerability[];
+  validations: VulnerabilityValidation[];
+  events: ScanEvent[];
+}) {
+  const confirmed = vulnerabilities
+    .map((vuln, index) => ({ vuln, index }))
+    .filter(({ vuln }) => isAiConfirmed(vuln));
+  const validationByIndex = new Map(validations.map((item) => [item.vuln_index, item]));
+  const runningCount = validations.filter((item) => item.running).length;
+  const completedCount = validations.filter((item) => isValidationComplete(item.status)).length;
+  const failedCount = validations.filter((item) => isValidationFailed(item.status)).length;
+  const status = runningCount > 0 ? "验证中" : completedCount > 0 ? "已验证" : confirmed.length > 0 ? "等待" : "无目标";
+  const tone: TaskTone = runningCount > 0 ? "blue" : failedCount > 0 ? "red" : completedCount > 0 ? "green" : "slate";
+
   return (
-    <TaskPanel title={title} status="预留" tone="slate" summary={description}>
-      <div className="rounded-lg border border-slate-800 bg-slate-950/50 px-4 py-8 text-center text-sm text-slate-500">
-        该页签已预留，后续任务接入后会在这里展示执行状态、当前目标和结果。
+    <TaskPanel
+      title="漏洞验证"
+      status={status}
+      tone={tone}
+      summary="对漏洞挖掘阶段确认的问题调用 Agent 本地验证脚本，展示验证过程和脚本返回结果。"
+    >
+      <div className="grid grid-cols-1 gap-3 md:grid-cols-4">
+        <MiniMetric label="确认问题" value={confirmed.length} tone="red" />
+        <MiniMetric label="验证中" value={runningCount} tone="blue" />
+        <MiniMetric label="已完成" value={completedCount} tone="green" />
+        <MiniMetric label="异常/超时" value={failedCount} tone="amber" />
       </div>
+      {confirmed.length === 0 ? (
+        <EmptyState text="当前还没有漏洞挖掘阶段确认的问题。" />
+      ) : (
+        <div className="space-y-3">
+          {confirmed.map(({ vuln, index }) => (
+            <ValidationCard
+              key={`${index}-${vuln.file}-${vuln.line}`}
+              index={index}
+              vulnerability={vuln}
+              validation={validationByIndex.get(index)}
+            />
+          ))}
+        </div>
+      )}
       <EventList events={events} empty="暂无验证任务日志" />
     </TaskPanel>
   );
+}
+
+function ValidationCard({
+  index,
+  vulnerability,
+  validation,
+}: {
+  index: number;
+  vulnerability: Vulnerability;
+  validation?: VulnerabilityValidation;
+}) {
+  const status = validation?.status || "pending";
+  const tone: TaskTone = validation?.running ? "blue" : isValidationFailed(status) ? "red" : isValidationComplete(status) ? "green" : "slate";
+  return (
+    <div className="rounded-lg border border-slate-800 bg-slate-950/50 p-3">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div className="min-w-0">
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="font-mono text-xs text-slate-500">#{index}</span>
+            <span className="text-sm font-semibold text-slate-100">{vulnerability.vuln_type}</span>
+            <span className="text-xs text-slate-500">{vulnerability.severity}</span>
+          </div>
+          <div className="mt-1 break-all font-mono text-xs text-slate-300">{vulnerability.file}:{vulnerability.line}</div>
+          <div className="mt-1 truncate font-mono text-xs text-slate-500">{vulnerability.function}</div>
+        </div>
+        <div className="flex items-center gap-2">
+          {validation?.running && <span className="h-3 w-3 rounded-full border border-blue-500/30 border-t-blue-300 animate-spin" />}
+          <StatusPill label={validationStatusLabel(status)} tone={tone} />
+        </div>
+      </div>
+      {validation ? (
+        <div className="mt-3 grid grid-cols-1 gap-3 xl:grid-cols-3">
+          <ValidationBlock title="中间产出" content={validation.intermediate_output} />
+          <ValidationBlock title="验证代码" content={validation.validation_code} />
+          <ValidationBlock title="验证输出" content={validation.validation_output} />
+        </div>
+      ) : (
+        <div className="mt-3 rounded border border-slate-800 bg-slate-900/50 px-3 py-2 text-xs text-slate-500">等待验证脚本启动</div>
+      )}
+    </div>
+  );
+}
+
+function ValidationBlock({ title, content }: { title: string; content: string }) {
+  return (
+    <div className="min-w-0 rounded border border-slate-800 bg-slate-950">
+      <div className="border-b border-slate-800 px-3 py-2 text-xs font-semibold text-slate-500">{title}</div>
+      <pre className="max-h-72 overflow-auto whitespace-pre-wrap break-words px-3 py-2 font-mono text-xs leading-5 text-slate-300">
+        {content || "（暂无）"}
+      </pre>
+    </div>
+  );
+}
+
+function validationStatusLabel(status: string): string {
+  const labels: Record<string, string> = {
+    pending: "等待",
+    running: "验证中",
+    verified: "已验证",
+    success: "已验证",
+    failed: "未通过",
+    error: "异常",
+    timeout: "超时",
+    cancelled: "已取消",
+    skipped: "跳过",
+  };
+  return labels[status] ?? status;
+}
+
+function isValidationComplete(status: string): boolean {
+  return ["verified", "success", "failed"].includes(status);
+}
+
+function isValidationFailed(status: string): boolean {
+  return ["error", "timeout", "cancelled"].includes(status);
 }
 
 function ReportGenerationPanel({
