@@ -186,6 +186,54 @@ class AgentRuntimePackageTests(unittest.TestCase):
                 "print('server snapshot')\n",
             )
 
+    def test_runtime_install_preserves_skipped_validator_dirs(self) -> None:
+        files = [
+            ("agent/main.py", b"print('server snapshot')\n"),
+            ("agent/server.py", b"# server\n"),
+            ("backend/api.py", b"# api\n"),
+            ("requirements-agent.txt", b"requests\n"),
+        ]
+        archive = agent_api._build_agent_runtime_zip_from_files(files)
+        expected_hash = agent_api._agent_runtime_hash_for_files(files)
+        manifest = _runtime_manifest(files)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "agent" / "product_validators").mkdir(parents=True)
+            (root / "agent" / "product_validators" / "custom.py").write_text(
+                "def register(registry):\n    pass\n",
+                encoding="utf-8",
+            )
+            (root / "agent" / "vulnerability_validation").mkdir(parents=True)
+            (root / "agent" / "vulnerability_validation" / "validator.py").write_text(
+                "print('local validator')\n",
+                encoding="utf-8",
+            )
+            (root / "agent" / "main.py").write_text("print('old')\n", encoding="utf-8")
+            (root / "agent" / "stale.py").write_text("# stale\n", encoding="utf-8")
+            (root / "backend").mkdir()
+            (root / "backend" / "old.py").write_text("# old\n", encoding="utf-8")
+            (root / "requirements-agent.txt").write_text("old\n", encoding="utf-8")
+
+            with patch("agent.updater.runtime_root", return_value=root):
+                updater._install_update_archive(archive, expected_hash, manifest)
+
+            self.assertEqual(
+                (root / "agent" / "product_validators" / "custom.py").read_text(encoding="utf-8"),
+                "def register(registry):\n    pass\n",
+            )
+            self.assertEqual(
+                (root / "agent" / "vulnerability_validation" / "validator.py").read_text(encoding="utf-8"),
+                "print('local validator')\n",
+            )
+            self.assertFalse((root / "agent" / "stale.py").exists())
+            self.assertFalse((root / "backend" / "old.py").exists())
+            self.assertEqual(
+                (root / "agent" / "main.py").read_text(encoding="utf-8"),
+                "print('server snapshot')\n",
+            )
+            self.assertEqual(compute_runtime_hash(root), expected_hash)
+
     def test_runtime_install_rejects_manifest_missing_file(self) -> None:
         manifest_files = [
             ("agent/main.py", b"print('server snapshot')\n"),

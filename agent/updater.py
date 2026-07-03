@@ -218,20 +218,7 @@ def _install_update_archive(
 
         _verify_update_contents(tmp_root, archive_files, expected_hash, manifest)
 
-        runtime_dirs, runtime_files = _install_targets(manifest)
-        for dir_name in runtime_dirs:
-            src = tmp_root / dir_name
-            if not src.exists():
-                continue
-            dest = root / dir_name
-            if dest.exists():
-                shutil.rmtree(dest)
-            shutil.copytree(src, dest)
-
-        for filename in runtime_files:
-            src = tmp_root / filename
-            if src.is_file():
-                shutil.copy2(src, root / filename)
+        _install_update_files(tmp_root, root, sorted(archive_files))
 
 
 def _verify_update_contents(
@@ -330,24 +317,96 @@ def _verify_update_contents(
             )
 
 
-def _install_targets(manifest: dict[str, Any] | None) -> tuple[set[str], set[str]]:
-    if not manifest:
-        return set((*RUNTIME_DIRS, *RUNTIME_TOOL_DIRS)), set(RUNTIME_ROOT_FILES)
+def _install_update_files(tmp_root: Path, root: Path, archive_paths: list[str]) -> None:
+    """Replace runtime-managed files without touching skipped local directories."""
+    root = root.resolve()
+    desired = set(archive_paths)
+    target_roots = _target_roots_for_archive(archive_paths)
 
-    dirs: set[str] = set()
-    files: set[str] = set()
-    for entry in manifest.get("files") or []:
-        if not isinstance(entry, dict):
+    _remove_stale_runtime_files(root, desired, target_roots)
+    _prune_empty_runtime_dirs(root, target_roots)
+
+    for arcname in archive_paths:
+        member = Path(arcname)
+        if member.is_absolute() or ".." in member.parts:
+            raise RuntimeError(f"Unsafe runtime update path: {arcname}")
+        if _should_skip(member):
             continue
-        path = str(entry.get("path") or "")
-        if not path:
+        src = tmp_root / member
+        if not src.is_file():
             continue
-        first, sep, _rest = path.partition("/")
-        if sep:
-            dirs.add(first)
-        else:
-            files.add(first)
-    return dirs, files
+        dest = (root / member).resolve()
+        dest.relative_to(root)
+        if dest.exists() and dest.is_dir():
+            if _contains_skipped_path(dest, root):
+                raise RuntimeError(f"Refusing to replace runtime directory containing skipped paths: {arcname}")
+            shutil.rmtree(dest)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(src, dest)
+
+
+def _target_roots_for_archive(archive_paths: list[str]) -> set[str]:
+    managed_dirs = {*RUNTIME_DIRS, *RUNTIME_TOOL_DIRS}
+    managed_files = set(RUNTIME_ROOT_FILES)
+    roots: set[str] = set()
+    for arcname in archive_paths:
+        first, sep, _rest = arcname.partition("/")
+        if sep and first in managed_dirs:
+            roots.add(first)
+        elif not sep and first in managed_files:
+            roots.add(first)
+    return roots
+
+
+def _remove_stale_runtime_files(root: Path, desired: set[str], target_roots: set[str]) -> None:
+    managed_dirs = {*RUNTIME_DIRS, *RUNTIME_TOOL_DIRS}
+    for target in sorted(target_roots):
+        target_path = root / target
+        if target in RUNTIME_ROOT_FILES:
+            if target not in desired and target_path.is_file():
+                target_path.unlink()
+            continue
+        if target not in managed_dirs or not target_path.is_dir():
+            continue
+        for file_path in sorted(target_path.rglob("*"), reverse=True):
+            if not file_path.is_file():
+                continue
+            rel = file_path.relative_to(root)
+            if _should_skip(rel):
+                continue
+            if rel.as_posix() not in desired:
+                file_path.unlink()
+
+
+def _prune_empty_runtime_dirs(root: Path, target_roots: set[str]) -> None:
+    managed_dirs = {*RUNTIME_DIRS, *RUNTIME_TOOL_DIRS}
+    for target in sorted(target_roots):
+        if target not in managed_dirs:
+            continue
+        target_path = root / target
+        if not target_path.is_dir():
+            continue
+        dirs = [path for path in target_path.rglob("*") if path.is_dir()]
+        for dir_path in sorted(dirs, key=lambda p: len(p.parts), reverse=True):
+            rel = dir_path.relative_to(root)
+            if _should_skip(rel):
+                continue
+            try:
+                dir_path.rmdir()
+            except OSError:
+                pass
+
+
+def _contains_skipped_path(path: Path, root: Path) -> bool:
+    rel = path.relative_to(root)
+    if _should_skip(rel):
+        return True
+    if not path.is_dir():
+        return False
+    for child in path.rglob("*"):
+        if _should_skip(child.relative_to(root)):
+            return True
+    return False
 
 
 def _install_requirements_if_needed() -> None:
