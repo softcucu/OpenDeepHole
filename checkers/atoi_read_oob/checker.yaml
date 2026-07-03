@@ -1,0 +1,11 @@
+name: atoi_read_oob
+label: atoi Read OOB / atoi 参数读越界
+description: >
+  静态枚举 C/C++ 代码中的 atoi 调用点，并由 AI 判断参数是否可能不是合法
+  NUL 终止字符串，从而导致 atoi 持续读取到对象边界之外。
+family: oob
+enabled: true
+mode: opencode
+visibility: public
+category: out_of_bounds
+modified_at: "2026-07-03T00:00:00+08:00"
