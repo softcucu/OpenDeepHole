@@ -1079,6 +1079,57 @@ async def _trigger_vulnerability_validation(
     return {"ok": True, "vuln_index": idx}
 
 
+async def _stop_vulnerability_validation(scan_id: str, idx: int) -> dict:
+    """Cancel one Agent-side local validation for a vulnerability."""
+    from backend.api.agent import send_agent_command
+
+    store = get_scan_store()
+    loaded = store.load_scan(scan_id)
+    if loaded is None:
+        raise HTTPException(status_code=404, detail="Scan not found")
+    scan, meta = loaded
+
+    if idx < 0 or idx >= len(scan.vulnerabilities):
+        raise HTTPException(status_code=404, detail="Vulnerability index out of range")
+
+    existing = next((item for item in scan.validations if item.vuln_index == idx), None)
+    if existing is None:
+        raise HTTPException(status_code=404, detail="Validation not found")
+
+    active = existing.running or existing.status in {"pending", "queued", "running"}
+    if active:
+        now = _now_iso()
+        validation = store.upsert_vulnerability_validation(
+            scan_id,
+            existing.model_copy(update={
+                "status": "cancelled",
+                "running": False,
+                "validation_success": False,
+                "validation_output": "用户手动停止",
+                "final_output": "用户手动停止",
+                "finished_at": now,
+                "updated_at": now,
+            }),
+        )
+        _publish_validation(scan_id, validation)
+        _update_running_validation(scan_id, validation)
+    else:
+        validation = existing
+
+    agent_id = _resolve_scan_agent_id(meta)
+    if active and agent_id is not None:
+        if agent_id != meta.agent_id:
+            store.update_scan_agent(scan_id, agent_id, meta.agent_name)
+        await send_agent_command(agent_id, {
+            "type": "vulnerability_validation_stop",
+            "scan_id": scan_id,
+            "vuln_index": idx,
+        })
+
+    logger.info("Vulnerability validation for scan %s idx %d cancelled by user", scan_id, idx)
+    return {"ok": True, "vuln_index": idx, "status": validation.status}
+
+
 @router.post("/api/scan/{scan_id}/vulnerability/{idx}/validation")
 async def trigger_vulnerability_validation(
     scan_id: str,
@@ -1089,6 +1140,17 @@ async def trigger_vulnerability_validation(
     """Manually start Agent-side local validation for one confirmed vulnerability."""
     _check_scan_owner(scan_id, current_user)
     return await _trigger_vulnerability_validation(scan_id, idx, _server_url_from_request(request))
+
+
+@router.post("/api/scan/{scan_id}/vulnerability/{idx}/validation/stop")
+async def stop_vulnerability_validation(
+    scan_id: str,
+    idx: int,
+    current_user: User = Depends(get_current_user),
+) -> dict:
+    """Cancel Agent-side local validation for one vulnerability."""
+    _check_scan_owner(scan_id, current_user)
+    return await _stop_vulnerability_validation(scan_id, idx)
 
 
 @router.get("/api/scan/{scan_id}/report.zip")

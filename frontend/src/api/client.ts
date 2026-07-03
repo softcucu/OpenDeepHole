@@ -291,6 +291,21 @@ export async function triggerVulnerabilityValidation(scanId: string, idx: number
   return data;
 }
 
+export async function stopVulnerabilityValidation(scanId: string, idx: number): Promise<{ ok: boolean; vuln_index: number; status: string }> {
+  if (isPublicScan(scanId)) {
+    const { data } = await api.post<{ ok: boolean; vuln_index: number; status: string }>(
+      publicScanPath(`/vulnerability/${idx}/validation/stop`),
+      null,
+      { params: publicParams() },
+    );
+    return data;
+  }
+  const { data } = await api.post<{ ok: boolean; vuln_index: number; status: string }>(
+    `/api/scan/${scanId}/vulnerability/${idx}/validation/stop`,
+  );
+  return data;
+}
+
 export async function downloadScanReportZip(scanId: string): Promise<Blob> {
   if (isPublicScan(scanId)) {
     const { data } = await api.get<Blob>(

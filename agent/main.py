@@ -115,6 +115,11 @@ async def _handle_command(msg: dict, config, task_manager, reporter) -> dict | N
             vulnerability=msg.get("vulnerability") or {},
             report_markdown=msg.get("report_markdown", ""),
         )
+    elif cmd_type == "vulnerability_validation_stop":
+        await agent_server.handle_vulnerability_validation_stop(
+            scan_id=msg["scan_id"],
+            vuln_index=int(msg["vuln_index"]),
+        )
     elif cmd_type == "product_validators_sync":
         return await agent_server.handle_product_validators_sync(
             request_id=msg.get("request_id", ""),
@@ -231,6 +236,7 @@ async def _ws_loop(config, task_manager, reporter) -> None:
                     "agent_session_id": reporter.agent_session_id,
                     "active_scans": task_manager.active_snapshots() + pending_scan_snapshots(),
                     "active_fp_reviews": agent_server.active_fp_review_snapshots(),
+                    "active_validations": agent_server.active_validation_snapshots(),
                 }
                 if config.owner_token:
                     hello_msg["owner_token"] = config.owner_token

@@ -22,6 +22,7 @@ _fp_review_tasks: dict[str, asyncio.Task] = {}
 _fp_review_cancel_events: dict[str, threading.Event] = {}
 _fp_review_scan_ids: dict[str, str] = {}
 _validation_tasks: dict[tuple[str, int], asyncio.Task] = {}
+_validation_cancel_events: dict[tuple[str, int], threading.Event] = {}
 
 
 def active_fp_review_snapshots() -> list[dict]:
@@ -30,6 +31,15 @@ def active_fp_review_snapshots() -> list[dict]:
         {"scan_id": scan_id, "review_id": review_id}
         for review_id, scan_id in _fp_review_scan_ids.items()
         if review_id in _fp_review_tasks
+    ]
+
+
+def active_validation_snapshots() -> list[dict]:
+    """Snapshot of vulnerability validations still running in this agent."""
+    return [
+        {"scan_id": scan_id, "vuln_index": vuln_index}
+        for (scan_id, vuln_index), task in _validation_tasks.items()
+        if not task.done()
     ]
 _SKILL_CREATOR_NAME = "deephole-skill-creator"
 
@@ -259,6 +269,7 @@ async def handle_vulnerability_validation(
         return
 
     cancel_event = threading.Event()
+    _validation_cancel_events[task_key] = cancel_event
 
     async def _run_validation() -> None:
         from agent.config import apply_network_env, apply_remote_config
@@ -292,10 +303,27 @@ async def handle_vulnerability_validation(
             print(f"[validation] Unhandled error in validation {scan_id}#{vuln_index}: {exc}")
         finally:
             _validation_tasks.pop(task_key, None)
+            _validation_cancel_events.pop(task_key, None)
 
     _validation_tasks[task_key] = asyncio.create_task(_run_validation())
     path_hint = f" ({project_path})" if project_path else ""
     print(f"Started vulnerability validation {scan_id}#{vuln_index}{path_hint}")
+
+
+async def handle_vulnerability_validation_stop(scan_id: str, vuln_index: int) -> None:
+    """Handle a 'vulnerability_validation_stop' command."""
+    task_key = (scan_id, vuln_index)
+    cancel_event = _validation_cancel_events.get(task_key)
+    if cancel_event is not None:
+        cancel_event.set()
+        print(f"Stopping vulnerability validation {scan_id}#{vuln_index}")
+        return
+    task = _validation_tasks.get(task_key)
+    if task is not None and not task.done():
+        task.cancel()
+        print(f"Cancelling validation task {scan_id}#{vuln_index}")
+        return
+    print(f"Warning: validation {scan_id}#{vuln_index} not found for stop")
 
 
 async def handle_product_validators_sync(request_id: str, package: dict) -> dict:

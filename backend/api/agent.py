@@ -378,6 +378,75 @@ def _reattach_active_fp_reviews(agent_id: str, agent: AgentInfo, active_fp_revie
         logger.info("Reattached active FP review %s from agent %s", review_id, agent_id)
 
 
+def _reattach_active_validations(agent_id: str, agent: AgentInfo, active_validations: list) -> list[dict]:
+    """Restore server-side ownership for Agent validations and return stop commands for cancelled ones."""
+    pending_stops: list[dict] = []
+    if not active_validations:
+        return pending_stops
+
+    store = get_scan_store()
+    for item in active_validations:
+        if not isinstance(item, dict):
+            continue
+        scan_id = str(item.get("scan_id") or "")
+        try:
+            vuln_index = int(item.get("vuln_index"))
+        except (TypeError, ValueError):
+            continue
+        if not scan_id or vuln_index < 0:
+            continue
+
+        meta = store.get_scan_meta(scan_id)
+        if meta is None:
+            continue
+        if meta.agent_name and meta.agent_name != agent.name:
+            logger.warning(
+                "Ignoring active validation %s#%s from agent %s: stored agent_name=%s",
+                scan_id,
+                vuln_index,
+                agent.name,
+                meta.agent_name,
+            )
+            continue
+        if meta.user_id and agent.user_id and meta.user_id != agent.user_id:
+            logger.warning(
+                "Ignoring active validation %s#%s from agent %s: owner mismatch",
+                scan_id,
+                vuln_index,
+                agent.name,
+            )
+            continue
+
+        validation = next(
+            (entry for entry in store.list_vulnerability_validations(scan_id) if entry.vuln_index == vuln_index),
+            None,
+        )
+        if validation is None:
+            logger.warning("Agent %s reported unknown active validation %s#%s", agent_id, scan_id, vuln_index)
+            continue
+
+        store.update_scan_agent(scan_id, agent_id, agent.name)
+        if validation.status == "cancelled":
+            pending_stops.append({
+                "type": "vulnerability_validation_stop",
+                "scan_id": scan_id,
+                "vuln_index": vuln_index,
+            })
+            logger.info("Queued stop for cancelled active validation %s#%s from agent %s", scan_id, vuln_index, agent_id)
+            continue
+        if validation.running or validation.status in {"pending", "queued", "running"}:
+            logger.info("Reattached active validation %s#%s from agent %s", scan_id, vuln_index, agent_id)
+        else:
+            logger.info(
+                "Ignoring active validation %s#%s from agent %s: status=%s",
+                scan_id,
+                vuln_index,
+                agent.name,
+                validation.status,
+            )
+    return pending_stops
+
+
 def _ensure_running_scan(scan_id: str) -> ScanStatus | None:
     """Load a recoverable scan into memory when events arrive after restart."""
     scan = _running_scans.get(scan_id)
@@ -515,6 +584,11 @@ async def agent_websocket(websocket: WebSocket) -> None:
 
         _reattach_active_agent_scans(agent_id, agent_info, msg.get("active_scans") or [])
         _reattach_active_fp_reviews(agent_id, agent_info, msg.get("active_fp_reviews") or [])
+        pending_validation_stops = _reattach_active_validations(
+            agent_id,
+            agent_info,
+            msg.get("active_validations") or [],
+        )
 
         reported_config = msg.get("config")
         if reported_config and name not in _agent_configs:
@@ -529,6 +603,8 @@ async def agent_websocket(websocket: WebSocket) -> None:
             "agent_id": agent_id,
             "config": cfg.model_dump(exclude_defaults=True),
         })
+        for command in pending_validation_stops:
+            await send_agent_command(agent_id, command)
 
         logger.info("Agent connected via WebSocket: %s (%s) user=%s", agent_id, name, user_id or "(none)")
 

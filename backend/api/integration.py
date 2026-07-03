@@ -295,6 +295,15 @@ async def trigger_public_vulnerability_validation(
     return await scan_api.trigger_vulnerability_validation(scan_id, idx, request, current_user)
 
 
+@router.post("/api/public/scans/{scan_id}/vulnerability/{idx}/validation/stop")
+async def stop_public_vulnerability_validation(
+    scan_id: str,
+    idx: int,
+    current_user: User = Depends(_public_user_dependency),
+) -> dict:
+    return await scan_api.stop_vulnerability_validation(scan_id, idx, current_user)
+
+
 @router.get("/api/public/scans/{scan_id}/report.zip")
 async def download_public_report_zip(
     scan_id: str,

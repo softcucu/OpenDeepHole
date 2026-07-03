@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { getScanStatus, stopScan, downloadScanReport, downloadScanReportZip, getCheckers, updateScanFeedback, getSkillContent, triggerFpReview, stopFpReview, getFpReview, getFpReviewSkill, getScanGitHistory, getSkillReports, retryIncompleteScan, triggerVulnerabilityValidation } from "../api/client";
+import { getScanStatus, stopScan, downloadScanReport, downloadScanReportZip, getCheckers, updateScanFeedback, getSkillContent, triggerFpReview, stopFpReview, getFpReview, getFpReviewSkill, getScanGitHistory, getSkillReports, retryIncompleteScan, triggerVulnerabilityValidation, stopVulnerabilityValidation } from "../api/client";
 import type { Candidate, FpReviewJob, HistoryPattern, IndexStatus, ScanItemStatus, ScanStatus as ScanStatusType, ScanEvent, CheckerInfo, SkillReport, OpenCodePoolStatus, Vulnerability, OutputSource, VulnerabilityValidation } from "../types";
 import { useScanSSE } from "../hooks/useScanSSE";
 import type { ScanSSEHandlers, SSEStateSetters } from "../hooks/useScanSSE";
@@ -162,6 +162,7 @@ export default function ScanStatus({ scanId, onBack }: Props) {
   const [fpReviewLoading, setFpReviewLoading] = useState(false);
   const [fpReviewStopping, setFpReviewStopping] = useState(false);
   const [launchingValidations, setLaunchingValidations] = useState<Set<number>>(new Set());
+  const [stoppingValidations, setStoppingValidations] = useState<Set<number>>(new Set());
 
   // Code indexing progress
   const [indexStatus, setIndexStatus] = useState<IndexStatus | null>(null);
@@ -221,6 +222,12 @@ export default function ScanStatus({ scanId, onBack }: Props) {
     },
     onVulnerabilityValidation: (data) => {
       setLaunchingValidations((prev) => {
+        if (!prev.has(data.validation.vuln_index)) return prev;
+        const next = new Set(prev);
+        next.delete(data.validation.vuln_index);
+        return next;
+      });
+      setStoppingValidations((prev) => {
         if (!prev.has(data.validation.vuln_index)) return prev;
         const next = new Set(prev);
         next.delete(data.validation.vuln_index);
@@ -396,6 +403,22 @@ export default function ScanStatus({ scanId, onBack }: Props) {
       const msg = response?.data?.detail || (err instanceof Error ? err.message : "未知错误");
       alert(`启动漏洞验证失败：${msg}`);
       setLaunchingValidations((prev) => {
+        const next = new Set(prev);
+        next.delete(index);
+        return next;
+      });
+    }
+  };
+
+  const handleStopValidation = async (index: number) => {
+    setStoppingValidations((prev) => new Set(prev).add(index));
+    try {
+      await stopVulnerabilityValidation(scanId, index);
+    } catch (err: unknown) {
+      const response = (err as { response?: { data?: { detail?: string } } }).response;
+      const msg = response?.data?.detail || (err instanceof Error ? err.message : "未知错误");
+      alert(`停止漏洞验证失败：${msg}`);
+      setStoppingValidations((prev) => {
         const next = new Set(prev);
         next.delete(index);
         return next;
@@ -642,8 +665,10 @@ export default function ScanStatus({ scanId, onBack }: Props) {
       fpReviewRunning={isFpReviewing}
       validations={scan.validations ?? []}
       validatingIndices={launchingValidations}
+      stoppingValidationIndices={stoppingValidations}
       agentOnline={!!scan.agent_online}
       onTriggerValidation={handleTriggerValidation}
+      onStopValidation={handleStopValidation}
       onFeedbackCreated={addSelectedFeedbackIds}
       onFeedbackRemoved={removeSelectedFeedbackIds}
       onVulnMarked={() => {
@@ -940,7 +965,9 @@ export default function ScanStatus({ scanId, onBack }: Props) {
           <ValidationPanel
             vulnerabilities={scan.vulnerabilities}
             validations={scan.validations ?? []}
+            stoppingValidationIndices={stoppingValidations}
             events={validationEvents}
+            onStopValidation={handleStopValidation}
           />
         )}
         {activeTab === "reports" && (
@@ -1608,11 +1635,15 @@ function VariantHuntPanel({
 function ValidationPanel({
   vulnerabilities,
   validations,
+  stoppingValidationIndices,
   events,
+  onStopValidation,
 }: {
   vulnerabilities: Vulnerability[];
   validations: VulnerabilityValidation[];
+  stoppingValidationIndices?: Set<number>;
   events: ScanEvent[];
+  onStopValidation?: (index: number) => void | Promise<void>;
 }) {
   const [selectedIndex, setSelectedIndex] = useState<number | null>(null);
   const confirmed = vulnerabilities
@@ -1712,6 +1743,8 @@ function ValidationPanel({
                 index={selected.index}
                 vulnerability={selected.vuln}
                 validation={selected.validation}
+                stopping={stoppingValidationIndices?.has(selected.index) ?? false}
+                onStopValidation={onStopValidation}
               />
             ) : (
               <div className="flex h-full items-center justify-center px-4 py-16 text-sm text-slate-500">
@@ -1730,13 +1763,18 @@ function ValidationDetail({
   index,
   vulnerability,
   validation,
+  stopping = false,
+  onStopValidation,
 }: {
   index: number;
   vulnerability: Vulnerability;
   validation?: VulnerabilityValidation;
+  stopping?: boolean;
+  onStopValidation?: (index: number) => void | Promise<void>;
 }) {
   const status = validation?.status || "pending";
   const tone = validationTone(validation);
+  const canStop = Boolean(onStopValidation && (stopping || validation?.running || status === "queued" || status === "running"));
   return (
     <div className="max-h-[70vh] overflow-y-auto p-4">
       <div className="border-b border-slate-800 pb-3">
@@ -1751,6 +1789,16 @@ function ValidationDetail({
             <div className="mt-1 truncate font-mono text-xs text-slate-500">{vulnerability.function}</div>
           </div>
           <div className="flex items-center gap-2">
+            {canStop && (
+              <button
+                type="button"
+                onClick={() => onStopValidation?.(index)}
+                disabled={stopping}
+                className="rounded border border-red-500/30 bg-red-500/10 px-2 py-1 text-xs font-medium text-red-300 transition-colors hover:bg-red-500/20 disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                {stopping ? "停止中..." : "停止验证"}
+              </button>
+            )}
             {validation?.running && <span className="h-3 w-3 rounded-full border border-blue-500/30 border-t-blue-300 animate-spin" />}
             <StatusPill label={validationStatusLabel(status)} tone={tone} />
           </div>
