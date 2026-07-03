@@ -2,10 +2,10 @@ name: loop_mut_idx_oob
 label: Loop Mutated Index OOB / 循环变更索引越界
 description: >
   检测 C/C++ 中循环变量在循环内变化、被用作数组下标或指针偏移，
-  但循环退出条件没有直接约束该索引且访问点附近缺少明显范围校验的潜在越界读写风险。
+  或循环上界未在循环前明显比较校验时仍驱动数组下标/指针偏移访问的潜在越界读写风险。
 family: oob
 enabled: true
 mode: opencode
 visibility: public
 category: out_of_bounds
-modified_at: "2026-05-21T20:02:48+08:00"
+modified_at: "2026-07-03T00:00:00+08:00"

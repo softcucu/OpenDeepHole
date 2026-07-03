@@ -111,11 +111,93 @@ void derived_memfunc(char *base, char *src, unsigned remain) {
     assert len(candidates) >= 2
 
 
+def test_loop_mut_idx_oob_semgrep_rules_find_unchecked_loop_bound_patterns(tmp_path: Path) -> None:
+    source = tmp_path / "unchecked_bound.c"
+    code = """
+typedef unsigned long uintptr_t;
+
+typedef struct {
+    uintptr_t packet;
+    unsigned len;
+} FragInfo;
+
+void frag_access(FragInfo *fragInfo, unsigned fragNum) {
+    unsigned fragId;
+    for (fragId = 0; fragId < fragNum; fragId++) {
+        (void)(uintptr_t)(fragInfo[fragId].packet);
+        (void)fragInfo[fragId].len;
+    }
+}
+
+void pointer_offset(char *ptr, unsigned count) {
+    unsigned idx;
+    for (idx = 0; idx < count; idx++) {
+        *(ptr + idx) = 0;
+    }
+}
+"""
+    source.write_text(code, encoding="utf-8")
+
+    candidates = list(LoopMutIdxOobAnalyzer().find_candidates(tmp_path))
+    candidate_lines = {candidate.line for candidate in candidates}
+    lines = code.splitlines()
+    packet_line = lines.index("        (void)(uintptr_t)(fragInfo[fragId].packet);") + 1
+    len_line = lines.index("        (void)fragInfo[fragId].len;") + 1
+    pointer_line = lines.index("        *(ptr + idx) = 0;") + 1
+
+    assert packet_line in candidate_lines
+    assert len_line in candidate_lines
+    assert pointer_line in candidate_lines
+
+
+def test_loop_mut_idx_oob_semgrep_rules_ignore_loop_bound_after_prior_comparison(tmp_path: Path) -> None:
+    source = tmp_path / "checked_bound.c"
+    code = """
+typedef unsigned long uintptr_t;
+
+typedef struct {
+    uintptr_t packet;
+    unsigned len;
+} FragInfo;
+
+void checked_direct(FragInfo *fragInfo, unsigned fragNum, unsigned maxFrags) {
+    unsigned fragId;
+    if (fragNum > maxFrags) return;
+    for (fragId = 0; fragId < fragNum; fragId++) {
+        (void)(uintptr_t)(fragInfo[fragId].packet);
+    }
+}
+
+void checked_reverse(FragInfo *fragInfo, unsigned fragNum, unsigned maxFrags) {
+    unsigned fragId;
+    if (maxFrags < fragNum) {
+        return;
+    }
+    for (fragId = 0; fragId < fragNum; fragId++) {
+        (void)fragInfo[fragId].len;
+    }
+}
+"""
+    source.write_text(code, encoding="utf-8")
+
+    candidates = list(LoopMutIdxOobAnalyzer().find_candidates(tmp_path))
+    candidate_lines = {candidate.line for candidate in candidates}
+    lines = code.splitlines()
+    direct_line = lines.index("        (void)(uintptr_t)(fragInfo[fragId].packet);") + 1
+    reverse_line = lines.index("        (void)fragInfo[fragId].len;") + 1
+
+    assert direct_line not in candidate_lines
+    assert reverse_line not in candidate_lines
+
+
 def test_loop_mut_idx_oob_semgrep_rules_ignore_basic_safe_shapes(tmp_path: Path) -> None:
     source = tmp_path / "safe.c"
     source.write_text(
         """
-void direct_condition(char *dst, unsigned len) {
+void direct_condition(char *dst, unsigned len, unsigned cap) {
+    if (len > cap) {
+        return;
+    }
     for (unsigned idx = 0; idx < len; idx++) {
         dst[idx] = 0;
     }

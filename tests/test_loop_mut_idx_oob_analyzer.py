@@ -30,9 +30,10 @@ def test_loop_mut_idx_oob_skips_when_semgrep_missing(tmp_path: Path) -> None:
 
 def test_loop_mut_idx_oob_rule_yaml_is_valid() -> None:
     data = yaml.safe_load(RULE_FILE.read_text(encoding="utf-8"))
-    assert len(data["rules"]) == 4
+    assert len(data["rules"]) == 5
     rule_ids = {rule["id"] for rule in data["rules"]}
     assert "c.loop-mutated-index-array-access.broad" in rule_ids
+    assert "c.loop-bound-unchecked-index-access.broad" in rule_ids
     assert "c.loop-mutated-index-pointer-access.broad" in rule_ids
     assert "c.loop-mutated-index-memory-call.broad" in rule_ids
     assert "c.loop-mutated-index-derived-pointer-sink.broad" in rule_ids

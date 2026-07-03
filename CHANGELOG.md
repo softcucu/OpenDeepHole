@@ -2,6 +2,7 @@
 
 ## 2026-07-03
 
+- **优化** `loop_mut_idx_oob` Semgrep 初筛新增未校验循环上界召回：当循环变量由未提前比较校验的上界控制并用于数组下标或指针偏移访问时，会提取候选点，覆盖 `fragInfo[fragId]` 这类访问层级
 - **新增** 演示用审计排序：数组越界家族候选中若命中 `MC_EthBuildPayLoadByFrag`，会在漏洞识别阶段优先放到第一个候选位置，便于展示漏洞发现过程
 - **优化** MCP 初始提示词和 `deephole-code` 源码查询工具说明会明确要求优先使用 `view_function_code`、`view_struct_code`、`view_global_variable_definition` 阅读源码，索引不可用或需要目录级搜索时再回退内置 `read`/`grep`/`glob`
 - **新增** 扫描详情页新增一级「静态分析」页签：展示最终进入 AI 审计队列的所有静态候选点，支持分页、类型/审计状态/验证状态筛选，并在候选详情中展示描述、AI 审计结论和验证状态
