@@ -332,6 +332,13 @@ class ThreatAnalysisSources(BaseModel):
     documents: list[str] = []
 
 
+class ThreatAnalysisScanScope(BaseModel):
+    """Code scope covered by the threat-analysis result."""
+    project_path: str = ""
+    code_scan_path: str = ""
+    code_scan_relative_path: str = ""
+
+
 class ThreatRisk(BaseModel):
     risk_id: str = ""
     name: str = ""
@@ -382,6 +389,7 @@ class ThreatAnalysis(BaseModel):
     schema_version: str = "1.0"
     analysis_id: str = ""
     sources: ThreatAnalysisSources = Field(default_factory=ThreatAnalysisSources)
+    scan_scope: ThreatAnalysisScanScope = Field(default_factory=ThreatAnalysisScanScope)
     assets: list[ThreatAsset] = []
     attack_trees: list[ThreatAttackTree] = []
     code_path_mappings: list[ThreatCodePathMapping] = []

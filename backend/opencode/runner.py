@@ -25,7 +25,12 @@ from backend.opencode.model_pool import (
     release_model_lease,
 )
 from backend.opencode.serve_client import get_serve_manager
-from backend.threat_analysis import parse_threat_analysis_file
+from backend.threat_analysis import (
+    apply_threat_analysis_scan_scope,
+    build_threat_analysis_scan_scope,
+    parse_threat_analysis_file,
+    write_threat_analysis_file,
+)
 
 logger = get_logger(__name__)
 
@@ -825,6 +830,8 @@ async def run_threat_analysis_audit(
     analysis_root = (project_dir or workspace).resolve()
     target_path = (code_scan_path or analysis_root).resolve()
     result_path = analysis_root / "res.json"
+    scan_scope = build_threat_analysis_scan_scope(analysis_root, target_path)
+    scan_scope_json = json.dumps(scan_scope.model_dump(), ensure_ascii=False)
 
     for attempt in range(1, max_retries + 2):
         result_id = f"threat-analysis-{uuid4().hex}"
@@ -837,6 +844,7 @@ async def run_threat_analysis_audit(
             f"本次代码分析范围为 `{target_path}`。"
             f"产品名称为 `{product or '未指定'}`。"
             f"最终必须把一个合法 JSON 对象写入 `{result_path}`，文件名必须是 `res.json`。"
+            f"JSON 顶层必须包含 scan_scope，值必须是 {scan_scope_json}。"
             "JSON 结构必须符合技能文档的 `schema_version/sources/assets/attack_trees/code_path_mappings` 要求。"
             "如果某类信息无法识别，使用空数组或空字符串，不要编造不存在的代码路径。"
             "不得修改 `res.json` 之外的任何文件；不需要调用 submit_result。"
@@ -869,7 +877,10 @@ async def run_threat_analysis_audit(
             )
         except asyncio.TimeoutError:
             logger.error("%s threat analysis timed out for %s", tool, project_id)
-            parsed = _read_fresh_threat_analysis_result(result_path, old_mtime, started_at, log_path)
+            parsed = _read_fresh_threat_analysis_result(
+                result_path, old_mtime, started_at, log_path,
+                project_dir=analysis_root, code_scan_path=target_path,
+            )
             if parsed is not None:
                 return parsed
             return None
@@ -879,14 +890,20 @@ async def run_threat_analysis_audit(
             logger.exception("%s threat analysis failed for %s (attempt %d)", tool, project_id, attempt)
             if on_output:
                 on_output(f"[retry {attempt}/{max_retries}] {tool} error: {exc}")
-            parsed = _read_fresh_threat_analysis_result(result_path, old_mtime, started_at, log_path)
+            parsed = _read_fresh_threat_analysis_result(
+                result_path, old_mtime, started_at, log_path,
+                project_dir=analysis_root, code_scan_path=target_path,
+            )
             if parsed is not None:
                 return parsed
             if attempt <= max_retries:
                 continue
             return None
 
-        parsed = _read_fresh_threat_analysis_result(result_path, old_mtime, started_at, log_path)
+        parsed = _read_fresh_threat_analysis_result(
+            result_path, old_mtime, started_at, log_path,
+            project_dir=analysis_root, code_scan_path=target_path,
+        )
         if parsed is not None:
             return parsed
         if attempt <= max_retries:
@@ -905,6 +922,9 @@ def _read_fresh_threat_analysis_result(
     old_mtime: float | None,
     started_at: float,
     log_path: Path | None,
+    *,
+    project_dir: Path | None = None,
+    code_scan_path: Path | None = None,
 ) -> ThreatAnalysis | None:
     if not result_path.is_file():
         logger.warning("Threat analysis res.json was not written: %s", result_path)
@@ -918,7 +938,11 @@ def _read_fresh_threat_analysis_result(
         logger.warning("Ignoring stale threat analysis res.json: %s", result_path)
         return None
     try:
-        return parse_threat_analysis_file(result_path)
+        analysis = parse_threat_analysis_file(result_path)
+        if project_dir is not None:
+            analysis = apply_threat_analysis_scan_scope(analysis, project_dir, code_scan_path)
+            write_threat_analysis_file(result_path, analysis)
+        return analysis
     except Exception as exc:
         logger.warning(
             "Failed to parse threat analysis res.json %s: %s\n%s",

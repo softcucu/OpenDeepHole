@@ -17,7 +17,7 @@ import yaml
 from agent.config import AgentConfig, apply_network_env
 from agent.reporter import Reporter
 from backend.checker_sync import unpack_checker_packages
-from backend.models import Candidate, FeedbackEntry, ScanEvent, Vulnerability
+from backend.models import Candidate, FeedbackEntry, ScanEvent, ThreatAnalysis, Vulnerability
 from backend.registry import CHECKERS_DIR_ENV
 
 
@@ -366,6 +366,40 @@ def _resolve_scan_paths(project_path: Path, code_scan_path: Path | None) -> tupl
     if not _is_relative_to(scan_root, project_root):
         raise ValueError(f"代码扫描路径必须位于项目总路径内: {scan_root} 不在 {project_root} 内")
     return project_root, scan_root
+
+
+def _load_existing_threat_analysis_for_scope(
+    project_root: Path,
+    scan_root: Path,
+) -> tuple[ThreatAnalysis | None, str]:
+    """Load project-root res.json only when it belongs to this scan scope."""
+    from backend.threat_analysis import (
+        build_threat_analysis_scan_scope,
+        parse_threat_analysis_file,
+        threat_analysis_scope_matches,
+    )
+
+    result_path = project_root / "res.json"
+    expected = build_threat_analysis_scan_scope(project_root, scan_root)
+    if not result_path.is_file():
+        return None, ""
+    try:
+        analysis = parse_threat_analysis_file(result_path)
+    except Exception as exc:
+        return None, f"已有威胁分析产物解析失败，重新分析（路径: {result_path}，原因: {exc}）"
+    if threat_analysis_scope_matches(analysis, project_root, scan_root):
+        scope_label = analysis.scan_scope.code_scan_relative_path or expected.code_scan_relative_path
+        return analysis, f"复用已有威胁分析产物（扫描范围: {scope_label}，路径: {result_path}）"
+    old_scope = (
+        analysis.scan_scope.code_scan_relative_path
+        or analysis.scan_scope.code_scan_path
+        or "未标记"
+    )
+    return (
+        None,
+        f"已有威胁分析产物属于扫描范围 {old_scope}，当前扫描范围为 "
+        f"{expected.code_scan_relative_path}，重新分析（路径: {result_path}）",
+    )
 
 
 def _candidate_path_candidates(candidate_file: str, project_root: Path, scan_root: Path) -> list[Path]:
@@ -854,19 +888,25 @@ async def run_scan(
                 from backend.opencode.runner import run_threat_analysis_audit
 
                 root_dir = Path(__file__).resolve().parent.parent
-                await emit("threat_analysis", "开始基于攻击树的威胁分析...")
-                analysis = await run_threat_analysis_audit(
-                    workspace=workspace,
-                    project_id=scan_id,
-                    skill_path=root_dir / "attack-tree-threat-analysis.md",
-                    reference_catalog_path=root_dir / "attack-method-reference-catalog.md",
-                    on_output=lambda line: print(f"  [threat] {line}", flush=True),
-                    cancel_event=cancel_event,
-                    timeout=config.opencode.timeout,
-                    project_dir=project_path,
-                    code_scan_path=code_scan_path,
-                    product=product,
+                analysis, cache_message = _load_existing_threat_analysis_for_scope(
+                    project_path, code_scan_path,
                 )
+                if cache_message:
+                    await emit("threat_analysis", cache_message)
+                if analysis is None:
+                    await emit("threat_analysis", "开始基于攻击树的威胁分析...")
+                    analysis = await run_threat_analysis_audit(
+                        workspace=workspace,
+                        project_id=scan_id,
+                        skill_path=root_dir / "attack-tree-threat-analysis.md",
+                        reference_catalog_path=root_dir / "attack-method-reference-catalog.md",
+                        on_output=lambda line: print(f"  [threat] {line}", flush=True),
+                        cancel_event=cancel_event,
+                        timeout=config.opencode.timeout,
+                        project_dir=project_path,
+                        code_scan_path=code_scan_path,
+                        product=product,
+                    )
                 if analysis is not None:
                     await reporter.push_threat_analysis(scan_id, analysis.model_dump())
                     await emit(

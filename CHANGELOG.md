@@ -2,6 +2,7 @@
 
 ## 2026-07-03
 
+- **修复** 威胁分析产物继续写入项目根目录 `res.json`，但会标记实际 `code_scan_path` 子目录；新扫描只有在已有产物的扫描范围与本次扫描目录一致时才复用，避免不同子目录扫描误跳过威胁分析
 - **修复** Windows 下停止扫描后继续运行时 OpenCode/nga serve 端口可能被旧子进程占用的问题；Agent 关闭或重启本 Agent 标记的 serve 时会清理进程树，避免 `.cmd` 父进程退出但 Node 子进程继续占用 `OPENCODE_SERVE_PORT`
 - **修复** OpenCode/nga serve 模式的 `x-opencode-directory` 请求头改为 ASCII 安全编码，避免项目路径包含中文等非 ASCII 字符时 httpx 在创建 `/session` 请求前抛出 `UnicodeEncodeError`
 - **优化** `loop_mut_idx_oob` Semgrep 初筛新增未校验循环上界召回：当循环变量由未提前比较校验的上界控制并用于数组下标或指针偏移访问时，会提取候选点，覆盖 `fragInfo[fragId]` 这类访问层级

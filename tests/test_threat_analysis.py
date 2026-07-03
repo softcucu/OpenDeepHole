@@ -1,10 +1,18 @@
 import tempfile
 import unittest
+import time
 from pathlib import Path
 
+from backend.opencode.runner import _read_fresh_threat_analysis_result
 from backend.models import ScanItemStatus, ScanMeta, ScanStatus
 from backend.store.sqlite import SqliteScanStore
-from backend.threat_analysis import parse_threat_analysis_data, parse_threat_analysis_file
+from backend.threat_analysis import (
+    apply_threat_analysis_scan_scope,
+    parse_threat_analysis_data,
+    parse_threat_analysis_file,
+    threat_analysis_scope_matches,
+    write_threat_analysis_file,
+)
 
 
 def _scan(scan_id: str) -> tuple[ScanStatus, ScanMeta]:
@@ -35,6 +43,11 @@ class ThreatAnalysisParserTests(unittest.TestCase):
             "schema_version": "1.0",
             "analysis_id": "ATA-001",
             "sources": {"repositories": ["."], "documents": []},
+            "scan_scope": {
+                "project_path": "/tmp/project",
+                "code_scan_path": "/tmp/project/src",
+                "code_scan_relative_path": "src",
+            },
             "assets": [
                 {
                     "asset_id": "ASSET-001",
@@ -77,6 +90,7 @@ class ThreatAnalysisParserTests(unittest.TestCase):
         self.assertEqual(analysis.assets[0].risks[0].security_property, "availability")
         self.assertEqual(analysis.attack_trees[0].nodes[-1].preconditions, ["允许远程登录"])
         self.assertEqual(analysis.code_path_mappings[0].code_paths[0].path, "src/api")
+        self.assertEqual(analysis.scan_scope.code_scan_relative_path, "src")
 
     def test_parse_file_accepts_fenced_json(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -87,6 +101,61 @@ class ThreatAnalysisParserTests(unittest.TestCase):
 
             self.assertEqual(analysis.schema_version, "1.0")
             self.assertEqual(analysis.assets, [])
+
+    def test_apply_scan_scope_marks_subdirectory(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp) / "project"
+            scan_root = project / "src"
+            scan_root.mkdir(parents=True)
+            analysis = parse_threat_analysis_data({"schema_version": "1.0", "assets": []})
+
+            scoped = apply_threat_analysis_scan_scope(analysis, project, scan_root)
+
+            self.assertEqual(scoped.scan_scope.project_path, project.resolve().as_posix())
+            self.assertEqual(scoped.scan_scope.code_scan_path, scan_root.resolve().as_posix())
+            self.assertEqual(scoped.scan_scope.code_scan_relative_path, "src")
+            self.assertTrue(threat_analysis_scope_matches(scoped, project, scan_root))
+            self.assertFalse(threat_analysis_scope_matches(scoped, project, project))
+
+    def test_write_scan_scope_to_result_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp) / "project"
+            scan_root = project / "src"
+            scan_root.mkdir(parents=True)
+            result_path = project / "res.json"
+            analysis = apply_threat_analysis_scan_scope(
+                parse_threat_analysis_data({"analysis_id": "ATA-SCOPE", "assets": []}),
+                project,
+                scan_root,
+            )
+
+            write_threat_analysis_file(result_path, analysis)
+            loaded = parse_threat_analysis_file(result_path)
+
+            self.assertEqual(loaded.analysis_id, "ATA-SCOPE")
+            self.assertEqual(loaded.scan_scope.code_scan_relative_path, "src")
+
+    def test_runner_read_result_writes_scan_scope_to_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp) / "project"
+            scan_root = project / "src"
+            scan_root.mkdir(parents=True)
+            result_path = project / "res.json"
+            result_path.write_text('{"analysis_id":"ATA-RUNNER","assets":[]}', encoding="utf-8")
+
+            analysis = _read_fresh_threat_analysis_result(
+                result_path,
+                None,
+                time.time(),
+                None,
+                project_dir=project,
+                code_scan_path=scan_root,
+            )
+            loaded = parse_threat_analysis_file(result_path)
+
+            self.assertIsNotNone(analysis)
+            self.assertEqual(analysis.scan_scope.code_scan_relative_path, "src")
+            self.assertEqual(loaded.scan_scope.code_scan_relative_path, "src")
 
 
 class ThreatAnalysisStoreTests(unittest.TestCase):

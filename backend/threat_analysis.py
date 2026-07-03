@@ -8,6 +8,7 @@ from typing import Any
 
 from backend.models import (
     ThreatAnalysis,
+    ThreatAnalysisScanScope,
     ThreatAnalysisSources,
     ThreatAsset,
     ThreatAttackTree,
@@ -77,12 +78,83 @@ def _int(value: Any, default: int = 0) -> int:
         return default
 
 
+def build_threat_analysis_scan_scope(
+    project_path: Path,
+    code_scan_path: Path | None = None,
+) -> ThreatAnalysisScanScope:
+    """Return normalized scope metadata for a threat-analysis artifact."""
+    project_root = project_path.expanduser().resolve()
+    scan_root = (code_scan_path or project_root).expanduser().resolve()
+    try:
+        relative = scan_root.relative_to(project_root).as_posix()
+    except ValueError:
+        relative = scan_root.as_posix()
+    if not relative:
+        relative = "."
+    return ThreatAnalysisScanScope(
+        project_path=project_root.as_posix(),
+        code_scan_path=scan_root.as_posix(),
+        code_scan_relative_path=relative,
+    )
+
+
+def apply_threat_analysis_scan_scope(
+    analysis: ThreatAnalysis,
+    project_path: Path,
+    code_scan_path: Path | None = None,
+) -> ThreatAnalysis:
+    """Attach the authoritative scan scope to parsed threat-analysis output."""
+    return analysis.model_copy(
+        update={
+            "scan_scope": build_threat_analysis_scan_scope(project_path, code_scan_path),
+        }
+    )
+
+
+def threat_analysis_scope_matches(
+    analysis: ThreatAnalysis,
+    project_path: Path,
+    code_scan_path: Path | None = None,
+) -> bool:
+    """Return True only when an artifact was generated for the requested scan scope."""
+    scope = analysis.scan_scope
+    if not scope.project_path or not scope.code_scan_path:
+        return False
+    expected = build_threat_analysis_scan_scope(project_path, code_scan_path)
+    try:
+        stored_project = Path(scope.project_path).expanduser().resolve()
+        stored_scan = Path(scope.code_scan_path).expanduser().resolve()
+    except OSError:
+        return (
+            scope.project_path == expected.project_path
+            and scope.code_scan_path == expected.code_scan_path
+        )
+    return (
+        stored_project == Path(expected.project_path)
+        and stored_scan == Path(expected.code_scan_path)
+    )
+
+
+def write_threat_analysis_file(path: Path, analysis: ThreatAnalysis) -> None:
+    """Persist normalized threat-analysis JSON."""
+    path.write_text(
+        json.dumps(analysis.model_dump(), ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+
 def parse_threat_analysis_data(data: dict[str, Any]) -> ThreatAnalysis:
     """Normalize raw ``res.json`` data into the public API model."""
     sources_raw = data.get("sources") if isinstance(data.get("sources"), dict) else {}
     sources = ThreatAnalysisSources(
         repositories=_str_list(sources_raw.get("repositories")),
         documents=_str_list(sources_raw.get("documents")),
+    )
+    scan_scope_raw = data.get("scan_scope") if isinstance(data.get("scan_scope"), dict) else {}
+    scan_scope = ThreatAnalysisScanScope(
+        project_path=_str(scan_scope_raw.get("project_path")),
+        code_scan_path=_str(scan_scope_raw.get("code_scan_path")),
+        code_scan_relative_path=_str(scan_scope_raw.get("code_scan_relative_path")),
     )
 
     assets: list[ThreatAsset] = []
@@ -153,6 +225,7 @@ def parse_threat_analysis_data(data: dict[str, Any]) -> ThreatAnalysis:
         schema_version=_str(data.get("schema_version"), "1.0") or "1.0",
         analysis_id=_str(data.get("analysis_id")),
         sources=sources,
+        scan_scope=scan_scope,
         assets=assets,
         attack_trees=attack_trees,
         code_path_mappings=mappings,

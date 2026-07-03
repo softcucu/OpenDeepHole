@@ -2,6 +2,7 @@ import tempfile
 import unittest
 import sqlite3
 import os
+import json
 from pathlib import Path
 
 from agent.scanner import (
@@ -12,6 +13,7 @@ from agent.scanner import (
     _candidate_key,
     _candidate_pattern_key,
     _dedup_candidates,
+    _load_existing_threat_analysis_for_scope,
     _normalize_candidate_for_project,
     _order_candidates_for_audit,
     _prepare_audit_queue,
@@ -126,6 +128,82 @@ class AgentScanPathTests(unittest.TestCase):
             self.assertEqual(candidate.function, "__project__")
             self.assertEqual(candidate.vuln_type, "skillonly")
             self.assertTrue(is_project_level_candidate(candidate))
+
+    def test_reuse_existing_threat_analysis_for_matching_scan_scope(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp) / "project"
+            scan_dir = project / "module"
+            scan_dir.mkdir(parents=True)
+            (project / "res.json").write_text(
+                json.dumps({
+                    "schema_version": "1.0",
+                    "analysis_id": "ATA-MODULE",
+                    "scan_scope": {
+                        "project_path": project.resolve().as_posix(),
+                        "code_scan_path": scan_dir.resolve().as_posix(),
+                        "code_scan_relative_path": "module",
+                    },
+                    "assets": [],
+                }),
+                encoding="utf-8",
+            )
+
+            analysis, message = _load_existing_threat_analysis_for_scope(
+                project.resolve(), scan_dir.resolve(),
+            )
+
+            self.assertIsNotNone(analysis)
+            self.assertEqual(analysis.analysis_id, "ATA-MODULE")
+            self.assertIn("复用已有威胁分析产物", message)
+
+    def test_reject_existing_threat_analysis_for_different_scan_scope(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp) / "project"
+            old_dir = project / "old"
+            new_dir = project / "new"
+            old_dir.mkdir(parents=True)
+            new_dir.mkdir()
+            (project / "res.json").write_text(
+                json.dumps({
+                    "schema_version": "1.0",
+                    "analysis_id": "ATA-OLD",
+                    "scan_scope": {
+                        "project_path": project.resolve().as_posix(),
+                        "code_scan_path": old_dir.resolve().as_posix(),
+                        "code_scan_relative_path": "old",
+                    },
+                    "assets": [],
+                }),
+                encoding="utf-8",
+            )
+
+            analysis, message = _load_existing_threat_analysis_for_scope(
+                project.resolve(), new_dir.resolve(),
+            )
+
+            self.assertIsNone(analysis)
+            self.assertIn("当前扫描范围为 new", message)
+
+    def test_reject_existing_threat_analysis_without_scan_scope(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp) / "project"
+            scan_dir = project / "module"
+            scan_dir.mkdir(parents=True)
+            (project / "res.json").write_text(
+                json.dumps({
+                    "schema_version": "1.0",
+                    "analysis_id": "ATA-LEGACY",
+                    "assets": [],
+                }),
+                encoding="utf-8",
+            )
+
+            analysis, message = _load_existing_threat_analysis_for_scope(
+                project.resolve(), scan_dir.resolve(),
+            )
+
+            self.assertIsNone(analysis)
+            self.assertIn("未标记", message)
 
 
 class AgentAuditOrderingTests(unittest.TestCase):

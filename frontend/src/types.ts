@@ -187,6 +187,12 @@ export interface ThreatAnalysisSources {
   documents: string[];
 }
 
+export interface ThreatAnalysisScanScope {
+  project_path: string;
+  code_scan_path: string;
+  code_scan_relative_path: string;
+}
+
 export interface ThreatRisk {
   risk_id: string;
   name: string;
@@ -237,6 +243,7 @@ export interface ThreatAnalysis {
   schema_version: string;
   analysis_id: string;
   sources: ThreatAnalysisSources;
+  scan_scope: ThreatAnalysisScanScope;
   assets: ThreatAsset[];
   attack_trees: ThreatAttackTree[];
   code_path_mappings: ThreatCodePathMapping[];
