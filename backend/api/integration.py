@@ -27,6 +27,7 @@ from backend.models import (
     HistoryPattern,
     MarkRequest,
     ScanStatus,
+    ThreatAnalysis,
     UnmarkRequest,
     User,
 )
@@ -414,6 +415,14 @@ async def get_public_scan_git_history(
     current_user: User = Depends(_public_user_dependency),
 ) -> list[HistoryPattern]:
     return await scan_api.get_scan_git_history(scan_id, current_user)
+
+
+@router.get("/api/public/scans/{scan_id}/threat-analysis", response_model=ThreatAnalysis)
+async def get_public_scan_threat_analysis(
+    scan_id: str,
+    current_user: User = Depends(_public_user_dependency),
+) -> ThreatAnalysis:
+    return await scan_api.get_scan_threat_analysis(scan_id, current_user)
 
 
 @router.get("/api/public/scans/{scan_id}/checkers", response_model=list[CheckerInfo])

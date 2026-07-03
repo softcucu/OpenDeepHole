@@ -19,7 +19,11 @@ import httpx
 
 RUNTIME_DIRS = ("agent", "code_parser", "mcp_server", "backend")
 RUNTIME_TOOL_DIRS = ("ctags-p6.2.20260517.0-x64",)
-RUNTIME_ROOT_FILES = ("requirements-agent.txt",)
+RUNTIME_ROOT_FILES = (
+    "requirements-agent.txt",
+    "attack-tree-threat-analysis.md",
+    "attack-method-reference-catalog.md",
+)
 SKIP_DIRS = {
     "__pycache__",
     ".git",

@@ -44,6 +44,7 @@ from backend.models import (
     ScanStatus,
     ScanSummary,
     SkillReport,
+    ThreatAnalysis,
     UnmarkRequest,
     UpdateScanProductRequest,
     User,
@@ -1609,6 +1610,19 @@ async def get_scan_git_history(
     """Return the git-history security problem patterns mined for a scan."""
     _check_scan_owner(scan_id, current_user)
     return get_scan_store().get_git_history_patterns(scan_id)
+
+
+@router.get("/api/scan/{scan_id}/threat-analysis", response_model=ThreatAnalysis)
+async def get_scan_threat_analysis(
+    scan_id: str,
+    current_user: User = Depends(get_current_user),
+) -> ThreatAnalysis:
+    """Return the attack-tree threat analysis result for a scan."""
+    _check_scan_owner(scan_id, current_user)
+    analysis = get_scan_store().get_threat_analysis(scan_id)
+    if analysis is None:
+        raise HTTPException(status_code=404, detail="No threat analysis found for this scan")
+    return analysis
 
 
 @router.get("/api/scan/{scan_id}/events")

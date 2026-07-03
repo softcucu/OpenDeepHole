@@ -1,5 +1,5 @@
 import axios from "axios";
-import type { AgentConfigTestResult, AgentInfo, AgentOpenCodeModelsResult, AgentOpenCodePoolStatus, AgentRemoteConfig, CheckerCatalogItem, CheckerDashboardResponse, CheckerInfo, FeedbackEntry, FpReviewJob, HistoryPattern, IndexStatus, ScanStatus, ScanStartResponse, ScanSummary, SkillCreateJob, SkillImportFile, SkillReport, TokenResponse, User, UserFeedbackVerdict } from "../types";
+import type { AgentConfigTestResult, AgentInfo, AgentOpenCodeModelsResult, AgentOpenCodePoolStatus, AgentRemoteConfig, CheckerCatalogItem, CheckerDashboardResponse, CheckerInfo, FeedbackEntry, FpReviewJob, HistoryPattern, IndexStatus, ScanStatus, ScanStartResponse, ScanSummary, SkillCreateJob, SkillImportFile, SkillReport, ThreatAnalysis, TokenResponse, User, UserFeedbackVerdict } from "../types";
 
 const api = axios.create({ baseURL: "/" });
 
@@ -626,6 +626,18 @@ export async function getScanGitHistory(scanId: string): Promise<HistoryPattern[
     return data;
   }
   const { data } = await api.get<HistoryPattern[]>(`/api/scan/${scanId}/git_history`);
+  return data;
+}
+
+export async function getScanThreatAnalysis(scanId: string): Promise<ThreatAnalysis> {
+  if (isPublicScan(scanId)) {
+    const { data } = await api.get<ThreatAnalysis>(
+      publicScanPath("/threat-analysis"),
+      { params: publicParams() },
+    );
+    return data;
+  }
+  const { data } = await api.get<ThreatAnalysis>(`/api/scan/${scanId}/threat-analysis`);
   return data;
 }
 

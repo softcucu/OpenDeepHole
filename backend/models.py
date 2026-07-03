@@ -326,6 +326,68 @@ class SkillReport(BaseModel):
     output_source: OutputSource = Field(default_factory=OutputSource)
 
 
+class ThreatAnalysisSources(BaseModel):
+    """Input sources actually used by the attack-tree threat analysis."""
+    repositories: list[str] = []
+    documents: list[str] = []
+
+
+class ThreatRisk(BaseModel):
+    risk_id: str = ""
+    name: str = ""
+    security_property: str = ""
+    description: str = ""
+
+
+class ThreatAsset(BaseModel):
+    asset_id: str = ""
+    name: str = ""
+    description: str = ""
+    asset_type: str = "other"
+    criticality: str = "medium"
+    risks: list[ThreatRisk] = []
+
+
+class ThreatAttackTreeNode(BaseModel):
+    node_id: str = ""
+    parent_id: str | None = None
+    node_type: str = ""
+    name: str = ""
+    order: int = 0
+    basis: list[str] = []
+    surface_type: str = ""
+    preconditions: list[str] = []
+
+
+class ThreatAttackTree(BaseModel):
+    tree_id: str = ""
+    asset_id: str = ""
+    risk_id: str = ""
+    attack_goal: str = ""
+    root_node_id: str = ""
+    nodes: list[ThreatAttackTreeNode] = []
+
+
+class ThreatCodePath(BaseModel):
+    path: str = ""
+    description: str = ""
+
+
+class ThreatCodePathMapping(BaseModel):
+    surface_node_id: str = ""
+    code_paths: list[ThreatCodePath] = []
+
+
+class ThreatAnalysis(BaseModel):
+    schema_version: str = "1.0"
+    analysis_id: str = ""
+    sources: ThreatAnalysisSources = Field(default_factory=ThreatAnalysisSources)
+    assets: list[ThreatAsset] = []
+    attack_trees: list[ThreatAttackTree] = []
+    code_path_mappings: list[ThreatCodePathMapping] = []
+    updated_at: str = ""
+
+
 class VulnerabilityValidation(BaseModel):
     """Runtime validation status and artifacts for one vulnerability."""
     scan_id: str = ""
@@ -398,6 +460,7 @@ class ScanStatus(BaseModel):
     candidates: list[ScanCandidate] = []
     vulnerabilities: list[Vulnerability]
     skill_reports: list[SkillReport] = []
+    threat_analysis: ThreatAnalysis | None = None
     validations: list[VulnerabilityValidation] = []
     events: list[ScanEvent] = []
     current_candidate: Candidate | None = None

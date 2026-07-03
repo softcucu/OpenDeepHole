@@ -25,6 +25,7 @@ from backend.models import (
     ScanStatus,
     ScanSummary,
     SkillReport,
+    ThreatAnalysis,
     UserInDB,
     Vulnerability,
     VulnerabilityValidation,
@@ -160,6 +161,16 @@ class ScanStoreBase(ABC):
     @abstractmethod
     def list_skill_reports(self, scan_id: str, checker_name: str | None = None) -> list[SkillReport]:
         """Return Markdown reports for a scan, optionally filtered by checker."""
+
+    # -- Threat analysis --
+
+    @abstractmethod
+    def replace_threat_analysis(self, scan_id: str, analysis: ThreatAnalysis) -> ThreatAnalysis:
+        """Replace the attack-tree threat analysis result for a scan."""
+
+    @abstractmethod
+    def get_threat_analysis(self, scan_id: str) -> ThreatAnalysis | None:
+        """Return the attack-tree threat analysis result for a scan if present."""
 
     # -- Events --
 

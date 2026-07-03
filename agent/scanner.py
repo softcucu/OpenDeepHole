@@ -825,7 +825,10 @@ async def run_scan(
 
         # --- Phase 3: Start local MCP (needed by opencode and API fallback) ---
         mcp_port = None
-        needs_opencode = any(entry.mode in {"opencode", "api"} for entry in registry.values())
+        needs_opencode = (
+            not retry_mode
+            or any(entry.mode in {"opencode", "api"} for entry in registry.values())
+        )
         if needs_opencode:
             from agent.local_mcp import LocalMCPServer
             from agent import mcp_registry
@@ -845,7 +848,44 @@ async def run_scan(
         )
         await emit("init", "Analysis workspace ready")
 
-        # --- Phase 5: Memory allocation/free API preprocessing ---
+        # --- Phase 5: Attack-tree threat analysis (fresh scans only) ---
+        if not retry_mode and workspace is not None and not cancel_event.is_set():
+            try:
+                from backend.opencode.runner import run_threat_analysis_audit
+
+                root_dir = Path(__file__).resolve().parent.parent
+                await emit("threat_analysis", "开始基于攻击树的威胁分析...")
+                analysis = await run_threat_analysis_audit(
+                    workspace=workspace,
+                    project_id=scan_id,
+                    skill_path=root_dir / "attack-tree-threat-analysis.md",
+                    reference_catalog_path=root_dir / "attack-method-reference-catalog.md",
+                    on_output=lambda line: print(f"  [threat] {line}", flush=True),
+                    cancel_event=cancel_event,
+                    timeout=config.opencode.timeout,
+                    project_dir=project_path,
+                    code_scan_path=code_scan_path,
+                    product=product,
+                )
+                if analysis is not None:
+                    await reporter.push_threat_analysis(scan_id, analysis.model_dump())
+                    await emit(
+                        "threat_analysis",
+                        f"威胁分析完成：识别 {len(analysis.assets)} 个关键资产，{len(analysis.attack_trees)} 棵攻击树",
+                    )
+                elif cancel_event.is_set():
+                    await emit("threat_analysis", "威胁分析已停止")
+                else:
+                    await emit("threat_analysis", "威胁分析未生成有效 res.json，已跳过结果展示")
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                await emit("threat_analysis", f"威胁分析异常（已跳过）: {exc}")
+            if cancel_event.is_set():
+                await reporter.finish_scan(scan_id, [], "cancelled", 0, 0)
+                return
+
+        # --- Phase 6: Memory allocation/free API preprocessing ---
         from backend.preprocess.memory_api_discovery import ensure_memory_api_artifact
         await ensure_memory_api_artifact(
             project_root=project_path,
@@ -857,7 +897,7 @@ async def run_scan(
             emit=lambda phase, message: emit(phase, message),
         )
 
-        # --- Phase 5: Static analysis (or load from cache) ---
+        # --- Phase 7: Static analysis (or load from cache) ---
         # Skip static analysis only when a candidates cache file already exists
         # (written by a previous run of this scan_id).  DB existence alone does
         # NOT skip this phase.
