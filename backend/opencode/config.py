@@ -6,7 +6,7 @@ import json
 import os
 import shutil
 import threading
-from pathlib import Path, PurePath
+from pathlib import Path
 
 from backend.config import get_config
 from backend.logger import get_logger
@@ -107,7 +107,7 @@ def _link_skill_resources(entry, link_dir: Path) -> None:
 
 
 def writable_edit_patterns(path: str | os.PathLike[str]) -> list[str]:
-    normalized = str(PurePath(path))
+    normalized = str(path)
     variants = [normalized]
     slash_normalized = normalized.replace("\\", "/")
     if slash_normalized not in variants:
@@ -353,3 +353,26 @@ def get_skill_content(workspace: Path, vuln_type: str) -> str | None:
         if path.is_file():
             return path.resolve().read_text(encoding="utf-8")
     return None
+
+
+def install_attack_tree_threat_analysis_skill(
+    workspace: Path,
+    skill_path: Path,
+    reference_catalog_path: Path,
+) -> None:
+    """Install the built-in attack-tree threat-analysis skill into a workspace."""
+    skill_path = skill_path.resolve()
+    reference_catalog_path = reference_catalog_path.resolve()
+    if not skill_path.is_file():
+        raise FileNotFoundError(f"Threat analysis skill not found: {skill_path}")
+    if not reference_catalog_path.is_file():
+        raise FileNotFoundError(f"Attack method reference catalog not found: {reference_catalog_path}")
+
+    with get_workspace_lock(workspace):
+        skill_dir = workspace / ".opencode" / "skills" / "attack-tree-threat-analysis"
+        skill_dir.mkdir(parents=True, exist_ok=True)
+        (skill_dir / "SKILL.md").write_text(skill_path.read_text(encoding="utf-8"), encoding="utf-8")
+        (skill_dir / "attack-method-reference-catalog.md").write_text(
+            reference_catalog_path.read_text(encoding="utf-8"),
+            encoding="utf-8",
+        )

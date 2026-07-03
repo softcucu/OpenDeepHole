@@ -24,6 +24,8 @@ class AgentRuntimePackageTests(unittest.TestCase):
 
         self.assertIn("agent/main.py", names)
         self.assertIn("requirements-agent.txt", names)
+        self.assertIn("attack-tree-threat-analysis.md", names)
+        self.assertIn("attack-method-reference-catalog.md", names)
         self.assertIn("ctags-p6.2.20260517.0-x64/ctags.exe", names)
         self.assertFalse(any(name.startswith("checkers/") for name in names))
         self.assertNotIn("agent.yaml", names)
@@ -43,6 +45,8 @@ class AgentRuntimePackageTests(unittest.TestCase):
         self.assertIn("run_agent.sh", names)
         self.assertIn("run_agent.bat", names)
         self.assertIn("requirements-agent.txt", names)
+        self.assertIn("attack-tree-threat-analysis.md", names)
+        self.assertIn("attack-method-reference-catalog.md", names)
         self.assertTrue(any(name.startswith("checkers/") for name in names))
         self.assertIn("ctags-p6.2.20260517.0-x64/ctags.exe", names)
         self.assertIn("agent/product_validators/demo.py", names)

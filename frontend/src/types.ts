@@ -181,6 +181,67 @@ export interface SkillReport {
   output_source?: OutputSource;
 }
 
+export interface ThreatAnalysisSources {
+  repositories: string[];
+  documents: string[];
+}
+
+export interface ThreatRisk {
+  risk_id: string;
+  name: string;
+  security_property: string;
+  description: string;
+}
+
+export interface ThreatAsset {
+  asset_id: string;
+  name: string;
+  description: string;
+  asset_type: string;
+  criticality: string;
+  risks: ThreatRisk[];
+}
+
+export interface ThreatAttackTreeNode {
+  node_id: string;
+  parent_id: string | null;
+  node_type: "goal" | "domain" | "surface" | "method" | string;
+  name: string;
+  order: number;
+  basis: string[];
+  surface_type?: string;
+  preconditions?: string[];
+}
+
+export interface ThreatAttackTree {
+  tree_id: string;
+  asset_id: string;
+  risk_id: string;
+  attack_goal: string;
+  root_node_id: string;
+  nodes: ThreatAttackTreeNode[];
+}
+
+export interface ThreatCodePath {
+  path: string;
+  description: string;
+}
+
+export interface ThreatCodePathMapping {
+  surface_node_id: string;
+  code_paths: ThreatCodePath[];
+}
+
+export interface ThreatAnalysis {
+  schema_version: string;
+  analysis_id: string;
+  sources: ThreatAnalysisSources;
+  assets: ThreatAsset[];
+  attack_trees: ThreatAttackTree[];
+  code_path_mappings: ThreatCodePathMapping[];
+  updated_at: string;
+}
+
 export interface Candidate {
   file: string;
   line: number;
@@ -254,6 +315,7 @@ export interface ScanStatus {
   candidates: ScanCandidate[];
   vulnerabilities: Vulnerability[];
   skill_reports: SkillReport[];
+  threat_analysis?: ThreatAnalysis | null;
   validations?: VulnerabilityValidation[];
   events: ScanEvent[];
   current_candidate: Candidate | null;

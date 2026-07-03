@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import threading
+from datetime import datetime, timezone
 from pathlib import Path
 
 from backend.scan_metrics import VulnStat
@@ -27,6 +28,7 @@ from backend.models import (
     ScanStatus,
     ScanSummary,
     SkillReport,
+    ThreatAnalysis,
     UserInDB,
     Vulnerability,
     VulnerabilityValidation,
@@ -197,6 +199,12 @@ CREATE TABLE IF NOT EXISTS skill_reports (
 
 CREATE INDEX IF NOT EXISTS idx_skill_reports_scan ON skill_reports(scan_id);
 CREATE INDEX IF NOT EXISTS idx_scan_candidates_scan ON scan_candidates(scan_id);
+
+CREATE TABLE IF NOT EXISTS threat_analysis (
+    scan_id    TEXT PRIMARY KEY REFERENCES scans(scan_id) ON DELETE CASCADE,
+    content    TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
 
 CREATE TABLE IF NOT EXISTS feedback_entries (
     id              TEXT PRIMARY KEY,
@@ -462,6 +470,11 @@ class SqliteScanStore(ScanStoreBase):
                 UNIQUE(scan_id, checker_name, filename)
             );
             CREATE INDEX IF NOT EXISTS idx_skill_reports_scan ON skill_reports(scan_id);
+            CREATE TABLE IF NOT EXISTS threat_analysis (
+                scan_id    TEXT PRIMARY KEY REFERENCES scans(scan_id) ON DELETE CASCADE,
+                content    TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
             CREATE TABLE IF NOT EXISTS users (
                 user_id       TEXT PRIMARY KEY,
                 username      TEXT NOT NULL UNIQUE,
@@ -644,6 +657,7 @@ class SqliteScanStore(ScanStoreBase):
             candidates=self.list_scan_candidates(row["scan_id"]),
             vulnerabilities=self.get_vulnerabilities(row["scan_id"]),
             skill_reports=self.list_skill_reports(row["scan_id"]),
+            threat_analysis=self.get_threat_analysis(row["scan_id"]),
             validations=self.list_vulnerability_validations(row["scan_id"]),
             events=self.get_events(row["scan_id"]),
             current_candidate=current,
@@ -1629,6 +1643,41 @@ class SqliteScanStore(ScanStoreBase):
             )
             for r in cur.fetchall()
         ]
+
+    # -- Threat analysis --
+
+    def replace_threat_analysis(self, scan_id: str, analysis: ThreatAnalysis) -> ThreatAnalysis:
+        updated_at = analysis.updated_at or datetime.now(timezone.utc).isoformat()
+        stored = analysis.model_copy(update={"updated_at": updated_at})
+        with self._lock:
+            self._conn.execute(
+                """\
+                INSERT INTO threat_analysis (scan_id, content, updated_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(scan_id) DO UPDATE SET
+                    content = excluded.content,
+                    updated_at = excluded.updated_at
+                """,
+                (scan_id, stored.model_dump_json(), updated_at),
+            )
+            self._conn.commit()
+        return stored
+
+    def get_threat_analysis(self, scan_id: str) -> ThreatAnalysis | None:
+        cur = self._conn.execute(
+            "SELECT content, updated_at FROM threat_analysis WHERE scan_id = ?",
+            (scan_id,),
+        )
+        row = cur.fetchone()
+        if row is None:
+            return None
+        try:
+            analysis = ThreatAnalysis.model_validate_json(row["content"])
+        except Exception:
+            return None
+        if not analysis.updated_at:
+            analysis = analysis.model_copy(update={"updated_at": row["updated_at"] or ""})
+        return analysis
 
     # -- Events --
 
