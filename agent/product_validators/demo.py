@@ -12,7 +12,7 @@ from agent.vulnerability_validation import ValidationResult
 
 
 def register(registry) -> None:
-    registry.register("DEMO_VALIDATION", validate_demo)
+    registry.register("LTE", validate_demo)
 
 
 def validate_demo(ctx) -> ValidationResult:
