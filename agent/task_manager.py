@@ -14,6 +14,7 @@ class ScanTask:
     code_scan_path: Path
     checkers: list[str]
     scan_name: str
+    product: str = ""
     feedback_entries: list[dict] = field(default_factory=list)
     checker_packages: list[dict] = field(default_factory=list)
     retry_candidates: list[dict] | None = None
@@ -34,6 +35,7 @@ class TaskManager:
         code_scan_path: str | None,
         checkers: list[str],
         scan_name: str,
+        product: str = "",
         feedback_entries: list[dict] | None = None,
         checker_packages: list[dict] | None = None,
         retry_candidates: list[dict] | None = None,
@@ -46,6 +48,7 @@ class TaskManager:
             code_scan_path=Path(code_scan_path or project_path),
             checkers=checkers,
             scan_name=scan_name,
+            product=product,
             feedback_entries=feedback_entries or [],
             checker_packages=checker_packages or [],
             retry_candidates=retry_candidates,
@@ -88,5 +91,6 @@ class TaskManager:
                 "code_scan_path": str(task.code_scan_path),
                 "checkers": task.checkers,
                 "scan_name": task.scan_name,
+                "product": task.product,
             })
         return active

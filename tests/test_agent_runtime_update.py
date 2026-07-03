@@ -32,6 +32,7 @@ class AgentRuntimePackageTests(unittest.TestCase):
         self.assertFalse(any(name.startswith("backend/static/") for name in names))
         self.assertFalse(any(name.startswith("backend/system_skills/") for name in names))
         self.assertFalse(any("/vulnerability_validation/" in name for name in names))
+        self.assertFalse(any(name.startswith("agent/product_validators/") for name in names))
 
     def test_agent_download_zip_includes_launchers_config_and_bundled_ctags(self) -> None:
         data = agent_api._build_agent_zip("http://server.example", "owner-token")
@@ -44,6 +45,7 @@ class AgentRuntimePackageTests(unittest.TestCase):
         self.assertIn("requirements-agent.txt", names)
         self.assertTrue(any(name.startswith("checkers/") for name in names))
         self.assertIn("ctags-p6.2.20260517.0-x64/ctags.exe", names)
+        self.assertIn("agent/product_validators/demo.py", names)
         self.assertIn('server_url: "http://server.example"', agent_yaml)
         self.assertIn('owner_token: "owner-token"', agent_yaml)
 
@@ -131,6 +133,19 @@ class AgentRuntimePackageTests(unittest.TestCase):
 
             before = compute_runtime_hash(root)
             (validator_dir / "validator.py").write_text("print('v2')\n", encoding="utf-8")
+
+            self.assertEqual(before, compute_runtime_hash(root))
+
+    def test_runtime_hash_ignores_product_validator_changes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "agent" / "product_validators").mkdir(parents=True)
+            (root / "agent" / "main.py").write_text("print('agent')\n", encoding="utf-8")
+            validator = root / "agent" / "product_validators" / "demo.py"
+            validator.write_text("print('v1')\n", encoding="utf-8")
+
+            before = compute_runtime_hash(root)
+            validator.write_text("print('v2')\n", encoding="utf-8")
 
             self.assertEqual(before, compute_runtime_hash(root))
 
@@ -301,6 +316,36 @@ class AgentRuntimePackageTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "package hash mismatch"):
                 agent_server._write_skill_creator_package(package, Path(tmp))
 
+    def test_product_validator_package_writer_uses_dispatched_files(self) -> None:
+        package = _product_validators_package({
+            "__init__.py": "",
+            "demo.py": "def register(registry):\n    pass\n",
+        })
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "product_validators"
+            installed = agent_server._write_product_validators_package(package, root)
+
+            self.assertEqual(installed, ["__init__.py", "demo.py"])
+            self.assertEqual(
+                (root / "demo.py").read_text(encoding="utf-8"),
+                "def register(registry):\n    pass\n",
+            )
+
+    def test_product_validator_package_writer_rejects_path_traversal(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaisesRegex(RuntimeError, "Unsafe product validators package path"):
+                agent_server._write_product_validators_package(
+                    _product_validators_package({"../bad.py": "bad"}),
+                    Path(tmp) / "product_validators",
+                )
+
+    def test_product_validator_package_writer_rejects_hash_mismatch(self) -> None:
+        package = _product_validators_package({"demo.py": ""})
+        package["sha256"] = "0" * 64
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaisesRegex(RuntimeError, "hash mismatch"):
+                agent_server._write_product_validators_package(package, Path(tmp) / "product_validators")
+
     def test_runtime_update_only_task_runs_post_update_skill_create(self) -> None:
         update = AsyncMock(return_value=False)
         handler = AsyncMock(return_value={"ok": True})
@@ -374,6 +419,19 @@ def _skill_creator_package(files: dict[str, str]) -> dict[str, str]:
     data = archive.getvalue()
     return {
         "name": "deephole-skill-creator",
+        "sha256": hashlib.sha256(data).hexdigest(),
+        "archive_b64": base64.b64encode(data).decode("ascii"),
+    }
+
+
+def _product_validators_package(files: dict[str, str]) -> dict[str, str]:
+    archive = io.BytesIO()
+    with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        for name, content in files.items():
+            zf.writestr(name, content)
+    data = archive.getvalue()
+    return {
+        "name": "product_validators",
         "sha256": hashlib.sha256(data).hexdigest(),
         "archive_b64": base64.b64encode(data).decode("ascii"),
     }

@@ -548,6 +548,13 @@ export async function testAgentConfig(agentId: string, config: AgentRemoteConfig
   return data;
 }
 
+export async function syncProductValidators(agentId: string): Promise<{ ok: boolean; message: string; installed: string[] }> {
+  const { data } = await api.post<{ ok: boolean; message: string; installed: string[] }>(
+    `/api/agent/${agentId}/product-validators/sync`,
+  );
+  return data;
+}
+
 // --- FP Review ---
 
 export function scanSSEUrl(scanId: string): string {

@@ -71,6 +71,7 @@ async def _handle_command(msg: dict, config, task_manager, reporter) -> dict | N
             code_scan_path=msg.get("code_scan_path"),
             checkers=msg.get("checkers", []),
             scan_name=msg.get("scan_name", ""),
+            product=msg.get("product", ""),
             feedback_entries=msg.get("feedback_entries", []),
             checker_packages=msg.get("checker_packages", []),
         )
@@ -85,6 +86,7 @@ async def _handle_command(msg: dict, config, task_manager, reporter) -> dict | N
             code_scan_path=msg.get("code_scan_path"),
             checkers=msg.get("checkers"),
             scan_name=msg.get("scan_name"),
+            product=msg.get("product"),
             feedback_entries=msg.get("feedback_entries"),
             checker_packages=msg.get("checker_packages"),
             retry_candidates=msg.get("retry_candidates"),
@@ -108,8 +110,15 @@ async def _handle_command(msg: dict, config, task_manager, reporter) -> dict | N
             scan_id=msg["scan_id"],
             vuln_index=int(msg["vuln_index"]),
             project_path=msg.get("project_path", ""),
+            code_scan_path=msg.get("code_scan_path", ""),
+            product=msg.get("product", ""),
             vulnerability=msg.get("vulnerability") or {},
             report_markdown=msg.get("report_markdown", ""),
+        )
+    elif cmd_type == "product_validators_sync":
+        return await agent_server.handle_product_validators_sync(
+            request_id=msg.get("request_id", ""),
+            package=msg.get("package") or {},
         )
     elif cmd_type == "fp_review_stop":
         await agent_server.handle_fp_review_stop(

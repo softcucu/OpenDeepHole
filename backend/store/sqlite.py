@@ -136,9 +136,15 @@ CREATE TABLE IF NOT EXISTS vulnerability_validations (
     vuln_index          INTEGER NOT NULL,
     status              TEXT NOT NULL DEFAULT 'pending',
     running             INTEGER NOT NULL DEFAULT 0,
+    product             TEXT NOT NULL DEFAULT '',
+    validator_name      TEXT NOT NULL DEFAULT '',
+    validation_success  INTEGER,
+    is_problem          INTEGER,
     validation_code     TEXT NOT NULL DEFAULT '',
     validation_output   TEXT NOT NULL DEFAULT '',
     intermediate_output TEXT NOT NULL DEFAULT '',
+    final_output        TEXT NOT NULL DEFAULT '',
+    artifacts           TEXT NOT NULL DEFAULT '[]',
     started_at          TEXT NOT NULL DEFAULT '',
     finished_at         TEXT NOT NULL DEFAULT '',
     updated_at          TEXT NOT NULL DEFAULT '',
@@ -524,9 +530,15 @@ class SqliteScanStore(ScanStoreBase):
                 vuln_index          INTEGER NOT NULL,
                 status              TEXT NOT NULL DEFAULT 'pending',
                 running             INTEGER NOT NULL DEFAULT 0,
+                product             TEXT NOT NULL DEFAULT '',
+                validator_name      TEXT NOT NULL DEFAULT '',
+                validation_success  INTEGER,
+                is_problem          INTEGER,
                 validation_code     TEXT NOT NULL DEFAULT '',
                 validation_output   TEXT NOT NULL DEFAULT '',
                 intermediate_output TEXT NOT NULL DEFAULT '',
+                final_output        TEXT NOT NULL DEFAULT '',
+                artifacts           TEXT NOT NULL DEFAULT '[]',
                 started_at          TEXT NOT NULL DEFAULT '',
                 finished_at         TEXT NOT NULL DEFAULT '',
                 updated_at          TEXT NOT NULL DEFAULT '',
@@ -535,6 +547,32 @@ class SqliteScanStore(ScanStoreBase):
             CREATE INDEX IF NOT EXISTS idx_vulnerability_validations_scan
                 ON vulnerability_validations(scan_id);
         """)
+        validation_cur = self._conn.execute("PRAGMA table_info(vulnerability_validations)")
+        validation_cols = {r[1] for r in validation_cur.fetchall()}
+        if "product" not in validation_cols:
+            self._conn.execute(
+                "ALTER TABLE vulnerability_validations ADD COLUMN product TEXT NOT NULL DEFAULT ''"
+            )
+        if "validator_name" not in validation_cols:
+            self._conn.execute(
+                "ALTER TABLE vulnerability_validations ADD COLUMN validator_name TEXT NOT NULL DEFAULT ''"
+            )
+        if "validation_success" not in validation_cols:
+            self._conn.execute(
+                "ALTER TABLE vulnerability_validations ADD COLUMN validation_success INTEGER"
+            )
+        if "is_problem" not in validation_cols:
+            self._conn.execute(
+                "ALTER TABLE vulnerability_validations ADD COLUMN is_problem INTEGER"
+            )
+        if "final_output" not in validation_cols:
+            self._conn.execute(
+                "ALTER TABLE vulnerability_validations ADD COLUMN final_output TEXT NOT NULL DEFAULT ''"
+            )
+        if "artifacts" not in validation_cols:
+            self._conn.execute(
+                "ALTER TABLE vulnerability_validations ADD COLUMN artifacts TEXT NOT NULL DEFAULT '[]'"
+            )
         # git 历史问题模式表（旧库补建）
         self._conn.executescript("""\
             CREATE TABLE IF NOT EXISTS git_history_patterns (
@@ -1284,20 +1322,32 @@ class SqliteScanStore(ScanStoreBase):
         scan_id: str,
         validation: VulnerabilityValidation,
     ) -> VulnerabilityValidation:
+        def _nullable_bool(value: bool | None) -> int | None:
+            if value is None:
+                return None
+            return 1 if value else 0
+
         with self._lock:
             self._conn.execute(
                 """\
                 INSERT INTO vulnerability_validations
-                    (scan_id, vuln_index, status, running, validation_code,
-                     validation_output, intermediate_output, started_at,
-                     finished_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    (scan_id, vuln_index, status, running, product, validator_name,
+                     validation_success, is_problem, validation_code,
+                     validation_output, intermediate_output, final_output, artifacts,
+                     started_at, finished_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(scan_id, vuln_index) DO UPDATE SET
                     status = excluded.status,
                     running = excluded.running,
+                    product = excluded.product,
+                    validator_name = excluded.validator_name,
+                    validation_success = excluded.validation_success,
+                    is_problem = excluded.is_problem,
                     validation_code = excluded.validation_code,
                     validation_output = excluded.validation_output,
                     intermediate_output = excluded.intermediate_output,
+                    final_output = excluded.final_output,
+                    artifacts = excluded.artifacts,
                     started_at = excluded.started_at,
                     finished_at = excluded.finished_at,
                     updated_at = excluded.updated_at
@@ -1307,9 +1357,15 @@ class SqliteScanStore(ScanStoreBase):
                     validation.vuln_index,
                     validation.status,
                     1 if validation.running else 0,
+                    validation.product,
+                    validation.validator_name,
+                    _nullable_bool(validation.validation_success),
+                    _nullable_bool(validation.is_problem),
                     validation.validation_code,
                     validation.validation_output,
                     validation.intermediate_output,
+                    validation.final_output,
+                    json.dumps(validation.artifacts or [], ensure_ascii=False),
                     validation.started_at,
                     validation.finished_at,
                     validation.updated_at,
@@ -1328,15 +1384,31 @@ class SqliteScanStore(ScanStoreBase):
             """,
             (scan_id,),
         )
+        def _bool_or_none(value) -> bool | None:
+            return None if value is None else bool(value)
+
+        def _artifacts(value: str | None) -> list[dict]:
+            try:
+                raw = json.loads(value or "[]")
+            except Exception:
+                return []
+            return raw if isinstance(raw, list) else []
+
         return [
             VulnerabilityValidation(
                 scan_id=r["scan_id"],
                 vuln_index=r["vuln_index"],
                 status=r["status"] or "pending",
                 running=bool(r["running"]),
+                product=r["product"] or "",
+                validator_name=r["validator_name"] or "",
+                validation_success=_bool_or_none(r["validation_success"]),
+                is_problem=_bool_or_none(r["is_problem"]),
                 validation_code=r["validation_code"] or "",
                 validation_output=r["validation_output"] or "",
                 intermediate_output=r["intermediate_output"] or "",
+                final_output=r["final_output"] or "",
+                artifacts=_artifacts(r["artifacts"]),
                 started_at=r["started_at"] or "",
                 finished_at=r["finished_at"] or "",
                 updated_at=r["updated_at"] or "",

@@ -140,12 +140,26 @@ export interface VulnerabilityValidation {
   vuln_index: number;
   status: string;
   running: boolean;
+  product?: string;
+  validator_name?: string;
+  validation_success?: boolean | null;
+  is_problem?: boolean | null;
   validation_code: string;
   validation_output: string;
   intermediate_output: string;
+  final_output?: string;
+  artifacts?: ValidationArtifact[];
   started_at: string;
   finished_at: string;
   updated_at: string;
+}
+
+export interface ValidationArtifact {
+  name: string;
+  kind?: string;
+  content?: string;
+  path?: string;
+  updated_at?: string;
 }
 
 export interface HistoryPattern {

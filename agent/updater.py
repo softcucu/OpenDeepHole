@@ -20,7 +20,16 @@ import httpx
 RUNTIME_DIRS = ("agent", "code_parser", "mcp_server", "backend")
 RUNTIME_TOOL_DIRS = ("ctags-p6.2.20260517.0-x64",)
 RUNTIME_ROOT_FILES = ("requirements-agent.txt",)
-SKIP_DIRS = {"__pycache__", ".git", ".mypy_cache", ".pytest_cache", "static", "system_skills", "vulnerability_validation"}
+SKIP_DIRS = {
+    "__pycache__",
+    ".git",
+    ".mypy_cache",
+    ".pytest_cache",
+    "static",
+    "system_skills",
+    "vulnerability_validation",
+    "product_validators",
+}
 SKIP_SUFFIXES = {".pyc", ".pyo"}
 PENDING_COMMANDS_FILE = Path.home() / ".opendeephole" / "pending_commands.json"
 

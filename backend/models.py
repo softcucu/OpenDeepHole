@@ -326,9 +326,15 @@ class VulnerabilityValidation(BaseModel):
     vuln_index: int
     status: str = "pending"              # pending | running | verified | failed | error | timeout | skipped
     running: bool = False
+    product: str = ""
+    validator_name: str = ""
+    validation_success: bool | None = None
+    is_problem: bool | None = None
     validation_code: str = ""
     validation_output: str = ""
     intermediate_output: str = ""
+    final_output: str = ""
+    artifacts: list[dict] = []
     started_at: str = ""
     finished_at: str = ""
     updated_at: str = ""
@@ -426,9 +432,15 @@ class AgentVulnerabilityValidationUpdate(BaseModel):
     vuln_index: int
     status: str = "pending"
     running: bool = False
+    product: str = ""
+    validator_name: str = ""
+    validation_success: bool | None = None
+    is_problem: bool | None = None
     validation_code: str = ""
     validation_output: str = ""
     intermediate_output: str = ""
+    final_output: str = ""
+    artifacts: list[dict] = []
     started_at: str = ""
     finished_at: str = ""
     updated_at: str = ""

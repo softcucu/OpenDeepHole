@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { getAgentOpenCodeModels, getAgentOpenCodePool, getAgents, getAgentConfig, testAgentConfig, updateAgentConfig } from "../api/client";
+import { getAgentOpenCodeModels, getAgentOpenCodePool, getAgents, getAgentConfig, syncProductValidators, testAgentConfig, updateAgentConfig } from "../api/client";
 import type {
   AgentGitHistoryConfig,
   AgentInfo,
@@ -197,7 +197,9 @@ function AgentConfigPanel({ agent }: AgentConfigPanelProps) {
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [testing, setTesting] = useState(false);
+  const [syncingValidators, setSyncingValidators] = useState(false);
   const [testResult, setTestResult] = useState<{ ok: boolean; message: string } | null>(null);
+  const [validatorSyncResult, setValidatorSyncResult] = useState<{ ok: boolean; message: string; installed: string[] } | null>(null);
   const [saved, setSaved] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [modelPicker, setModelPicker] = useState<{
@@ -276,6 +278,20 @@ function AgentConfigPanel({ agent }: AgentConfigPanelProps) {
       setError("API 校验失败，请确认 Agent 在线并重试");
     } finally {
       setTesting(false);
+    }
+  };
+
+  const handleSyncValidators = async () => {
+    setSyncingValidators(true);
+    setError(null);
+    setValidatorSyncResult(null);
+    try {
+      const result = await syncProductValidators(agent.agent_id);
+      setValidatorSyncResult(result);
+    } catch {
+      setError("验证方法同步失败，请确认 Agent 在线并重试");
+    } finally {
+      setSyncingValidators(false);
     }
   };
 
@@ -441,7 +457,27 @@ function AgentConfigPanel({ agent }: AgentConfigPanelProps) {
           </svg>
           配置
         </button>
+        <button
+          onClick={handleSyncValidators}
+          disabled={!agent.online || syncingValidators}
+          className="px-3 py-1.5 text-xs font-medium bg-slate-700 hover:bg-slate-600 disabled:bg-slate-800 disabled:text-slate-500 disabled:cursor-not-allowed text-slate-100 rounded-lg transition-colors"
+        >
+          {syncingValidators ? "同步中" : "同步验证方法"}
+        </button>
       </div>
+
+      {validatorSyncResult && (
+        <div className={`border-t px-4 py-2 text-xs ${
+          validatorSyncResult.ok
+            ? "border-green-500/20 bg-green-500/10 text-green-300"
+            : "border-red-500/20 bg-red-500/10 text-red-300"
+        }`}>
+          {validatorSyncResult.message || (validatorSyncResult.ok ? "验证方法已同步" : "验证方法同步失败")}
+          {validatorSyncResult.installed.length > 0 && (
+            <span className="ml-2 text-slate-400">{validatorSyncResult.installed.join(", ")}</span>
+          )}
+        </div>
+      )}
 
       <AgentModelUsage pool={pool} />
 

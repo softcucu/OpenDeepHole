@@ -1764,15 +1764,62 @@ function ValidationDetail({
           </div>
         </div>
         {validation ? (
-          <div className="grid grid-cols-1 gap-3 xl:grid-cols-3">
-            <ValidationBlock title="中间产出" content={validation.intermediate_output} />
-            <ValidationBlock title="验证代码" content={validation.validation_code} />
-            <ValidationBlock title="验证输出" content={validation.validation_output} />
+          <div className="space-y-3">
+            <div className="flex flex-wrap gap-2">
+              <StatusPill
+                label={`验证成功：${formatNullableBool(validation.validation_success)}`}
+                tone={nullableBoolTone(validation.validation_success)}
+              />
+              <StatusPill
+                label={`是否问题：${formatNullableBool(validation.is_problem)}`}
+                tone={nullableBoolTone(validation.is_problem)}
+              />
+              {validation.product && <StatusPill label={`产品：${validation.product}`} tone="slate" />}
+              {validation.validator_name && <StatusPill label={`方法：${validation.validator_name}`} tone="slate" />}
+            </div>
+            <div className="grid grid-cols-1 gap-3 xl:grid-cols-2">
+              <ValidationBlock title="中间产出" content={validation.intermediate_output} />
+              <ValidationArtifacts validation={validation} />
+              <ValidationBlock title="最终结论" content={validation.final_output || validation.validation_output} />
+            </div>
           </div>
         ) : (
           <div className="rounded border border-slate-800 bg-slate-900/50 px-3 py-2 text-xs text-slate-500">等待验证脚本启动</div>
         )}
       </div>
+    </div>
+  );
+}
+
+function ValidationArtifacts({ validation }: { validation: VulnerabilityValidation }) {
+  const artifacts = validation.artifacts && validation.artifacts.length > 0
+    ? validation.artifacts
+    : validation.validation_code
+      ? [{ name: "validation.py", kind: "code", content: validation.validation_code }]
+      : [];
+  return (
+    <div className="min-w-0 rounded border border-slate-800 bg-slate-950">
+      <div className="border-b border-slate-800 px-3 py-2 text-xs font-semibold text-slate-500">产物</div>
+      {artifacts.length === 0 ? (
+        <div className="px-3 py-2 text-xs text-slate-500">（暂无）</div>
+      ) : (
+        <div className="max-h-72 overflow-auto">
+          {artifacts.map((artifact, idx) => (
+            <div key={`${artifact.name}-${idx}`} className="border-b border-slate-900 last:border-b-0">
+              <div className="flex flex-wrap items-center gap-2 px-3 py-2 text-xs">
+                <span className="font-mono text-slate-200">{artifact.name}</span>
+                {artifact.kind && <span className="rounded bg-slate-800 px-1.5 py-0.5 text-[10px] uppercase text-slate-400">{artifact.kind}</span>}
+                {artifact.path && <span className="break-all font-mono text-[11px] text-slate-500">{artifact.path}</span>}
+              </div>
+              {artifact.content && (
+                <pre className="whitespace-pre-wrap break-words px-3 pb-2 font-mono text-xs leading-5 text-slate-300">
+                  {artifact.content}
+                </pre>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
@@ -1802,6 +1849,18 @@ function validationStatusLabel(status: string): string {
     skipped: "跳过",
   };
   return labels[status] ?? status;
+}
+
+function formatNullableBool(value?: boolean | null): string {
+  if (value === true) return "是";
+  if (value === false) return "否";
+  return "未知";
+}
+
+function nullableBoolTone(value?: boolean | null): TaskTone {
+  if (value === true) return "green";
+  if (value === false) return "amber";
+  return "slate";
 }
 
 function validationTone(validation?: VulnerabilityValidation): TaskTone {

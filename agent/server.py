@@ -54,6 +54,7 @@ async def _run(task, is_resume: bool) -> None:
             code_scan_path=task.code_scan_path,
             reporter=_reporter,
             scan_name=task.scan_name,
+            product=task.product,
             checker_names=task.checkers,
             scan_id=task.scan_id,
             cancel_event=task.cancel_event,
@@ -74,6 +75,7 @@ async def handle_task(
     code_scan_path: str | None,
     checkers: list[str],
     scan_name: str,
+    product: str = "",
     feedback_entries: list[dict] | None = None,
     checker_packages: list[dict] | None = None,
 ) -> None:
@@ -93,6 +95,7 @@ async def handle_task(
         code_scan_path=code_scan_path,
         checkers=checkers,
         scan_name=scan_name,
+        product=product,
         feedback_entries=feedback_entries,
         checker_packages=checker_packages,
     )
@@ -117,6 +120,7 @@ async def handle_resume(
     code_scan_path: Optional[str] = None,
     checkers: Optional[list[str]] = None,
     scan_name: Optional[str] = None,
+    product: Optional[str] = None,
     feedback_entries: Optional[list[dict]] = None,
     checker_packages: Optional[list[dict]] = None,
     retry_candidates: Optional[list[dict]] = None,
@@ -138,6 +142,7 @@ async def handle_resume(
             code_scan_path=code_scan_path,
             checkers=checkers or [],
             scan_name=scan_name or "",
+            product=product or "",
             feedback_entries=feedback_entries,
             checker_packages=checker_packages,
             retry_candidates=retry_candidates,
@@ -155,6 +160,8 @@ async def handle_resume(
             task.checkers = checkers
         if scan_name is not None:
             task.scan_name = scan_name
+        if product is not None:
+            task.product = product
         if feedback_entries is not None:
             task.feedback_entries = feedback_entries
         if checker_packages is not None:
@@ -236,6 +243,8 @@ async def handle_vulnerability_validation(
     scan_id: str,
     vuln_index: int,
     project_path: str,
+    code_scan_path: str,
+    product: str,
     vulnerability: dict,
     report_markdown: str,
 ) -> None:
@@ -274,6 +283,9 @@ async def handle_vulnerability_validation(
                 vulnerability=Vulnerability(**vulnerability),
                 report_markdown=report_markdown,
                 scan_dir=work_root,
+                project_path=Path(project_path) if project_path else None,
+                code_scan_path=Path(code_scan_path) if code_scan_path else None,
+                product=product,
                 cancel_event=cancel_event,
             )
         except Exception as exc:
@@ -284,6 +296,25 @@ async def handle_vulnerability_validation(
     _validation_tasks[task_key] = asyncio.create_task(_run_validation())
     path_hint = f" ({project_path})" if project_path else ""
     print(f"Started vulnerability validation {scan_id}#{vuln_index}{path_hint}")
+
+
+async def handle_product_validators_sync(request_id: str, package: dict) -> dict:
+    """Install a manually-dispatched product validator package."""
+    try:
+        installed = _write_product_validators_package(package, Path(__file__).resolve().parent / "product_validators")
+        return {
+            "type": "product_validators_sync_result",
+            "request_id": request_id,
+            "ok": True,
+            "installed": installed,
+        }
+    except Exception as exc:
+        return {
+            "type": "product_validators_sync_result",
+            "request_id": request_id,
+            "ok": False,
+            "message": str(exc),
+        }
 
 
 async def handle_feedback_selection_update(scan_id: str, feedback_entries: list[dict]) -> None:
@@ -521,6 +552,66 @@ def _write_skill_creator_package(package: dict, skills_root: Path) -> None:
 
     if not wrote_skill:
         raise RuntimeError("deephole-skill-creator package missing SKILL.md")
+
+
+def _write_product_validators_package(package: dict, validators_root: Path) -> list[str]:
+    name = str(package.get("name") or "").strip()
+    if name != "product_validators":
+        raise RuntimeError("Invalid product validators package name")
+
+    expected_hash = str(package.get("sha256") or "").strip()
+    encoded = str(package.get("archive_b64") or "")
+    if not expected_hash or not encoded:
+        raise RuntimeError("Invalid product validators package metadata")
+
+    try:
+        data = base64.b64decode(encoded.encode("ascii"), validate=True)
+    except Exception as exc:
+        raise RuntimeError("Invalid product validators package archive") from exc
+    actual_hash = hashlib.sha256(data).hexdigest()
+    if actual_hash != expected_hash:
+        raise RuntimeError("product validators package hash mismatch")
+
+    validators_root = validators_root.resolve()
+    tmp_root = validators_root.parent / ".product_validators.tmp"
+    if tmp_root.exists():
+        shutil.rmtree(tmp_root)
+    tmp_root.mkdir(parents=True, exist_ok=True)
+    installed: list[str] = []
+
+    try:
+        try:
+            with zipfile.ZipFile(io.BytesIO(data)) as zf:
+                for info in zf.infolist():
+                    if info.is_dir():
+                        continue
+                    member = Path(info.filename)
+                    if member.is_absolute() or ".." in member.parts:
+                        raise RuntimeError(f"Unsafe product validators package path: {info.filename}")
+                    if member.suffix != ".py":
+                        continue
+                    dest = (tmp_root / member).resolve()
+                    try:
+                        dest.relative_to(tmp_root.resolve())
+                    except ValueError as exc:
+                        raise RuntimeError(f"Unsafe product validators package path: {info.filename}") from exc
+                    dest.parent.mkdir(parents=True, exist_ok=True)
+                    dest.write_bytes(zf.read(info))
+                    installed.append(member.as_posix())
+        except zipfile.BadZipFile as exc:
+            raise RuntimeError("Invalid product validators package archive") from exc
+
+        if validators_root.exists():
+            backup = validators_root.parent / ".product_validators.bak"
+            if backup.exists():
+                shutil.rmtree(backup)
+            validators_root.rename(backup)
+        validators_root.parent.mkdir(parents=True, exist_ok=True)
+        tmp_root.rename(validators_root)
+        return sorted(installed)
+    finally:
+        if tmp_root.exists():
+            shutil.rmtree(tmp_root, ignore_errors=True)
 
 
 def _skill_creator_prompt(name: str, description: str, user_input: str) -> str:

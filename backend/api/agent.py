@@ -24,6 +24,7 @@ Other:
 from __future__ import annotations
 
 import asyncio
+import base64
 import hashlib
 import io
 import secrets
@@ -96,6 +97,7 @@ class _RuntimeDownload:
 _runtime_download_tokens: dict[str, _RuntimeDownload] = {}
 _config_test_waiters: dict[str, asyncio.Future] = {}
 _opencode_model_waiters: dict[str, asyncio.Future] = {}
+_product_validator_sync_waiters: dict[str, asyncio.Future] = {}
 
 # In-memory index progress store: scan_id → {status, parsed_files, total_files}
 _scan_index_statuses: dict[str, dict] = {}
@@ -549,6 +551,12 @@ async def agent_websocket(websocket: WebSocket) -> None:
                 if waiter is not None and not waiter.done():
                     waiter.set_result(incoming)
                 continue
+            if isinstance(incoming, dict) and incoming.get("type") == "product_validators_sync_result":
+                request_id = str(incoming.get("request_id") or "")
+                waiter = _product_validator_sync_waiters.pop(request_id, None)
+                if waiter is not None and not waiter.done():
+                    waiter.set_result(incoming)
+                continue
             if isinstance(incoming, dict) and incoming.get("type") == "skill_create_result":
                 from backend.api.skills import handle_skill_create_result
 
@@ -606,6 +614,12 @@ class _AgentRegisterBody(BaseModel):
 class _AgentConfigTestResponse(BaseModel):
     ok: bool
     message: str = ""
+
+
+class _ProductValidatorsSyncResponse(BaseModel):
+    ok: bool
+    message: str = ""
+    installed: list[str] = []
 
 
 class _AgentOpenCodeModelInfo(BaseModel):
@@ -852,6 +866,44 @@ async def test_agent_config(
     )
 
 
+@router.post("/{agent_id}/product-validators/sync", response_model=_ProductValidatorsSyncResponse)
+async def sync_agent_product_validators(
+    agent_id: str,
+    current_user: User = Depends(get_current_user),
+) -> _ProductValidatorsSyncResponse:
+    """Manually push repo-managed product validators to an online Agent."""
+    agent = _registered_agents.get(agent_id)
+    if agent is None:
+        raise HTTPException(status_code=404, detail="Agent not found")
+    if current_user.role != "admin" and agent.user_id != current_user.user_id:
+        raise HTTPException(status_code=403, detail="Access denied")
+    if agent_id not in _agent_ws:
+        raise HTTPException(status_code=400, detail="Agent is offline")
+
+    request_id = uuid.uuid4().hex
+    loop = asyncio.get_running_loop()
+    waiter = loop.create_future()
+    _product_validator_sync_waiters[request_id] = waiter
+    ok = await send_agent_command(agent_id, {
+        "type": "product_validators_sync",
+        "request_id": request_id,
+        "package": _build_product_validators_package(),
+    })
+    if not ok:
+        _product_validator_sync_waiters.pop(request_id, None)
+        raise HTTPException(status_code=502, detail="Agent not connected")
+    try:
+        result = await asyncio.wait_for(waiter, timeout=30.0)
+    except asyncio.TimeoutError:
+        _product_validator_sync_waiters.pop(request_id, None)
+        raise HTTPException(status_code=504, detail="Product validator sync timed out")
+    return _ProductValidatorsSyncResponse(
+        ok=bool(result.get("ok")),
+        message=str(result.get("message") or ""),
+        installed=[str(item) for item in (result.get("installed") or [])],
+    )
+
+
 @router.get("/agents")
 async def list_agents_prefixed(
     current_user: User = Depends(get_current_user),
@@ -989,9 +1041,15 @@ async def agent_report_vulnerability_validation(
         vuln_index=body.vuln_index,
         status=body.status,
         running=body.running,
+        product=body.product,
+        validator_name=body.validator_name,
+        validation_success=body.validation_success,
+        is_problem=body.is_problem,
         validation_code=body.validation_code,
         validation_output=body.validation_output,
         intermediate_output=body.intermediate_output,
+        final_output=body.final_output,
+        artifacts=body.artifacts,
         started_at=body.started_at,
         finished_at=body.finished_at,
         updated_at=body.updated_at,
@@ -1382,8 +1440,18 @@ _AGENT_ROOT_FILES = [
     "run_agent.bat",
     "requirements-agent.txt",
 ]
-_AGENT_SKIP_DIRS = {"__pycache__", ".git", ".mypy_cache", ".pytest_cache", "static", "system_skills", "vulnerability_validation"}
+_AGENT_DOWNLOAD_SKIP_DIRS = {
+    "__pycache__",
+    ".git",
+    ".mypy_cache",
+    ".pytest_cache",
+    "static",
+    "system_skills",
+    "vulnerability_validation",
+}
+_AGENT_RUNTIME_SKIP_DIRS = {*_AGENT_DOWNLOAD_SKIP_DIRS, "product_validators"}
 _AGENT_SKIP_SUFFIXES = {".pyc", ".pyo"}
+_PRODUCT_VALIDATORS_DIR = _PROJECT_ROOT / "agent" / "product_validators"
 
 
 def _agent_runtime_hash_scope() -> dict:
@@ -1392,13 +1460,13 @@ def _agent_runtime_hash_scope() -> dict:
         "dirs": list(_AGENT_RUNTIME_DIRS),
         "tool_dirs": list(_AGENT_TOOL_DIRS),
         "root_files": list(_AGENT_RUNTIME_ROOT_FILES),
-        "skip_dirs": sorted(_AGENT_SKIP_DIRS),
+        "skip_dirs": sorted(_AGENT_RUNTIME_SKIP_DIRS),
         "skip_suffixes": sorted(_AGENT_SKIP_SUFFIXES),
     }
 
 
-def _should_skip_agent_file(path: Path) -> bool:
-    return path.suffix in _AGENT_SKIP_SUFFIXES or any(part in _AGENT_SKIP_DIRS for part in path.parts)
+def _should_skip_agent_file(path: Path, skip_dirs: set[str]) -> bool:
+    return path.suffix in _AGENT_SKIP_SUFFIXES or any(part in skip_dirs for part in path.parts)
 
 
 def _iter_agent_runtime_files():
@@ -1410,7 +1478,7 @@ def _iter_agent_runtime_files():
         # (Windows Path sorting is case-insensitive, Linux is case-sensitive).
         entries = []
         for file_path in dir_path.rglob("*"):
-            if file_path.is_file() and not _should_skip_agent_file(file_path):
+            if file_path.is_file() and not _should_skip_agent_file(file_path, _AGENT_RUNTIME_SKIP_DIRS):
                 arcname = file_path.relative_to(_PROJECT_ROOT).as_posix()
                 entries.append((arcname, file_path))
         entries.sort(key=lambda e: e[0])
@@ -1486,6 +1554,38 @@ def _build_agent_runtime_download() -> _RuntimeDownload:
     )
 
 
+def _iter_product_validator_files() -> list[tuple[str, Path]]:
+    if not _PRODUCT_VALIDATORS_DIR.is_dir():
+        return []
+    entries: list[tuple[str, Path]] = []
+    for file_path in _PRODUCT_VALIDATORS_DIR.rglob("*.py"):
+        if not file_path.is_file() or file_path.suffix in _AGENT_SKIP_SUFFIXES:
+            continue
+        if any(part in _AGENT_DOWNLOAD_SKIP_DIRS for part in file_path.parts):
+            continue
+        arcname = file_path.relative_to(_PRODUCT_VALIDATORS_DIR).as_posix()
+        if arcname.startswith("../") or arcname.startswith("/") or "/../" in arcname:
+            continue
+        entries.append((arcname, file_path))
+    entries.sort(key=lambda item: item[0])
+    return entries
+
+
+def _build_product_validators_package() -> dict:
+    buf = io.BytesIO()
+    files = _iter_product_validator_files()
+    with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        for arcname, file_path in files:
+            zf.write(file_path, arcname)
+    archive = buf.getvalue()
+    return {
+        "name": "product_validators",
+        "archive_b64": base64.b64encode(archive).decode("ascii"),
+        "sha256": hashlib.sha256(archive).hexdigest(),
+        "files": [arcname for arcname, _file_path in files],
+    }
+
+
 def create_agent_runtime_update_payload(server_url: str) -> dict:
     _purge_expired_runtime_downloads()
     download = _build_agent_runtime_download()
@@ -1511,7 +1611,7 @@ def _build_agent_zip(server_url: str = "", owner_token: str = "") -> bytes:
             if not dir_path.is_dir():
                 continue
             for file_path in dir_path.rglob("*"):
-                if file_path.is_file() and not _should_skip_agent_file(file_path):
+                if file_path.is_file() and not _should_skip_agent_file(file_path, _AGENT_DOWNLOAD_SKIP_DIRS):
                     arcname = str(file_path.relative_to(_PROJECT_ROOT))
                     zf.write(file_path, arcname)
 

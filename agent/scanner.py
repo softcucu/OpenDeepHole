@@ -583,6 +583,7 @@ async def run_scan(
     code_scan_path: Path | None,
     reporter: Reporter,
     scan_name: str,
+    product: str,
     checker_names: list[str],
     scan_id: str,                    # pre-assigned by server
     cancel_event: threading.Event,   # from task_manager
@@ -631,6 +632,8 @@ async def run_scan(
         await emit("init", f"Scan started: {scan_name}")
         await emit("init", f"Project: {project_path}")
         await emit("init", f"Code scan path: {code_scan_path}")
+        if product:
+            await emit("init", f"Product: {product}")
         await emit("init", f"Checkers: {checker_names or 'all'}" + (" (resume)" if is_resume else ""))
 
         # Load checker registry (discovers from bundled checkers/ dir)
@@ -1134,6 +1137,9 @@ async def run_scan(
                 vulnerability=vuln,
                 report_markdown=report_markdown,
                 scan_dir=scan_dir,
+                project_path=project_path,
+                code_scan_path=code_scan_path,
+                product=product,
                 cancel_event=cancel_event,
             ))
             validation_tasks.add(task)
