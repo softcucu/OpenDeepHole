@@ -209,6 +209,8 @@ def register_tools(mcp: FastMCP, project_dir: Path | str | None = None) -> None:
         """
         根据函数名返回函数体代码。
         file_path 可选，传入可缩小搜索范围。
+        需要阅读函数源码时优先使用本 deephole-code MCP 工具；仅在索引不可用、
+        未命中或需要目录级枚举/文本搜索时，再回退内置 read/grep/glob。
 
         参数：
             project_id: 项目标识符（由分析提示中提供）。
@@ -244,7 +246,8 @@ def register_tools(mcp: FastMCP, project_dir: Path | str | None = None) -> None:
     def view_struct_code(project_id: str, struct_name: str) -> str:
         """
         根据结构体名返回结构体定义代码。
-        file_path 可选，传入可缩小搜索范围（当前版本暂不使用）。
+        需要阅读结构体定义时优先使用本 deephole-code MCP 工具；仅在索引不可用、
+        未命中或需要目录级枚举/文本搜索时，再回退内置 read/grep/glob。
 
         参数：
             project_id: 项目标识符。
@@ -279,6 +282,8 @@ def register_tools(mcp: FastMCP, project_dir: Path | str | None = None) -> None:
     ) -> str:
         """
         根据全局变量名返回其定义。注意：只有 g_ 开头的变量才会被索引为全局变量。
+        需要阅读全局变量定义时优先使用本 deephole-code MCP 工具；仅在索引不可用、
+        未命中或需要目录级枚举/文本搜索时，再回退内置 read/grep/glob。
 
         参数：
             project_id: 项目标识符。

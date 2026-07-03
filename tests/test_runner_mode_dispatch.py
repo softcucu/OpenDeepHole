@@ -22,6 +22,7 @@ from backend.opencode.runner import (
     _run_audit_via_opencode,
     _serve_runtime_namespace,
     _select_cli_cwd,
+    _with_source_reading_priority_instruction,
     _with_writable_paths,
     _write_prompt_file,
     _terminate_process_tree,
@@ -95,6 +96,17 @@ def test_long_prompt_file_reference_is_passed_as_message(tmp_path: Path) -> None
     assert str(prompt_path) in message
     _cleanup_prompt_file(prompt_path)
     assert not prompt_path.exists()
+
+
+def test_source_reading_priority_instruction_is_idempotent() -> None:
+    prompt = "hello"
+
+    once = _with_source_reading_priority_instruction(prompt)
+    twice = _with_source_reading_priority_instruction(once)
+
+    assert once == twice
+    assert "优先使用 deephole-code MCP 源码查询工具" in once
+    assert "read/grep/glob" in once
 
 
 def test_prepare_cli_workspace_creates_claude_and_gemini_skill_configs(tmp_path: Path) -> None:
@@ -222,6 +234,8 @@ def test_invoke_opencode_uses_serve_manager_when_configured(tmp_path: Path) -> N
         )
         assert "真实项目根目录" in kwargs["prompt"]
         assert str(project.resolve()) in kwargs["prompt"]
+        assert "优先使用 deephole-code MCP 源码查询工具" in kwargs["prompt"]
+        assert kwargs["prompt"].count("源码阅读规则") == 1
         assert "caller_model" not in kwargs["prompt"]
         assert output_lines
         assert all(line.startswith("[model=anthropic/claude-sonnet]") for line in output_lines)

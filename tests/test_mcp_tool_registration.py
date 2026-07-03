@@ -66,6 +66,21 @@ def test_registered_mcp_tools_do_not_expose_caller_model() -> None:
         assert "caller_model" not in inspect.signature(mcp.tools[name]).parameters
 
 
+def test_source_lookup_tools_describe_deephole_code_priority() -> None:
+    mcp = _FakeMCP()
+
+    register_tools(mcp)
+
+    for name in (
+        "view_function_code",
+        "view_struct_code",
+        "view_global_variable_definition",
+    ):
+        doc = inspect.getdoc(mcp.tools[name]) or ""
+        assert "优先使用本 deephole-code MCP 工具" in doc
+        assert "read/grep/glob" in doc
+
+
 def test_bound_project_dir_isolated_from_agent_project_env(tmp_path, monkeypatch) -> None:
     project_a = tmp_path / "project-a"
     project_b = tmp_path / "project-b"
