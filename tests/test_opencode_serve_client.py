@@ -4,9 +4,15 @@ import json
 from pathlib import Path
 from unittest.mock import AsyncMock
 
+import httpx
 import pytest
 
-from backend.opencode.serve_client import OpenCodeServeKey, OpenCodeServeManager, _serve_port
+from backend.opencode.serve_client import (
+    OpenCodeServeKey,
+    OpenCodeServeManager,
+    _serve_context_headers,
+    _serve_port,
+)
 
 
 class _FakeResponse:
@@ -150,6 +156,18 @@ def test_run_prompt_uses_project_directory_and_default_tools(monkeypatch, tmp_pa
         }
 
     asyncio.run(run())
+
+
+def test_serve_context_headers_encode_non_ascii_directory(tmp_path: Path) -> None:
+    directory = tmp_path / "源码 项目"
+
+    headers = _serve_context_headers(directory)
+
+    value = headers["x-opencode-directory"]
+    assert value != str(directory)
+    assert value.isascii()
+    assert "%E6%BA%90%E7%A0%81" in value
+    assert httpx.Headers(headers)["x-opencode-directory"] == value
 
 
 def test_run_prompt_omits_tools_field_when_tool_discovery_fails(monkeypatch, tmp_path: Path) -> None:

@@ -2,6 +2,7 @@
 
 ## 2026-07-03
 
+- **修复** OpenCode/nga serve 模式的 `x-opencode-directory` 请求头改为 ASCII 安全编码，避免项目路径包含中文等非 ASCII 字符时 httpx 在创建 `/session` 请求前抛出 `UnicodeEncodeError`
 - **优化** `loop_mut_idx_oob` Semgrep 初筛新增未校验循环上界召回：当循环变量由未提前比较校验的上界控制并用于数组下标或指针偏移访问时，会提取候选点，覆盖 `fragInfo[fragId]` 这类访问层级
 - **新增** 演示用审计排序：数组越界家族候选中若命中 `MC_EthBuildPayLoadByFrag`，会在漏洞识别阶段优先放到第一个候选位置，便于展示漏洞发现过程
 - **优化** MCP 初始提示词和 `deephole-code` 源码查询工具说明会明确要求优先使用 `view_function_code`、`view_struct_code`、`view_global_variable_definition` 阅读源码，索引不可用或需要目录级搜索时再回退内置 `read`/`grep`/`glob`
