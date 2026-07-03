@@ -14,6 +14,7 @@ from agent.scanner import (
     _dedup_candidates,
     _normalize_candidate_for_project,
     _order_candidates_for_audit,
+    _prepare_audit_queue,
     _round_robin_by_pattern,
     _resolve_scan_paths,
     _configure_backend,
@@ -216,49 +217,43 @@ class AgentAuditOrderingTests(unittest.TestCase):
 
         self.assertEqual([c.line for c in ordered], [3, 1, 2])
 
-    def test_demo_oob_function_is_always_first(self) -> None:
-        candidates = [
-            _candidate("safe_mem_oob", 1),
-            _candidate("npd", 1),
-            _candidate("safe_mem_oob", 2).model_copy(
-                update={"function": "MC_EthBuildPayLoadByFrag"},
-            ),
-            _candidate("safe_mem_oob", 3),
-            _candidate("memleak", 1),
-            _candidate("memleak", 2),
-        ]
-
-        ordered = _order_candidates_for_audit(
-            candidates,
-            ["npd", "memleak", "safe_mem_oob"],
-            family_of={"npd": "npd", "memleak": "memleak", "safe_mem_oob": "oob"},
-        )
-
-        self.assertEqual(ordered[0].function, "MC_EthBuildPayLoadByFrag")
-        self.assertEqual(ordered[0].vuln_type, "safe_mem_oob")
-        self.assertEqual(
-            [(c.vuln_type, c.line) for c in ordered[1:]],
-            [
-                ("npd", 1),
-                ("memleak", 1),
-                ("memleak", 2),
-                ("safe_mem_oob", 1),
-                ("safe_mem_oob", 3),
-            ],
-        )
-
-    def test_demo_function_priority_only_applies_to_oob_family(self) -> None:
+    def test_first_audit_function_is_always_first_for_any_checker(self) -> None:
         candidates = [
             _candidate("intoverflow", 1).model_copy(
-                update={"function": "MC_EthBuildPayLoadByFrag"},
+                update={"function": "MC_EthBuildPayloadByFrag"},
             ),
-            _candidate("intoverflow", 2),
             _candidate("npd", 1),
+            _candidate("memleak", 1),
+            _candidate("memleak", 2),
+            _candidate("safe_mem_oob", 1),
         ]
 
-        ordered = _order_candidates_for_audit(
+        ordered = _prepare_audit_queue(
             candidates,
-            ["intoverflow", "npd"],
+            ["npd", "safe_mem_oob", "memleak", "intoverflow"],
+            family_of={
+                "npd": "npd",
+                "safe_mem_oob": "oob",
+                "memleak": "memleak",
+                "intoverflow": "intoverflow",
+            },
+        )
+
+        self.assertEqual(ordered[0].function, "MC_EthBuildPayloadByFrag")
+        self.assertEqual(ordered[0].vuln_type, "intoverflow")
+
+    def test_non_exact_first_audit_function_is_not_prioritized(self) -> None:
+        candidates = [
+            _candidate("npd", 1),
+            _candidate("intoverflow", 1).model_copy(
+                update={"function": "MC_EthBuildPayloadByFragTypo"},
+            ),
+            _candidate("intoverflow", 2),
+        ]
+
+        ordered = _prepare_audit_queue(
+            candidates,
+            ["npd", "intoverflow"],
             family_of={"intoverflow": "intoverflow", "npd": "npd"},
         )
 
@@ -267,34 +262,54 @@ class AgentAuditOrderingTests(unittest.TestCase):
             [("npd", 1), ("intoverflow", 1), ("intoverflow", 2)],
         )
 
-    def test_multiple_demo_oob_candidates_keep_original_order(self) -> None:
+    def test_multiple_first_audit_function_candidates_keep_original_order(self) -> None:
         candidates = [
-            _candidate("bufoverflow", 20).model_copy(
-                update={"function": "MC_EthBuildPayLoadByFrag"},
+            _candidate("memleak", 20).model_copy(
+                update={"function": "MC_EthBuildPayloadByFrag"},
             ),
             _candidate("npd", 1),
-            _candidate("safe_mem_oob", 10).model_copy(
-                update={"function": "MC_EthBuildPayLoadByFrag"},
+            _candidate("intoverflow", 10).model_copy(
+                update={"function": "MC_EthBuildPayloadByFrag"},
             ),
-            _candidate("loop_mut_idx_oob", 30).model_copy(
-                update={"function": "MC_EthBuildPayLoadByFrag"},
+            _candidate("safe_mem_oob", 10).model_copy(
+                update={"function": "MC_EthBuildPayloadByFrag"},
             ),
         ]
 
-        ordered = _order_candidates_for_audit(
+        ordered = _prepare_audit_queue(
             candidates,
-            ["safe_mem_oob", "loop_mut_idx_oob", "bufoverflow", "npd"],
+            ["npd", "safe_mem_oob", "intoverflow", "memleak"],
             family_of={
-                "bufoverflow": "oob",
                 "safe_mem_oob": "oob",
-                "loop_mut_idx_oob": "oob",
+                "intoverflow": "intoverflow",
+                "memleak": "memleak",
                 "npd": "npd",
             },
         )
 
         self.assertEqual(
             [(c.vuln_type, c.line) for c in ordered[:3]],
-            [("bufoverflow", 20), ("safe_mem_oob", 10), ("loop_mut_idx_oob", 30)],
+            [("memleak", 20), ("intoverflow", 10), ("safe_mem_oob", 10)],
+        )
+
+    def test_first_audit_function_stays_first_after_pattern_round_robin(self) -> None:
+        candidates = [
+            _subject_candidate("npd", 1, "ptr"),
+            _subject_candidate("npd", 2, "ptr", function="MC_EthBuildPayloadByFrag"),
+            _subject_candidate("memleak", 1, "buf"),
+        ]
+
+        ordered = _prepare_audit_queue(
+            candidates,
+            ["npd", "memleak"],
+            pattern_filter_enabled=True,
+            pattern_filter_scope="directory",
+        )
+
+        self.assertEqual(ordered[0].function, "MC_EthBuildPayloadByFrag")
+        self.assertEqual(
+            [(c.vuln_type, c.line) for c in ordered[1:]],
+            [("memleak", 1), ("npd", 1)],
         )
 
     def test_audit_order_summary_uses_actual_audit_order(self) -> None:

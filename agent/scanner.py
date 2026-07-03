@@ -25,8 +25,7 @@ FunctionSourceSnapshot = tuple[str, int | None]
 PROJECT_LEVEL_FUNCTION = "__project__"
 STATIC_PROGRESS_MIN_INTERVAL_SECONDS = 0.5
 STATIC_PROGRESS_MIN_PERCENT_DELTA = 1.0
-DEMO_FIRST_AUDIT_FUNCTION = "MC_EthBuildPayLoadByFrag"
-DEMO_FIRST_AUDIT_FAMILY = "oob"
+FIRST_AUDIT_FUNCTION = "MC_EthBuildPayloadByFrag"
 
 
 class _StaticProgressGate:
@@ -103,19 +102,10 @@ def _order_candidates_for_audit(
             fallback_order[vuln_type] = len(checker_order) + len(fallback_order)
         return fallback_order[vuln_type]
 
-    def _is_demo_first_candidate(candidate: Candidate) -> bool:
-        family = (family_of or {}).get(candidate.vuln_type, candidate.vuln_type)
-        return (
-            family == DEMO_FIRST_AUDIT_FAMILY
-            and candidate.function == DEMO_FIRST_AUDIT_FUNCTION
-        )
-
     def _sort_key(item: tuple[int, Candidate]) -> tuple[int, int, int, int]:
         index, candidate = item
-        if _is_demo_first_candidate(candidate):
-            return (0, index, 0, index)
         return (
-            1,
+            0,
             counts[candidate.vuln_type],
             _checker_order(candidate.vuln_type),
             index,
@@ -126,6 +116,36 @@ def _order_candidates_for_audit(
         key=_sort_key,
     )
     return [candidate for _, candidate in ordered]
+
+
+def _prioritize_first_audit_function(
+    candidates: list[Candidate],
+    original_order: dict[int, int] | None = None,
+) -> list[Candidate]:
+    if len(candidates) <= 1:
+        return list(candidates)
+    first = [candidate for candidate in candidates if candidate.function == FIRST_AUDIT_FUNCTION]
+    if not first:
+        return list(candidates)
+    if original_order:
+        first = sorted(first, key=lambda candidate: original_order.get(id(candidate), len(candidates)))
+    rest = [candidate for candidate in candidates if candidate.function != FIRST_AUDIT_FUNCTION]
+    return first + rest
+
+
+def _prepare_audit_queue(
+    candidates: list[Candidate],
+    checker_names: list[str],
+    *,
+    family_of: dict[str, str] | None = None,
+    pattern_filter_enabled: bool = False,
+    pattern_filter_scope: str = "directory",
+) -> list[Candidate]:
+    original_order = {id(candidate): index for index, candidate in enumerate(candidates)}
+    ordered = _order_candidates_for_audit(candidates, checker_names, family_of=family_of)
+    if pattern_filter_enabled:
+        ordered = _round_robin_by_pattern(ordered, pattern_filter_scope)
+    return _prioritize_first_audit_function(ordered, original_order)
 
 
 def _audit_order_summary(candidates: list[Candidate]) -> str:
@@ -1058,8 +1078,19 @@ async def run_scan(
                     candidate_index=total,
                 )
 
+        pattern_filter_enabled = bool(getattr(config.pattern_filter, "enabled", True))
+        pattern_filter_scope = getattr(config.pattern_filter, "scope", "directory")
+        if pattern_filter_scope not in {"directory", "file", "repo"}:
+            pattern_filter_scope = "directory"
+        reported_candidates = _prepare_audit_queue(
+            candidates,
+            audit_checker_order,
+            family_of=family_of,
+            pattern_filter_enabled=pattern_filter_enabled,
+            pattern_filter_scope=pattern_filter_scope,
+        )
         if not retry_mode:
-            await reporter.report_candidates(scan_id, candidates)
+            await reporter.report_candidates(scan_id, reported_candidates)
 
         function_source_cache = await asyncio.to_thread(
             _build_function_source_cache,
@@ -1089,17 +1120,13 @@ async def run_scan(
             c for c in candidates
             if _candidate_key(c) not in processed_keys
         ]
-        remaining = _order_candidates_for_audit(
+        remaining = _prepare_audit_queue(
             remaining,
             audit_checker_order,
             family_of=family_of,
+            pattern_filter_enabled=pattern_filter_enabled,
+            pattern_filter_scope=pattern_filter_scope,
         )
-        pattern_filter_enabled = bool(getattr(config.pattern_filter, "enabled", True))
-        pattern_filter_scope = getattr(config.pattern_filter, "scope", "directory")
-        if pattern_filter_scope not in {"directory", "file", "repo"}:
-            pattern_filter_scope = "directory"
-        if pattern_filter_enabled:
-            remaining = _round_robin_by_pattern(remaining, pattern_filter_scope)
         already_done = retry_processed_offset if retry_mode else total - len(remaining)
 
         # --- Phase 7: AI audit ---
@@ -1212,6 +1239,7 @@ async def run_scan(
                         ai_analysis="同模式代表点已被 AI 审计否决，自动过滤（未调用 LLM）",
                         confirmed=False,
                         ai_verdict="filtered_same_pattern",
+                        audit_index=global_index,
                     )
                     _attach_function_source(vuln, candidate, function_source_cache)
                     async with result_lock:
@@ -1334,11 +1362,13 @@ async def run_scan(
                         ai_analysis="No analysis result returned",
                         confirmed=False,
                         ai_verdict="no_result",
+                        audit_index=global_index,
                     )
                 ]
                 async with result_lock:
                     for project_vuln in project_vulns:
                         _attach_function_source(project_vuln, candidate, function_source_cache)
+                        project_vuln.audit_index = global_index
                         vulnerabilities.append(project_vuln)
                 for project_vuln in project_vulns:
                     response = await reporter.report_vulnerability(scan_id, project_vuln)
@@ -1371,8 +1401,10 @@ async def run_scan(
                     ai_analysis="No analysis result returned",
                     confirmed=False,
                     ai_verdict="no_result",
+                    audit_index=global_index,
                 )
             _attach_function_source(vuln, candidate, function_source_cache)
+            vuln.audit_index = global_index
             if (
                 isinstance(candidate.metadata, dict)
                 and candidate.metadata.get("variant_of")

@@ -110,6 +110,7 @@ class Vulnerability(BaseModel):
     ticket_id: str = ""                      # 问题单号
     function_source: str = ""
     function_start_line: int | None = None
+    audit_index: int | None = None           # Static candidate audit order; DB idx remains the API handle.
     variant_of: str = ""                     # 同类变体排查命中时，来源历史问题模式（根因摘要+出处提交/文件）
     output_source: OutputSource = Field(default_factory=OutputSource)
 

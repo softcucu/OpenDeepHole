@@ -131,6 +131,7 @@ export interface Vulnerability {
   ticket_id?: string;
   function_source?: string;
   function_start_line?: number | null;
+  audit_index?: number | null;
   variant_of?: string;
   output_source?: OutputSource;
 }

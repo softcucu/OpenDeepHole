@@ -38,7 +38,13 @@ def _make_scan(scan_id: str, user_id: str = "user-1") -> tuple[ScanStatus, ScanM
     return scan, meta
 
 
-def _make_vuln(idx: int, *, ai_verdict: str = "confirmed", user_verdict: str | None = None) -> Vulnerability:
+def _make_vuln(
+    idx: int,
+    *,
+    ai_verdict: str = "confirmed",
+    user_verdict: str | None = None,
+    audit_index: int | None = None,
+) -> Vulnerability:
     return Vulnerability(
         file=f"f{idx}.c",
         line=idx,
@@ -50,7 +56,71 @@ def _make_vuln(idx: int, *, ai_verdict: str = "confirmed", user_verdict: str | N
         confirmed=True,
         ai_verdict=ai_verdict,
         user_verdict=user_verdict,
+        audit_index=audit_index,
     )
+
+
+class VulnerabilityStoreTests(unittest.TestCase):
+    def test_vulnerability_audit_index_round_trips_and_upsert_updates(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = SqliteScanStore(Path(tmp) / "scan.db")
+            store.save_scan(*_make_scan("scan-1"))
+            store.add_vulnerability("scan-1", _make_vuln(1, audit_index=7))
+            timeout = _make_vuln(2, ai_verdict="failed", audit_index=9).model_copy(
+                update={"confirmed": False, "severity": "unknown"},
+            )
+            store.add_vulnerability("scan-1", timeout)
+
+            replacement = _make_vuln(2, audit_index=3)
+            index = store.upsert_incomplete_vulnerability("scan-1", replacement)
+
+            self.assertEqual(index, 1)
+            stored = store.get_vulnerabilities("scan-1")
+            self.assertEqual([v.audit_index for v in stored], [7, 3])
+            self.assertEqual(stored[1].ai_verdict, "confirmed")
+
+    def test_migrates_vulnerability_audit_index_column(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "scan.db"
+            store = SqliteScanStore(db_path)
+            store._conn.execute("DROP TABLE vulnerabilities")
+            store._conn.execute(
+                """\
+                CREATE TABLE vulnerabilities (
+                    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+                    scan_id             TEXT NOT NULL REFERENCES scans(scan_id) ON DELETE CASCADE,
+                    idx                 INTEGER NOT NULL,
+                    file                TEXT NOT NULL,
+                    line                INTEGER NOT NULL,
+                    function            TEXT NOT NULL,
+                    vuln_type           TEXT NOT NULL,
+                    severity            TEXT NOT NULL,
+                    description         TEXT NOT NULL,
+                    ai_analysis         TEXT NOT NULL,
+                    confirmed           INTEGER NOT NULL,
+                    ai_verdict          TEXT NOT NULL DEFAULT '',
+                    failure_reason      TEXT NOT NULL DEFAULT '',
+                    function_source     TEXT NOT NULL DEFAULT '',
+                    function_start_line INTEGER,
+                    user_verdict        TEXT,
+                    user_verdict_reason TEXT,
+                    ticket_submitted    INTEGER NOT NULL DEFAULT 0,
+                    ticket_id           TEXT NOT NULL DEFAULT '',
+                    variant_of          TEXT NOT NULL DEFAULT '',
+                    output_source       TEXT NOT NULL DEFAULT '{}',
+                    UNIQUE(scan_id, idx)
+                )
+                """
+            )
+            store._conn.commit()
+            store._conn.close()
+
+            migrated = SqliteScanStore(db_path)
+            cols = {row[1] for row in migrated._conn.execute("PRAGMA table_info(vulnerabilities)").fetchall()}
+            self.assertIn("audit_index", cols)
+            migrated.save_scan(*_make_scan("scan-1"))
+            migrated.add_vulnerability("scan-1", _make_vuln(1, audit_index=5))
+            self.assertEqual(migrated.get_vulnerabilities("scan-1")[0].audit_index, 5)
 
 
 class VulnStatsStoreTests(unittest.TestCase):

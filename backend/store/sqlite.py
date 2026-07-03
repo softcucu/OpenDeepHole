@@ -111,6 +111,7 @@ CREATE TABLE IF NOT EXISTS vulnerabilities (
     id                  INTEGER PRIMARY KEY AUTOINCREMENT,
     scan_id             TEXT NOT NULL REFERENCES scans(scan_id) ON DELETE CASCADE,
     idx                 INTEGER NOT NULL,
+    audit_index         INTEGER,
     file                TEXT NOT NULL,
     line                INTEGER NOT NULL,
     function            TEXT NOT NULL,
@@ -377,6 +378,10 @@ class SqliteScanStore(ScanStoreBase):
         if "ai_verdict" not in vuln_cols:
             self._conn.execute(
                 "ALTER TABLE vulnerabilities ADD COLUMN ai_verdict TEXT DEFAULT ''"
+            )
+        if "audit_index" not in vuln_cols:
+            self._conn.execute(
+                "ALTER TABLE vulnerabilities ADD COLUMN audit_index INTEGER"
             )
         if "failure_reason" not in vuln_cols:
             self._conn.execute(
@@ -1189,16 +1194,17 @@ class SqliteScanStore(ScanStoreBase):
             self._conn.execute(
                 """\
                 INSERT INTO vulnerabilities
-                    (scan_id, idx, file, line, function, vuln_type,
+                    (scan_id, idx, audit_index, file, line, function, vuln_type,
                      severity, description, ai_analysis, confirmed,
                      ai_verdict, failure_reason, user_verdict, user_verdict_reason,
                      ticket_submitted, ticket_id,
                      function_source, function_start_line, variant_of, output_source)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     scan_id,
                     next_idx,
+                    vuln.audit_index,
                     vuln.file,
                     vuln.line,
                     vuln.function,
@@ -1247,7 +1253,8 @@ class SqliteScanStore(ScanStoreBase):
                 self._conn.execute(
                     """\
                     UPDATE vulnerabilities
-                    SET severity = ?,
+                    SET audit_index = ?,
+                        severity = ?,
                         description = ?,
                         ai_analysis = ?,
                         confirmed = ?,
@@ -1264,6 +1271,7 @@ class SqliteScanStore(ScanStoreBase):
                     WHERE scan_id = ? AND idx = ?
                     """,
                     (
+                        vuln.audit_index,
                         vuln.severity,
                         vuln.description,
                         vuln.ai_analysis,
@@ -1289,16 +1297,17 @@ class SqliteScanStore(ScanStoreBase):
             self._conn.execute(
                 """\
                 INSERT INTO vulnerabilities
-                    (scan_id, idx, file, line, function, vuln_type,
+                    (scan_id, idx, audit_index, file, line, function, vuln_type,
                      severity, description, ai_analysis, confirmed,
                      ai_verdict, failure_reason, user_verdict, user_verdict_reason,
                      ticket_submitted, ticket_id,
                      function_source, function_start_line, variant_of, output_source)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     scan_id,
                     next_idx,
+                    vuln.audit_index,
                     vuln.file,
                     vuln.line,
                     vuln.function,
@@ -1439,6 +1448,7 @@ class SqliteScanStore(ScanStoreBase):
                 ticket_id=r["ticket_id"] or "",
                 function_source=r["function_source"] or "",
                 function_start_line=r["function_start_line"],
+                audit_index=(r["audit_index"] if "audit_index" in r.keys() else None),
                 variant_of=(r["variant_of"] if "variant_of" in r.keys() else "") or "",
                 output_source=_output_source(r["output_source"] if "output_source" in r.keys() else "{}"),
             )
