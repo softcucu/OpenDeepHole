@@ -65,7 +65,7 @@ def validate_demo(ctx) -> ValidationResult:
     step_1_artifact = validation_dir / STEP_1_ARTIFACT
     step_1_prompt = (
         f"使用 {STEP_1_SKILL} 验证 {report_path} 中的问题，"
-        f"中间产物保存在 {step_1_artifact}。"
+        f"中间产物保存在 {step_1_artifact}。如果找不到SKILL，就写入保存“Step1 找不到SKILL”"
     )
     step_1_success = False
     step_1_return_code = 0
@@ -117,7 +117,7 @@ def validate_demo(ctx) -> ValidationResult:
     step_2_artifact = validation_dir / STEP_2_ARTIFACT
     step_2_prompt = (
         f"使用 {STEP_2_SKILL} 验证 {report_path} 中的问题，"
-        f"中间产物保存在 {step_2_artifact}。"
+        f"中间产物保存在 {step_2_artifact}。如果找不到SKILL，就写入保存“Step2 找不到SKILL”"
     )
     step_2_success = False
     step_2_return_code = 0
@@ -169,7 +169,7 @@ def validate_demo(ctx) -> ValidationResult:
     step_3_artifact = validation_dir / STEP_3_ARTIFACT
     step_3_prompt = (
         f"使用 {STEP_3_SKILL} 验证 {report_path} 中的问题，"
-        f"中间产物保存在 {step_3_artifact}。"
+        f"中间产物保存在 {step_3_artifact}。如果找不到SKILL，就写入保存“Step3 找不到SKILL”"
     )
     step_3_success = False
     step_3_return_code = 0
@@ -221,7 +221,7 @@ def validate_demo(ctx) -> ValidationResult:
     step_4_artifact = validation_dir / STEP_4_ARTIFACT
     step_4_prompt = (
         f"使用 {STEP_4_SKILL} 验证 {report_path} 中的问题，"
-        f"中间产物保存在 {step_4_artifact}。"
+        f"中间产物保存在 {step_4_artifact}。如果找不到SKILL，就写入保存“Step2 找不到SKILL”"
     )
     step_4_success = False
     step_4_return_code = 0
