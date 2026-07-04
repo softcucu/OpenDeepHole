@@ -4,7 +4,7 @@
 
 - **变更** Git 历史问题分析默认关闭；默认扫描链路为威胁分析完成后直接进入静态分析和漏洞挖掘，需要时可在 Agent 配置中设置 `git_history.enabled: true` 开启历史提交分析和同类变体排查
 - **变更** 漏洞验证默认整体超时调整为 2 小时；产品验证器可在 `registry.register(..., timeout_seconds=7200)` 中覆盖单产品超时，验证上下文会通过 `ctx.timeout_seconds` 和 `get_validation_info()` 暴露最终生效值
-- **变更** 漏洞验证 demo 改为在项目目录下保存单漏洞报告，并按 STEP 1-4 串行通过 `ctx.run_command()` 启动 4 个硬编码 nga skill；每阶段默认失败后重试 2 次，进程输出会同步到页面，全部完成后返回需人工介入的验证成功结果
+- **变更** 漏洞验证 demo 改为在项目目录下保存单漏洞报告，并在代码中显式按 STEP 1-4 串行调用 4 个硬编码 nga skill；每个 STEP 保留独立提示词和 2 次失败重试，进程输出会同步到页面，全部完成后返回需人工介入的验证成功结果
 - **修复** 手动重新点击漏洞验证不再携带或执行 Agent runtime 自动更新，避免修改 demo 后验证按钮触发整包下载或 Agent 重启；产品验证器更新继续通过客户端「同步验证方法」推送到在线 Agent
 - **修复** Windows Agent 在静态分析完成后进入 git 历史挖掘时，git 子进程输出不再按系统默认 `gbk` 解码，避免非 GBK 字节触发 `UnicodeDecodeError` 并打断后续扫描
 - **修复** OpenCode/nga serve 启动失败时不再只返回 `code 1`；Agent 会捕获启动阶段 stdout/stderr 并在健康检查失败或子进程提前退出时带上日志尾部，同时强制子进程使用 UTF-8 友好环境，便于定位 provider、配置或本机 CLI 启动错误
