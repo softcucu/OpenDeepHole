@@ -7,6 +7,7 @@ from pathlib import Path
 from agent.vulnerability_validation import ValidationResult
 
 
+# 接入真实验证流程时，优先替换这 4 组 skill 名称和对应产物文件名。
 STEP_1_SKILL = "validation-skill-1"
 STEP_1_ARTIFACT = "01-validation-skill-1.md"
 STEP_2_SKILL = "validation-skill-2"
@@ -35,6 +36,7 @@ def validate_demo(ctx) -> ValidationResult:
     report_markdown = ctx.get_report_markdown()
     validation_info = ctx.get_validation_info()
     vulnerability = validation_info["vulnerability"]
+    # 所有验证输入和中间产物都放在 project_dir 下，方便 nga 在同一项目根目录内发现 skill 并读写文件。
     validation_dir = (
         project_dir
         / ".opendeephole"
@@ -43,6 +45,7 @@ def validate_demo(ctx) -> ValidationResult:
         / f"vuln-{validation_info['vuln_index']}"
     )
     validation_dir.mkdir(parents=True, exist_ok=True)
+    # 这个 Markdown 报告会传给后续 4 个 nga skill。
     report_path = validation_dir / "vulnerability.md"
     report_path.write_text(report_markdown, encoding="utf-8")
 
@@ -54,7 +57,7 @@ def validate_demo(ctx) -> ValidationResult:
     )
     ctx.publish_artifact("vulnerability.md", path=report_path, kind="report")
 
-    # STEP 1
+    # STEP 1：修改第一阶段时，同步调整 STEP_1_SKILL、STEP_1_ARTIFACT 和这里的提示词。
     if ctx.cancelled():
         return ValidationResult(
             validation_success=False,
@@ -71,10 +74,12 @@ def validate_demo(ctx) -> ValidationResult:
         f"中间产物保存在 {step_1_artifact}。"
     )
     ctx.emit_stdout(f"STEP 1 running {STEP_1_SKILL}")
+    # 直接通过命令行调用 nga；stdout/stderr 由 ctx.run_command() 流式转发。
     step_1_return_code = ctx.run_command(
         ["nga", "run", "--dir", str(project_dir), step_1_prompt],
         cwd=project_dir,
     )
+    # 只有 nga 写出预期的非空产物后，才进入下一阶段。
     if (
         step_1_return_code != 0
         or not step_1_artifact.is_file()
@@ -90,7 +95,7 @@ def validate_demo(ctx) -> ValidationResult:
     ctx.publish_artifact(STEP_1_ARTIFACT, path=step_1_artifact, kind="artifact")
     ctx.emit_stdout(f"STEP 1 completed: {step_1_artifact}")
 
-    # STEP 2
+    # STEP 2：修改第二阶段时，同步调整 STEP_2_SKILL、STEP_2_ARTIFACT 和这里的提示词。
     if ctx.cancelled():
         return ValidationResult(
             validation_success=False,
@@ -107,10 +112,12 @@ def validate_demo(ctx) -> ValidationResult:
         f"中间产物保存在 {step_2_artifact}。"
     )
     ctx.emit_stdout(f"STEP 2 running {STEP_2_SKILL}")
+    # 直接通过命令行调用 nga；--dir 必须保持指向 project_dir。
     step_2_return_code = ctx.run_command(
         ["nga", "run", "--dir", str(project_dir), step_2_prompt],
         cwd=project_dir,
     )
+    # 如果本阶段失败或没有保存 Markdown 产物，就停在这里，不继续后续 STEP。
     if (
         step_2_return_code != 0
         or not step_2_artifact.is_file()
@@ -126,7 +133,7 @@ def validate_demo(ctx) -> ValidationResult:
     ctx.publish_artifact(STEP_2_ARTIFACT, path=step_2_artifact, kind="artifact")
     ctx.emit_stdout(f"STEP 2 completed: {step_2_artifact}")
 
-    # STEP 3
+    # STEP 3：修改第三阶段时，同步调整 STEP_3_SKILL、STEP_3_ARTIFACT 和这里的提示词。
     if ctx.cancelled():
         return ValidationResult(
             validation_success=False,
@@ -143,10 +150,12 @@ def validate_demo(ctx) -> ValidationResult:
         f"中间产物保存在 {step_3_artifact}。"
     )
     ctx.emit_stdout(f"STEP 3 running {STEP_3_SKILL}")
+    # 直接通过命令行调用 nga；--dir 必须保持指向 project_dir。
     step_3_return_code = ctx.run_command(
         ["nga", "run", "--dir", str(project_dir), step_3_prompt],
         cwd=project_dir,
     )
+    # 如果本阶段失败或没有保存 Markdown 产物，就停在这里，不继续后续 STEP。
     if (
         step_3_return_code != 0
         or not step_3_artifact.is_file()
@@ -162,7 +171,7 @@ def validate_demo(ctx) -> ValidationResult:
     ctx.publish_artifact(STEP_3_ARTIFACT, path=step_3_artifact, kind="artifact")
     ctx.emit_stdout(f"STEP 3 completed: {step_3_artifact}")
 
-    # STEP 4
+    # STEP 4：修改第四阶段时，同步调整 STEP_4_SKILL、STEP_4_ARTIFACT 和这里的提示词。
     if ctx.cancelled():
         return ValidationResult(
             validation_success=False,
@@ -179,10 +188,12 @@ def validate_demo(ctx) -> ValidationResult:
         f"中间产物保存在 {step_4_artifact}。"
     )
     ctx.emit_stdout(f"STEP 4 running {STEP_4_SKILL}")
+    # 直接通过命令行调用 nga；--dir 必须保持指向 project_dir。
     step_4_return_code = ctx.run_command(
         ["nga", "run", "--dir", str(project_dir), step_4_prompt],
         cwd=project_dir,
     )
+    # 最后一个产物也必须存在且非空，才返回 validation_success=True。
     if (
         step_4_return_code != 0
         or not step_4_artifact.is_file()
