@@ -1,3 +1,4 @@
+import asyncio
 import tempfile
 import threading
 import unittest
@@ -5,9 +6,11 @@ import sqlite3
 import os
 import json
 from pathlib import Path
+from unittest.mock import AsyncMock, patch
 
 from agent.scanner import (
     GIT_HISTORY_PIPELINE_ENABLED,
+    MEMORY_API_DISCOVERY_PIPELINE_ENABLED,
     STATIC_PROGRESS_MIN_INTERVAL_SECONDS,
     _StaticProgressGate,
     _audit_order_summary,
@@ -20,15 +23,18 @@ from agent.scanner import (
     _order_candidates_for_audit,
     _prepare_audit_queue,
     _round_robin_by_pattern,
+    _run_threat_analysis_phase,
     _resolve_scan_paths,
+    _should_run_memory_api_phase,
     _should_run_git_history_phase,
+    _wait_for_threat_analysis_task,
     _configure_backend,
     build_project_level_candidate,
     is_project_level_candidate,
     refresh_backend_runtime_config,
 )
 from agent.config import AgentConfig
-from backend.models import Candidate, OpenCodePoolStatus, ScanItemStatus, ScanMeta, ScanStatus
+from backend.models import Candidate, OpenCodePoolStatus, ScanItemStatus, ScanMeta, ScanStatus, ThreatAnalysis
 from backend.store.sqlite import SqliteScanStore
 
 
@@ -208,6 +214,80 @@ class AgentScanPathTests(unittest.TestCase):
             self.assertIsNone(analysis)
             self.assertIn("未标记", message)
 
+    def test_threat_analysis_phase_pushes_result_without_terminal_scan_state(self) -> None:
+        class FakeReporter:
+            def __init__(self) -> None:
+                self.pushed: list[tuple[str, dict]] = []
+
+            async def push_threat_analysis(self, scan_id: str, analysis: dict) -> None:
+                self.pushed.append((scan_id, analysis))
+
+        async def run() -> tuple[list[tuple[str, str]], FakeReporter, AsyncMock]:
+            with tempfile.TemporaryDirectory() as tmp:
+                project = Path(tmp) / "project"
+                workspace = Path(tmp) / "workspace"
+                project.mkdir()
+                workspace.mkdir()
+                reporter = FakeReporter()
+                events: list[tuple[str, str]] = []
+
+                async def emit(phase: str, message: str) -> None:
+                    events.append((phase, message))
+
+                runner = AsyncMock(return_value=ThreatAnalysis(
+                    schema_version="1.0",
+                    analysis_id="threat-1",
+                ))
+                with patch("backend.opencode.runner.run_threat_analysis_audit", runner):
+                    await _run_threat_analysis_phase(
+                        config=AgentConfig(),
+                        project_path=project.resolve(),
+                        code_scan_path=project.resolve(),
+                        reporter=reporter,  # type: ignore[arg-type]
+                        scan_id="scan-1",
+                        product="demo",
+                        workspace=workspace,
+                        cancel_event=threading.Event(),
+                        emit=emit,
+                    )
+                return events, reporter, runner
+
+        events, reporter, runner = asyncio.run(run())
+
+        runner.assert_awaited_once()
+        self.assertEqual(reporter.pushed[0][0], "scan-1")
+        self.assertEqual(reporter.pushed[0][1]["analysis_id"], "threat-1")
+        self.assertTrue(any("开始基于攻击树的威胁分析" in message for _phase, message in events))
+        self.assertTrue(any("威胁分析完成" in message for _phase, message in events))
+
+    def test_wait_for_threat_analysis_task_blocks_until_background_done(self) -> None:
+        async def run() -> list[object]:
+            release = asyncio.Event()
+            events: list[object] = []
+
+            async def background() -> None:
+                events.append("started")
+                await release.wait()
+                events.append("done")
+
+            async def emit(phase: str, message: str) -> None:
+                events.append((phase, message))
+
+            task = asyncio.create_task(background())
+            await asyncio.sleep(0)
+            waiter = asyncio.create_task(_wait_for_threat_analysis_task(task, emit=emit))
+            await asyncio.sleep(0)
+            events.append(("waiter_done_before_release", waiter.done()))
+            release.set()
+            await waiter
+            return events
+
+        events = asyncio.run(run())
+
+        self.assertIn(("threat_analysis", "等待威胁分析后台任务收尾..."), events)
+        self.assertIn(("waiter_done_before_release", False), events)
+        self.assertIn("done", events)
+
     def test_git_history_phase_is_hard_disabled_even_when_config_enabled(self) -> None:
         config = AgentConfig()
         config.git_history.enabled = True
@@ -219,6 +299,20 @@ class AgentScanPathTests(unittest.TestCase):
                 config,
                 ran_fresh_static=True,
                 retry_mode=False,
+                workspace=Path("/tmp/opencode-workspace"),
+                cancel_event=cancel_event,
+            )
+        )
+
+    def test_memory_api_phase_is_hard_disabled_even_when_config_enabled(self) -> None:
+        config = AgentConfig()
+        config.memory_api_discovery.enabled = True
+        cancel_event = threading.Event()
+
+        self.assertFalse(MEMORY_API_DISCOVERY_PIPELINE_ENABLED)
+        self.assertFalse(
+            _should_run_memory_api_phase(
+                config,
                 workspace=Path("/tmp/opencode-workspace"),
                 cancel_event=cancel_event,
             )

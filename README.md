@@ -36,7 +36,7 @@
 **源码不离开本地**：Agent 只上报漏洞分析结论，不上传源码文件。  
 **误报反馈闭环**：用户在 Web UI 标记正报或误报后，选中的经验会注入 SKILL 中减少重复误判；也可将问题标为“待分析”作为人工待处理状态，该状态不进入经验库且仍可继续 AI 去误报复核；已标记问题也可以取消标记，取消后会移除该标记生成的经验并重新进入 AI 去误报候选。
 **静态候选收敛、同类合并与同模式过滤**：DB 类 checker 会按本次 `code_scan_path` 在 SQL 层收敛函数范围；静态候选进入 AI 前会按 checker `family` 做函数级同类合并，并只向 OpenCode 提供“函数/变量或表达式/问题类型”的最小审计问题。AI 审计确认某个同模式代表点为非问题后，可通过 `pattern_filter` 自动过滤同 `vuln_type + subject + scope` 的后续候选。详细规则见下文“静态候选合并与同模式过滤”。
-**git 历史问题挖掘 + 同类变体排查（可选，默认关闭）**：默认扫描链路为威胁分析 → 静态分析 → 候选点 AI 审计。需要历史增强时，在 Agent 配置中设置 `git_history.enabled: true`；若目标是 git 仓库，扫描会分析 git 提交历史——逐条提交（每条一个 LLM 调用）判定是否为安全修复并提炼「历史问题模式」（根因+缺陷类型+触发条件的抽象描述），再对每条模式派一个 agent 在全仓搜索同类未修复站点，命中的作为新候选（带「同类变体来源」`variant_of`）并入 AI 审计。挖掘出的历史问题模式在扫描详情页「git 历史问题模式」面板展示。相关配置见 `git_history`（`enabled`/`max_commits`/`since`/`paths`/`variant_hunt`）。
+**git 历史问题挖掘 + 同类变体排查（可选，默认关闭）**：默认扫描链路在完成代码索引和工作区准备后，会并行启动威胁分析和静态分析；静态分析完成后立即进入候选点 AI 审计，威胁分析结果生成后独立上报展示，并在扫描最终完成前收尾。需要历史增强时，在 Agent 配置中设置 `git_history.enabled: true`；若目标是 git 仓库，扫描会分析 git 提交历史——逐条提交（每条一个 LLM 调用）判定是否为安全修复并提炼「历史问题模式」（根因+缺陷类型+触发条件的抽象描述），再对每条模式派一个 agent 在全仓搜索同类未修复站点，命中的作为新候选（带「同类变体来源」`variant_of`）并入 AI 审计。挖掘出的历史问题模式在扫描详情页「git 历史问题模式」面板展示。相关配置见 `git_history`（`enabled`/`max_commits`/`since`/`paths`/`variant_hunt`）。
 
 **AI 去误报（扫描完成自动触发，历史/校验匹配 + 三阶段辩论，二元定级）**：扫描完成且存在已确认漏洞时**自动发起去误报**，无需手动点击（受 `fp_review.auto_on_complete` 控制，默认开启；仅在该扫描尚无去误报任务时触发，避免重复复核）。扫描详情页顶部「AI去误报」按钮仍保留，可手动重跑或补跑未复核项。FP 复核先运行 `history_match` 阶段——判断候选能否与某条历史问题模式（同根因）或其它函数里把校验做对了的调用站点对应上；**能对应上则直接判定 high 并跳过三阶段对抗辩论**，报告中以「对应修复/校验」字段（`match_type` history/validation + `match_reference`）回溯到对应的历史问题或正面对照。对应不上才进入 `prove-bug`、`prove-fp`、`final-judge` 三阶段辩论（各阶段通过本地 Markdown artifact 文件交接；`prove-bug` 判定非问题时正式早退，记录"可能误报"）。去误报定级简化为二元：命中匹配或论证为外部可触发 → **high**，其余一律 → **low**。阶段结束后页面即可查看论证；阶段未写工件或未提交结论会按配置重试并展示失败原因，复核结束后无最终结论显示"复核失败"。复核按模型池容量并发执行并同时高亮所有进行中的行；Agent 断线重连后复核任务自动重新挂接，不会被误判为已停止。
 **漏洞报告导出**：对每一个 AI 判定为「是问题」的扫描项可单独导出 Markdown 报告（含元信息、描述、AI 分析及去误报三阶段论证）；扫描详情页顶部「导出报告」可将本次所有确认为问题的漏洞各自导出为 Markdown 并打包为 zip。对应端点 `GET /api/scan/{id}/vulnerability/{idx}/report`（单项 Markdown）与 `GET /api/scan/{id}/report.zip`（整体 zip）。
@@ -423,9 +423,9 @@ class Analyzer(BaseAnalyzer):
 - 使用 DB 的 analyzer 应优先调用 `scoped_functions(db, project_path)`，让 `code_scan_path` 子目录扫描在 SQL 层收敛函数范围；无法判定范围时会自动退回全量。
 - `Candidate.description` 应尽量只包含必要审计问题（函数、变量/表达式、问题类型），不要写静态分析规则、命中路径或工具细节；`metadata.subject` 用于跨规则合并和同模式过滤。
 
-**扫描前内存 API 缓存：**
+**内存 API 缓存：**
 
-扫描在 checker 静态分析开始前会检查项目根目录中的 `memory_api_pairs.json`。如果文件已存在，会直接复用；如果不存在，会先分析项目中的底层堆内存申请/释放函数和宏，批量调用 opencode 判断候选并生成该 JSON 文件，然后再开始后续扫描。该过程只读取 `code_index.db` 和源码，不修改数据库。
+扫描管线已禁用内存 API 预处理，不再在 checker 静态分析前自动检查、生成或复用 `memory_api_pairs.json`。相关模块和配置仍保留，已有产物也仍可被内存类 checker 按需读取。
 
 内存类 checker 可读取该文件中的 `allocators`、`deallocators` 和 `pairs` 来识别项目自定义的 malloc/free 薄封装；结构体/对象专用 destroy/free、复杂 cleanup/refcount 生命周期函数和文件/socket/mmap 等非堆资源不会作为底层内存 API 保留。
 
@@ -684,7 +684,7 @@ CLI 工具调用约定：
 
 OpenCode 模型池统计：
 
-- 位置审计、扫描前内存 API 识别和 AI 去误报都会通过统一调用入口累计模型池统计。
+- 位置审计、威胁分析和 AI 去误报都会通过统一调用入口累计模型池统计；扫描管线中的内存 API 预处理已禁用。
 - 配置模型池后，`opencode_concurrency` 是所有模型合计运行数的硬上限；每个模型还会受自己的 `max_concurrency` 和 `time_windows` 限制。
 - 模型行可设置 `use_default_model: true`，表示参与模型池调度但调用 CLI 时不传 `--model`。
 - 扫描详情页点击「模型看板」可以查看每个模型的累计任务、成功/失败/超时/取消计数、平均耗时、当前运行数和当前排队数。

@@ -29,6 +29,9 @@ FIRST_AUDIT_FUNCTION = "MC_EthBuildPayloadByFrag"
 # Keep the git-history implementation and config fields in place, but do not
 # execute this expensive phase from the scan pipeline for now.
 GIT_HISTORY_PIPELINE_ENABLED = False
+# Keep memory API discovery available as a standalone module/config surface, but
+# do not run it as a scan-pipeline precondition.
+MEMORY_API_DISCOVERY_PIPELINE_ENABLED = False
 
 
 class _StaticProgressGate:
@@ -96,6 +99,21 @@ def _should_run_git_history_phase(
         and not retry_mode
         and getattr(config, "git_history", None) is not None
         and config.git_history.enabled
+        and workspace is not None
+        and not cancel_event.is_set()
+    )
+
+
+def _should_run_memory_api_phase(
+    config: AgentConfig,
+    *,
+    workspace: Path | None,
+    cancel_event: threading.Event,
+) -> bool:
+    return (
+        MEMORY_API_DISCOVERY_PIPELINE_ENABLED
+        and getattr(config, "memory_api_discovery", None) is not None
+        and config.memory_api_discovery.enabled
         and workspace is not None
         and not cancel_event.is_set()
     )
@@ -424,6 +442,99 @@ def _load_existing_threat_analysis_for_scope(
     )
 
 
+async def _run_threat_analysis_phase(
+    *,
+    config: AgentConfig,
+    project_path: Path,
+    code_scan_path: Path,
+    reporter: Reporter,
+    scan_id: str,
+    product: str,
+    workspace: Path,
+    cancel_event: threading.Event,
+    emit: Callable[[str, str], object],
+) -> None:
+    """Run attack-tree threat analysis without owning the scan terminal state."""
+    if cancel_event.is_set():
+        return
+    try:
+        from backend.opencode.runner import run_threat_analysis_audit
+
+        root_dir = Path(__file__).resolve().parent.parent
+        analysis, cache_message = _load_existing_threat_analysis_for_scope(
+            project_path, code_scan_path,
+        )
+        if cache_message:
+            maybe = emit("threat_analysis", cache_message)
+            if asyncio.iscoroutine(maybe):
+                await maybe
+        if analysis is None:
+            maybe = emit("threat_analysis", "开始基于攻击树的威胁分析...")
+            if asyncio.iscoroutine(maybe):
+                await maybe
+            analysis = await run_threat_analysis_audit(
+                workspace=workspace,
+                project_id=scan_id,
+                skill_path=root_dir / "attack-tree-threat-analysis.md",
+                reference_catalog_path=root_dir / "attack-method-reference-catalog.md",
+                on_output=lambda line: print(f"  [threat] {line}", flush=True),
+                cancel_event=cancel_event,
+                timeout=config.opencode.timeout,
+                project_dir=project_path,
+                code_scan_path=code_scan_path,
+                product=product,
+            )
+        if analysis is not None:
+            await reporter.push_threat_analysis(scan_id, analysis.model_dump())
+            maybe = emit(
+                "threat_analysis",
+                f"威胁分析完成：识别 {len(analysis.assets)} 个关键资产，{len(analysis.attack_trees)} 棵攻击树",
+            )
+            if asyncio.iscoroutine(maybe):
+                await maybe
+        elif cancel_event.is_set():
+            maybe = emit("threat_analysis", "威胁分析已停止")
+            if asyncio.iscoroutine(maybe):
+                await maybe
+        else:
+            maybe = emit("threat_analysis", "威胁分析未生成有效 res.json，已跳过结果展示")
+            if asyncio.iscoroutine(maybe):
+                await maybe
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        maybe = emit("threat_analysis", f"威胁分析异常（已跳过）: {exc}")
+        if asyncio.iscoroutine(maybe):
+            await maybe
+
+
+async def _wait_for_threat_analysis_task(
+    task: asyncio.Task | None,
+    *,
+    cancel_event: threading.Event | None = None,
+    emit: Callable[[str, str], object] | None = None,
+    cancel_first: bool = False,
+) -> None:
+    """Wait for a background threat-analysis task before cleanup or terminal state."""
+    if task is None:
+        return
+    if cancel_first and not task.done() and cancel_event is not None:
+        cancel_event.set()
+    if not task.done() and emit is not None:
+        maybe = emit("threat_analysis", "等待威胁分析后台任务收尾...")
+        if asyncio.iscoroutine(maybe):
+            await maybe
+    try:
+        await task
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        if emit is not None:
+            maybe = emit("threat_analysis", f"威胁分析后台任务异常（已跳过）: {exc}")
+            if asyncio.iscoroutine(maybe):
+                await maybe
+
+
 def _candidate_path_candidates(candidate_file: str, project_root: Path, scan_root: Path) -> list[Path]:
     normalized = candidate_file.replace("\\", "/")
     raw = Path(normalized)
@@ -709,6 +820,7 @@ async def run_scan(
     previous_checkers_dir = os.environ.get(CHECKERS_DIR_ENV)
     pool_status_stop = asyncio.Event()
     pool_status_task: asyncio.Task | None = None
+    threat_analysis_task: asyncio.Task | None = None
 
     try:
         project_path, code_scan_path = _resolve_scan_paths(project_path, code_scan_path)
@@ -912,60 +1024,24 @@ async def run_scan(
         )
         await emit("init", "Analysis workspace ready")
 
-        # --- Phase 5: Attack-tree threat analysis (fresh scans only) ---
+        # --- Phase 5: Attack-tree threat analysis (fresh scans only, background) ---
         if not retry_mode and workspace is not None and not cancel_event.is_set():
-            try:
-                from backend.opencode.runner import run_threat_analysis_audit
-
-                root_dir = Path(__file__).resolve().parent.parent
-                analysis, cache_message = _load_existing_threat_analysis_for_scope(
-                    project_path, code_scan_path,
-                )
-                if cache_message:
-                    await emit("threat_analysis", cache_message)
-                if analysis is None:
-                    await emit("threat_analysis", "开始基于攻击树的威胁分析...")
-                    analysis = await run_threat_analysis_audit(
-                        workspace=workspace,
-                        project_id=scan_id,
-                        skill_path=root_dir / "attack-tree-threat-analysis.md",
-                        reference_catalog_path=root_dir / "attack-method-reference-catalog.md",
-                        on_output=lambda line: print(f"  [threat] {line}", flush=True),
-                        cancel_event=cancel_event,
-                        timeout=config.opencode.timeout,
-                        project_dir=project_path,
-                        code_scan_path=code_scan_path,
-                        product=product,
-                    )
-                if analysis is not None:
-                    await reporter.push_threat_analysis(scan_id, analysis.model_dump())
-                    await emit(
-                        "threat_analysis",
-                        f"威胁分析完成：识别 {len(analysis.assets)} 个关键资产，{len(analysis.attack_trees)} 棵攻击树",
-                    )
-                elif cancel_event.is_set():
-                    await emit("threat_analysis", "威胁分析已停止")
-                else:
-                    await emit("threat_analysis", "威胁分析未生成有效 res.json，已跳过结果展示")
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:
-                await emit("threat_analysis", f"威胁分析异常（已跳过）: {exc}")
-            if cancel_event.is_set():
-                await reporter.finish_scan(scan_id, [], "cancelled", 0, 0)
-                return
+            threat_analysis_task = asyncio.create_task(_run_threat_analysis_phase(
+                config=config,
+                project_path=project_path,
+                code_scan_path=code_scan_path,
+                reporter=reporter,
+                scan_id=scan_id,
+                product=product,
+                workspace=workspace,
+                cancel_event=cancel_event,
+                emit=lambda phase, message: emit(phase, message),
+            ))
 
         # --- Phase 6: Memory allocation/free API preprocessing ---
-        from backend.preprocess.memory_api_discovery import ensure_memory_api_artifact
-        await ensure_memory_api_artifact(
-            project_root=project_path,
-            workspace=workspace,
-            scan_dir=scan_dir,
-            db=db,
-            project_id=scan_id,
-            cancel_event=cancel_event,
-            emit=lambda phase, message: emit(phase, message),
-        )
+        # Hard-disabled in the scan pipeline. The standalone module/config remain
+        # available for compatibility, but this stage is no longer a precondition
+        # for static analysis.
 
         # --- Phase 7: Static analysis (or load from cache) ---
         # Skip static analysis only when a candidates cache file already exists
@@ -1085,6 +1161,11 @@ async def run_scan(
                 await emit("static_analysis", "Static analysis stopped by user")
                 if db is not None:
                     db.close()
+                await _wait_for_threat_analysis_task(
+                    threat_analysis_task,
+                    cancel_event=cancel_event,
+                    emit=emit,
+                )
                 await reporter.finish_scan(scan_id, [], "cancelled", 0, 0)
                 return
 
@@ -1212,6 +1293,11 @@ async def run_scan(
             db.close()
 
         if total == 0:
+            await _wait_for_threat_analysis_task(
+                threat_analysis_task,
+                cancel_event=cancel_event,
+                emit=emit,
+            )
             await emit("complete", "No candidates found — nothing to audit")
             await reporter.finish_scan(scan_id, [], "complete", 0, 0)
             shutil.rmtree(scan_dir, ignore_errors=True)
@@ -1589,12 +1675,22 @@ async def run_scan(
 
         # --- Phase 8: Report results ---
         if cancelled:
+            await _wait_for_threat_analysis_task(
+                threat_analysis_task,
+                cancel_event=cancel_event,
+                emit=emit,
+            )
             await reporter.finish_scan(
                 scan_id, [], "cancelled", total, already_done + processed_this_run
             )
             # Do NOT delete scan_dir on cancel — needed for resume
             return
 
+        await _wait_for_threat_analysis_task(
+            threat_analysis_task,
+            cancel_event=cancel_event,
+            emit=emit,
+        )
         confirmed_count = sum(1 for v in vulnerabilities if v.confirmed)
         await emit(
             "complete",
@@ -1606,6 +1702,16 @@ async def run_scan(
 
     except Exception as exc:
         print(f"[error] Scan failed: {exc}")
+        emit_func = locals().get("emit")
+        try:
+            await _wait_for_threat_analysis_task(
+                threat_analysis_task,
+                cancel_event=cancel_event,
+                emit=emit_func if callable(emit_func) else None,
+                cancel_first=True,
+            )
+        except Exception:
+            pass
         try:
             await reporter.send_event(scan_id, ScanEvent.create("error", f"Scan failed: {exc}"))
             await reporter.finish_scan(scan_id, [], "error", 0, 0, error_message=str(exc))
