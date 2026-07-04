@@ -48,8 +48,8 @@ class OpenCodeModelConfig:
 
 @dataclass
 class OpenCodeConfig:
-    tool: str = "opencode"
-    executable: str = "opencode"  # CLI executable name or full path
+    tool: str = "nga"
+    executable: str = "nga"  # CLI executable name or full path
     invocation_mode: str = "serve"  # serve | cli
     model: str = ""
     timeout: int = 1200

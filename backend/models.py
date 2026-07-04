@@ -569,8 +569,8 @@ class AgentOpenCodeModelConfig(BaseModel):
 
 
 class AgentOpenCodeConfig(BaseModel):
-    tool: str = "opencode"
-    executable: str = "opencode"
+    tool: str = "nga"
+    executable: str = "nga"
     invocation_mode: str = "serve"
     model: str = ""
     timeout: int = 1200
@@ -608,7 +608,7 @@ class AgentVulnerabilityValidationConfig(BaseModel):
 class AgentRemoteConfig(BaseModel):
     """Agent configuration managed from the server Web UI."""
     no_proxy: str = "10.0.0.0/8"
-    opencode_concurrency: int = 1
+    opencode_concurrency: int = 4
     llm_api: AgentLLMApiConfig = AgentLLMApiConfig()
     opencode: AgentOpenCodeConfig = AgentOpenCodeConfig()
     fp_review_cli: AgentOpenCodeConfig | None = None

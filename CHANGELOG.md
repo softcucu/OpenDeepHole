@@ -2,6 +2,7 @@
 
 ## 2026-07-04
 
+- **修复** Agent 远端配置和 Web 配置面板的默认 OpenCode/兼容 CLI 改为与下载包 `agent.yaml` 一致的 `nga`/`nga`、并发 4，避免仅保存 `git_history.enabled: false` 等配置时把本地可用的 `nga serve` 覆盖成默认 `opencode serve`，导致 serve 无法启动
 - **变更** `loop_mut_idx_oob` 撤销未校验循环上界直接访问召回，改为召回 `bspkern_copy_from_user`/`copy_from_user` 家族中目标指针按拷贝长度循环累加或递减的候选；候选提示会点名重点长度变量和目标变量，SKILL 复核要求说明真实边界与漏洞触发方式
 - **变更** Git 历史问题分析默认关闭；默认扫描链路为威胁分析完成后直接进入静态分析和漏洞挖掘，需要时可在 Agent 配置中设置 `git_history.enabled: true` 开启历史提交分析和同类变体排查
 - **变更** 漏洞验证默认整体超时调整为 2 小时；产品验证器可在 `registry.register(..., timeout_seconds=7200)` 中覆盖单产品超时，验证上下文会通过 `ctx.timeout_seconds` 和 `get_validation_info()` 暴露最终生效值

@@ -38,7 +38,7 @@ const DEFAULT_VULNERABILITY_VALIDATION = {
 
 const DEFAULT_CONFIG: AgentRemoteConfig = {
   no_proxy: "10.0.0.0/8",
-  opencode_concurrency: 1,
+  opencode_concurrency: 4,
   llm_api: {
     base_url: "https://api.anthropic.com",
     api_key: "",
@@ -49,8 +49,8 @@ const DEFAULT_CONFIG: AgentRemoteConfig = {
     stream: false,
   },
   opencode: {
-    tool: "opencode",
-    executable: "opencode",
+    tool: "nga",
+    executable: "nga",
     invocation_mode: "serve",
     model: "",
     timeout: 1200,

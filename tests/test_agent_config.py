@@ -25,7 +25,8 @@ class AgentConfigTests(unittest.TestCase):
         self.assertEqual(cfg.no_proxy, "10.0.0.0/8")
         self.assertEqual(cfg.llm_api.timeout, 300)
         self.assertFalse(cfg.llm_api.stream)
-        self.assertEqual(cfg.opencode.tool, "opencode")
+        self.assertEqual(cfg.opencode.tool, "nga")
+        self.assertEqual(cfg.opencode.executable, "nga")
         self.assertEqual(cfg.opencode.invocation_mode, "serve")
         self.assertEqual(cfg.opencode.timeout, 1200)
         self.assertEqual(cfg.opencode.max_retries, 2)
@@ -45,6 +46,19 @@ class AgentConfigTests(unittest.TestCase):
     def test_backend_and_remote_git_history_defaults_are_disabled(self) -> None:
         self.assertFalse(BackendGitHistoryConfig().enabled)
         self.assertFalse(AgentRemoteConfig().git_history.enabled)
+        self.assertEqual(AgentRemoteConfig().opencode.tool, "nga")
+        self.assertEqual(AgentRemoteConfig().opencode.executable, "nga")
+        self.assertEqual(AgentRemoteConfig().opencode_concurrency, 4)
+
+    def test_full_remote_defaults_do_not_switch_agent_to_opencode(self) -> None:
+        cfg = AgentConfig()
+        cfg.opencode.tool = "nga"
+        cfg.opencode.executable = "nga"
+
+        apply_remote_config(cfg, AgentRemoteConfig().model_dump())
+
+        self.assertEqual(cfg.opencode.tool, "nga")
+        self.assertEqual(cfg.opencode.executable, "nga")
 
     def test_apply_remote_config_overwrites_falsey_values(self) -> None:
         cfg = AgentConfig()

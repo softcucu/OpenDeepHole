@@ -128,8 +128,8 @@ llm_api:
 # CLI 审计工具配置（供 mode: opencode 的检查项使用）
 # tool 可选: nga, opencode, hac, claude
 opencode:
-  tool: "opencode"
-  executable: "opencode"
+  tool: "nga"
+  executable: "nga"
   model: ""       # 兼容字段：未配置 models 时使用；留空则使用 CLI 默认模型
   timeout: 1200
   max_retries: 2
@@ -625,8 +625,8 @@ llm_api:
 # CLI 审计工具配置（供 mode: opencode 的检查项使用）
 # tool 可选: nga, opencode, hac, claude
 opencode:
-  tool: "opencode"
-  executable: "opencode"
+  tool: "nga"
+  executable: "nga"
   model: ""      # 兼容字段：未配置 models 时使用；留空则使用 CLI 默认模型
   timeout: 1200
   max_retries: 2
@@ -634,7 +634,7 @@ opencode:
 
 # OpenCode/兼容 CLI 总并发数；位置审计、扫描前 API 识别和 AI 去误报都会复用。
 # 配置 models 后，该值仍是所有模型合计运行数的硬上限
-opencode_concurrency: 1
+opencode_concurrency: 4
 
 # 静态候选跨规则去重：同 family、同文件、同函数只保留一个代表候选
 static_dedup: true
