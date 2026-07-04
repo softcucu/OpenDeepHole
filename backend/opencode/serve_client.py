@@ -8,6 +8,7 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import shutil
 import signal
 import socket
@@ -187,6 +188,71 @@ def _with_serve_startup_log(message: str, path: Path | None) -> str:
     if not tail:
         return message
     return f"{message}\n\nOpenCode serve startup output:\n{tail}"
+
+
+def _serve_startup_env_debug(env: dict[str, str]) -> list[str]:
+    lines: list[str] = []
+    for name in (
+        "NODE_TLS_REJECT_UNAUTHORIZED",
+        "PYTHONIOENCODING",
+        "PYTHONUTF8",
+        "OPENCODE_CONFIG_CONTENT",
+    ):
+        value = env.get(name)
+        lines.append(f"    {name}={value if value is not None else '(unset)'}")
+    lines.append("    OPENCODE_SERVER_PASSWORD=(cleared)")
+    lines.append("    OPENCODE_SERVER_USERNAME=(cleared)")
+    return lines
+
+
+def _serve_startup_shell_debug(cmd: list[str], cwd: Path, env: dict[str, str]) -> str:
+    env_parts = [
+        f"{name}={shlex.quote(env[name])}"
+        for name in (
+            "NODE_TLS_REJECT_UNAUTHORIZED",
+            "PYTHONIOENCODING",
+            "PYTHONUTF8",
+            "OPENCODE_CONFIG_CONTENT",
+        )
+        if name in env
+    ]
+    prefix = " ".join(env_parts)
+    command = shlex.join(cmd)
+    if prefix:
+        command = f"{prefix} {command}"
+    return f"cd {shlex.quote(str(cwd))} && {command}"
+
+
+def _log_serve_startup_debug(
+    *,
+    key: OpenCodeServeKey,
+    cmd: list[str],
+    port: int,
+    cwd: Path,
+    env: dict[str, str],
+    startup_log_path: Path,
+    popen_kwargs: dict[str, Any],
+    marker_path: Path,
+) -> None:
+    config_content = env.get("OPENCODE_CONFIG_CONTENT", "")
+    lines = [
+        "OpenCode serve startup debug:",
+        f"  tool={key.tool}",
+        f"  executable_config={key.executable}",
+        f"  executable_resolved={cmd[0]}",
+        f"  port={port}",
+        f"  cwd={cwd}",
+        f"  marker_path={marker_path}",
+        f"  startup_log_path={startup_log_path}",
+        f"  config_hash={key.config_hash or '(none)'}",
+        f"  config_content_bytes={len(config_content.encode('utf-8')) if config_content else 0}",
+        f"  argv={json.dumps(cmd, ensure_ascii=False)}",
+        f"  shell={_serve_startup_shell_debug(cmd, cwd, env)}",
+        "  env_overrides:",
+        *_serve_startup_env_debug(env),
+        f"  popen_kwargs={popen_kwargs!r}",
+    ]
+    logger.info("%s", "\n".join(lines))
 
 
 def _remove_file(path: Path | None) -> None:
@@ -1105,6 +1171,16 @@ class OpenCodeServeManager:
             kwargs["start_new_session"] = True
         startup_log_path = _new_serve_startup_log_path(key.tool, port)
         self._startup_log_path = startup_log_path
+        _log_serve_startup_debug(
+            key=key,
+            cmd=cmd,
+            port=port,
+            cwd=prepared_cwd,
+            env=env,
+            startup_log_path=startup_log_path,
+            popen_kwargs=kwargs,
+            marker_path=self._marker_path,
+        )
         try:
             with startup_log_path.open("ab") as startup_log:
                 self._proc = subprocess.Popen(

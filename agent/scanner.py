@@ -26,6 +26,9 @@ PROJECT_LEVEL_FUNCTION = "__project__"
 STATIC_PROGRESS_MIN_INTERVAL_SECONDS = 0.5
 STATIC_PROGRESS_MIN_PERCENT_DELTA = 1.0
 FIRST_AUDIT_FUNCTION = "MC_EthBuildPayloadByFrag"
+# Keep the git-history implementation and config fields in place, but do not
+# execute this expensive phase from the scan pipeline for now.
+GIT_HISTORY_PIPELINE_ENABLED = False
 
 
 class _StaticProgressGate:
@@ -76,6 +79,25 @@ def build_project_level_candidate(
         function=PROJECT_LEVEL_FUNCTION,
         description=f"Project-level audit for {entry.label}",
         vuln_type=entry.name,
+    )
+
+
+def _should_run_git_history_phase(
+    config: AgentConfig,
+    *,
+    ran_fresh_static: bool,
+    retry_mode: bool,
+    workspace: Path | None,
+    cancel_event: threading.Event,
+) -> bool:
+    return (
+        GIT_HISTORY_PIPELINE_ENABLED
+        and ran_fresh_static
+        and not retry_mode
+        and getattr(config, "git_history", None) is not None
+        and config.git_history.enabled
+        and workspace is not None
+        and not cancel_event.is_set()
     )
 
 
@@ -1077,13 +1099,12 @@ async def run_scan(
 
         # --- Phase 5.5: git history mining + variant hunting (fresh scans only) ---
         # 仅在首次扫描（非续扫、非缓存命中）时运行；续扫/复核从后端读取已上报的模式。
-        if (
-            ran_fresh_static
-            and not retry_mode
-            and getattr(config, "git_history", None) is not None
-            and config.git_history.enabled
-            and workspace is not None
-            and not cancel_event.is_set()
+        if _should_run_git_history_phase(
+            config,
+            ran_fresh_static=ran_fresh_static,
+            retry_mode=retry_mode,
+            workspace=workspace,
+            cancel_event=cancel_event,
         ):
             try:
                 from agent.git_history import mine_history

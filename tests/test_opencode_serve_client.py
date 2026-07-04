@@ -398,6 +398,7 @@ def test_start_locked_uses_fixed_port_and_writes_marker(monkeypatch, tmp_path: P
         commands: list[list[str]] = []
         envs: list[dict[str, str]] = []
         popen_kwargs: list[dict] = []
+        startup_logs: list[str] = []
         git_init_cwds: list[Path] = []
         marker_path = tmp_path / "serve-marker.json"
         startup_log_path = tmp_path / "serve-startup.log"
@@ -428,6 +429,10 @@ def test_start_locked_uses_fixed_port_and_writes_marker(monkeypatch, tmp_path: P
 
         monkeypatch.setattr("backend.opencode.serve_client.subprocess.Popen", fake_popen)
         monkeypatch.setattr("backend.opencode.serve_client.subprocess.run", fake_run)
+        monkeypatch.setattr(
+            "backend.opencode.serve_client.logger.info",
+            lambda message, *args: startup_logs.append(message % args if args else str(message)),
+        )
 
         manager = OpenCodeServeManager()
         manager._wait_health_locked = AsyncMock()
@@ -461,6 +466,18 @@ def test_start_locked_uses_fixed_port_and_writes_marker(monkeypatch, tmp_path: P
         assert popen_kwargs[0]["cwd"] == str(startup_cwd)
         assert popen_kwargs[0]["stdout"] != subprocess.DEVNULL
         assert popen_kwargs[0]["stderr"] == subprocess.STDOUT
+        log_text = "\n".join(startup_logs)
+        assert "OpenCode serve startup debug:" in log_text
+        assert "executable_config=opencode" in log_text
+        assert "executable_resolved=/bin/opencode" in log_text
+        assert f"cwd={startup_cwd}" in log_text
+        assert f"marker_path={marker_path}" in log_text
+        assert f"startup_log_path={startup_log_path}" in log_text
+        assert 'argv=["/bin/opencode", "serve", "--hostname", "127.0.0.1", "--port", "4096"]' in log_text
+        assert "shell=cd " in log_text
+        assert "/bin/opencode serve --hostname 127.0.0.1 --port 4096" in log_text
+        assert 'OPENCODE_CONFIG_CONTENT={"mcp": {}}' in log_text
+        assert "popen_kwargs={'start_new_session': True}" in log_text
 
     asyncio.run(run())
 

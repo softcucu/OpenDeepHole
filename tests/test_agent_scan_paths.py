@@ -1,4 +1,5 @@
 import tempfile
+import threading
 import unittest
 import sqlite3
 import os
@@ -6,6 +7,7 @@ import json
 from pathlib import Path
 
 from agent.scanner import (
+    GIT_HISTORY_PIPELINE_ENABLED,
     STATIC_PROGRESS_MIN_INTERVAL_SECONDS,
     _StaticProgressGate,
     _audit_order_summary,
@@ -19,6 +21,7 @@ from agent.scanner import (
     _prepare_audit_queue,
     _round_robin_by_pattern,
     _resolve_scan_paths,
+    _should_run_git_history_phase,
     _configure_backend,
     build_project_level_candidate,
     is_project_level_candidate,
@@ -204,6 +207,22 @@ class AgentScanPathTests(unittest.TestCase):
 
             self.assertIsNone(analysis)
             self.assertIn("未标记", message)
+
+    def test_git_history_phase_is_hard_disabled_even_when_config_enabled(self) -> None:
+        config = AgentConfig()
+        config.git_history.enabled = True
+        cancel_event = threading.Event()
+
+        self.assertFalse(GIT_HISTORY_PIPELINE_ENABLED)
+        self.assertFalse(
+            _should_run_git_history_phase(
+                config,
+                ran_fresh_static=True,
+                retry_mode=False,
+                workspace=Path("/tmp/opencode-workspace"),
+                cancel_event=cancel_event,
+            )
+        )
 
 
 class AgentAuditOrderingTests(unittest.TestCase):

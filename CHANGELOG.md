@@ -2,9 +2,11 @@
 
 ## 2026-07-04
 
+- **优化** OpenCode/nga serve 启动前会在 Agent 命令行打印完整诊断信息，包括解析后的可执行文件、端口、CWD、marker/startup log 路径、argv、可复现 shell 形式命令、Popen 参数以及完整 `OPENCODE_CONFIG_CONTENT` 注入内容，便于定位本机 serve 启动失败原因
+- **变更** `git_history` 历史提交分析和同类变体排查在扫描管线中硬禁用；实现代码和配置字段继续保留，但即使配置文件里 `git_history.enabled: true` 也不会执行该阶段
 - **修复** Agent 远端配置和 Web 配置面板的默认 OpenCode/兼容 CLI 改为与下载包 `agent.yaml` 一致的 `nga`/`nga`、并发 4，避免仅保存 `git_history.enabled: false` 等配置时把本地可用的 `nga serve` 覆盖成默认 `opencode serve`，导致 serve 无法启动
 - **变更** `loop_mut_idx_oob` 撤销未校验循环上界直接访问召回，改为召回 `bspkern_copy_from_user`/`copy_from_user` 家族中目标指针按拷贝长度循环累加或递减的候选；候选提示会点名重点长度变量和目标变量，SKILL 复核要求说明真实边界与漏洞触发方式
-- **变更** Git 历史问题分析默认关闭；默认扫描链路为威胁分析完成后直接进入静态分析和漏洞挖掘，需要时可在 Agent 配置中设置 `git_history.enabled: true` 开启历史提交分析和同类变体排查
+- **变更** Git 历史问题分析默认关闭；默认扫描链路为威胁分析完成后直接进入静态分析和漏洞挖掘
 - **变更** 漏洞验证默认整体超时调整为 2 小时；产品验证器可在 `registry.register(..., timeout_seconds=7200)` 中覆盖单产品超时，验证上下文会通过 `ctx.timeout_seconds` 和 `get_validation_info()` 暴露最终生效值
 - **变更** 漏洞验证 demo 改为在项目目录下保存单漏洞报告，并在代码中显式按 STEP 1-4 串行调用 4 个硬编码 nga skill；每个 STEP 保留独立提示词和 2 次失败重试，进程输出会同步到页面，全部完成后返回需人工介入的验证成功结果
 - **修复** 手动重新点击漏洞验证不再携带或执行 Agent runtime 自动更新，避免修改 demo 后验证按钮触发整包下载或 Agent 重启；产品验证器更新继续通过客户端「同步验证方法」推送到在线 Agent
