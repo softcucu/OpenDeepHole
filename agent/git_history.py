@@ -37,11 +37,22 @@ class _Commit:
 EmitFn = Callable[[str, str], Awaitable[None]]
 
 
+def _run_git_text(cmd: list[str], *, timeout: int) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        cmd,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=timeout,
+    )
+
+
 def is_git_repo(project_path: Path) -> bool:
     try:
-        result = subprocess.run(
+        result = _run_git_text(
             ["git", "-C", str(project_path), "rev-parse", "--is-inside-work-tree"],
-            capture_output=True, text=True, timeout=15,
+            timeout=15,
         )
     except Exception:
         return False
@@ -64,7 +75,7 @@ def collect_commits(
         cmd.append("--")
         cmd.extend(paths.split())
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+        result = _run_git_text(cmd, timeout=60)
     except Exception:
         return []
     if result.returncode != 0:
@@ -83,13 +94,13 @@ def collect_commits(
 def _commit_diff(project_path: Path, commit_hash: str) -> str:
     """返回某条提交的 diff（含摘要），超长则截断。"""
     try:
-        stat = subprocess.run(
+        stat = _run_git_text(
             ["git", "-C", str(project_path), "show", "--stat", "--format=%s%n%b", commit_hash],
-            capture_output=True, text=True, timeout=60,
+            timeout=60,
         ).stdout
-        patch = subprocess.run(
+        patch = _run_git_text(
             ["git", "-C", str(project_path), "show", "--format=", commit_hash],
-            capture_output=True, text=True, timeout=60,
+            timeout=60,
         ).stdout
     except Exception:
         return ""

@@ -2,6 +2,7 @@
 
 ## 2026-07-04
 
+- **修复** Windows Agent 在静态分析完成后进入 git 历史挖掘时，git 子进程输出不再按系统默认 `gbk` 解码，避免非 GBK 字节触发 `UnicodeDecodeError` 并打断后续扫描
 - **修复** OpenCode/nga serve 在已有任务运行时不再因新任务或模型列表请求的运行配置哈希不同而等待当前 session 结束；并发扫描会复用同一个 serve 进程创建独立 session，模型池运行任务同步展示对应 `ses_*` 会话 ID
 - **修复** 威胁分析结果改为写入本次扫描任务目录的 `res.json`，避免同一路径并发扫描时争抢项目根目录 `res.json`
 - **新增** 漏洞验证函数上下文提供 `get_report_markdown()` 和 `get_validation_info()`，验证结果新增“是否需要人工介入”字段并在漏洞验证页展示；示例产品验证器同步演示读取报告、上下文信息和返回最终结论
