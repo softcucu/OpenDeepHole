@@ -166,6 +166,12 @@ opencode:
 # 同时受单模型 max_concurrency 和每日使用时间限制。
 opencode_concurrency: 3
 
+# 漏洞验证默认整体超时为 2 小时；产品验证器可通过
+# registry.register("LTE", validate_demo, timeout_seconds=7200) 覆盖。
+vulnerability_validation:
+  enabled: true
+  timeout_seconds: 7200
+
 # AI 去误报 CLI 配置可选；不配置则继承上面的审计工具和模型
 # fp_review_cli:
 #   tool: "claude"
@@ -224,7 +230,7 @@ OpenDeepHole Agent
 ```
 
 Agent 通过 WebSocket 保持长连接，等待服务器推送任务。
-启动后的 Agent 支持扫描前自动更新运行时代码。服务端更新 `agent/`、`backend/`、`code_parser/`、`mcp_server/`、包内 Windows ctags 目录或 `requirements-agent.txt` 后，旧 Agent 会在下次启动扫描前下载最新 runtime 并重启继续执行该扫描；runtime 更新包会携带快照 manifest，用于校验下载 zip 的文件集合和逐文件 hash；`checkers/` 更新会在创建或恢复扫描时按选中检查项同步到 Agent，不会触发 Agent 重启；如果更新了 `run_agent.sh` 或 `run_agent.bat`，需要重新下载 Agent 包。
+启动后的 Agent 支持扫描前自动更新运行时代码。服务端更新 `agent/`、`backend/`、`code_parser/`、`mcp_server/`、包内 Windows ctags 目录或 `requirements-agent.txt` 后，旧 Agent 会在下次启动扫描前下载最新 runtime 并重启继续执行该扫描；runtime 更新包会携带快照 manifest，用于校验下载 zip 的文件集合和逐文件 hash；`checkers/` 更新会在创建或恢复扫描时按选中检查项同步到 Agent，不会触发 Agent 重启；漏洞验证不会触发 runtime 下载，修改 `agent/product_validators/` 后在客户端页面点击「同步验证方法」推送到在线 Agent；如果更新了 `run_agent.sh` 或 `run_agent.bat`，需要重新下载 Agent 包。
 
 **第 4 步：在 Web UI 创建扫描任务**
 
@@ -638,6 +644,13 @@ pattern_filter:
   enabled: true
   scope: "directory"  # directory | file | repo
 
+# 漏洞验证脚本配置；默认整体超时 2 小时。
+vulnerability_validation:
+  enabled: true
+  script_path: ""
+  command: ""
+  timeout_seconds: 7200
+
 # AI 去误报 CLI 配置（可选；不配置则继承上面的审计工具和模型）
 # fp_review_cli:
 #   tool: "claude"
@@ -687,7 +700,7 @@ npm run build
 tail -f logs/opendeephole.log
 ```
 
-> **注意：** Agent 需要运行支持 checker 同步的新版本。之后新增或修改 checker 时，只要点击开始扫描，后端会把本次选中的 checker 同步到 Agent，无需重启后端或 Agent，也不会触发 Agent runtime 自更新重启。
+> **注意：** Agent 需要运行支持 checker 同步的新版本。之后新增或修改 checker 时，只要点击开始扫描，后端会把本次选中的 checker 同步到 Agent，无需重启后端或 Agent，也不会触发 Agent runtime 自更新重启。修改产品验证器时，点击客户端页面的「同步验证方法」即可；重新点击漏洞验证只会执行 Agent 当前安装的验证器，不会下载 runtime。
 
 ## 数据存储位置
 

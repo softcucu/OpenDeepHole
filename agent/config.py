@@ -86,7 +86,7 @@ class VulnerabilityValidationConfig:
     enabled: bool = True
     script_path: str = ""
     command: str = ""
-    timeout_seconds: int = 300
+    timeout_seconds: int = 7200
 
 
 def normalize_cli_config(config: OpenCodeConfig) -> OpenCodeConfig:
@@ -264,7 +264,7 @@ def apply_remote_config(config: AgentConfig, remote: dict) -> None:
         )
         config.vulnerability_validation.timeout_seconds = _bounded_int(
             config.vulnerability_validation.timeout_seconds,
-            300,
+            7200,
             1,
             86400,
         )
@@ -405,7 +405,7 @@ def load_config(path: Optional[Path] = None) -> AgentConfig:
     )
     cfg.vulnerability_validation.timeout_seconds = _bounded_int(
         cfg.vulnerability_validation.timeout_seconds,
-        300,
+        7200,
         1,
         86400,
     )

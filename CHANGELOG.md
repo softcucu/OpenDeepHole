@@ -2,7 +2,9 @@
 
 ## 2026-07-04
 
-- **变更** 漏洞验证 demo 改为在项目目录下保存单漏洞报告，并按 STEP 1-4 明确串行通过 `subprocess.Popen` 直接启动 4 个硬编码 nga skill；每阶段默认失败后重试 2 次，进程输出会同时打印到 Agent 终端并通过 `ctx.emit_stdout()` 同步到页面，全部完成后返回需人工介入的验证成功结果
+- **变更** 漏洞验证默认整体超时调整为 2 小时；产品验证器可在 `registry.register(..., timeout_seconds=7200)` 中覆盖单产品超时，验证上下文会通过 `ctx.timeout_seconds` 和 `get_validation_info()` 暴露最终生效值
+- **变更** 漏洞验证 demo 改为在项目目录下保存单漏洞报告，并按 STEP 1-4 串行通过 `ctx.run_command()` 启动 4 个硬编码 nga skill；每阶段默认失败后重试 2 次，进程输出会同步到页面，全部完成后返回需人工介入的验证成功结果
+- **修复** 手动重新点击漏洞验证不再携带或执行 Agent runtime 自动更新，避免修改 demo 后验证按钮触发整包下载或 Agent 重启；产品验证器更新继续通过客户端「同步验证方法」推送到在线 Agent
 - **修复** Windows Agent 在静态分析完成后进入 git 历史挖掘时，git 子进程输出不再按系统默认 `gbk` 解码，避免非 GBK 字节触发 `UnicodeDecodeError` 并打断后续扫描
 - **修复** OpenCode/nga serve 在已有任务运行时不再因新任务或模型列表请求的运行配置哈希不同而等待当前 session 结束；并发扫描会复用同一个 serve 进程创建独立 session，模型池运行任务同步展示对应 `ses_*` 会话 ID
 - **修复** 威胁分析结果改为写入本次扫描任务目录的 `res.json`，避免同一路径并发扫描时争抢项目根目录 `res.json`

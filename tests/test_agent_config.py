@@ -34,7 +34,7 @@ class AgentConfigTests(unittest.TestCase):
         self.assertTrue(cfg.pattern_filter.enabled)
         self.assertEqual(cfg.pattern_filter.scope, "directory")
         self.assertTrue(cfg.vulnerability_validation.enabled)
-        self.assertEqual(cfg.vulnerability_validation.timeout_seconds, 300)
+        self.assertEqual(cfg.vulnerability_validation.timeout_seconds, 7200)
         self.assertEqual(cfg.opencode_concurrency, 4)
 
     def test_apply_remote_config_overwrites_falsey_values(self) -> None:
@@ -121,7 +121,7 @@ class AgentConfigTests(unittest.TestCase):
         self.assertEqual(remote["pattern_filter"], {"enabled": True, "scope": "directory"})
         self.assertEqual(
             remote["vulnerability_validation"],
-            {"enabled": True, "script_path": "", "command": "", "timeout_seconds": 300},
+            {"enabled": True, "script_path": "", "command": "", "timeout_seconds": 7200},
         )
 
     def test_save_config_persists_remote_managed_fields(self) -> None:

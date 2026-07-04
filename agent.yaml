@@ -74,7 +74,7 @@ vulnerability_validation:
   enabled: true
   script_path: ""      # 留空时使用 ~/.opendeephole/vulnerability_validation/validator.py
   command: ""          # 可选自定义命令；会追加 --report <file> --output <file>
-  timeout_seconds: 300
+  timeout_seconds: 7200
 
 # AI 去误报 CLI 配置（可选）
 # 删除或设为 null 时，默认继承上面的 opencode 工具和模型配置。

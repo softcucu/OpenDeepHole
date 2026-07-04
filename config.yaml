@@ -14,7 +14,7 @@ vulnerability_validation:
   enabled: true     # Agent 本地验证脚本；脚本文件不随远端 runtime/checker 同步
   script_path: ""   # 留空时使用 ~/.opendeephole/vulnerability_validation/validator.py
   command: ""       # 可选自定义命令；会追加 --report <file> --output <file>
-  timeout_seconds: 300
+  timeout_seconds: 7200
 
 server:
   host: "0.0.0.0"

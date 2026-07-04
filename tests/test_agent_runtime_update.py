@@ -456,6 +456,34 @@ class AgentRuntimePackageTests(unittest.TestCase):
         self.assertEqual(update.await_args.args[0], {"hash": "new-runtime"})
         handler.assert_awaited_once()
 
+    def test_vulnerability_validation_command_skips_runtime_update(self) -> None:
+        update = AsyncMock(return_value=False)
+        handler = AsyncMock()
+
+        with (
+            patch("agent.updater.ensure_runtime_updated", new=update),
+            patch("agent.server.handle_vulnerability_validation", new=handler),
+        ):
+            asyncio.run(agent_main._handle_command(
+                {
+                    "type": "vulnerability_validation",
+                    "scan_id": "scan-1",
+                    "vuln_index": 0,
+                    "project_path": "/repo/project",
+                    "code_scan_path": "/repo/project",
+                    "product": "LTE",
+                    "vulnerability": {"file": "src/a.c", "line": 1},
+                    "report_markdown": "# report\n",
+                    "agent_runtime_update": {"hash": "new-runtime"},
+                },
+                None,
+                None,
+                None,
+            ))
+
+        update.assert_not_awaited()
+        handler.assert_awaited_once()
+
 
 def _bytes_path(data: bytes):
     import io

@@ -1001,10 +1001,10 @@ async def download_vulnerability_report(
 async def _trigger_vulnerability_validation(
     scan_id: str,
     idx: int,
-    server_url: str,
+    _server_url: str,
 ) -> dict:
     """Start Agent-side local validation for one AI-confirmed vulnerability."""
-    from backend.api.agent import create_agent_runtime_update_payload, send_agent_command
+    from backend.api.agent import send_agent_command
 
     store = get_scan_store()
     loaded = store.load_scan(scan_id)
@@ -1059,7 +1059,6 @@ async def _trigger_vulnerability_validation(
         "product": meta.product,
         "vulnerability": vuln.model_dump(),
         "report_markdown": _vuln_report_markdown(idx, vuln, fp_map.get(idx)),
-        "agent_runtime_update": create_agent_runtime_update_payload(server_url),
     })
     if not ok:
         failed = store.upsert_vulnerability_validation(

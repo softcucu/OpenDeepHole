@@ -33,7 +33,7 @@ const DEFAULT_VULNERABILITY_VALIDATION = {
   enabled: true,
   script_path: "",
   command: "",
-  timeout_seconds: 300,
+  timeout_seconds: 7200,
 };
 
 const DEFAULT_CONFIG: AgentRemoteConfig = {
