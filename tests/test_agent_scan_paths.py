@@ -471,17 +471,23 @@ class ScanStoreCodeScanPathTests(unittest.TestCase):
                 cfg = AgentConfig()
                 cfg.opencode.model = "old-model"
                 cfg.opencode_concurrency = 1
+                cfg.git_history.enabled = True
+                cfg.git_history.max_commits = 12
                 _configure_backend(cfg, scan_dir)
                 loaded = backend_config.get_config()
                 self.assertEqual(loaded.opencode.model, "old-model")
                 self.assertEqual(loaded.opencode_concurrency, 1)
+                self.assertTrue(loaded.git_history.enabled)
+                self.assertEqual(loaded.git_history.max_commits, 12)
 
                 cfg.opencode.model = "new-model"
                 cfg.opencode_concurrency = 4
+                cfg.git_history.enabled = False
                 refresh_backend_runtime_config(cfg)
 
                 self.assertEqual(loaded.opencode.model, "new-model")
                 self.assertEqual(loaded.opencode_concurrency, 4)
+                self.assertFalse(loaded.git_history.enabled)
             finally:
                 if old_config_path is None:
                     os.environ.pop("CONFIG_PATH", None)

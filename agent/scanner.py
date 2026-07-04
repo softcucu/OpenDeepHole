@@ -578,6 +578,13 @@ def _backend_runtime_sections(config: AgentConfig, scan_dir: Path | None = None)
             "timeout_seconds": config.memory_api_discovery.timeout_seconds,
             "max_candidates": config.memory_api_discovery.max_candidates,
         },
+        "git_history": {
+            "enabled": config.git_history.enabled,
+            "max_commits": config.git_history.max_commits,
+            "since": config.git_history.since,
+            "paths": config.git_history.paths,
+            "variant_hunt": config.git_history.variant_hunt,
+        },
         "static_dedup": config.static_dedup,
         "pattern_filter": {
             "enabled": config.pattern_filter.enabled,
@@ -619,6 +626,7 @@ def refresh_backend_runtime_config(config: AgentConfig) -> None:
     current.opencode = _cfg.OpenCodeConfig(**raw["opencode"])
     current.opencode_concurrency = int(raw["opencode_concurrency"])
     current.memory_api_discovery = _cfg.MemoryApiDiscoveryConfig(**raw["memory_api_discovery"])
+    current.git_history = _cfg.GitHistoryConfig(**raw["git_history"])
     current.static_dedup = bool(raw["static_dedup"])
     current.pattern_filter = _cfg.PatternFilterConfig(**raw["pattern_filter"])
     current.no_proxy = str(raw.get("no_proxy") or "")

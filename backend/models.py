@@ -586,7 +586,7 @@ class AgentMemoryApiDiscoveryConfig(BaseModel):
 
 
 class AgentGitHistoryConfig(BaseModel):
-    enabled: bool = True
+    enabled: bool = False
     max_commits: int = 200
     since: str = ""
     paths: str = ""

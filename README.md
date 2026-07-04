@@ -36,7 +36,7 @@
 **源码不离开本地**：Agent 只上报漏洞分析结论，不上传源码文件。  
 **误报反馈闭环**：用户在 Web UI 标记正报或误报后，选中的经验会注入 SKILL 中减少重复误判；也可将问题标为“待分析”作为人工待处理状态，该状态不进入经验库且仍可继续 AI 去误报复核；已标记问题也可以取消标记，取消后会移除该标记生成的经验并重新进入 AI 去误报候选。
 **静态候选收敛、同类合并与同模式过滤**：DB 类 checker 会按本次 `code_scan_path` 在 SQL 层收敛函数范围；静态候选进入 AI 前会按 checker `family` 做函数级同类合并，并只向 OpenCode 提供“函数/变量或表达式/问题类型”的最小审计问题。AI 审计确认某个同模式代表点为非问题后，可通过 `pattern_filter` 自动过滤同 `vuln_type + subject + scope` 的后续候选。详细规则见下文“静态候选合并与同模式过滤”。
-**git 历史问题挖掘 + 同类变体排查**：创建扫描时（git 仓库且 `git_history.enabled`）会分析 git 提交历史——逐条提交（每条一个 LLM 调用）判定是否为安全修复并提炼「历史问题模式」（根因+缺陷类型+触发条件的抽象描述），再对每条模式派一个 agent 在全仓搜索同类未修复站点，命中的作为新候选（带「同类变体来源」`variant_of`）并入 AI 审计。挖掘出的历史问题模式在扫描详情页「git 历史问题模式」面板展示。相关配置见 `git_history`（`max_commits`/`since`/`paths`/`variant_hunt`）。
+**git 历史问题挖掘 + 同类变体排查（可选，默认关闭）**：默认扫描链路为威胁分析 → 静态分析 → 候选点 AI 审计。需要历史增强时，在 Agent 配置中设置 `git_history.enabled: true`；若目标是 git 仓库，扫描会分析 git 提交历史——逐条提交（每条一个 LLM 调用）判定是否为安全修复并提炼「历史问题模式」（根因+缺陷类型+触发条件的抽象描述），再对每条模式派一个 agent 在全仓搜索同类未修复站点，命中的作为新候选（带「同类变体来源」`variant_of`）并入 AI 审计。挖掘出的历史问题模式在扫描详情页「git 历史问题模式」面板展示。相关配置见 `git_history`（`enabled`/`max_commits`/`since`/`paths`/`variant_hunt`）。
 
 **AI 去误报（扫描完成自动触发，历史/校验匹配 + 三阶段辩论，二元定级）**：扫描完成且存在已确认漏洞时**自动发起去误报**，无需手动点击（受 `fp_review.auto_on_complete` 控制，默认开启；仅在该扫描尚无去误报任务时触发，避免重复复核）。扫描详情页顶部「AI去误报」按钮仍保留，可手动重跑或补跑未复核项。FP 复核先运行 `history_match` 阶段——判断候选能否与某条历史问题模式（同根因）或其它函数里把校验做对了的调用站点对应上；**能对应上则直接判定 high 并跳过三阶段对抗辩论**，报告中以「对应修复/校验」字段（`match_type` history/validation + `match_reference`）回溯到对应的历史问题或正面对照。对应不上才进入 `prove-bug`、`prove-fp`、`final-judge` 三阶段辩论（各阶段通过本地 Markdown artifact 文件交接；`prove-bug` 判定非问题时正式早退，记录"可能误报"）。去误报定级简化为二元：命中匹配或论证为外部可触发 → **high**，其余一律 → **low**。阶段结束后页面即可查看论证；阶段未写工件或未提交结论会按配置重试并展示失败原因，复核结束后无最终结论显示"复核失败"。复核按模型池容量并发执行并同时高亮所有进行中的行；Agent 断线重连后复核任务自动重新挂接，不会被误判为已停止。
 **漏洞报告导出**：对每一个 AI 判定为「是问题」的扫描项可单独导出 Markdown 报告（含元信息、描述、AI 分析及去误报三阶段论证）；扫描详情页顶部「导出报告」可将本次所有确认为问题的漏洞各自导出为 Markdown 并打包为 zip。对应端点 `GET /api/scan/{id}/vulnerability/{idx}/report`（单项 Markdown）与 `GET /api/scan/{id}/report.zip`（整体 zip）。
@@ -650,6 +650,15 @@ vulnerability_validation:
   script_path: ""
   command: ""
   timeout_seconds: 7200
+
+# Git 历史安全问题挖掘配置；默认关闭，设为 true 后会在静态分析后、
+# 候选点 AI 审计前分析历史提交并可选合并同类变体候选。
+git_history:
+  enabled: false
+  max_commits: 200
+  since: ""
+  paths: ""
+  variant_hunt: true
 
 # AI 去误报 CLI 配置（可选；不配置则继承上面的审计工具和模型）
 # fp_review_cli:

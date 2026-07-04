@@ -673,6 +673,13 @@ export default function ScanStatus({ scanId, onBack }: Props) {
   const issueCount = effectiveIssueCount(scan, fpReview);
   const verifiedIssueCount = validatedIssueCount(scan, fpReview);
   const variantIssueCount = scan.vulnerabilities.filter((v) => v.variant_of).length;
+  const showGitHistoryStages = gitHistory.length > 0
+    || variantIssueCount > 0
+    || hasEvent(scan.events, ["git_history", "variant_hunt"]);
+  const visibleMiningTabs = showGitHistoryStages
+    ? MINING_TABS
+    : MINING_TABS.filter((tab) => tab.key !== "variant_hunt");
+  const visibleMiningTab = showGitHistoryStages ? activeMiningTab : "candidate_audit";
   const indexProgress = formatIndexProgress(indexStatus, scan);
   const threatAnalysisEvents = filterEvents(scan.events, ["threat_analysis"]);
   const miningEvents = filterEvents(scan.events, ["variant_hunt", "auditing", "opencode_output"]);
@@ -942,6 +949,7 @@ export default function ScanStatus({ scanId, onBack }: Props) {
             retryableCount={retryableCount}
             variantIssueCount={variantIssueCount}
             gitHistoryCount={gitHistory.length}
+            showGitHistoryStages={showGitHistoryStages}
             currentStage={currentStageLabel(scan, scan.events)}
             indexProgress={indexProgress}
             pct={pct}
@@ -976,11 +984,11 @@ export default function ScanStatus({ scanId, onBack }: Props) {
         )}
         {activeTab === "mining" && (
           <TabbedPanel
-            tabs={MINING_TABS}
-            active={activeMiningTab}
+            tabs={visibleMiningTabs}
+            active={visibleMiningTab}
             onChange={setActiveMiningTab}
           >
-            {activeMiningTab === "candidate_audit" && (
+            {visibleMiningTab === "candidate_audit" && (
               <AuditTaskPanel
                 scan={scan}
                 pct={pct}
@@ -989,7 +997,7 @@ export default function ScanStatus({ scanId, onBack }: Props) {
                 pool={scan.opencode_pool ?? null}
               />
             )}
-            {activeMiningTab === "variant_hunt" && (
+            {visibleMiningTab === "variant_hunt" && (
               <VariantHuntPanel
                 variantIssueCount={variantIssueCount}
                 vulnerabilities={scan.vulnerabilities}
@@ -1277,6 +1285,7 @@ function ScanOverview({
   retryableCount,
   variantIssueCount,
   gitHistoryCount,
+  showGitHistoryStages,
   currentStage,
   indexProgress,
   pct,
@@ -1294,6 +1303,7 @@ function ScanOverview({
   retryableCount: number;
   variantIssueCount: number;
   gitHistoryCount: number;
+  showGitHistoryStages: boolean;
   currentStage: string;
   indexProgress: ReturnType<typeof formatIndexProgress>;
   pct: number;
@@ -1339,7 +1349,9 @@ function ScanOverview({
       <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-4">
         <OverviewMetric icon="target" label="候选点" value={scan.total_candidates || scan.vulnerabilities.length} detail={`${scan.processed_candidates} 已审计`} tone="blue" />
         <OverviewMetric icon="alert" label="发现的问题" value={issueCount} detail={`${verifiedIssueCount} 已验证`} tone="red" onClick={() => onNavigate("issues")} />
-        <OverviewMetric icon="history" label="历史模式" value={gitHistoryCount} detail={`${variantIssueCount} 个变体候选`} tone="purple" onClick={() => onNavigate("threat")} />
+        {showGitHistoryStages && (
+          <OverviewMetric icon="history" label="历史模式" value={gitHistoryCount} detail={`${variantIssueCount} 个变体候选`} tone="purple" onClick={() => onNavigate("threat")} />
+        )}
         <OverviewMetric icon="queue" label="未完成候选" value={retryableCount} detail={retryableCount > 0 ? "可续扫" : "无待处理项"} tone="amber" />
       </div>
 
@@ -1364,12 +1376,14 @@ function ScanOverview({
               progress={staticTotalFiles ? staticPct : undefined}
               detail={staticTotalFiles ? `${staticScannedFiles}/${staticTotalFiles} 文件` : "等待静态分析"}
             />
-            <TaskSummaryRow
-              label="Git 历史问题分析"
-              status={taskStateLabel(gitHistoryCount > 0 || hasEvent(scan.events, ["git_history"]), hasEvent(scan.events, ["git_history"]) && !auditRunning && !isDone)}
-              tone={gitHistoryCount > 0 ? "purple" : hasEvent(scan.events, ["git_history"]) ? "amber" : "slate"}
-              detail={gitHistoryCount > 0 ? `${gitHistoryCount} 条历史问题模式` : "暂无历史模式"}
-            />
+            {showGitHistoryStages && (
+              <TaskSummaryRow
+                label="Git 历史问题分析"
+                status={taskStateLabel(gitHistoryCount > 0 || hasEvent(scan.events, ["git_history"]), hasEvent(scan.events, ["git_history"]) && !auditRunning && !isDone)}
+                tone={gitHistoryCount > 0 ? "purple" : hasEvent(scan.events, ["git_history"]) ? "amber" : "slate"}
+                detail={gitHistoryCount > 0 ? `${gitHistoryCount} 条历史问题模式` : "暂无历史模式"}
+              />
+            )}
             <TaskSummaryRow
               label="候选点 AI 审计"
               status={taskStateLabel(isDone || (scan.total_candidates > 0 && scan.processed_candidates >= scan.total_candidates), auditRunning)}

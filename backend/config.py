@@ -68,7 +68,7 @@ class GitHistoryConfig(BaseModel):
     扫描时分析 git 提交历史，提炼一批「历史安全问题模式」，并据此做同类
     变体排查与去误报阶段的历史/校验匹配定级。
     """
-    enabled: bool = True
+    enabled: bool = False
     max_commits: int = 200          # 最多分析最近 N 条提交
     since: str = ""                 # git log --since 过滤（可空）
     paths: str = ""                 # git log 路径过滤（可空，空格分隔）

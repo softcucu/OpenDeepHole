@@ -36,7 +36,7 @@ fp_review:
   auto_on_complete: true  # 扫描完成且存在已确认漏洞时，自动触发去误报（无需手动点击）
 
 git_history:
-  enabled: true        # 扫描时分析 git 历史，挖掘历史安全问题模式并做同类变体排查
+  enabled: false       # 默认关闭；设为 true 时分析 git 历史，挖掘历史安全问题模式并做同类变体排查
   max_commits: 200     # 最多分析最近 N 条提交
   since: ""            # git log --since 过滤，如 "6 months ago"（留空不限）
   paths: ""            # git log 路径过滤，空格分隔（留空不限）

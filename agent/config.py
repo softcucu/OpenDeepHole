@@ -68,7 +68,7 @@ class MemoryApiDiscoveryConfig:
 @dataclass
 class GitHistoryConfig:
     """Git 历史安全问题挖掘配置（与后端 GitHistoryConfig 对应）。"""
-    enabled: bool = True
+    enabled: bool = False
     max_commits: int = 200
     since: str = ""
     paths: str = ""
@@ -180,6 +180,14 @@ def _opencode_config_dict(config: OpenCodeConfig) -> dict:
     return data
 
 
+def _normalize_git_history_config(config: GitHistoryConfig) -> None:
+    config.enabled = _bool_value(config.enabled, False)
+    config.variant_hunt = _bool_value(config.variant_hunt, True)
+    config.max_commits = _bounded_int(config.max_commits, 200, 0, 10000)
+    config.since = str(config.since or "")
+    config.paths = str(config.paths or "")
+
+
 @dataclass
 class AgentConfig:
     server_url: str = "http://localhost:8000"
@@ -243,6 +251,7 @@ def apply_remote_config(config: AgentConfig, remote: dict) -> None:
         for f in dataclasses.fields(config.git_history):
             if f.name in section and section[f.name] is not None:
                 setattr(config.git_history, f.name, section[f.name])
+        _normalize_git_history_config(config.git_history)
     if "static_dedup" in remote and remote["static_dedup"] is not None:
         config.static_dedup = _bool_value(remote["static_dedup"], True)
     section = remote.get("pattern_filter") or {}
@@ -409,6 +418,7 @@ def load_config(path: Optional[Path] = None) -> AgentConfig:
         1,
         86400,
     )
+    _normalize_git_history_config(cfg.git_history)
     return cfg
 
 

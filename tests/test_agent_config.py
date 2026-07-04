@@ -14,6 +14,8 @@ from agent.config import (
     remote_config_dict,
     save_config,
 )
+from backend.config import GitHistoryConfig as BackendGitHistoryConfig
+from backend.models import AgentRemoteConfig
 
 
 class AgentConfigTests(unittest.TestCase):
@@ -30,6 +32,9 @@ class AgentConfigTests(unittest.TestCase):
         self.assertIsNone(cfg.fp_review_cli)
         self.assertTrue(cfg.memory_api_discovery.enabled)
         self.assertEqual(cfg.memory_api_discovery.batch_size, 8)
+        self.assertFalse(cfg.git_history.enabled)
+        self.assertEqual(cfg.git_history.max_commits, 200)
+        self.assertTrue(cfg.git_history.variant_hunt)
         self.assertTrue(cfg.static_dedup)
         self.assertTrue(cfg.pattern_filter.enabled)
         self.assertEqual(cfg.pattern_filter.scope, "directory")
@@ -37,11 +42,16 @@ class AgentConfigTests(unittest.TestCase):
         self.assertEqual(cfg.vulnerability_validation.timeout_seconds, 7200)
         self.assertEqual(cfg.opencode_concurrency, 4)
 
+    def test_backend_and_remote_git_history_defaults_are_disabled(self) -> None:
+        self.assertFalse(BackendGitHistoryConfig().enabled)
+        self.assertFalse(AgentRemoteConfig().git_history.enabled)
+
     def test_apply_remote_config_overwrites_falsey_values(self) -> None:
         cfg = AgentConfig()
         cfg.no_proxy = "localhost"
         cfg.llm_api.stream = True
         cfg.opencode.max_retries = 5
+        cfg.git_history.enabled = True
 
         apply_remote_config(
             cfg,
@@ -61,6 +71,13 @@ class AgentConfigTests(unittest.TestCase):
                     "batch_size": 5,
                     "timeout_seconds": 120,
                     "max_candidates": 50,
+                },
+                "git_history": {
+                    "enabled": False,
+                    "max_commits": 0,
+                    "since": "6 months ago",
+                    "paths": "src tests",
+                    "variant_hunt": False,
                 },
                 "static_dedup": False,
                 "pattern_filter": {"enabled": False, "scope": "repo"},
@@ -88,6 +105,11 @@ class AgentConfigTests(unittest.TestCase):
         self.assertEqual(cfg.memory_api_discovery.batch_size, 5)
         self.assertEqual(cfg.memory_api_discovery.timeout_seconds, 120)
         self.assertEqual(cfg.memory_api_discovery.max_candidates, 50)
+        self.assertFalse(cfg.git_history.enabled)
+        self.assertEqual(cfg.git_history.max_commits, 0)
+        self.assertEqual(cfg.git_history.since, "6 months ago")
+        self.assertEqual(cfg.git_history.paths, "src tests")
+        self.assertFalse(cfg.git_history.variant_hunt)
         self.assertFalse(cfg.static_dedup)
         self.assertFalse(cfg.pattern_filter.enabled)
         self.assertEqual(cfg.pattern_filter.scope, "repo")
@@ -117,6 +139,10 @@ class AgentConfigTests(unittest.TestCase):
         self.assertIsNone(remote["fp_review_cli"])
         self.assertEqual(remote["memory_api_discovery"]["batch_size"], 8)
         self.assertEqual(remote["memory_api_discovery"]["max_candidates"], 200)
+        self.assertEqual(
+            remote["git_history"],
+            {"enabled": False, "max_commits": 200, "since": "", "paths": "", "variant_hunt": True},
+        )
         self.assertTrue(remote["static_dedup"])
         self.assertEqual(remote["pattern_filter"], {"enabled": True, "scope": "directory"})
         self.assertEqual(
@@ -148,6 +174,13 @@ class AgentConfigTests(unittest.TestCase):
                     "opencode": {"tool": "opencode", "executable": "opencode", "timeout": 1200, "max_retries": 2},
                     "fp_review_cli": {"tool": "claude", "executable": "claude", "timeout": 900},
                     "memory_api_discovery": {"enabled": True, "batch_size": 10, "timeout_seconds": 240},
+                    "git_history": {
+                        "enabled": True,
+                        "max_commits": 12,
+                        "since": "1 year ago",
+                        "paths": "src",
+                        "variant_hunt": False,
+                    },
                     "static_dedup": False,
                     "pattern_filter": {"enabled": False, "scope": "file"},
                     "vulnerability_validation": {"enabled": True, "script_path": "/local/validator.py", "timeout_seconds": 600},
@@ -173,6 +206,16 @@ class AgentConfigTests(unittest.TestCase):
             self.assertTrue(raw["memory_api_discovery"]["enabled"])
             self.assertEqual(raw["memory_api_discovery"]["batch_size"], 10)
             self.assertEqual(raw["memory_api_discovery"]["timeout_seconds"], 240)
+            self.assertEqual(
+                raw["git_history"],
+                {
+                    "enabled": True,
+                    "max_commits": 12,
+                    "paths": "src",
+                    "since": "1 year ago",
+                    "variant_hunt": False,
+                },
+            )
             self.assertFalse(raw["static_dedup"])
             self.assertEqual(raw["pattern_filter"], {"enabled": False, "scope": "file"})
             self.assertEqual(raw["vulnerability_validation"]["script_path"], "/local/validator.py")
@@ -198,6 +241,26 @@ class AgentConfigTests(unittest.TestCase):
 
             self.assertEqual(cfg.opencode.tool, "nga")
             self.assertEqual(effective_fp_review_cli_config(cfg).model, "audit-model")
+
+    def test_load_config_defaults_git_history_off_and_allows_explicit_enable(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "agent.yaml"
+            path.write_text("opencode: {}\n", encoding="utf-8")
+
+            cfg = load_config(path)
+
+            self.assertFalse(cfg.git_history.enabled)
+
+            path.write_text(
+                yaml.dump({"git_history": {"enabled": "true", "max_commits": "3", "variant_hunt": "false"}}),
+                encoding="utf-8",
+            )
+
+            cfg = load_config(path)
+
+            self.assertTrue(cfg.git_history.enabled)
+            self.assertEqual(cfg.git_history.max_commits, 3)
+            self.assertFalse(cfg.git_history.variant_hunt)
 
     def test_apply_network_env_clears_blank_no_proxy(self) -> None:
         cfg = AgentConfig(no_proxy="")

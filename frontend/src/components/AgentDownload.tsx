@@ -22,7 +22,7 @@ const DEFAULT_PATTERN_FILTER: AgentPatternFilterConfig = {
 };
 
 const DEFAULT_GIT_HISTORY: AgentGitHistoryConfig = {
-  enabled: true,
+  enabled: false,
   max_commits: 200,
   since: "",
   paths: "",
