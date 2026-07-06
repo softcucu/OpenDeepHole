@@ -1,6 +1,7 @@
 """opencode CLI runner — invokes opencode for AI-powered vulnerability analysis."""
 
 import asyncio
+import copy
 import hashlib
 import json
 import os
@@ -50,6 +51,8 @@ _SOURCE_READING_PRIORITY_INSTRUCTION = (
     "（view_function_code、view_struct_code、view_global_variable_definition）；"
     "仅在索引不可用、未命中或需要目录级枚举/文本搜索时，再使用内置 read/grep/glob。"
 )
+_GLOBAL_OPENCODE_CONFIG_FILENAMES = ("config.json", "opencode.json", "opencode.jsonc")
+_PROJECT_OPENCODE_CONFIG_FILENAMES = ("opencode.json", "opencode.jsonc")
 
 
 @dataclass
@@ -1134,6 +1137,186 @@ def _read_opencode_config(workspace: Path) -> dict:
     return {}
 
 
+def _strip_jsonc_comments(text: str) -> str:
+    result: list[str] = []
+    in_string = False
+    quote = ""
+    escaped = False
+    index = 0
+    while index < len(text):
+        char = text[index]
+        next_char = text[index + 1] if index + 1 < len(text) else ""
+        if in_string:
+            result.append(char)
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == quote:
+                in_string = False
+            index += 1
+            continue
+        if char in {"'", '"'}:
+            in_string = True
+            quote = char
+            result.append(char)
+            index += 1
+            continue
+        if char == "/" and next_char == "/":
+            result.extend("  ")
+            index += 2
+            while index < len(text) and text[index] not in "\r\n":
+                result.append(" ")
+                index += 1
+            continue
+        if char == "/" and next_char == "*":
+            result.extend("  ")
+            index += 2
+            while index < len(text) - 1:
+                if text[index] == "*" and text[index + 1] == "/":
+                    result.extend("  ")
+                    index += 2
+                    break
+                result.append("\n" if text[index] in "\r\n" else " ")
+                index += 1
+            continue
+        result.append(char)
+        index += 1
+    return "".join(result)
+
+
+def _strip_jsonc_trailing_commas(text: str) -> str:
+    result: list[str] = []
+    in_string = False
+    quote = ""
+    escaped = False
+    index = 0
+    while index < len(text):
+        char = text[index]
+        if in_string:
+            result.append(char)
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == quote:
+                in_string = False
+            index += 1
+            continue
+        if char in {"'", '"'}:
+            in_string = True
+            quote = char
+            result.append(char)
+            index += 1
+            continue
+        if char == ",":
+            lookahead = index + 1
+            while lookahead < len(text) and text[lookahead].isspace():
+                lookahead += 1
+            if lookahead < len(text) and text[lookahead] in "}]":
+                index += 1
+                continue
+        result.append(char)
+        index += 1
+    return "".join(result)
+
+
+def _read_opencode_config_file(path: Path) -> dict:
+    if not path.is_file():
+        return {}
+    try:
+        text = path.read_text(encoding="utf-8")
+        if path.suffix.lower() == ".jsonc":
+            text = _strip_jsonc_trailing_commas(_strip_jsonc_comments(text))
+        data = json.loads(text)
+    except Exception as exc:
+        logger.warning("Ignoring invalid OpenCode config file %s: %s", path, exc)
+        return {}
+    if isinstance(data, dict):
+        return data
+    logger.warning("Ignoring non-object OpenCode config file %s", path)
+    return {}
+
+
+def _deep_merge_dicts(base: dict, override: dict) -> dict:
+    merged = copy.deepcopy(base)
+    for key, value in override.items():
+        current = merged.get(key)
+        if isinstance(current, dict) and isinstance(value, dict):
+            merged[key] = _deep_merge_dicts(current, value)
+        else:
+            merged[key] = copy.deepcopy(value)
+    return merged
+
+
+def _merge_opencode_configs(*configs: dict) -> dict:
+    merged: dict = {}
+    for config in configs:
+        if config:
+            merged = _deep_merge_dicts(merged, config)
+    return merged
+
+
+def _config_home_from_env(env: dict[str, str]) -> Path | None:
+    xdg_config_home = str(env.get("XDG_CONFIG_HOME") or "").strip()
+    if xdg_config_home:
+        return Path(xdg_config_home)
+    home = str(env.get("HOME") or "").strip()
+    if home:
+        return Path(home) / ".config"
+    if sys.platform == "win32":
+        appdata = str(env.get("APPDATA") or "").strip()
+        if appdata:
+            return Path(appdata)
+    return None
+
+
+def _global_opencode_config_candidates(tool: str, env: dict[str, str]) -> list[Path]:
+    config_home = _config_home_from_env(env)
+    if config_home is None:
+        return []
+    config_names = ["opencode"]
+    if tool != "opencode":
+        config_names.append(tool)
+    paths: list[Path] = []
+    for config_name in config_names:
+        config_dir = config_home / config_name
+        paths.extend(config_dir / filename for filename in _GLOBAL_OPENCODE_CONFIG_FILENAMES)
+    return paths
+
+
+def _project_opencode_config_candidates(project_dir: Path | None) -> list[Path]:
+    if project_dir is None:
+        return []
+    try:
+        root = Path(project_dir)
+    except TypeError:
+        return []
+    if not root.is_dir():
+        return []
+    paths: list[Path] = []
+    paths.extend(root / filename for filename in _PROJECT_OPENCODE_CONFIG_FILENAMES)
+    paths.extend(root / ".opencode" / filename for filename in _PROJECT_OPENCODE_CONFIG_FILENAMES)
+    return paths
+
+
+def _read_user_opencode_config(tool: str, project_dir: Path | None, env: dict[str, str]) -> dict:
+    configs: list[dict] = []
+    seen: set[Path] = set()
+    for path in _global_opencode_config_candidates(tool, env) + _project_opencode_config_candidates(project_dir):
+        try:
+            key = path.resolve()
+        except Exception:
+            key = path
+        if key in seen:
+            continue
+        seen.add(key)
+        config = _read_opencode_config_file(path)
+        if config:
+            configs.append(config)
+    return _merge_opencode_configs(*configs)
+
+
 def _with_writable_paths(config: dict, writable_paths: list[Path] | None) -> dict:
     if not writable_paths:
         return config
@@ -1208,6 +1391,18 @@ def _opencode_config_for_runtime(
     return config
 
 
+def _opencode_config_for_env(
+    workspace: Path,
+    tool: str,
+    project_dir: Path | None,
+    env: dict[str, str],
+    writable_paths: list[Path] | None = None,
+) -> dict:
+    user_config = _read_user_opencode_config(tool, project_dir, env)
+    task_config = _with_writable_paths(_read_opencode_config(workspace), writable_paths)
+    return _merge_opencode_configs(user_config, task_config)
+
+
 def _write_json_file(path: Path, data: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -1222,8 +1417,9 @@ def _prepare_opencode_runtime_workspace(
 
     opencode walks up from CWD to the git worktree root looking for
     ``.opencode/skills/``, so skills are placed under *runtime_cwd*.
-    The runtime ``opencode.json`` is also written there for the
-    ``OPENCODE_CONFIG_CONTENT`` env-var.
+    The runtime ``opencode.json`` written here contains only OpenDeepHole's
+    task-local MCP, permission, and skill wiring. User provider credentials are
+    merged later into ``OPENCODE_CONFIG_CONTENT`` and are not written here.
     """
     if runtime_cwd == workspace:
         return workspace
@@ -1405,11 +1601,18 @@ def _build_cli_env(
     tool: str,
     base_env: dict[str, str] | None = None,
     writable_paths: list[Path] | None = None,
+    project_dir: Path | None = None,
 ) -> dict[str, str]:
-    env = dict(base_env or os.environ)
+    env = dict(os.environ if base_env is None else base_env)
     env["NODE_TLS_REJECT_UNAUTHORIZED"] = "0"
     if tool in {"nga", "opencode"}:
-        opencode_config = _with_writable_paths(_read_opencode_config(workspace), writable_paths)
+        opencode_config = _opencode_config_for_env(
+            workspace,
+            tool,
+            project_dir,
+            env,
+            writable_paths=writable_paths,
+        )
         if opencode_config:
             env["OPENCODE_CONFIG_CONTENT"] = json.dumps(opencode_config, ensure_ascii=False)
     return env
@@ -1605,7 +1808,12 @@ async def _invoke_opencode(
                 runtime_cwd=cwd,
                 writable_paths=writable_paths,
             )
-            serve_env = _build_cli_env(config_workspace, tool, writable_paths=writable_paths)
+            serve_env = _build_cli_env(
+                config_workspace,
+                tool,
+                writable_paths=writable_paths,
+                project_dir=project_dir or workspace,
+            )
 
             async def record_serve_session(session_id: str) -> None:
                 await update_model_lease_context(lease, {"serve_session_id": session_id})
@@ -1661,7 +1869,12 @@ async def _invoke_opencode(
             runtime_cwd=cwd,
             writable_paths=writable_paths,
         )
-        env = _build_cli_env(config_workspace, tool, writable_paths=writable_paths)
+        env = _build_cli_env(
+            config_workspace,
+            tool,
+            writable_paths=writable_paths,
+            project_dir=project_dir or workspace,
+        )
 
         kwargs: dict = {}
         if sys.platform == "win32":

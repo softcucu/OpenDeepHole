@@ -4,7 +4,8 @@
 
 - **优化** 扫描详情页「静态分析」拆分为「调用图构建」和「候选点生成」两个子页；调用图构建展示索引文件数、函数数量、调用关系、结构体/类/联合体、全局变量和引用数量，候选点生成保留原候选列表、分页、筛选和状态展示
 - **修复** 静态分析/代码索引完成事件不再用 `0/0` 覆盖已有文件进度；刷新扫描详情页也会重新读取索引状态，避免扫描文件数长期显示为 0
-- **优化** OpenCode/nga serve 启动前会在 Agent 命令行打印完整诊断信息，包括解析后的可执行文件、端口、CWD、marker/startup log 路径、argv、可复现 shell 形式命令、Popen 参数以及完整 `OPENCODE_CONFIG_CONTENT` 注入内容，便于定位本机 serve 启动失败原因
+- **修复** OpenCode/nga 运行时配置会把用户全局和项目根目录的 provider/model 配置合并进 `OPENCODE_CONFIG_CONTENT`，再覆盖当前任务的 MCP、SKILL 路径和权限配置，避免隔离 `startup_cwd` 下启动 serve 时丢失本机模型配置并回退访问公网 Provider
+- **优化** OpenCode/nga serve 启动前会在 Agent 命令行打印完整诊断信息，包括解析后的可执行文件、端口、CWD、marker/startup log 路径、argv、可复现 shell 形式命令、Popen 参数以及脱敏后的 `OPENCODE_CONFIG_CONTENT` 注入内容，便于定位本机 serve 启动失败原因且避免泄露 API Key、token 或认证 header
 - **变更** `git_history` 历史提交分析和同类变体排查在扫描管线中硬禁用；实现代码和配置字段继续保留，但即使配置文件里 `git_history.enabled: true` 也不会执行该阶段
 - **修复** Agent 远端配置和 Web 配置面板的默认 OpenCode/兼容 CLI 改为与下载包 `agent.yaml` 一致的 `nga`/`nga`、并发 4，避免仅保存 `git_history.enabled: false` 等配置时把本地可用的 `nga serve` 覆盖成默认 `opencode serve`，导致 serve 无法启动
 - **变更** `loop_mut_idx_oob` 撤销未校验循环上界直接访问召回，改为召回 `bspkern_copy_from_user`/`copy_from_user` 家族中目标指针按拷贝长度循环累加或递减的候选；候选提示会点名重点长度变量和目标变量，SKILL 复核要求说明真实边界与漏洞触发方式

@@ -354,6 +354,83 @@ def test_opencode_runtime_cwd_receives_config_and_fp_skills(tmp_path: Path) -> N
     assert env_config["skills"]["paths"] == runtime_config["skills"]["paths"]
 
 
+def test_opencode_env_merges_user_config_without_writing_provider_secrets(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    project = tmp_path / "project"
+    xdg_config = tmp_path / "xdg"
+    global_config = xdg_config / "opencode"
+    workspace.mkdir()
+    project.mkdir()
+    global_config.mkdir(parents=True)
+    skills_root = workspace / ".opencode" / "skills"
+    skill_dir = skills_root / "prove-bug"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text("skill", encoding="utf-8")
+    (global_config / "config.json").write_text(
+        json.dumps({
+            "provider": {
+                "corp": {
+                    "name": "Corp",
+                    "options": {
+                        "apiKey": "global-secret",
+                        "baseURL": "https://global.example/v1",
+                    },
+                }
+            },
+            "mcp": {"other": {"type": "remote", "url": "http://127.0.0.1:9999/mcp"}},
+            "model": "corp/global-model",
+        }),
+        encoding="utf-8",
+    )
+    (project / "opencode.jsonc").write_text(
+        """
+        {
+          // Project model should override the global default.
+          "model": "corp/project-model",
+          "provider": {
+            "corp": {
+              "options": {
+                "baseURL": "https://project.example/v1",
+              },
+            },
+          },
+        }
+        """,
+        encoding="utf-8",
+    )
+    (workspace / "opencode.json").write_text(
+        json.dumps({
+            "mcp": {"deephole-code": {"url": "http://127.0.0.1:9123/mcp"}},
+            "skills": {"paths": [str(skills_root.resolve())]},
+        }),
+        encoding="utf-8",
+    )
+
+    runtime_cwd = _select_cli_cwd(workspace, "opencode", project)
+    config_workspace = _prepare_cli_workspace(
+        workspace,
+        "opencode",
+        runtime_cwd=runtime_cwd,
+    )
+    env = _build_cli_env(
+        config_workspace,
+        "opencode",
+        base_env={"XDG_CONFIG_HOME": str(xdg_config)},
+        project_dir=project,
+    )
+    runtime_config = json.loads((runtime_cwd / "opencode.json").read_text(encoding="utf-8"))
+    env_config = json.loads(env["OPENCODE_CONFIG_CONTENT"])
+
+    assert "provider" not in runtime_config
+    assert runtime_config["mcp"]["deephole-code"]["url"] == "http://127.0.0.1:9123/mcp"
+    assert env_config["provider"]["corp"]["options"]["apiKey"] == "global-secret"
+    assert env_config["provider"]["corp"]["options"]["baseURL"] == "https://project.example/v1"
+    assert env_config["model"] == "corp/project-model"
+    assert env_config["mcp"]["other"]["url"] == "http://127.0.0.1:9999/mcp"
+    assert env_config["mcp"]["deephole-code"]["url"] == "http://127.0.0.1:9123/mcp"
+    assert env_config["skills"]["paths"] == [str((runtime_cwd / ".opencode" / "skills").resolve())]
+
+
 def test_project_runtime_cwd_falls_back_to_workspace_when_unavailable(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     project_file = tmp_path / "project"

@@ -13,6 +13,8 @@ from backend.opencode.serve_client import (
     OpenCodeServeManager,
     _serve_context_headers,
     _serve_port,
+    _serve_startup_env_debug,
+    _serve_startup_shell_debug,
 )
 
 
@@ -480,6 +482,38 @@ def test_start_locked_uses_fixed_port_and_writes_marker(monkeypatch, tmp_path: P
         assert "popen_kwargs={'start_new_session': True}" in log_text
 
     asyncio.run(run())
+
+
+def test_serve_startup_debug_redacts_config_secrets(tmp_path: Path) -> None:
+    env = {
+        "NODE_TLS_REJECT_UNAUTHORIZED": "0",
+        "PYTHONIOENCODING": "utf-8",
+        "PYTHONUTF8": "1",
+        "OPENCODE_CONFIG_CONTENT": json.dumps({
+            "provider": {
+                "corp": {
+                    "options": {
+                        "apiKey": "super-secret-key",
+                        "baseURL": "https://project.example/v1",
+                    },
+                    "headers": {"Authorization": "Bearer secret-token"},
+                }
+            },
+            "mcp": {"deephole-code": {"url": "http://127.0.0.1:9123/mcp"}},
+        }),
+    }
+
+    debug_text = "\n".join(_serve_startup_env_debug(env))
+    shell_text = _serve_startup_shell_debug(["/bin/opencode", "serve"], tmp_path, env)
+    combined = debug_text + "\n" + shell_text
+
+    assert env["OPENCODE_CONFIG_CONTENT"].count("super-secret-key") == 1
+    assert "super-secret-key" not in combined
+    assert "secret-token" not in combined
+    assert '"apiKey": "***"' in combined
+    assert '"headers": "***"' in combined
+    assert "https://project.example/v1" in combined
+    assert "http://127.0.0.1:9123/mcp" in combined
 
 
 def test_start_locked_uses_bootstrap_cwd_without_runtime_workspace(monkeypatch, tmp_path: Path) -> None:

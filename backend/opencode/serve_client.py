@@ -37,6 +37,10 @@ _SERVE_PORT_ENV = "OPENCODE_SERVE_PORT"
 _SERVE_MARKER_ENV = "OPENCODE_SERVE_MARKER"
 _SERVE_MARKER_OWNER = "opendeephole-agent-serve-v1"
 _SERVE_BOOTSTRAP_CWD_PREFIX = "opendeephole-opencode-serve-bootstrap"
+_SENSITIVE_CONFIG_KEY_RE = re.compile(
+    r"(api[_-]?key|apikey|token|secret|password|authorization|cookie|credential|headers?)",
+    re.IGNORECASE,
+)
 
 
 @dataclass(frozen=True)
@@ -190,6 +194,41 @@ def _with_serve_startup_log(message: str, path: Path | None) -> str:
     return f"{message}\n\nOpenCode serve startup output:\n{tail}"
 
 
+def _redact_sensitive_config(value: Any, *, parent_key: str = "") -> Any:
+    if parent_key and _SENSITIVE_CONFIG_KEY_RE.search(parent_key):
+        return "***"
+    if isinstance(value, dict):
+        redacted: dict[str, Any] = {}
+        for key, item in value.items():
+            key_text = str(key)
+            if _SENSITIVE_CONFIG_KEY_RE.search(key_text):
+                redacted[key] = "***"
+            else:
+                redacted[key] = _redact_sensitive_config(item, parent_key=key_text)
+        return redacted
+    if isinstance(value, list):
+        return [_redact_sensitive_config(item, parent_key=parent_key) for item in value]
+    return value
+
+
+def _redacted_config_content(config_content: str) -> str:
+    if not config_content:
+        return ""
+    try:
+        data = json.loads(config_content)
+    except Exception:
+        return f"<redacted invalid config content bytes={len(config_content.encode('utf-8'))}>"
+    return json.dumps(_redact_sensitive_config(data), ensure_ascii=False)
+
+
+def _serve_debug_env_value(name: str, value: str | None) -> str | None:
+    if value is None:
+        return None
+    if name == "OPENCODE_CONFIG_CONTENT":
+        return _redacted_config_content(value)
+    return value
+
+
 def _serve_startup_env_debug(env: dict[str, str]) -> list[str]:
     lines: list[str] = []
     for name in (
@@ -198,7 +237,7 @@ def _serve_startup_env_debug(env: dict[str, str]) -> list[str]:
         "PYTHONUTF8",
         "OPENCODE_CONFIG_CONTENT",
     ):
-        value = env.get(name)
+        value = _serve_debug_env_value(name, env.get(name))
         lines.append(f"    {name}={value if value is not None else '(unset)'}")
     lines.append("    OPENCODE_SERVER_PASSWORD=(cleared)")
     lines.append("    OPENCODE_SERVER_USERNAME=(cleared)")
@@ -207,7 +246,7 @@ def _serve_startup_env_debug(env: dict[str, str]) -> list[str]:
 
 def _serve_startup_shell_debug(cmd: list[str], cwd: Path, env: dict[str, str]) -> str:
     env_parts = [
-        f"{name}={shlex.quote(env[name])}"
+        f"{name}={shlex.quote(_serve_debug_env_value(name, env[name]) or '')}"
         for name in (
             "NODE_TLS_REJECT_UNAUTHORIZED",
             "PYTHONIOENCODING",
