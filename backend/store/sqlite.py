@@ -105,6 +105,7 @@ CREATE TABLE IF NOT EXISTS scans (
     feedback_ids       TEXT DEFAULT '[]',
     workspace_path     TEXT,
     product            TEXT NOT NULL DEFAULT '',
+    validation_environment TEXT NOT NULL DEFAULT '',
     public_access_token TEXT NOT NULL DEFAULT '',
     opencode_pool      TEXT NOT NULL DEFAULT '{}'
 );
@@ -154,6 +155,7 @@ CREATE TABLE IF NOT EXISTS vulnerability_validations (
     status              TEXT NOT NULL DEFAULT 'pending',
     running             INTEGER NOT NULL DEFAULT 0,
     product             TEXT NOT NULL DEFAULT '',
+    validation_environment TEXT NOT NULL DEFAULT '',
     validator_name      TEXT NOT NULL DEFAULT '',
     validation_success  INTEGER,
     is_problem          INTEGER,
@@ -377,6 +379,10 @@ class SqliteScanStore(ScanStoreBase):
             self._conn.execute("ALTER TABLE scans ADD COLUMN user_id TEXT DEFAULT ''")
         if "product" not in cols:
             self._conn.execute("ALTER TABLE scans ADD COLUMN product TEXT NOT NULL DEFAULT ''")
+        if "validation_environment" not in cols:
+            self._conn.execute(
+                "ALTER TABLE scans ADD COLUMN validation_environment TEXT NOT NULL DEFAULT ''"
+            )
         if "public_access_token" not in cols:
             self._conn.execute("ALTER TABLE scans ADD COLUMN public_access_token TEXT NOT NULL DEFAULT ''")
         if "opencode_pool" not in cols:
@@ -582,6 +588,7 @@ class SqliteScanStore(ScanStoreBase):
                 status              TEXT NOT NULL DEFAULT 'pending',
                 running             INTEGER NOT NULL DEFAULT 0,
                 product             TEXT NOT NULL DEFAULT '',
+                validation_environment TEXT NOT NULL DEFAULT '',
                 validator_name      TEXT NOT NULL DEFAULT '',
                 validation_success  INTEGER,
                 is_problem          INTEGER,
@@ -604,6 +611,10 @@ class SqliteScanStore(ScanStoreBase):
         if "product" not in validation_cols:
             self._conn.execute(
                 "ALTER TABLE vulnerability_validations ADD COLUMN product TEXT NOT NULL DEFAULT ''"
+            )
+        if "validation_environment" not in validation_cols:
+            self._conn.execute(
+                "ALTER TABLE vulnerability_validations ADD COLUMN validation_environment TEXT NOT NULL DEFAULT ''"
             )
         if "validator_name" not in validation_cols:
             self._conn.execute(
@@ -659,6 +670,9 @@ class SqliteScanStore(ScanStoreBase):
             scan_id=row["scan_id"],
             project_id=row["project_id"],
             product=row["product"] if row["product"] is not None else "",
+            validation_environment=(
+                row["validation_environment"] if row["validation_environment"] is not None else ""
+            ),
             scan_items=json.loads(row["scan_items"]),
             created_at=row["created_at"],
             status=ScanItemStatus(row["status"]),
@@ -691,6 +705,9 @@ class SqliteScanStore(ScanStoreBase):
             code_scan_path=row["code_scan_path"] if row["code_scan_path"] is not None else "",
             scan_name=row["scan_name"] if row["scan_name"] is not None else "",
             product=row["product"] if row["product"] is not None else "",
+            validation_environment=(
+                row["validation_environment"] if row["validation_environment"] is not None else ""
+            ),
             user_id=row["user_id"] if row["user_id"] is not None else "",
             public_access_token=row["public_access_token"] if row["public_access_token"] is not None else "",
         )
@@ -712,8 +729,8 @@ class SqliteScanStore(ScanStoreBase):
                      current_candidate, error_message, feedback_ids,
                      static_total_files, static_scanned_files, static_analysis_done,
                      user_id, agent_name, agent_id, project_path, code_scan_path, scan_name,
-                     product, public_access_token, opencode_pool)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     product, validation_environment, public_access_token, opencode_pool)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     scan.scan_id,
@@ -737,6 +754,7 @@ class SqliteScanStore(ScanStoreBase):
                     meta.code_scan_path,
                     meta.scan_name,
                     meta.product,
+                    meta.validation_environment,
                     meta.public_access_token,
                     scan.opencode_pool.model_dump_json() if scan.opencode_pool else "{}",
                 ),
@@ -766,6 +784,9 @@ class SqliteScanStore(ScanStoreBase):
             project_id=row["project_id"],
             scan_name=row["scan_name"] if row["scan_name"] is not None else "",
             product=row["product"] if row["product"] is not None else "",
+            validation_environment=(
+                row["validation_environment"] if row["validation_environment"] is not None else ""
+            ),
             status=ScanItemStatus(row["status"]),
             created_at=row["created_at"],
             progress=row["progress"],
@@ -1489,15 +1510,16 @@ class SqliteScanStore(ScanStoreBase):
             self._conn.execute(
                 """\
                 INSERT INTO vulnerability_validations
-                    (scan_id, vuln_index, status, running, product, validator_name,
+                    (scan_id, vuln_index, status, running, product, validation_environment, validator_name,
                      validation_success, is_problem, requires_human_intervention, validation_code,
                      validation_output, intermediate_output, final_output, artifacts,
                      started_at, finished_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(scan_id, vuln_index) DO UPDATE SET
                     status = excluded.status,
                     running = excluded.running,
                     product = excluded.product,
+                    validation_environment = excluded.validation_environment,
                     validator_name = excluded.validator_name,
                     validation_success = excluded.validation_success,
                     is_problem = excluded.is_problem,
@@ -1517,6 +1539,7 @@ class SqliteScanStore(ScanStoreBase):
                     validation.status,
                     1 if validation.running else 0,
                     validation.product,
+                    validation.validation_environment,
                     validation.validator_name,
                     _nullable_bool(validation.validation_success),
                     _nullable_bool(validation.is_problem),
@@ -1561,6 +1584,7 @@ class SqliteScanStore(ScanStoreBase):
                 status=r["status"] or "pending",
                 running=bool(r["running"]),
                 product=r["product"] or "",
+                validation_environment=r["validation_environment"] or "",
                 validator_name=r["validator_name"] or "",
                 validation_success=_bool_or_none(r["validation_success"]),
                 is_problem=_bool_or_none(r["is_problem"]),

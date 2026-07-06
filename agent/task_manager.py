@@ -15,6 +15,7 @@ class ScanTask:
     checkers: list[str]
     scan_name: str
     product: str = ""
+    validation_environment: str = ""
     feedback_entries: list[dict] = field(default_factory=list)
     checker_packages: list[dict] = field(default_factory=list)
     retry_candidates: list[dict] | None = None
@@ -36,6 +37,7 @@ class TaskManager:
         checkers: list[str],
         scan_name: str,
         product: str = "",
+        validation_environment: str = "",
         feedback_entries: list[dict] | None = None,
         checker_packages: list[dict] | None = None,
         retry_candidates: list[dict] | None = None,
@@ -49,6 +51,7 @@ class TaskManager:
             checkers=checkers,
             scan_name=scan_name,
             product=product,
+            validation_environment=validation_environment,
             feedback_entries=feedback_entries or [],
             checker_packages=checker_packages or [],
             retry_candidates=retry_candidates,
@@ -92,5 +95,6 @@ class TaskManager:
                 "checkers": task.checkers,
                 "scan_name": task.scan_name,
                 "product": task.product,
+                "validation_environment": task.validation_environment,
             })
         return active

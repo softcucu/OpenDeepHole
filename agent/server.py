@@ -36,6 +36,7 @@ class _ValidationQueueItem:
     project_path: str
     code_scan_path: str
     product: str
+    validation_environment: str
     vulnerability: dict
     report_markdown: str
     cancel_event: threading.Event
@@ -81,6 +82,7 @@ async def _run(task, is_resume: bool) -> None:
             reporter=_reporter,
             scan_name=task.scan_name,
             product=task.product,
+            validation_environment=task.validation_environment,
             checker_names=task.checkers,
             scan_id=task.scan_id,
             cancel_event=task.cancel_event,
@@ -102,6 +104,7 @@ async def handle_task(
     checkers: list[str],
     scan_name: str,
     product: str = "",
+    validation_environment: str = "",
     feedback_entries: list[dict] | None = None,
     checker_packages: list[dict] | None = None,
 ) -> None:
@@ -122,6 +125,7 @@ async def handle_task(
         checkers=checkers,
         scan_name=scan_name,
         product=product,
+        validation_environment=validation_environment,
         feedback_entries=feedback_entries,
         checker_packages=checker_packages,
     )
@@ -147,6 +151,7 @@ async def handle_resume(
     checkers: Optional[list[str]] = None,
     scan_name: Optional[str] = None,
     product: Optional[str] = None,
+    validation_environment: Optional[str] = None,
     feedback_entries: Optional[list[dict]] = None,
     checker_packages: Optional[list[dict]] = None,
     retry_candidates: Optional[list[dict]] = None,
@@ -169,6 +174,7 @@ async def handle_resume(
             checkers=checkers or [],
             scan_name=scan_name or "",
             product=product or "",
+            validation_environment=validation_environment or "",
             feedback_entries=feedback_entries,
             checker_packages=checker_packages,
             retry_candidates=retry_candidates,
@@ -188,6 +194,8 @@ async def handle_resume(
             task.scan_name = scan_name
         if product is not None:
             task.product = product
+        if validation_environment is not None:
+            task.validation_environment = validation_environment
         if feedback_entries is not None:
             task.feedback_entries = feedback_entries
         if checker_packages is not None:
@@ -271,6 +279,7 @@ async def handle_vulnerability_validation(
     project_path: str,
     code_scan_path: str,
     product: str,
+    validation_environment: str,
     vulnerability: dict,
     report_markdown: str,
 ) -> None:
@@ -291,6 +300,7 @@ async def handle_vulnerability_validation(
         project_path=project_path,
         code_scan_path=code_scan_path,
         product=product,
+        validation_environment=validation_environment,
         vulnerability=vulnerability,
         report_markdown=report_markdown,
         cancel_event=cancel_event,
@@ -362,6 +372,7 @@ async def _run_single_validation(item: _ValidationQueueItem) -> None:
             project_path=Path(item.project_path) if item.project_path else None,
             code_scan_path=Path(item.code_scan_path) if item.code_scan_path else None,
             product=item.product,
+            validation_environment=item.validation_environment,
             cancel_event=item.cancel_event,
         )
     except Exception as exc:

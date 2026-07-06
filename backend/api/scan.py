@@ -40,6 +40,7 @@ from backend.models import (
     ScanItemStatus,
     ScanMeta,
     ScanProductList,
+    ScanValidationEnvironmentList,
     ScanStartResponse,
     ScanStatus,
     ScanSummary,
@@ -100,6 +101,32 @@ def _validate_product(product: str) -> str:
         return ""
     if normalized not in _configured_products():
         raise HTTPException(status_code=400, detail=f"Unknown product: {normalized}")
+    return normalized
+
+
+def _configured_validation_environments() -> list[str]:
+    environments: list[str] = []
+    seen: set[str] = set()
+    for environment in get_config().scan.validation_environments:
+        normalized = str(environment).strip()
+        if normalized and normalized not in seen:
+            environments.append(normalized)
+            seen.add(normalized)
+    return environments
+
+
+def _default_validation_environment() -> str:
+    environments = _configured_validation_environments()
+    return environments[0] if environments else ""
+
+
+def _validate_validation_environment(validation_environment: str) -> str:
+    normalized = validation_environment.strip()
+    environments = _configured_validation_environments()
+    if not normalized:
+        return environments[0] if environments else ""
+    if normalized not in environments:
+        raise HTTPException(status_code=400, detail=f"Unknown validation environment: {normalized}")
     return normalized
 
 
@@ -390,11 +417,13 @@ async def create_agent_scan(
     code_scan_path = body.code_scan_path.strip() or project_path
     scan_name = body.scan_name or project_path.split("/")[-1] or scan_id
     product = _validate_product(body.product)
+    validation_environment = _validate_validation_environment(body.validation_environment)
 
     scan = ScanStatus(
         scan_id=scan_id,
         project_id=scan_name,
         product=product,
+        validation_environment=validation_environment,
         scan_items=validated_checker_names,
         created_at=now,
         status=ScanItemStatus.PENDING,
@@ -415,6 +444,7 @@ async def create_agent_scan(
         code_scan_path=code_scan_path,
         scan_name=scan_name,
         product=product,
+        validation_environment=validation_environment,
         user_id=current_user.user_id,
         public_access_token=public_access_token,
     )
@@ -435,6 +465,7 @@ async def create_agent_scan(
         "checkers": validated_checker_names,
         "scan_name": scan_name,
         "product": product,
+        "validation_environment": validation_environment,
         "feedback_entries": feedback_entries,
         "checker_packages": checker_packages,
         "agent_runtime_update": create_agent_runtime_update_payload(_server_url_from_request(request)),
@@ -520,6 +551,16 @@ async def list_scan_products(
 ) -> ScanProductList:
     """Return configured scan product options."""
     return ScanProductList(products=_configured_products())
+
+
+@router.get("/api/scan/validation-environments", response_model=ScanValidationEnvironmentList)
+async def list_scan_validation_environments(
+    _current_user: User = Depends(get_current_user),
+) -> ScanValidationEnvironmentList:
+    """Return configured vulnerability validation environment options."""
+    return ScanValidationEnvironmentList(
+        validation_environments=_configured_validation_environments()
+    )
 
 
 @router.get("/api/scan/{scan_id}", response_model=ScanStatus)
@@ -680,6 +721,7 @@ async def resume_scan(
         "checkers": meta.scan_items,
         "scan_name": meta.scan_name,
         "product": meta.product,
+        "validation_environment": meta.validation_environment or _default_validation_environment(),
         "feedback_entries": feedback_entries,
         "checker_packages": _checker_packages_for(meta.scan_items),
         "agent_runtime_update": create_agent_runtime_update_payload(_server_url_from_request(request)),
@@ -778,6 +820,7 @@ async def retry_incomplete_scan(
         "checkers": meta.scan_items,
         "scan_name": meta.scan_name,
         "product": meta.product,
+        "validation_environment": meta.validation_environment or _default_validation_environment(),
         "feedback_entries": feedback_entries,
         "checker_packages": _checker_packages_for(meta.scan_items),
         "retry_candidates": [candidate.model_dump() for candidate in retry_candidates],
@@ -1041,6 +1084,8 @@ async def _trigger_vulnerability_validation(
             vuln_index=idx,
             status="queued",
             running=True,
+            product=meta.product,
+            validation_environment=meta.validation_environment or _default_validation_environment(),
             intermediate_output="验证任务已提交到 Agent，等待本地脚本启动。",
             started_at=now,
             updated_at=now,
@@ -1057,6 +1102,7 @@ async def _trigger_vulnerability_validation(
         "project_path": meta.project_path,
         "code_scan_path": meta.code_scan_path or meta.project_path,
         "product": meta.product,
+        "validation_environment": meta.validation_environment or _default_validation_environment(),
         "vulnerability": vuln.model_dump(),
         "report_markdown": _vuln_report_markdown(idx, vuln, fp_map.get(idx)),
     })

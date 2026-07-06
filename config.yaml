@@ -59,6 +59,8 @@ scan:
     - "RuralCOW"
     - "eMRU200"
     - "Lampsite"
+  validation_environments:
+    - "仿真UBBPi板环境"
 
 logging:
   level: "DEBUG"  # DEBUG, INFO, WARNING, ERROR

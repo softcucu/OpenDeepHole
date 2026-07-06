@@ -142,6 +142,7 @@ export interface VulnerabilityValidation {
   status: string;
   running: boolean;
   product?: string;
+  validation_environment?: string;
   validator_name?: string;
   validation_success?: boolean | null;
   is_problem?: boolean | null;
@@ -315,6 +316,7 @@ export interface ScanStatus {
   scan_id: string;
   project_id: string;
   product: string;
+  validation_environment: string;
   scan_items: string[];
   created_at: string;
   status: ScanItemStatus;
@@ -387,6 +389,7 @@ export interface ScanSummary {
   project_id: string;
   scan_name: string;
   product: string;
+  validation_environment: string;
   status: ScanItemStatus;
   created_at: string;
   progress: number;

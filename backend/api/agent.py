@@ -1150,6 +1150,7 @@ async def agent_report_vulnerability_validation(
         status=body.status,
         running=body.running,
         product=body.product,
+        validation_environment=body.validation_environment,
         validator_name=body.validator_name,
         validation_success=body.validation_success,
         is_problem=body.is_problem,

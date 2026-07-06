@@ -403,6 +403,7 @@ class VulnerabilityValidation(BaseModel):
     status: str = "pending"              # pending | running | verified | failed | error | timeout | skipped
     running: bool = False
     product: str = ""
+    validation_environment: str = ""
     validator_name: str = ""
     validation_success: bool | None = None
     is_problem: bool | None = None
@@ -460,6 +461,7 @@ class ScanStatus(BaseModel):
     scan_id: str
     project_id: str = ""
     product: str = ""
+    validation_environment: str = ""
     scan_items: list[str] = []
     created_at: str = ""
     status: ScanItemStatus
@@ -517,6 +519,7 @@ class AgentVulnerabilityValidationUpdate(BaseModel):
     status: str = "pending"
     running: bool = False
     product: str = ""
+    validation_environment: str = ""
     validator_name: str = ""
     validation_success: bool | None = None
     is_problem: bool | None = None
@@ -629,12 +632,17 @@ class CreateScanRequest(BaseModel):
     code_scan_path: str = ""
     scan_name: str = ""
     product: str = ""
+    validation_environment: str = ""
     checkers: list[str]
     feedback_ids: list[str] = []
 
 
 class ScanProductList(BaseModel):
     products: list[str]
+
+
+class ScanValidationEnvironmentList(BaseModel):
+    validation_environments: list[str]
 
 
 class UpdateScanProductRequest(BaseModel):
@@ -652,6 +660,7 @@ class ScanMeta(BaseModel):
     code_scan_path: str = ""
     scan_name: str = ""
     product: str = ""
+    validation_environment: str = ""
     user_id: str = ""
     public_access_token: str = ""
 
@@ -662,6 +671,7 @@ class ScanSummary(BaseModel):
     project_id: str
     scan_name: str = ""
     product: str = ""
+    validation_environment: str = ""
     status: ScanItemStatus
     created_at: str
     progress: float

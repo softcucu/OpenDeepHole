@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { getAgents, getCheckers, getScanProducts, createScan } from "../api/client";
+import { getAgents, getCheckers, getScanProducts, getScanValidationEnvironments, createScan } from "../api/client";
 import type { AgentInfo, CheckerInfo } from "../types";
 
 interface Props {
@@ -11,6 +11,7 @@ export default function NewScanForm({ onScanStarted, onBack }: Props) {
   const [agents, setAgents] = useState<AgentInfo[]>([]);
   const [checkers, setCheckers] = useState<CheckerInfo[]>([]);
   const [products, setProducts] = useState<string[]>([]);
+  const [validationEnvironments, setValidationEnvironments] = useState<string[]>([]);
   const [loading, setLoading] = useState(true);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -20,6 +21,7 @@ export default function NewScanForm({ onScanStarted, onBack }: Props) {
   const [codeScanPath, setCodeScanPath] = useState<string>("");
   const [scanName, setScanName] = useState<string>("");
   const [selectedProduct, setSelectedProduct] = useState<string>("");
+  const [selectedValidationEnvironment, setSelectedValidationEnvironment] = useState<string>("");
   const [selectedCheckers, setSelectedCheckers] = useState<Set<string>>(new Set());
   const builtinCheckers = checkers.filter((checker) => !checker.user_created);
   const userCheckers = checkers.filter((checker) => checker.user_created);
@@ -27,14 +29,19 @@ export default function NewScanForm({ onScanStarted, onBack }: Props) {
   useEffect(() => {
     const load = async () => {
       try {
-        const [agentList, checkerList, productList] = await Promise.all([
+        const [agentList, checkerList, productList, validationEnvironmentList] = await Promise.all([
           getAgents(),
           getCheckers(),
           getScanProducts(),
+          getScanValidationEnvironments(),
         ]);
         setAgents(agentList);
         setCheckers(checkerList);
         setProducts(productList);
+        setValidationEnvironments(validationEnvironmentList);
+        if (validationEnvironmentList.length > 0) {
+          setSelectedValidationEnvironment(validationEnvironmentList[0]);
+        }
         // Pre-select all checkers
         setSelectedCheckers(new Set(checkerList.filter((c) => !c.user_created).map((c) => c.name)));
         // Pre-select first online agent
@@ -99,6 +106,7 @@ export default function NewScanForm({ onScanStarted, onBack }: Props) {
         code_scan_path: codeScanPath.trim(),
         scan_name: scanName.trim(),
         product: selectedProduct,
+        validation_environment: selectedValidationEnvironment,
         checkers: Array.from(selectedCheckers),
       });
       onScanStarted(resp.scan_id);
@@ -119,7 +127,7 @@ export default function NewScanForm({ onScanStarted, onBack }: Props) {
         <div className="flex items-center justify-between">
           <div>
             <h1 className="text-lg font-bold text-white">新建扫描</h1>
-            <p className="text-sm text-slate-400 mt-0.5">选择客户端、项目路径、代码扫描范围和检测项，创建扫描任务</p>
+            <p className="text-sm text-slate-400 mt-0.5">选择客户端、项目路径、代码扫描范围、产品、验证环境和检测项，创建扫描任务</p>
           </div>
           <button
             onClick={onBack}
@@ -259,6 +267,31 @@ export default function NewScanForm({ onScanStarted, onBack }: Props) {
                   </option>
                 ))}
               </select>
+            </div>
+
+            {/* Validation environment */}
+            <div className="bg-slate-800 border border-slate-700 rounded-xl p-5">
+              <label className="block text-sm font-medium text-slate-300 mb-3">
+                验证环境
+              </label>
+              <select
+                value={selectedValidationEnvironment}
+                onChange={(e) => setSelectedValidationEnvironment(e.target.value)}
+                className="w-full bg-slate-900 border border-slate-600 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-blue-500 transition-colors"
+              >
+                {validationEnvironments.length === 0 ? (
+                  <option value="">未配置</option>
+                ) : (
+                  validationEnvironments.map((environment) => (
+                    <option key={environment} value={environment}>
+                      {environment}
+                    </option>
+                  ))
+                )}
+              </select>
+              <p className="text-xs text-slate-500 mt-2">
+                漏洞验证会按产品和验证环境选择对应的 Agent 本地验证方法
+              </p>
             </div>
 
             {/* Checker selection */}

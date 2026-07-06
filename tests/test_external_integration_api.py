@@ -93,6 +93,7 @@ class ExternalIntegrationApiTests(unittest.TestCase):
                             agent_name="reverse-linux-agent",
                             project_path="/repo/project",
                             scan_name="project",
+                            validation_environment="仿真UBBPi板环境",
                             agent_config=AgentRemoteConfig(
                                 llm_api={"base_url": "https://api.example.test", "api_key": "key"},
                                 opencode={"tool": "opencode", "executable": "opencode", "model": "model"},
@@ -108,8 +109,10 @@ class ExternalIntegrationApiTests(unittest.TestCase):
             loaded = store.load_scan(result.scan_id)
             self.assertIsNotNone(loaded)
             self.assertEqual(loaded[1].scan_items, ["public_check"])
+            self.assertEqual(loaded[1].validation_environment, "仿真UBBPi板环境")
             self.assertTrue(loaded[1].public_access_token)
             self.assertEqual([call.args[1]["type"] for call in send.call_args_list], ["config", "task"])
+            self.assertEqual(send.call_args_list[1].args[1]["validation_environment"], "仿真UBBPi板环境")
 
     def test_public_scan_token_allows_marking_the_scan(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

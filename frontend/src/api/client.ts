@@ -213,6 +213,7 @@ export async function createScan(body: {
   code_scan_path?: string;
   scan_name: string;
   product?: string;
+  validation_environment?: string;
   checkers: string[];
   feedback_ids?: string[];
 }): Promise<ScanStartResponse> {
@@ -235,6 +236,11 @@ export async function getScanStatus(scanId: string): Promise<ScanStatus> {
 export async function getScanProducts(): Promise<string[]> {
   const { data } = await api.get<{ products: string[] }>("/api/scan/products");
   return data.products;
+}
+
+export async function getScanValidationEnvironments(): Promise<string[]> {
+  const { data } = await api.get<{ validation_environments: string[] }>("/api/scan/validation-environments");
+  return data.validation_environments;
 }
 
 export async function updateScanProduct(scanId: string, product: string): Promise<void> {

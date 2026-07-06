@@ -2,6 +2,7 @@
 
 ## 2026-07-06
 
+- **新增** 创建扫描时新增「验证环境」下拉选择，默认选项为「仿真UBBPi板环境」；扫描元数据、恢复/续扫命令和漏洞验证上下文都会保留该环境，产品验证器注册支持按 `产品 + 验证环境` 匹配验证方法
 - **修复** OpenCode/nga 运行时配置发现范围扩展到可执行文件所在目录、`.opencode/config.json`、显式 `opencode.config_paths` 和 `OPENCODE_CONFIG_PATH`，避免便携安装或公司内网非标准配置目录下启动 serve 时丢失 provider/model 配置并回退访问公网 Provider
 - **修复** 注入到 `OPENCODE_CONFIG_CONTENT` 的运行时 JSON 会移除顶层 `"$schema"`，避免环境变量携带 schema URL；启动诊断会记录候选配置文件命中情况和最终顶层 key，便于定位配置未合并的问题
 - **修复** OpenCode/nga 子进程支持通过 `opencode.proxy_url` 或 `OPENCODE_PROXY_URL` 显式注入 `HTTP_PROXY`/`HTTPS_PROXY` 及小写形式，默认 `NO_PROXY/no_proxy` 使用已验证的内网列表且可由 `opencode.no_proxy` 或 `OPENCODE_NO_PROXY` 覆盖，避免 Agent 进程未继承交互式终端代理环境时 serve 启动阶段访问 Provider 被公司代理拦截；代理变化会触发 serve 重启

@@ -15,7 +15,12 @@ from agent.vulnerability_validation import ValidationResult
 
 
 def register(registry) -> None:
-    registry.register("LTE", validate_lte, timeout_seconds=7200)
+    registry.register(
+        "LTE",
+        validate_lte,
+        validation_environment="仿真UBBPi板环境",
+        timeout_seconds=7200,
+    )
 
 
 def validate_lte(ctx) -> ValidationResult:
@@ -40,10 +45,11 @@ def validate_lte(ctx) -> ValidationResult:
     )
 ```
 
-`registry.register(product, func, timeout_seconds=None)` 参数说明：
+`registry.register(product, func, validation_environment="仿真UBBPi板环境", timeout_seconds=None)` 参数说明：
 
 - `product`：扫描任务选择的产品名，必须和扫描元数据里的产品名一致。
 - `func`：同步验证函数，不支持 `async def`。
+- `validation_environment`：扫描任务选择的验证环境，必须和扫描元数据里的验证环境一致。旧脚本不传该参数时，会按当前扫描的默认验证环境注册。
 - `timeout_seconds`：该产品验证器的整体超时，范围是 1 到 86400 秒。未设置时使用 Agent 全局漏洞验证超时。
 
 ## ctx 基础字段
@@ -53,6 +59,7 @@ def validate_lte(ctx) -> ValidationResult:
 - `ctx.scan_id`：扫描 ID。
 - `ctx.vuln_index`：漏洞在扫描结果中的索引。
 - `ctx.product`：当前扫描产品。
+- `ctx.validation_environment`：当前扫描选择的验证环境。
 - `ctx.vulnerability`：当前漏洞对象。需要字典时优先使用 `ctx.get_validation_info()["vulnerability"]`。
 - `ctx.report_markdown`：后端下发的单漏洞 Markdown 报告原文，推荐通过 `ctx.get_report_markdown()` 读取。
 - `ctx.work_dir`：该漏洞验证任务的工作目录，通常位于扫描目录下的 `validation/vuln-{idx}`。
@@ -83,6 +90,7 @@ ctx.publish_artifact("vulnerability.md", path=report_path, kind="report")
 - `scan_id`
 - `vuln_index`
 - `product`
+- `validation_environment`
 - `work_dir`
 - `validator_dir`
 - `report_path`

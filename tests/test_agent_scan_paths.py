@@ -643,6 +643,7 @@ class ScanStoreCodeScanPathTests(unittest.TestCase):
                 scan_id="scan-1",
                 project_id="project",
                 product="LTE",
+                validation_environment="仿真UBBPi板环境",
                 scan_items=["npd"],
                 created_at="2026-01-01T00:00:00+00:00",
                 status=ScanItemStatus.PENDING,
@@ -658,6 +659,7 @@ class ScanStoreCodeScanPathTests(unittest.TestCase):
                 code_scan_path="/repo/project/module",
                 scan_name="project",
                 product="LTE",
+                validation_environment="仿真UBBPi板环境",
             )
 
             store.save_scan(scan, meta)
@@ -668,6 +670,8 @@ class ScanStoreCodeScanPathTests(unittest.TestCase):
             loaded_scan, loaded_meta = loaded
             self.assertEqual(loaded_scan.product, "5G")
             self.assertEqual(loaded_meta.product, "5G")
+            self.assertEqual(loaded_scan.validation_environment, "仿真UBBPi板环境")
+            self.assertEqual(loaded_meta.validation_environment, "仿真UBBPi板环境")
 
     def test_scan_persists_opencode_pool_status(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -170,7 +170,7 @@ opencode:
 opencode_concurrency: 3
 
 # 漏洞验证默认整体超时为 2 小时；产品验证器可通过
-# registry.register("LTE", validate_demo, timeout_seconds=7200) 覆盖。
+# registry.register("LTE", validate_demo, validation_environment="仿真UBBPi板环境", timeout_seconds=7200) 覆盖。
 vulnerability_validation:
   enabled: true
   timeout_seconds: 7200

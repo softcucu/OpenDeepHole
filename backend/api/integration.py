@@ -48,6 +48,7 @@ class IntegrationScanRequest(BaseModel):
     code_scan_path: str = ""
     scan_name: str = ""
     product: str = ""
+    validation_environment: str = ""
     agent_config: AgentRemoteConfig = Field(default_factory=AgentRemoteConfig)
 
 
@@ -208,6 +209,7 @@ async def create_integration_scan(
             code_scan_path=body.code_scan_path,
             scan_name=body.scan_name,
             product=body.product,
+            validation_environment=body.validation_environment,
             checkers=checker_names,
             feedback_ids=[],
         ),

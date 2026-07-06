@@ -44,6 +44,7 @@ class ConfigPathTests(unittest.TestCase):
             config.scan.products,
             ["LTE", "5G", "MAE", "微波RTN", "RuralCOW", "eMRU200", "Lampsite"],
         )
+        self.assertEqual(config.scan.validation_environments, ["仿真UBBPi板环境"])
 
     def test_scan_products_can_be_overridden_from_yaml(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -52,13 +53,17 @@ class ConfigPathTests(unittest.TestCase):
                 "scan:\n"
                 "  products:\n"
                 "    - LTE\n"
-                "    - Custom\n",
+                "    - Custom\n"
+                "  validation_environments:\n"
+                "    - 仿真UBBPi板环境\n"
+                "    - 实验室环境\n",
                 encoding="utf-8",
             )
 
             config = load_config(str(cfg))
 
         self.assertEqual(config.scan.products, ["LTE", "Custom"])
+        self.assertEqual(config.scan.validation_environments, ["仿真UBBPi板环境", "实验室环境"])
 
 
 if __name__ == "__main__":

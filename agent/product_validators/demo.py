@@ -9,6 +9,7 @@ from agent.vulnerability_validation import ValidationResult
 
 # 接入真实验证流程时，优先替换这 4 组 skill 名称、产物文件名和失败重试次数。
 VALIDATION_TIMEOUT_SECONDS = 7200
+VALIDATION_ENVIRONMENT = "仿真UBBPi板环境"
 STEP_1_SKILL = "validation-skill-1"
 STEP_1_ARTIFACT = "01-validation-skill-1.md"
 STEP_1_RETRIES = 2
@@ -24,7 +25,12 @@ STEP_4_RETRIES = 2
 
 
 def register(registry) -> None:
-    registry.register("LTE", validate_demo, timeout_seconds=VALIDATION_TIMEOUT_SECONDS)
+    registry.register(
+        "LTE",
+        validate_demo,
+        validation_environment=VALIDATION_ENVIRONMENT,
+        timeout_seconds=VALIDATION_TIMEOUT_SECONDS,
+    )
 
 
 def _emit(ctx, message: str) -> None:
@@ -60,7 +66,10 @@ def validate_demo(ctx) -> ValidationResult:
     report_path = validation_dir / "vulnerability.md"
     report_path.write_text(report_markdown, encoding="utf-8")
 
-    start_message = f"demo validator started for product={ctx.product}"
+    start_message = (
+        f"demo validator started for product={ctx.product}, "
+        f"validation_environment={ctx.validation_environment}"
+    )
     _emit(ctx, start_message)
     validation_message = (
         "validating "

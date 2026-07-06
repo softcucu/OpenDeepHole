@@ -72,6 +72,7 @@ async def _handle_command(msg: dict, config, task_manager, reporter) -> dict | N
             checkers=msg.get("checkers", []),
             scan_name=msg.get("scan_name", ""),
             product=msg.get("product", ""),
+            validation_environment=msg.get("validation_environment", ""),
             feedback_entries=msg.get("feedback_entries", []),
             checker_packages=msg.get("checker_packages", []),
         )
@@ -87,6 +88,7 @@ async def _handle_command(msg: dict, config, task_manager, reporter) -> dict | N
             checkers=msg.get("checkers"),
             scan_name=msg.get("scan_name"),
             product=msg.get("product"),
+            validation_environment=msg.get("validation_environment"),
             feedback_entries=msg.get("feedback_entries"),
             checker_packages=msg.get("checker_packages"),
             retry_candidates=msg.get("retry_candidates"),
@@ -110,6 +112,7 @@ async def _handle_command(msg: dict, config, task_manager, reporter) -> dict | N
             project_path=msg.get("project_path", ""),
             code_scan_path=msg.get("code_scan_path", ""),
             product=msg.get("product", ""),
+            validation_environment=msg.get("validation_environment", ""),
             vulnerability=msg.get("vulnerability") or {},
             report_markdown=msg.get("report_markdown", ""),
         )

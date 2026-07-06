@@ -107,6 +107,9 @@ class ScanConfig(BaseModel):
         "eMRU200",
         "Lampsite",
     ]
+    validation_environments: list[str] = [
+        "仿真UBBPi板环境",
+    ]
 
 
 class LoggingConfig(BaseModel):

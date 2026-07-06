@@ -1378,6 +1378,11 @@ function ScanOverview({
             <h2 className="mt-1 text-xl font-semibold text-white">{currentStage}</h2>
             <p className="mt-1 text-sm text-slate-400">
               {scan.product || scan.project_id || scan.scan_id}
+              {scan.validation_environment && (
+                <span className="ml-3 border-l border-slate-700 pl-3">
+                  验证环境：<span className="text-slate-300">{scan.validation_environment}</span>
+                </span>
+              )}
               {scan.agent_name && (
                 <span className="ml-3 border-l border-slate-700 pl-3">
                   Agent: <span className={scan.agent_online ? "text-green-300" : "text-slate-500"}>{scan.agent_name}</span>
@@ -2807,6 +2812,7 @@ function ValidationDetail({
                 tone={humanInterventionTone(validation.requires_human_intervention)}
               />
               {validation.product && <StatusPill label={`产品：${validation.product}`} tone="slate" />}
+              {validation.validation_environment && <StatusPill label={`环境：${validation.validation_environment}`} tone="slate" />}
               {validation.validator_name && <StatusPill label={`方法：${validation.validator_name}`} tone="slate" />}
             </div>
             <div className="grid grid-cols-1 gap-3 xl:grid-cols-2">
