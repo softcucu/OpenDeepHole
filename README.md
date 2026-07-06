@@ -133,6 +133,7 @@ opencode:
   model: ""       # 兼容字段：未配置 models 时使用；留空则使用 CLI 默认模型
   timeout: 1200
   max_retries: 2
+  config_paths: [] # 可选：额外合并的 OpenCode 配置文件，一行/一项一个路径
   # 可选：多模型池。配置后由模型池统一决定模型、能力、时间和并发。
   models:
     - id: "fast"
@@ -630,6 +631,7 @@ opencode:
   model: ""      # 兼容字段：未配置 models 时使用；留空则使用 CLI 默认模型
   timeout: 1200
   max_retries: 2
+  config_paths: [] # 可选：额外合并的 OpenCode 配置文件；也可用 OPENCODE_CONFIG_PATH 指定
   models: []     # 可配置多个模型，字段同上方快速开始示例
 
 # OpenCode/兼容 CLI 总并发数；位置审计、扫描前 API 识别和 AI 去误报都会复用。
@@ -667,6 +669,7 @@ git_history:
 #   model: ""      # 兼容字段：未配置 models 时使用
 #   timeout: 1200
 #   max_retries: 2
+#   config_paths: []
 #   models: []
 
 # AI 去误报流程配置
@@ -676,7 +679,7 @@ fp_review:
 
 CLI 工具调用约定：
 
-- `nga` / `opencode`：每个扫描或复核任务使用隔离的 OpenCode 配置目录；Agent 会合并用户全局和真实项目根目录的 OpenCode provider/model 配置，再通过 `OPENCODE_CONFIG_CONTENT` 注入当前任务的 MCP URL、SKILL 路径和权限配置；API `directory` 始终指向真实项目根目录，不复制源码。启动诊断日志只输出脱敏后的注入配置。
+- `nga` / `opencode`：每个扫描或复核任务使用隔离的 OpenCode 配置目录；Agent 会合并用户全局目录、OpenCode 可执行文件所在目录、真实项目根目录、`opencode.config_paths` 和 `OPENCODE_CONFIG_PATH` 指向的 OpenCode provider/model 配置，再通过 `OPENCODE_CONFIG_CONTENT` 注入当前任务的 MCP URL、SKILL 路径和权限配置；注入环境变量前会移除顶层 `"$schema"`；API `directory` 始终指向真实项目根目录，不复制源码。
 - `nga` / `opencode` 默认通过 serve API 调用，单个 Agent 复用一个固定端口的 serve 进程；默认端口为 `4096`，可用 `OPENCODE_SERVE_PORT` 覆盖。发送 message 时不显式传 `tools`，由 OpenCode 按启动配置和 agent 默认能力暴露内置工具与 MCP 工具；配置内容变化时会等当前 session 结束后重启 serve。
 - OpenCode/nga serve 会话会保留在真实项目目录下，便于用 `opencode session list` 查看历史；Agent 只在取消或超时时 abort session，不在正常完成后删除 session。
 - `hac`：按 Gemini CLI 兼容方式运行，Agent 会在任务隔离配置目录写入 `.gemini/settings.json` 的 MCP server，并把技能复制到 `.gemini/skills/`。

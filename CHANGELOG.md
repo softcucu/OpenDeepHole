@@ -1,5 +1,10 @@
 # 更新日志
 
+## 2026-07-06
+
+- **修复** OpenCode/nga 运行时配置发现范围扩展到可执行文件所在目录、`.opencode/config.json`、显式 `opencode.config_paths` 和 `OPENCODE_CONFIG_PATH`，避免便携安装或公司内网非标准配置目录下启动 serve 时丢失 provider/model 配置并回退访问公网 Provider
+- **修复** 注入到 `OPENCODE_CONFIG_CONTENT` 的运行时 JSON 会移除顶层 `"$schema"`，避免环境变量携带 schema URL；启动诊断会记录候选配置文件命中情况和最终顶层 key，便于定位配置未合并的问题
+
 ## 2026-07-04
 
 - **优化** 扫描详情页「静态分析」拆分为「调用图构建」和「候选点生成」两个子页；调用图构建展示索引文件数、函数数量、调用关系、结构体/类/联合体、全局变量和引用数量，候选点生成保留原候选列表、分页、筛选和状态展示

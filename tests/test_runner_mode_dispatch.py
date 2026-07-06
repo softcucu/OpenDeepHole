@@ -431,6 +431,109 @@ def test_opencode_env_merges_user_config_without_writing_provider_secrets(tmp_pa
     assert env_config["skills"]["paths"] == [str((runtime_cwd / ".opencode" / "skills").resolve())]
 
 
+def test_opencode_env_uses_env_config_path_and_strips_schema(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    explicit_config = tmp_path / "corp-opencode.json"
+    workspace.mkdir()
+    explicit_config.write_text(
+        json.dumps({
+            "$schema": "https://opencode.ai/config.json",
+            "provider": {"corp": {"options": {"apiKey": "env-secret"}}},
+            "model": "corp/env-model",
+        }),
+        encoding="utf-8",
+    )
+    (workspace / "opencode.json").write_text(
+        json.dumps({
+            "$schema": "https://opencode.ai/config.json",
+            "mcp": {"deephole-code": {"url": "http://127.0.0.1:9123/mcp"}},
+        }),
+        encoding="utf-8",
+    )
+
+    env = _build_cli_env(
+        workspace,
+        "opencode",
+        base_env={"OPENCODE_CONFIG_PATH": str(explicit_config)},
+    )
+    env_config = json.loads(env["OPENCODE_CONFIG_CONTENT"])
+
+    assert "$schema" not in env_config
+    assert env_config["provider"]["corp"]["options"]["apiKey"] == "env-secret"
+    assert env_config["model"] == "corp/env-model"
+    assert env_config["mcp"]["deephole-code"]["url"] == "http://127.0.0.1:9123/mcp"
+
+
+def test_opencode_env_merges_executable_project_and_config_paths(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    project = tmp_path / "project"
+    executable_dir = tmp_path / "OpenCode"
+    explicit_config = tmp_path / "explicit" / "opencode.json"
+    workspace.mkdir()
+    project.mkdir()
+    executable_dir.mkdir()
+    explicit_config.parent.mkdir()
+    (executable_dir / "config.json").write_text(
+        json.dumps({
+            "provider": {
+                "corp": {
+                    "options": {
+                        "apiKey": "exe-secret",
+                        "baseURL": "https://exe.example/v1",
+                    },
+                }
+            },
+            "model": "corp/exe-model",
+        }),
+        encoding="utf-8",
+    )
+    (project / ".opencode").mkdir()
+    (project / ".opencode" / "config.json").write_text(
+        json.dumps({"model": "corp/project-model"}),
+        encoding="utf-8",
+    )
+    explicit_config.write_text(
+        json.dumps({
+            "provider": {"corp": {"options": {"baseURL": "https://explicit.example/v1"}}},
+            "model": "corp/explicit-model",
+        }),
+        encoding="utf-8",
+    )
+    (workspace / "opencode.json").write_text(
+        json.dumps({"mcp": {"deephole-code": {"url": "http://127.0.0.1:9123/mcp"}}}),
+        encoding="utf-8",
+    )
+
+    env = _build_cli_env(
+        workspace,
+        "opencode",
+        base_env={},
+        project_dir=project,
+        executable=str(executable_dir / "opencode"),
+        cli_config={"config_paths": [str(explicit_config)]},
+    )
+    env_config = json.loads(env["OPENCODE_CONFIG_CONTENT"])
+
+    assert env_config["provider"]["corp"]["options"]["apiKey"] == "exe-secret"
+    assert env_config["provider"]["corp"]["options"]["baseURL"] == "https://explicit.example/v1"
+    assert env_config["model"] == "corp/explicit-model"
+    assert env_config["mcp"]["deephole-code"]["url"] == "http://127.0.0.1:9123/mcp"
+
+
+def test_opencode_env_warns_when_injected_config_has_no_model_config(tmp_path: Path, caplog) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "opencode.json").write_text(
+        json.dumps({"mcp": {"deephole-code": {"url": "http://127.0.0.1:9123/mcp"}}}),
+        encoding="utf-8",
+    )
+
+    caplog.set_level("WARNING")
+    _build_cli_env(workspace, "opencode", base_env={})
+
+    assert "OPENCODE_CONFIG_CONTENT has no provider/model keys" in caplog.text
+
+
 def test_project_runtime_cwd_falls_back_to_workspace_when_unavailable(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     project_file = tmp_path / "project"

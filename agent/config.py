@@ -55,6 +55,7 @@ class OpenCodeConfig:
     timeout: int = 1200
     max_retries: int = 2          # retry on transient errors (not timeout)
     models: list[OpenCodeModelConfig] = field(default_factory=list)
+    config_paths: list[str] = field(default_factory=list)  # optional OpenCode config files to merge
 
 
 @dataclass
@@ -95,6 +96,14 @@ def normalize_cli_config(config: OpenCodeConfig) -> OpenCodeConfig:
     executable = (config.executable or "").strip()
     invocation_mode = (getattr(config, "invocation_mode", "") or "").strip().lower()
     config.invocation_mode = invocation_mode if invocation_mode in {"serve", "cli"} else "serve"
+    raw_config_paths = getattr(config, "config_paths", []) or []
+    if isinstance(raw_config_paths, str):
+        config.config_paths = [line.strip() for line in raw_config_paths.splitlines() if line.strip()]
+    elif isinstance(raw_config_paths, (list, tuple, set)):
+        config.config_paths = [str(path).strip() for path in raw_config_paths if str(path).strip()]
+    else:
+        path = str(raw_config_paths).strip()
+        config.config_paths = [path] if path else []
     if tool not in AI_CLI_TOOLS:
         inferred = Path(executable).name.lower() if executable else ""
         if inferred in AI_CLI_TOOLS:

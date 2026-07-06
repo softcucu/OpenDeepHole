@@ -56,6 +56,7 @@ const DEFAULT_CONFIG: AgentRemoteConfig = {
     timeout: 1200,
     max_retries: 2,
     models: [],
+    config_paths: [],
   },
   fp_review_cli: null,
   memory_api_discovery: {
@@ -107,11 +108,13 @@ function normalizeConfig(config: AgentRemoteConfig): AgentRemoteConfig {
   const base = deepClone(DEFAULT_CONFIG);
   const opencode = { ...base.opencode, ...config.opencode };
   opencode.models = normalizeModels(config.opencode?.models);
+  opencode.config_paths = normalizeConfigPaths(config.opencode?.config_paths);
   const fpReviewCli = config.fp_review_cli
     ? {
         ...opencode,
         ...config.fp_review_cli,
         models: normalizeModels(config.fp_review_cli.models),
+        config_paths: normalizeConfigPaths(config.fp_review_cli.config_paths ?? opencode.config_paths),
       }
     : null;
   return {
@@ -140,6 +143,20 @@ function normalizeModels(models?: AgentOpenCodeModelConfig[]): AgentOpenCodeMode
         time_windows: Array.isArray(model.time_windows) ? model.time_windows : [],
       }))
     : [];
+}
+
+function normalizeConfigPaths(paths?: string[]): string[] {
+  return Array.isArray(paths)
+    ? paths.map((path) => String(path || "").trim()).filter(Boolean)
+    : [];
+}
+
+function configPathsText(paths?: string[]): string {
+  return normalizeConfigPaths(paths).join("\n");
+}
+
+function parseConfigPaths(text: string): string[] {
+  return text.split(/\r?\n/).map((path) => path.trim()).filter(Boolean);
 }
 
 function validateTime(value: string): boolean {
@@ -314,7 +331,7 @@ function AgentConfigPanel({ agent }: AgentConfigPanelProps) {
     setCfg((prev) => ({ ...prev, llm_api: { ...prev.llm_api, [key]: value } }));
   };
 
-  const setOC = (key: keyof AgentRemoteConfig["opencode"], value: string | number) => {
+  const setOC = (key: keyof AgentRemoteConfig["opencode"], value: string | number | string[]) => {
     setCfg((prev) => ({ ...prev, opencode: { ...prev.opencode, [key]: value } }));
   };
 
@@ -329,7 +346,7 @@ function AgentConfigPanel({ agent }: AgentConfigPanelProps) {
     }));
   };
 
-  const setFpCli = (key: keyof AgentRemoteConfig["opencode"], value: string | number) => {
+  const setFpCli = (key: keyof AgentRemoteConfig["opencode"], value: string | number | string[]) => {
     setCfg((prev) => {
       const base = prev.fp_review_cli ?? { ...prev.opencode };
       return { ...prev, fp_review_cli: { ...base, [key]: value } };
@@ -606,6 +623,14 @@ function AgentConfigPanel({ agent }: AgentConfigPanelProps) {
                       onChange={(e) => setOC("executable", e.target.value)}
                       className={inputCls} placeholder={DEFAULT_EXECUTABLE_BY_TOOL[cfg.opencode.tool] ?? "opencode"} />
                   </Field>
+                  <Field label="OpenCode 配置文件" hint="一行一个文件路径">
+                    <textarea
+                      value={configPathsText(cfg.opencode.config_paths)}
+                      onChange={(e) => setOC("config_paths", parseConfigPaths(e.target.value))}
+                      className={`${inputCls} min-h-[72px] resize-y`}
+                      placeholder="/path/to/opencode.json"
+                    />
+                  </Field>
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                     <Field label="超时（秒）">
                       <input type="number" value={cfg.opencode.timeout}
@@ -656,6 +681,14 @@ function AgentConfigPanel({ agent }: AgentConfigPanelProps) {
                       <input type="text" value={cfg.fp_review_cli.executable}
                         onChange={(e) => setFpCli("executable", e.target.value)}
                         className={inputCls} placeholder={DEFAULT_EXECUTABLE_BY_TOOL[cfg.fp_review_cli.tool] ?? "opencode"} />
+                    </Field>
+                    <Field label="OpenCode 配置文件" hint="一行一个文件路径">
+                      <textarea
+                        value={configPathsText(cfg.fp_review_cli.config_paths)}
+                        onChange={(e) => setFpCli("config_paths", parseConfigPaths(e.target.value))}
+                        className={`${inputCls} min-h-[72px] resize-y`}
+                        placeholder="/path/to/opencode.json"
+                      />
                     </Field>
                     <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                       <Field label="超时（秒）">

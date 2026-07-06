@@ -52,7 +52,8 @@ _SOURCE_READING_PRIORITY_INSTRUCTION = (
     "仅在索引不可用、未命中或需要目录级枚举/文本搜索时，再使用内置 read/grep/glob。"
 )
 _GLOBAL_OPENCODE_CONFIG_FILENAMES = ("config.json", "opencode.json", "opencode.jsonc")
-_PROJECT_OPENCODE_CONFIG_FILENAMES = ("opencode.json", "opencode.jsonc")
+_PROJECT_OPENCODE_CONFIG_FILENAMES = ("config.json", "opencode.json", "opencode.jsonc")
+_OPENCODE_CONFIG_PATH_ENV = "OPENCODE_CONFIG_PATH"
 
 
 @dataclass
@@ -1045,6 +1046,7 @@ def _effective_cli_config(cli_config, model_option) -> dict:
         "timeout": _cfg_value(cli_config, "timeout", 1200),
         "max_retries": _cfg_value(cli_config, "max_retries", 2),
         "models": _cfg_value(cli_config, "models", []),
+        "config_paths": _cfg_value(cli_config, "config_paths", []),
     }
     if model_option.tool:
         data["tool"] = model_option.tool
@@ -1271,21 +1273,38 @@ def _config_home_from_env(env: dict[str, str]) -> Path | None:
     return None
 
 
-def _global_opencode_config_candidates(tool: str, env: dict[str, str]) -> list[Path]:
+def _global_opencode_config_candidates(tool: str, env: dict[str, str]) -> list[tuple[str, Path]]:
     config_home = _config_home_from_env(env)
     if config_home is None:
         return []
     config_names = ["opencode"]
     if tool != "opencode":
         config_names.append(tool)
-    paths: list[Path] = []
+    paths: list[tuple[str, Path]] = []
     for config_name in config_names:
         config_dir = config_home / config_name
-        paths.extend(config_dir / filename for filename in _GLOBAL_OPENCODE_CONFIG_FILENAMES)
+        paths.extend(("global", config_dir / filename) for filename in _GLOBAL_OPENCODE_CONFIG_FILENAMES)
     return paths
 
 
-def _project_opencode_config_candidates(project_dir: Path | None) -> list[Path]:
+def _executable_opencode_config_candidates(executable: str | None) -> list[tuple[str, Path]]:
+    executable = str(executable or "").strip()
+    if not executable:
+        return []
+    try:
+        executable_path = Path(executable)
+    except TypeError:
+        return []
+    parent = executable_path.parent
+    if not str(parent) or str(parent) == ".":
+        return []
+    paths: list[tuple[str, Path]] = []
+    paths.extend(("executable", parent / filename) for filename in _GLOBAL_OPENCODE_CONFIG_FILENAMES)
+    paths.extend(("executable", parent / ".opencode" / filename) for filename in _GLOBAL_OPENCODE_CONFIG_FILENAMES)
+    return paths
+
+
+def _project_opencode_config_candidates(project_dir: Path | None) -> list[tuple[str, Path]]:
     if project_dir is None:
         return []
     try:
@@ -1294,16 +1313,103 @@ def _project_opencode_config_candidates(project_dir: Path | None) -> list[Path]:
         return []
     if not root.is_dir():
         return []
-    paths: list[Path] = []
-    paths.extend(root / filename for filename in _PROJECT_OPENCODE_CONFIG_FILENAMES)
-    paths.extend(root / ".opencode" / filename for filename in _PROJECT_OPENCODE_CONFIG_FILENAMES)
+    paths: list[tuple[str, Path]] = []
+    paths.extend(("project", root / filename) for filename in _PROJECT_OPENCODE_CONFIG_FILENAMES)
+    paths.extend(("project", root / ".opencode" / filename) for filename in _PROJECT_OPENCODE_CONFIG_FILENAMES)
     return paths
 
 
-def _read_user_opencode_config(tool: str, project_dir: Path | None, env: dict[str, str]) -> dict:
+def _split_config_path_value(value: object) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, (list, tuple)):
+        return [str(item).strip() for item in value if str(item).strip()]
+    text = str(value).strip()
+    if not text:
+        return []
+    parts: list[str] = []
+    for item in text.splitlines():
+        for part in item.split(os.pathsep):
+            part = part.strip()
+            if part:
+                parts.append(part)
+    return parts
+
+
+def _expand_explicit_opencode_config_path(raw_path: str) -> list[Path]:
+    path = Path(os.path.expandvars(raw_path)).expanduser()
+    if path.is_dir():
+        return [path / filename for filename in _GLOBAL_OPENCODE_CONFIG_FILENAMES]
+    return [path]
+
+
+def _explicit_opencode_config_candidates(
+    env: dict[str, str],
+    config_paths: object = None,
+) -> list[tuple[str, Path]]:
+    paths: list[tuple[str, Path]] = []
+    for raw_path in _split_config_path_value(config_paths):
+        paths.extend(("configured", path) for path in _expand_explicit_opencode_config_path(raw_path))
+    for raw_path in _split_config_path_value(env.get(_OPENCODE_CONFIG_PATH_ENV)):
+        paths.extend(("env", path) for path in _expand_explicit_opencode_config_path(raw_path))
+    return paths
+
+
+def _log_user_opencode_config_discovery(
+    *,
+    tool: str,
+    project_dir: Path | None,
+    executable: str | None,
+    details: list[dict[str, object]],
+    merged: dict,
+) -> None:
+    loaded_keys = [
+        {
+            "source": detail["source"],
+            "path": detail["path"],
+            "keys": detail["keys"],
+        }
+        for detail in details
+        if detail.get("status") == "loaded"
+    ]
+    missing_count = sum(1 for detail in details if detail.get("status") == "missing")
+    logger.info(
+        "OpenCode user config discovery: tool=%s project_dir=%s executable=%s "
+        "candidates=%s missing=%s loaded=%s merged_top_keys=%s",
+        tool,
+        project_dir or "",
+        executable or "",
+        len(details),
+        missing_count,
+        loaded_keys,
+        sorted(str(key) for key in merged.keys()),
+    )
+    if merged and "provider" not in merged and "model" not in merged:
+        logger.warning(
+            "OpenCode merged user config has no provider/model keys; set %s or "
+            "opencode.config_paths if your CLI uses a non-standard config file",
+            _OPENCODE_CONFIG_PATH_ENV,
+        )
+
+
+def _read_user_opencode_config(
+    tool: str,
+    project_dir: Path | None,
+    env: dict[str, str],
+    *,
+    executable: str | None = None,
+    config_paths: object = None,
+) -> dict:
     configs: list[dict] = []
     seen: set[Path] = set()
-    for path in _global_opencode_config_candidates(tool, env) + _project_opencode_config_candidates(project_dir):
+    details: list[dict[str, object]] = []
+    candidates = (
+        _global_opencode_config_candidates(tool, env)
+        + _executable_opencode_config_candidates(executable)
+        + _project_opencode_config_candidates(project_dir)
+        + _explicit_opencode_config_candidates(env, config_paths)
+    )
+    for source, path in candidates:
         try:
             key = path.resolve()
         except Exception:
@@ -1311,10 +1417,26 @@ def _read_user_opencode_config(tool: str, project_dir: Path | None, env: dict[st
         if key in seen:
             continue
         seen.add(key)
+        exists = path.is_file()
         config = _read_opencode_config_file(path)
+        status = "loaded" if config else ("empty-or-invalid" if exists else "missing")
+        details.append({
+            "source": source,
+            "path": str(path),
+            "status": status,
+            "keys": sorted(str(key) for key in config.keys()),
+        })
         if config:
             configs.append(config)
-    return _merge_opencode_configs(*configs)
+    merged = _merge_opencode_configs(*configs)
+    _log_user_opencode_config_discovery(
+        tool=tool,
+        project_dir=project_dir,
+        executable=executable,
+        details=details,
+        merged=merged,
+    )
+    return merged
 
 
 def _with_writable_paths(config: dict, writable_paths: list[Path] | None) -> dict:
@@ -1397,10 +1519,26 @@ def _opencode_config_for_env(
     project_dir: Path | None,
     env: dict[str, str],
     writable_paths: list[Path] | None = None,
+    executable: str | None = None,
+    config_paths: object = None,
 ) -> dict:
-    user_config = _read_user_opencode_config(tool, project_dir, env)
+    user_config = _read_user_opencode_config(
+        tool,
+        project_dir,
+        env,
+        executable=executable,
+        config_paths=config_paths,
+    )
     task_config = _with_writable_paths(_read_opencode_config(workspace), writable_paths)
-    return _merge_opencode_configs(user_config, task_config)
+    merged = _merge_opencode_configs(user_config, task_config)
+    merged.pop("$schema", None)
+    if merged and "provider" not in merged and "model" not in merged:
+        logger.warning(
+            "OpenCode config injected through OPENCODE_CONFIG_CONTENT has no provider/model keys; "
+            "set %s or opencode.config_paths if your CLI relies on a non-standard config file",
+            _OPENCODE_CONFIG_PATH_ENV,
+        )
+    return merged
 
 
 def _write_json_file(path: Path, data: dict) -> None:
@@ -1602,6 +1740,8 @@ def _build_cli_env(
     base_env: dict[str, str] | None = None,
     writable_paths: list[Path] | None = None,
     project_dir: Path | None = None,
+    executable: str | None = None,
+    cli_config=None,
 ) -> dict[str, str]:
     env = dict(os.environ if base_env is None else base_env)
     env["NODE_TLS_REJECT_UNAUTHORIZED"] = "0"
@@ -1612,6 +1752,8 @@ def _build_cli_env(
             project_dir,
             env,
             writable_paths=writable_paths,
+            executable=executable,
+            config_paths=_cfg_value(cli_config, "config_paths", []) if cli_config is not None else [],
         )
         if opencode_config:
             env["OPENCODE_CONFIG_CONTENT"] = json.dumps(opencode_config, ensure_ascii=False)
@@ -1813,6 +1955,8 @@ async def _invoke_opencode(
                 tool,
                 writable_paths=writable_paths,
                 project_dir=project_dir or workspace,
+                executable=executable,
+                cli_config=effective_cli_config,
             )
 
             async def record_serve_session(session_id: str) -> None:
@@ -1874,6 +2018,8 @@ async def _invoke_opencode(
             tool,
             writable_paths=writable_paths,
             project_dir=project_dir or workspace,
+            executable=executable,
+            cli_config=effective_cli_config,
         )
 
         kwargs: dict = {}

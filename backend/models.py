@@ -576,6 +576,7 @@ class AgentOpenCodeConfig(BaseModel):
     timeout: int = 1200
     max_retries: int = 2
     models: list[AgentOpenCodeModelConfig] = []
+    config_paths: list[str] = []
 
 
 class AgentMemoryApiDiscoveryConfig(BaseModel):

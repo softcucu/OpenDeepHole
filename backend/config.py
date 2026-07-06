@@ -53,6 +53,7 @@ class OpenCodeConfig(BaseModel):
     max_retries: int = 2  # retry on transient errors (not timeout)
     mock: bool = False  # When True, skip real opencode and return fake results
     models: list[OpenCodeModelConfig] = []
+    config_paths: list[str] = []  # optional OpenCode config files to merge
 
 
 class MemoryApiDiscoveryConfig(BaseModel):

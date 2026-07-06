@@ -430,6 +430,7 @@ export interface AgentOpenCodeConfig {
   timeout: number;
   max_retries: number;
   models: AgentOpenCodeModelConfig[];
+  config_paths?: string[];
 }
 
 export interface AgentOpenCodeModelConfig {

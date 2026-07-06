@@ -30,6 +30,7 @@ class AgentConfigTests(unittest.TestCase):
         self.assertEqual(cfg.opencode.invocation_mode, "serve")
         self.assertEqual(cfg.opencode.timeout, 1200)
         self.assertEqual(cfg.opencode.max_retries, 2)
+        self.assertEqual(cfg.opencode.config_paths, [])
         self.assertIsNone(cfg.fp_review_cli)
         self.assertTrue(cfg.memory_api_discovery.enabled)
         self.assertEqual(cfg.memory_api_discovery.batch_size, 8)
@@ -48,6 +49,7 @@ class AgentConfigTests(unittest.TestCase):
         self.assertFalse(AgentRemoteConfig().git_history.enabled)
         self.assertEqual(AgentRemoteConfig().opencode.tool, "nga")
         self.assertEqual(AgentRemoteConfig().opencode.executable, "nga")
+        self.assertEqual(AgentRemoteConfig().opencode.config_paths, [])
         self.assertEqual(AgentRemoteConfig().opencode_concurrency, 4)
 
     def test_full_remote_defaults_do_not_switch_agent_to_opencode(self) -> None:
@@ -72,13 +74,20 @@ class AgentConfigTests(unittest.TestCase):
             {
                 "no_proxy": "",
                 "llm_api": {"stream": False, "timeout": 300},
-                "opencode": {"tool": "nga", "executable": "nga", "max_retries": 0, "timeout": 1200},
+                "opencode": {
+                    "tool": "nga",
+                    "executable": "nga",
+                    "max_retries": 0,
+                    "timeout": 1200,
+                    "config_paths": ["/opt/opencode/config.json"],
+                },
                 "fp_review_cli": {
                     "tool": "claude",
                     "executable": "claude",
                     "model": "sonnet",
                     "timeout": 900,
                     "max_retries": 1,
+                    "config_paths": ["/opt/opencode/fp.json"],
                 },
                 "memory_api_discovery": {
                     "enabled": False,
@@ -111,10 +120,12 @@ class AgentConfigTests(unittest.TestCase):
         self.assertEqual(cfg.opencode.timeout, 1200)
         self.assertEqual(cfg.opencode.tool, "nga")
         self.assertEqual(cfg.opencode.invocation_mode, "serve")
+        self.assertEqual(cfg.opencode.config_paths, ["/opt/opencode/config.json"])
         self.assertIsNotNone(cfg.fp_review_cli)
         self.assertEqual(cfg.fp_review_cli.tool, "claude")
         self.assertEqual(cfg.fp_review_cli.invocation_mode, "serve")
         self.assertEqual(cfg.fp_review_cli.model, "sonnet")
+        self.assertEqual(cfg.fp_review_cli.config_paths, ["/opt/opencode/fp.json"])
         self.assertFalse(cfg.memory_api_discovery.enabled)
         self.assertEqual(cfg.memory_api_discovery.batch_size, 5)
         self.assertEqual(cfg.memory_api_discovery.timeout_seconds, 120)
@@ -150,6 +161,7 @@ class AgentConfigTests(unittest.TestCase):
         self.assertEqual(remote["opencode"]["max_retries"], 2)
         self.assertEqual(remote["opencode_concurrency"], 4)
         self.assertEqual(remote["opencode"]["models"], [])
+        self.assertEqual(remote["opencode"]["config_paths"], [])
         self.assertIsNone(remote["fp_review_cli"])
         self.assertEqual(remote["memory_api_discovery"]["batch_size"], 8)
         self.assertEqual(remote["memory_api_discovery"]["max_candidates"], 200)
@@ -185,8 +197,19 @@ class AgentConfigTests(unittest.TestCase):
                 {
                     "no_proxy": "10.0.0.0/8",
                     "llm_api": {"stream": False, "timeout": 300},
-                    "opencode": {"tool": "opencode", "executable": "opencode", "timeout": 1200, "max_retries": 2},
-                    "fp_review_cli": {"tool": "claude", "executable": "claude", "timeout": 900},
+                    "opencode": {
+                        "tool": "opencode",
+                        "executable": "opencode",
+                        "timeout": 1200,
+                        "max_retries": 2,
+                        "config_paths": ["/opt/opencode/config.json"],
+                    },
+                    "fp_review_cli": {
+                        "tool": "claude",
+                        "executable": "claude",
+                        "timeout": 900,
+                        "config_paths": ["/opt/opencode/fp.json"],
+                    },
                     "memory_api_discovery": {"enabled": True, "batch_size": 10, "timeout_seconds": 240},
                     "git_history": {
                         "enabled": True,
@@ -213,10 +236,12 @@ class AgentConfigTests(unittest.TestCase):
             self.assertEqual(raw["opencode"]["timeout"], 1200)
             self.assertEqual(raw["opencode"]["max_retries"], 2)
             self.assertEqual(raw["opencode"]["models"], [])
+            self.assertEqual(raw["opencode"]["config_paths"], ["/opt/opencode/config.json"])
             self.assertEqual(raw["opencode_concurrency"], 4)
             self.assertEqual(raw["fp_review_cli"]["tool"], "claude")
             self.assertEqual(raw["fp_review_cli"]["invocation_mode"], "serve")
             self.assertEqual(raw["fp_review_cli"]["timeout"], 900)
+            self.assertEqual(raw["fp_review_cli"]["config_paths"], ["/opt/opencode/fp.json"])
             self.assertTrue(raw["memory_api_discovery"]["enabled"])
             self.assertEqual(raw["memory_api_discovery"]["batch_size"], 10)
             self.assertEqual(raw["memory_api_discovery"]["timeout_seconds"], 240)

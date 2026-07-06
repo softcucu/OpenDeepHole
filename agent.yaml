@@ -36,6 +36,7 @@ opencode:
   model: ""               # 兼容字段：未配置 models 时使用；留空则使用 CLI 默认模型
   timeout: 1200            # 单次调用超时（秒）
   max_retries: 2           # 非超时错误重试次数
+  config_paths: []         # 可选：额外合并的 OpenCode 配置文件；也可用 OPENCODE_CONFIG_PATH 指定
   # 可选：多模型池。未配置时使用上方 model，且所有 checker 都可使用。
   # models:
   #   - id: "fast"
