@@ -19,6 +19,8 @@ type MiningTab = "static_analysis" | "candidate_audit" | "fp_review";
 type StaticTab = "call_graph" | "candidate_generation";
 type TaskTone = "slate" | "cyan" | "amber" | "green" | "red" | "purple" | "blue";
 type ScanQueueTaskStatus = "planned" | "queued" | "running";
+type FlowNodeId = "threat" | "static_analysis" | "call_graph" | "candidate_generation" | "candidate_audit" | "fp_review" | "validation";
+type FlowNodeStatus = "pending" | "running" | "done";
 
 interface ScanQueueTask {
   id: string;
@@ -28,14 +30,6 @@ interface ScanQueueTask {
   task: Record<string, unknown>;
   timestamp: string;
 }
-
-const MAIN_TABS: { key: MainTab; label: string }[] = [
-  { key: "overview", label: "首页" },
-  { key: "threat", label: "威胁分析" },
-  { key: "mining", label: "漏洞挖掘" },
-  { key: "validation", label: "漏洞验证" },
-  { key: "issues", label: "发现的问题" },
-];
 
 const MINING_TABS: { key: MiningTab; label: string }[] = [
   { key: "static_analysis", label: "静态分析" },
@@ -189,6 +183,7 @@ export default function ScanStatus({ scanId, onBack }: Props) {
   const [scan, setScan] = useState<ScanStatusType | null>(null);
   const [activeTab, setActiveTab] = useState<MainTab>("overview");
   const [activeMiningTab, setActiveMiningTab] = useState<MiningTab>("static_analysis");
+  const [activeStaticTab, setActiveStaticTab] = useState<StaticTab>("call_graph");
   const [stopping, setStopping] = useState(false);
   const [retryingIncomplete, setRetryingIncomplete] = useState(false);
   const [downloadingReport, setDownloadingReport] = useState(false);
@@ -629,6 +624,30 @@ export default function ScanStatus({ scanId, onBack }: Props) {
     setScan((prev) => prev ? { ...prev, feedback_ids: [...next] } : prev);
   };
 
+  const handleFlowNodeClick = (node: FlowNodeId) => {
+    if (node === "threat") {
+      setActiveTab("threat");
+      return;
+    }
+    if (node === "validation") {
+      setActiveTab("validation");
+      return;
+    }
+    setActiveTab("mining");
+    if (node === "candidate_audit") {
+      setActiveMiningTab("candidate_audit");
+      return;
+    }
+    if (node === "fp_review") {
+      setActiveMiningTab("fp_review");
+      return;
+    }
+    setActiveMiningTab("static_analysis");
+    if (node === "call_graph" || node === "candidate_generation") {
+      setActiveStaticTab(node);
+    }
+  };
+
   const loadSkill = async (vulnType: string) => {
     setSkillType(vulnType);
     setSkillLoading(true);
@@ -960,28 +979,22 @@ export default function ScanStatus({ scanId, onBack }: Props) {
           </div>
         </div>
 
-        {/* Page tabs */}
-        <div className="flex flex-wrap items-center gap-2 border-t border-slate-700/60 pt-3">
-          {MAIN_TABS.map((tab) => (
-            <button
-              key={tab.key}
-              type="button"
-              onClick={() => setActiveTab(tab.key)}
-              className={`rounded-lg border px-3 py-1.5 text-sm font-medium transition-colors ${
-                activeTab === tab.key
-                  ? "border-blue-500/50 bg-blue-500/15 text-blue-100"
-                  : "border-slate-700 bg-slate-800/60 text-slate-300 hover:bg-slate-700"
-              }`}
-            >
-              {tab.label}
-              {tab.key === "issues" && (
-                <span className="ml-1.5 text-xs text-red-300">
-                  发现 {issueCount} · 已验证 {verifiedIssueCount}
-                </span>
-              )}
-            </button>
-          ))}
-        </div>
+        <ProcessFlowNav
+          scan={scan}
+          indexProgress={indexProgress}
+          fpReview={fpReview}
+          activeTab={activeTab}
+          activeMiningTab={activeMiningTab}
+          activeStaticTab={activeStaticTab}
+          issueCount={issueCount}
+          verifiedIssueCount={verifiedIssueCount}
+          threatAnalysisLoading={threatAnalysisLoading}
+          isDone={!!isDone}
+          isFpReviewing={isFpReviewing}
+          onNodeClick={handleFlowNodeClick}
+          onHome={() => setActiveTab("overview")}
+          onIssues={() => setActiveTab("issues")}
+        />
 
         {/* Error */}
         {visibleErrorMessage && (
@@ -1040,6 +1053,8 @@ export default function ScanStatus({ scanId, onBack }: Props) {
                 processedCandidates={scan.processed_candidates}
                 events={filterEvents(scan.events, ["static_analysis"])}
                 indexEvents={filterEvents(scan.events, ["init"])}
+                activeStaticTab={activeStaticTab}
+                onStaticTabChange={setActiveStaticTab}
               />
             )}
             {activeMiningTab === "candidate_audit" && (
@@ -1336,6 +1351,304 @@ export default function ScanStatus({ scanId, onBack }: Props) {
       )}
     </div>
   );
+}
+
+interface FlowNodeView {
+  id: FlowNodeId;
+  label: string;
+  detail: string;
+  status: FlowNodeStatus;
+  active: boolean;
+  tone: TaskTone;
+}
+
+function ProcessFlowNav({
+  scan,
+  indexProgress,
+  fpReview,
+  activeTab,
+  activeMiningTab,
+  activeStaticTab,
+  issueCount,
+  verifiedIssueCount,
+  threatAnalysisLoading,
+  isDone,
+  isFpReviewing,
+  onNodeClick,
+  onHome,
+  onIssues,
+}: {
+  scan: ScanStatusType;
+  indexProgress: ReturnType<typeof formatIndexProgress>;
+  fpReview: FpReviewJob | null;
+  activeTab: MainTab;
+  activeMiningTab: MiningTab;
+  activeStaticTab: StaticTab;
+  issueCount: number;
+  verifiedIssueCount: number;
+  threatAnalysisLoading: boolean;
+  isDone: boolean;
+  isFpReviewing: boolean;
+  onNodeClick: (node: FlowNodeId) => void;
+  onHome: () => void;
+  onIssues: () => void;
+}) {
+  const candidates = scan.candidates ?? [];
+  const candidateCount = candidates.length || scan.total_candidates || scan.vulnerabilities.length;
+  const staticRunning = scan.status === "analyzing" && !scan.static_analysis_done;
+  const staticDone = scan.static_analysis_done || candidateCount > 0 || scan.status === "auditing" || scan.status === "complete";
+  const threatRunning = (threatAnalysisLoading && !scan.threat_analysis)
+    || (!isDone && hasEvent(scan.events, ["threat_analysis"]) && !scan.threat_analysis);
+  const auditRunning = scan.status === "auditing" || Boolean(scan.current_candidate);
+  const auditDone = scan.status === "complete"
+    || (scan.total_candidates > 0 && scan.processed_candidates >= scan.total_candidates);
+  const validations = scan.validations ?? [];
+  const confirmedCount = scan.vulnerabilities.filter((vuln) => isAiConfirmed(vuln)).length;
+  const validationRunningCount = validations.filter((item) =>
+    item.running || item.status === "queued" || item.status === "running" || item.status === "pending",
+  ).length;
+  const validationDoneCount = validations.filter((item) => !item.running && isValidationTerminalStatus(item.status)).length;
+  const validationDone = validationDoneCount > 0 || (confirmedCount > 0 && validationDoneCount >= confirmedCount);
+  const fpReviewDone = fpReview?.status === "complete";
+  const fpReviewProcessed = fpReview?.processed ?? 0;
+  const fpReviewTotal = fpReview?.total ?? 0;
+
+  const staticDetail = candidateCount > 0
+    ? `${candidateCount} 个候选点`
+    : indexProgress.total > 0
+      ? `${indexProgress.current}/${indexProgress.total} 文件`
+      : "等待静态结果";
+  const validationDetail = confirmedCount > 0
+    ? `${validationRunningCount} 运行 · ${validationDoneCount}/${confirmedCount} 完成`
+    : "等待确认问题";
+
+  const nodes: Record<FlowNodeId, FlowNodeView> = {
+    threat: {
+      id: "threat",
+      label: "威胁分析",
+      detail: scan.threat_analysis
+        ? `${scan.threat_analysis.assets.length} 资产 · ${scan.threat_analysis.attack_trees.length} 攻击树`
+        : "攻击树分析",
+      status: flowStatus(Boolean(scan.threat_analysis), threatRunning),
+      active: activeTab === "threat",
+      tone: "green",
+    },
+    static_analysis: {
+      id: "static_analysis",
+      label: "静态分析",
+      detail: staticDetail,
+      status: flowStatus(staticDone, staticRunning),
+      active: activeTab === "mining" && activeMiningTab === "static_analysis",
+      tone: "cyan",
+    },
+    call_graph: {
+      id: "call_graph",
+      label: "调用图构建",
+      detail: indexProgress.total > 0
+        ? `${indexProgress.current}/${indexProgress.total} 文件`
+        : "代码索引",
+      status: flowStatus(indexProgress.done, indexProgress.running),
+      active: activeTab === "mining" && activeMiningTab === "static_analysis" && activeStaticTab === "call_graph",
+      tone: "blue",
+    },
+    candidate_generation: {
+      id: "candidate_generation",
+      label: "候选点生成",
+      detail: candidateCount > 0 ? `${candidateCount} 个候选点` : "静态规则产出",
+      status: flowStatus(staticDone, staticRunning),
+      active: activeTab === "mining" && activeMiningTab === "static_analysis" && activeStaticTab === "candidate_generation",
+      tone: "cyan",
+    },
+    candidate_audit: {
+      id: "candidate_audit",
+      label: "候选点审计",
+      detail: scan.total_candidates > 0
+        ? `${scan.processed_candidates}/${scan.total_candidates} 已审计`
+        : "等待候选点",
+      status: flowStatus(auditDone, auditRunning),
+      active: activeTab === "mining" && activeMiningTab === "candidate_audit",
+      tone: "blue",
+    },
+    fp_review: {
+      id: "fp_review",
+      label: "对抗式去误报",
+      detail: fpReviewTotal > 0 ? `${fpReviewProcessed}/${fpReviewTotal} 已复核` : "等待正报复核",
+      status: flowStatus(fpReviewDone, isFpReviewing),
+      active: activeTab === "mining" && activeMiningTab === "fp_review",
+      tone: "amber",
+    },
+    validation: {
+      id: "validation",
+      label: "漏洞验证",
+      detail: validationDetail,
+      status: flowStatus(validationDone, validationRunningCount > 0),
+      active: activeTab === "validation",
+      tone: "purple",
+    },
+  };
+
+  return (
+    <section className="border-t border-slate-700/60 pt-3">
+      <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <div className="text-xs font-semibold uppercase tracking-wider text-slate-500">执行流程</div>
+        </div>
+        <div className="flex flex-wrap items-center gap-2">
+          <FlowUtilityButton active={activeTab === "overview"} onClick={onHome}>
+            首页
+          </FlowUtilityButton>
+          <FlowUtilityButton active={activeTab === "issues"} onClick={onIssues}>
+            发现的问题
+            <span className="ml-1.5 text-xs text-red-300">发现 {issueCount} · 已验证 {verifiedIssueCount}</span>
+          </FlowUtilityButton>
+        </div>
+      </div>
+
+      <div className="overflow-x-auto pb-1">
+        <div className="flex min-w-[1180px] items-stretch gap-3">
+          <div className="flex items-center">
+            <FlowNodeButton node={nodes.threat} onClick={onNodeClick} />
+          </div>
+          <FlowArrow label="进入" />
+          <div className="flex-1 rounded-lg border border-slate-700 bg-slate-950/30 p-3">
+            <div className="mb-3 flex items-center justify-between gap-3">
+              <div className="text-xs font-semibold uppercase tracking-wider text-slate-500">漏洞挖掘</div>
+            </div>
+            <div className="flex items-stretch gap-3">
+              <div className="w-[420px] rounded-lg border border-cyan-500/20 bg-cyan-500/5 p-3">
+                <FlowNodeButton node={nodes.static_analysis} onClick={onNodeClick} wide />
+                <div className="mt-3 flex items-center gap-2">
+                  <FlowNodeButton node={nodes.call_graph} onClick={onNodeClick} compact />
+                  <FlowArrow compact />
+                  <FlowNodeButton node={nodes.candidate_generation} onClick={onNodeClick} compact />
+                </div>
+              </div>
+              <FlowArrow />
+              <div className="flex items-center">
+                <FlowNodeButton node={nodes.candidate_audit} onClick={onNodeClick} />
+              </div>
+              <div className="flex w-[250px] flex-col justify-center gap-2">
+                <div className="flex items-center gap-2">
+                  <FlowArrow compact />
+                  <FlowNodeButton node={nodes.fp_review} onClick={onNodeClick} compact />
+                </div>
+                <div className="flex items-center gap-2">
+                  <FlowArrow compact />
+                  <div className="rounded-lg border border-purple-500/20 bg-purple-500/5 px-3 py-2 text-xs text-purple-200">
+                    正报进入漏洞验证
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+          <FlowArrow label="正报验证" />
+          <div className="flex items-center">
+            <FlowNodeButton node={nodes.validation} onClick={onNodeClick} />
+          </div>
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function flowStatus(done: boolean, running: boolean): FlowNodeStatus {
+  if (running) return "running";
+  if (done) return "done";
+  return "pending";
+}
+
+function FlowUtilityButton({
+  active,
+  onClick,
+  children,
+}: {
+  active: boolean;
+  onClick: () => void;
+  children: React.ReactNode;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={`rounded-lg border px-3 py-1.5 text-sm font-medium transition-colors ${
+        active
+          ? "border-blue-500/50 bg-blue-500/15 text-blue-100"
+          : "border-slate-700 bg-slate-800/60 text-slate-300 hover:bg-slate-700"
+      }`}
+    >
+      {children}
+    </button>
+  );
+}
+
+function FlowNodeButton({
+  node,
+  onClick,
+  compact = false,
+  wide = false,
+}: {
+  node: FlowNodeView;
+  onClick: (node: FlowNodeId) => void;
+  compact?: boolean;
+  wide?: boolean;
+}) {
+  const statusTone = flowStatusTone(node.status, node.tone);
+  const sizeClass = compact
+    ? "min-h-[5.25rem] w-[11.5rem]"
+    : wide
+      ? "min-h-[5.5rem] w-full"
+      : "min-h-[6rem] w-[12.5rem]";
+  return (
+    <button
+      type="button"
+      onClick={() => onClick(node.id)}
+      className={`${sizeClass} rounded-lg border px-3 py-2 text-left transition-colors ${
+        node.active
+          ? `${toneBorder(node.tone)} ${toneBg(node.tone)} ring-1 ring-current/20`
+          : "border-slate-700 bg-slate-900/70 hover:border-slate-600 hover:bg-slate-800/80"
+      }`}
+      title={`${node.label} · ${flowStatusLabel(node.status)} · ${node.detail}`}
+    >
+      <div className="flex items-start justify-between gap-2">
+        <span className={`break-words text-sm font-semibold ${node.active ? toneText(node.tone) : "text-slate-100"}`}>
+          {node.label}
+        </span>
+        {node.status === "running" && (
+          <span className="mt-0.5 h-3 w-3 shrink-0 rounded-full border border-blue-500/30 border-t-blue-300 animate-spin" />
+        )}
+      </div>
+      <div className="mt-2 flex flex-wrap items-center gap-1.5">
+        <StatusPill label={flowStatusLabel(node.status)} tone={statusTone} />
+      </div>
+      <div className="mt-2 line-clamp-2 text-xs leading-5 text-slate-400">
+        {node.detail}
+      </div>
+    </button>
+  );
+}
+
+function FlowArrow({ label, compact = false }: { label?: string; compact?: boolean }) {
+  return (
+    <div className={`flex shrink-0 items-center ${compact ? "w-8" : "w-12"}`}>
+      <div className="h-px flex-1 bg-slate-600" />
+      <svg className="h-4 w-4 text-slate-500" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+      </svg>
+      {label && !compact && <span className="sr-only">{label}</span>}
+    </div>
+  );
+}
+
+function flowStatusLabel(status: FlowNodeStatus): string {
+  if (status === "running") return "正在执行";
+  if (status === "done") return "执行完毕";
+  return "待执行";
+}
+
+function flowStatusTone(status: FlowNodeStatus, doneTone: TaskTone): TaskTone {
+  if (status === "running") return "blue";
+  if (status === "done") return doneTone;
+  return "slate";
 }
 
 function ScanOverview({
@@ -2277,6 +2590,8 @@ function StaticTaskPanel({
   processedCandidates,
   events,
   indexEvents,
+  activeStaticTab,
+  onStaticTabChange,
 }: {
   scan: ScanStatusType;
   indexStatus: IndexStatus | null;
@@ -2288,8 +2603,9 @@ function StaticTaskPanel({
   processedCandidates: number;
   events: ScanEvent[];
   indexEvents: ScanEvent[];
+  activeStaticTab: StaticTab;
+  onStaticTabChange: (value: StaticTab) => void;
 }) {
-  const [activeStaticTab, setActiveStaticTab] = useState<StaticTab>("call_graph");
   const [selectedIndex, setSelectedIndex] = useState<number | null>(null);
   const [typeFilter, setTypeFilter] = useState(ALL_STATIC_FILTER);
   const [auditFilter, setAuditFilter] = useState(ALL_STATIC_FILTER);
@@ -2400,7 +2716,7 @@ function StaticTaskPanel({
       tone={scan.static_analysis_done ? "green" : running ? "cyan" : scan.status === "error" ? "red" : "slate"}
       summary="构建代码索引和调用关系后，运行静态规则产出后续 AI 审计候选点。"
     >
-      <TabbedPanel tabs={STATIC_TABS} active={activeStaticTab} onChange={setActiveStaticTab}>
+      <TabbedPanel tabs={STATIC_TABS} active={activeStaticTab} onChange={onStaticTabChange}>
         {activeStaticTab === "call_graph" ? (
           <CallGraphBuildPanel
             indexStatus={indexStatus}
