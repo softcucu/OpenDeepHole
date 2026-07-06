@@ -37,6 +37,7 @@ opencode:
   timeout: 1200            # 单次调用超时（秒）
   max_retries: 2           # 非超时错误重试次数
   proxy_url: ""            # 可选：OpenCode/nga 子进程代理，如 "http://127.0.0.1:3131"
+  no_proxy: ""             # 可选：OpenCode/nga 子进程 no_proxy；留空时使用内网默认列表
   config_paths: []         # 可选：额外合并的 OpenCode 配置文件；也可用 OPENCODE_CONFIG_PATH 指定
   # 可选：多模型池。未配置时使用上方 model，且所有 checker 都可使用。
   # models:

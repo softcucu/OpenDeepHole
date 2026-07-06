@@ -134,6 +134,7 @@ opencode:
   timeout: 1200
   max_retries: 2
   proxy_url: ""   # 可选：OpenCode/nga 子进程代理，如 "http://127.0.0.1:3131"
+  no_proxy: ""    # 可选：OpenCode/nga 子进程 no_proxy；留空时使用内网默认列表
   config_paths: [] # 可选：额外合并的 OpenCode 配置文件，一行/一项一个路径
   # 可选：多模型池。配置后由模型池统一决定模型、能力、时间和并发。
   models:
@@ -633,6 +634,7 @@ opencode:
   timeout: 1200
   max_retries: 2
   proxy_url: ""   # 可选：OpenCode/nga 子进程代理，也可用 OPENCODE_PROXY_URL 指定
+  no_proxy: ""    # 可选：OpenCode/nga 子进程 no_proxy，也可用 OPENCODE_NO_PROXY 指定
   config_paths: [] # 可选：额外合并的 OpenCode 配置文件；也可用 OPENCODE_CONFIG_PATH 指定
   models: []     # 可配置多个模型，字段同上方快速开始示例
 
@@ -672,6 +674,7 @@ git_history:
 #   timeout: 1200
 #   max_retries: 2
 #   proxy_url: ""
+#   no_proxy: ""
 #   config_paths: []
 #   models: []
 
@@ -682,7 +685,7 @@ fp_review:
 
 CLI 工具调用约定：
 
-- `nga` / `opencode`：每个扫描或复核任务使用隔离的 OpenCode 配置目录；Agent 会合并用户全局目录、OpenCode 可执行文件所在目录、真实项目根目录、`opencode.config_paths` 和 `OPENCODE_CONFIG_PATH` 指向的 OpenCode provider/model 配置，再通过 `OPENCODE_CONFIG_CONTENT` 注入当前任务的 MCP URL、SKILL 路径和权限配置；注入环境变量前会移除顶层 `"$schema"`；`opencode.proxy_url` 或 `OPENCODE_PROXY_URL` 会被展开为 `HTTP_PROXY`/`HTTPS_PROXY`/`ALL_PROXY` 传给 OpenCode 子进程；API `directory` 始终指向真实项目根目录，不复制源码。
+- `nga` / `opencode`：每个扫描或复核任务使用隔离的 OpenCode 配置目录；Agent 会合并用户全局目录、OpenCode 可执行文件所在目录、真实项目根目录、`opencode.config_paths` 和 `OPENCODE_CONFIG_PATH` 指向的 OpenCode provider/model 配置，再通过 `OPENCODE_CONFIG_CONTENT` 注入当前任务的 MCP URL、SKILL 路径和权限配置；注入环境变量前会移除顶层 `"$schema"`；`opencode.proxy_url` 或 `OPENCODE_PROXY_URL` 会被展开为 `HTTP_PROXY`/`HTTPS_PROXY` 及小写形式传给 OpenCode 子进程，`NO_PROXY/no_proxy` 默认使用内网列表且可由 `opencode.no_proxy` 或 `OPENCODE_NO_PROXY` 覆盖；API `directory` 始终指向真实项目根目录，不复制源码。
 - `nga` / `opencode` 默认通过 serve API 调用，单个 Agent 复用一个固定端口的 serve 进程；默认端口为 `4096`，可用 `OPENCODE_SERVE_PORT` 覆盖。发送 message 时不显式传 `tools`，由 OpenCode 按启动配置和 agent 默认能力暴露内置工具与 MCP 工具；配置内容变化时会等当前 session 结束后重启 serve。
 - OpenCode/nga serve 会话会保留在真实项目目录下，便于用 `opencode session list` 查看历史；Agent 只在取消或超时时 abort session，不在正常完成后删除 session。
 - `hac`：按 Gemini CLI 兼容方式运行，Agent 会在任务隔离配置目录写入 `.gemini/settings.json` 的 MCP server，并把技能复制到 `.gemini/skills/`。

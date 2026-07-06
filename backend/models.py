@@ -578,6 +578,7 @@ class AgentOpenCodeConfig(BaseModel):
     models: list[AgentOpenCodeModelConfig] = []
     config_paths: list[str] = []
     proxy_url: str = ""
+    no_proxy: str = ""
 
 
 class AgentMemoryApiDiscoveryConfig(BaseModel):

@@ -446,6 +446,8 @@ def test_start_locked_uses_fixed_port_and_writes_marker(monkeypatch, tmp_path: P
 
         manager = OpenCodeServeManager()
         manager._wait_health_locked = AsyncMock()
+        monkeypatch.setenv("ALL_PROXY", "http://127.0.0.1:9999")
+        monkeypatch.setenv("all_proxy", "http://127.0.0.1:9999")
 
         await manager._start_locked(OpenCodeServeKey(
             tool="opencode",
@@ -476,6 +478,8 @@ def test_start_locked_uses_fixed_port_and_writes_marker(monkeypatch, tmp_path: P
         assert envs[0]["OPENCODE_CONFIG_CONTENT"] == '{"mcp": {}}'
         assert envs[0]["HTTP_PROXY"] == "http://127.0.0.1:3131"
         assert envs[0]["HTTPS_PROXY"] == "http://127.0.0.1:3131"
+        assert "ALL_PROXY" not in envs[0]
+        assert "all_proxy" not in envs[0]
         assert envs[0]["NO_PROXY"] == "127.0.0.1,localhost"
         assert envs[0]["PYTHONIOENCODING"] == "utf-8"
         assert envs[0]["PYTHONUTF8"] == "1"

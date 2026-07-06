@@ -55,16 +55,24 @@ _GLOBAL_OPENCODE_CONFIG_FILENAMES = ("config.json", "opencode.json", "opencode.j
 _PROJECT_OPENCODE_CONFIG_FILENAMES = ("config.json", "opencode.json", "opencode.jsonc")
 _OPENCODE_CONFIG_PATH_ENV = "OPENCODE_CONFIG_PATH"
 _OPENCODE_PROXY_URL_ENV = "OPENCODE_PROXY_URL"
+_OPENCODE_NO_PROXY_ENV = "OPENCODE_NO_PROXY"
+_DEFAULT_OPENCODE_NO_PROXY = (
+    "mirrors.tools.huawei.com,.athuawei.com,.hic.cloud,.huawei.com,"
+    ".huaweimarine.com,.huaweimossel.com,.huaweistatic.com,.hw3static.com,"
+    ".hwht.com,.hwtelcloud.com,.hwtrip.com,.inhuawei.com,.pinjiantrip.com,"
+    "127.0.0.1,localhost,172.30.53.14,172.30.50.214,172.30.60.113,"
+    "172.30.59.148,192.168.76.2,10.96.0.0/12,192.168.59.0/24,"
+    "192.168.49.0/24,192.168.39.0/24"
+)
 _OPENCODE_PROCESS_ENV_KEYS = (
     "HTTP_PROXY",
     "HTTPS_PROXY",
-    "ALL_PROXY",
     "http_proxy",
     "https_proxy",
-    "all_proxy",
     "NO_PROXY",
     "no_proxy",
 )
+_OPENCODE_PROXY_CLEAR_ENV_KEYS = ("ALL_PROXY", "all_proxy")
 
 
 @dataclass
@@ -1059,6 +1067,7 @@ def _effective_cli_config(cli_config, model_option) -> dict:
         "models": _cfg_value(cli_config, "models", []),
         "config_paths": _cfg_value(cli_config, "config_paths", []),
         "proxy_url": _cfg_value(cli_config, "proxy_url", ""),
+        "no_proxy": _cfg_value(cli_config, "no_proxy", ""),
     }
     if model_option.tool:
         data["tool"] = model_option.tool
@@ -1376,16 +1385,14 @@ def _normalize_proxy_url(value: object) -> str:
     return proxy
 
 
-def _merge_no_proxy(existing: str | None) -> str:
-    values: list[str] = []
-    for part in str(existing or "").split(","):
-        part = part.strip()
-        if part and part not in values:
-            values.append(part)
-    for part in ("127.0.0.1", "localhost"):
-        if part not in values:
-            values.append(part)
-    return ",".join(values)
+def _opencode_no_proxy_value(cli_config, env: dict[str, str]) -> str:
+    configured = str(_cfg_value(cli_config, "no_proxy", "") if cli_config is not None else "").strip()
+    if configured:
+        return configured
+    configured = str(env.get(_OPENCODE_NO_PROXY_ENV, "") or "").strip()
+    if configured:
+        return configured
+    return _DEFAULT_OPENCODE_NO_PROXY
 
 
 def _opencode_proxy_env_overrides(cli_config, env: dict[str, str]) -> dict[str, str]:
@@ -1396,14 +1403,14 @@ def _opencode_proxy_env_overrides(cli_config, env: dict[str, str]) -> dict[str, 
         proxy_url = _normalize_proxy_url(env.get(_OPENCODE_PROXY_URL_ENV, ""))
     if not proxy_url:
         return {}
-    no_proxy = _merge_no_proxy(env.get("NO_PROXY") or env.get("no_proxy"))
+    for name in _OPENCODE_PROXY_CLEAR_ENV_KEYS:
+        env.pop(name, None)
+    no_proxy = _opencode_no_proxy_value(cli_config, env)
     return {
         "HTTP_PROXY": proxy_url,
         "HTTPS_PROXY": proxy_url,
-        "ALL_PROXY": proxy_url,
         "http_proxy": proxy_url,
         "https_proxy": proxy_url,
-        "all_proxy": proxy_url,
         "NO_PROXY": no_proxy,
         "no_proxy": no_proxy,
     }

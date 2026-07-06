@@ -31,6 +31,7 @@ opencode:
   max_retries: 2  # retry on transient errors (not timeout)
   mock: false    # set to false when opencode is configured
   proxy_url: ""  # optional proxy for opencode/nga child processes, e.g. "http://127.0.0.1:3131"
+  no_proxy: ""   # optional no_proxy for opencode/nga child processes; empty uses intranet defaults
   config_paths: [] # optional OpenCode config files to merge; OPENCODE_CONFIG_PATH is also supported
   models: []     # optional model pool; see README for fields, time windows, and default model rows
 

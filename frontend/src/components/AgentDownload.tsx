@@ -58,6 +58,7 @@ const DEFAULT_CONFIG: AgentRemoteConfig = {
     models: [],
     config_paths: [],
     proxy_url: "",
+    no_proxy: "",
   },
   fp_review_cli: null,
   memory_api_discovery: {
@@ -111,6 +112,7 @@ function normalizeConfig(config: AgentRemoteConfig): AgentRemoteConfig {
   opencode.models = normalizeModels(config.opencode?.models);
   opencode.config_paths = normalizeConfigPaths(config.opencode?.config_paths);
   opencode.proxy_url = String(config.opencode?.proxy_url || "").trim();
+  opencode.no_proxy = String(config.opencode?.no_proxy || "").trim();
   const fpReviewCli = config.fp_review_cli
     ? {
         ...opencode,
@@ -118,6 +120,7 @@ function normalizeConfig(config: AgentRemoteConfig): AgentRemoteConfig {
         models: normalizeModels(config.fp_review_cli.models),
         config_paths: normalizeConfigPaths(config.fp_review_cli.config_paths ?? opencode.config_paths),
         proxy_url: String(config.fp_review_cli.proxy_url ?? opencode.proxy_url ?? "").trim(),
+        no_proxy: String(config.fp_review_cli.no_proxy ?? opencode.no_proxy ?? "").trim(),
       }
     : null;
   return {
@@ -631,6 +634,14 @@ function AgentConfigPanel({ agent }: AgentConfigPanelProps) {
                       onChange={(e) => setOC("proxy_url", e.target.value)}
                       className={inputCls} placeholder="http://127.0.0.1:3131" />
                   </Field>
+                  <Field label="代理跳过列表" hint="可选；留空则使用全局 no_proxy">
+                    <textarea
+                      value={cfg.opencode.no_proxy || ""}
+                      onChange={(e) => setOC("no_proxy", e.target.value)}
+                      className={`${inputCls} min-h-[72px] resize-y`}
+                      placeholder="mirrors.tools.huawei.com,.huawei.com,127.0.0.1,localhost"
+                    />
+                  </Field>
                   <Field label="OpenCode 配置文件" hint="一行一个文件路径">
                     <textarea
                       value={configPathsText(cfg.opencode.config_paths)}
@@ -694,6 +705,14 @@ function AgentConfigPanel({ agent }: AgentConfigPanelProps) {
                       <input type="text" value={cfg.fp_review_cli.proxy_url || ""}
                         onChange={(e) => setFpCli("proxy_url", e.target.value)}
                         className={inputCls} placeholder="http://127.0.0.1:3131" />
+                    </Field>
+                    <Field label="代理跳过列表" hint="可选；留空则继承审计工具">
+                      <textarea
+                        value={cfg.fp_review_cli.no_proxy || ""}
+                        onChange={(e) => setFpCli("no_proxy", e.target.value)}
+                        className={`${inputCls} min-h-[72px] resize-y`}
+                        placeholder="mirrors.tools.huawei.com,.huawei.com,127.0.0.1,localhost"
+                      />
                     </Field>
                     <Field label="OpenCode 配置文件" hint="一行一个文件路径">
                       <textarea

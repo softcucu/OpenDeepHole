@@ -12,6 +12,7 @@ from backend.models import Candidate
 from backend.opencode import llm_api_runner
 from backend.opencode.llm_api_runner import LLMApiUnavailableError
 from backend.opencode.runner import (
+    _DEFAULT_OPENCODE_NO_PROXY,
     _build_cli_command,
     _build_cli_env,
     _cleanup_prompt_file,
@@ -236,8 +237,8 @@ def test_invoke_opencode_uses_serve_manager_when_configured(tmp_path: Path) -> N
         )
         assert kwargs["env_overrides"]["HTTP_PROXY"] == "http://127.0.0.1:3131"
         assert kwargs["env_overrides"]["HTTPS_PROXY"] == "http://127.0.0.1:3131"
-        assert "127.0.0.1" in kwargs["env_overrides"]["NO_PROXY"]
-        assert "localhost" in kwargs["env_overrides"]["NO_PROXY"]
+        assert kwargs["env_overrides"]["NO_PROXY"] == _DEFAULT_OPENCODE_NO_PROXY
+        assert kwargs["env_overrides"]["no_proxy"] == _DEFAULT_OPENCODE_NO_PROXY
         assert "真实项目根目录" in kwargs["prompt"]
         assert str(project.resolve()) in kwargs["prompt"]
         assert "优先使用 deephole-code MCP 源码查询工具" in kwargs["prompt"]
@@ -480,18 +481,37 @@ def test_opencode_proxy_url_populates_child_process_env(tmp_path: Path) -> None:
     env = _build_cli_env(
         workspace,
         "opencode",
-        base_env={"NO_PROXY": "10.0.0.0/8"},
+        base_env={"NO_PROXY": "10.0.0.0/8", "ALL_PROXY": "http://127.0.0.1:9999"},
         cli_config={"proxy_url": "127.0.0.1:3131"},
     )
 
     assert env["HTTP_PROXY"] == "http://127.0.0.1:3131"
     assert env["HTTPS_PROXY"] == "http://127.0.0.1:3131"
-    assert env["ALL_PROXY"] == "http://127.0.0.1:3131"
     assert env["http_proxy"] == "http://127.0.0.1:3131"
     assert env["https_proxy"] == "http://127.0.0.1:3131"
-    assert env["all_proxy"] == "http://127.0.0.1:3131"
-    assert env["NO_PROXY"] == "10.0.0.0/8,127.0.0.1,localhost"
-    assert env["no_proxy"] == "10.0.0.0/8,127.0.0.1,localhost"
+    assert "ALL_PROXY" not in env
+    assert "all_proxy" not in env
+    assert env["NO_PROXY"] == _DEFAULT_OPENCODE_NO_PROXY
+    assert env["no_proxy"] == _DEFAULT_OPENCODE_NO_PROXY
+
+
+def test_opencode_proxy_no_proxy_can_be_overridden(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "opencode.json").write_text(
+        json.dumps({"mcp": {"deephole-code": {"url": "http://127.0.0.1:9123/mcp"}}}),
+        encoding="utf-8",
+    )
+
+    env = _build_cli_env(
+        workspace,
+        "opencode",
+        base_env={},
+        cli_config={"proxy_url": "127.0.0.1:3131", "no_proxy": "corp.local,127.0.0.1"},
+    )
+
+    assert env["NO_PROXY"] == "corp.local,127.0.0.1"
+    assert env["no_proxy"] == "corp.local,127.0.0.1"
 
 
 def test_opencode_env_merges_executable_project_and_config_paths(tmp_path: Path) -> None:

@@ -47,14 +47,14 @@ _SERVE_DEBUG_ENV_NAMES = (
     "PYTHONUTF8",
     "HTTP_PROXY",
     "HTTPS_PROXY",
-    "ALL_PROXY",
     "http_proxy",
     "https_proxy",
-    "all_proxy",
     "NO_PROXY",
     "no_proxy",
     "OPENCODE_CONFIG_CONTENT",
 )
+_SERVE_PROXY_ENV_NAMES = {"HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"}
+_SERVE_PROXY_CLEAR_ENV_NAMES = ("ALL_PROXY", "all_proxy")
 
 
 @dataclass(frozen=True)
@@ -1230,6 +1230,9 @@ class OpenCodeServeManager:
             env["OPENCODE_CONFIG_CONTENT"] = key.config_content
         else:
             env.pop("OPENCODE_CONFIG_CONTENT", None)
+        if any(name in _SERVE_PROXY_ENV_NAMES for name, _ in key.env_overrides):
+            for name in _SERVE_PROXY_CLEAR_ENV_NAMES:
+                env.pop(name, None)
         for name, value in key.env_overrides:
             env[name] = value
         env.pop("OPENCODE_SERVER_PASSWORD", None)

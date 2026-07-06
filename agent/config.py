@@ -57,6 +57,7 @@ class OpenCodeConfig:
     models: list[OpenCodeModelConfig] = field(default_factory=list)
     config_paths: list[str] = field(default_factory=list)  # optional OpenCode config files to merge
     proxy_url: str = ""           # optional proxy for opencode/nga child processes
+    no_proxy: str = ""            # optional no_proxy override for opencode/nga child processes
 
 
 @dataclass
@@ -106,6 +107,7 @@ def normalize_cli_config(config: OpenCodeConfig) -> OpenCodeConfig:
         path = str(raw_config_paths).strip()
         config.config_paths = [path] if path else []
     config.proxy_url = str(getattr(config, "proxy_url", "") or "").strip()
+    config.no_proxy = str(getattr(config, "no_proxy", "") or "").strip()
     if tool not in AI_CLI_TOOLS:
         inferred = Path(executable).name.lower() if executable else ""
         if inferred in AI_CLI_TOOLS:

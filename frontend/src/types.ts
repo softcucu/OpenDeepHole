@@ -432,6 +432,7 @@ export interface AgentOpenCodeConfig {
   models: AgentOpenCodeModelConfig[];
   config_paths?: string[];
   proxy_url?: string;
+  no_proxy?: string;
 }
 
 export interface AgentOpenCodeModelConfig {

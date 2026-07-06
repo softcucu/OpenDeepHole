@@ -55,6 +55,7 @@ class OpenCodeConfig(BaseModel):
     models: list[OpenCodeModelConfig] = []
     config_paths: list[str] = []  # optional OpenCode config files to merge
     proxy_url: str = ""  # optional proxy for opencode/nga child processes
+    no_proxy: str = ""  # optional no_proxy override for opencode/nga child processes
 
 
 class MemoryApiDiscoveryConfig(BaseModel):
