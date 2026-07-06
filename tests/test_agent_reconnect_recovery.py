@@ -803,6 +803,7 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
                 scope_id="scan-1",
                 global_running=1,
                 global_queued=1,
+                queued_tasks=[{"task_type": "audit", "checker": "npd"}],
                 models=[
                     {
                         "id": "deep",
@@ -840,6 +841,7 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
             self.assertIsNotNone(stored.opencode_pool)
             self.assertEqual(stored.opencode_pool.global_running, 0)
             self.assertEqual(stored.opencode_pool.global_queued, 0)
+            self.assertEqual(stored.opencode_pool.queued_tasks, [])
             self.assertEqual(stored.opencode_pool.models[0].running, 0)
             self.assertEqual(stored.opencode_pool.models[0].queued, 0)
             self.assertEqual(stored.opencode_pool.models[0].active_tasks, [])

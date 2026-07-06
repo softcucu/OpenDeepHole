@@ -892,6 +892,7 @@ function AgentConfigPanel({ agent }: AgentConfigPanelProps) {
 
 function AgentModelUsage({ pool }: { pool: AgentOpenCodePoolStatus | null }) {
   const models = pool?.models ?? [];
+  const queuedTasks = pool?.queued_tasks ?? [];
   if (!pool || models.length === 0) {
     return (
       <div className="border-t border-slate-700/60 px-4 py-3 text-xs text-slate-500">
@@ -908,6 +909,18 @@ function AgentModelUsage({ pool }: { pool: AgentOpenCodePoolStatus | null }) {
         <span>排队 <b className="text-amber-300">{pool.global_queued}</b></span>
         <span>成功 <b className="text-green-300">{success}</b> / {total}</span>
       </div>
+      {queuedTasks.length > 0 && (
+        <div className="mb-2 grid grid-cols-1 gap-1 sm:grid-cols-2">
+          {queuedTasks.map((task, index) => (
+            <div
+              key={String(task.request_id || index)}
+              className="truncate rounded border border-amber-500/20 bg-amber-500/10 px-2 py-1 text-xs text-amber-100"
+            >
+              {compactTaskLabel(task)}
+            </div>
+          ))}
+        </div>
+      )}
       <div className="overflow-x-auto">
         <table className="w-full min-w-[52rem] text-xs">
           <thead>

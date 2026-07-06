@@ -490,6 +490,7 @@ def _terminal_opencode_pool_status(status: OpenCodePoolStatus | None) -> OpenCod
     cleared = status.model_copy(deep=True)
     cleared.global_running = 0
     cleared.global_queued = 0
+    cleared.queued_tasks = []
     for model in cleared.models:
         model.running = 0
         model.queued = 0
@@ -810,6 +811,7 @@ async def get_agent_opencode_pool(
                 result.models.append(model)
         result.global_running = latest.global_running
         result.global_queued = latest.global_queued
+        result.queued_tasks = latest.queued_tasks
         result.updated_at = latest.updated_at or result.updated_at
     return result
 

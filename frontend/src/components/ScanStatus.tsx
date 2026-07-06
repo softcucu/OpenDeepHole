@@ -3165,6 +3165,7 @@ function EventLine({ event }: { event: ScanEvent }) {
 
 function ModelPoolDashboard({ pool }: { pool: OpenCodePoolStatus | null }) {
   const models = pool?.models ?? [];
+  const queuedTasks = pool?.queued_tasks ?? [];
   const total = models.reduce((sum, item) => sum + item.total, 0);
   const success = models.reduce((sum, item) => sum + item.success, 0);
   const failure = models.reduce((sum, item) => sum + item.failure, 0);
@@ -3192,8 +3193,24 @@ function ModelPoolDashboard({ pool }: { pool: OpenCodePoolStatus | null }) {
         <MetricBox label="超时/取消" value={timeout + cancelled} tone="amber" />
       </div>
 
+      {queuedTasks.length > 0 && (
+        <div className="rounded-lg border border-slate-800 bg-slate-950 p-3">
+          <div className="mb-2 text-xs font-semibold text-slate-400">全局排队任务</div>
+          <div className="grid grid-cols-1 gap-2 md:grid-cols-2 xl:grid-cols-3">
+            {queuedTasks.map((task, index) => (
+              <div
+                key={String(task.request_id || index)}
+                className="truncate rounded border border-amber-500/20 bg-amber-500/10 px-2 py-1.5 text-xs text-amber-100"
+              >
+                {modelTaskLabel(task)}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
       <div className="overflow-x-auto rounded-lg border border-slate-800">
-        <table className="w-full min-w-[68rem] text-sm">
+        <table className="w-full min-w-[64rem] text-sm">
           <thead className="bg-slate-950">
             <tr>
               <th className={thCls}>模型</th>
@@ -3201,7 +3218,6 @@ function ModelPoolDashboard({ pool }: { pool: OpenCodePoolStatus | null }) {
               <th className={thCls}>可用</th>
               <th className={thCls}>权重</th>
               <th className={thCls}>运行/上限</th>
-              <th className={thCls}>排队</th>
               <th className={thCls}>累计</th>
               <th className={thCls}>成功</th>
               <th className={thCls}>失败</th>
@@ -3229,7 +3245,6 @@ function ModelPoolDashboard({ pool }: { pool: OpenCodePoolStatus | null }) {
                 </td>
                 <td className={tdCls}>{model.weight}</td>
                 <td className={tdCls}>{model.running}/{model.max_concurrency}</td>
-                <td className={tdCls}>{model.queued}</td>
                 <td className={tdCls}>{model.total}</td>
                 <td className={`${tdCls} text-green-300`}>{model.success}</td>
                 <td className={`${tdCls} text-red-300`}>{model.failure}</td>

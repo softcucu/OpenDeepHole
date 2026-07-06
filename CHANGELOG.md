@@ -2,6 +2,7 @@
 
 ## 2026-07-06
 
+- **变更** OpenCode/兼容 CLI 模型池改为全局任务队列调度：漏洞审计、威胁分析等模型调用不再在等待阶段预绑定到某个模型；模型释放真实槽位后再从全局队列选择下一个可运行任务，同时保留 `opencode_concurrency` 和单模型 `max_concurrency` 的并发上限语义
 - **新增** 创建扫描时新增「验证环境」下拉选择，默认选项为「仿真UBBPi板环境」；扫描元数据、恢复/续扫命令和漏洞验证上下文都会保留该环境，产品验证器注册支持按 `产品 + 验证环境` 匹配验证方法
 - **修复** OpenCode/nga 运行时配置发现范围扩展到可执行文件所在目录、`.opencode/config.json`、显式 `opencode.config_paths` 和 `OPENCODE_CONFIG_PATH`，避免便携安装或公司内网非标准配置目录下启动 serve 时丢失 provider/model 配置并回退访问公网 Provider
 - **修复** 注入到 `OPENCODE_CONFIG_CONTENT` 的运行时 JSON 会移除顶层 `"$schema"`，避免环境变量携带 schema URL；启动诊断会记录候选配置文件命中情况和最终顶层 key，便于定位配置未合并的问题

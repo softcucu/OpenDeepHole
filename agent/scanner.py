@@ -1358,7 +1358,13 @@ async def run_scan(
             await emit("auditing", f"Audit order: {_audit_order_summary(remaining)}")
 
         cancelled = False
-        audit_concurrency = max(1, min(8, len(remaining) or 1))
+        from backend.opencode.model_pool import total_model_capacity
+        audit_capacity = total_model_capacity(
+            config.opencode,
+            global_concurrency=config.opencode_concurrency,
+            required_capability="any",
+        )
+        audit_concurrency = max(1, min(audit_capacity, len(remaining) or 1))
         result_lock = asyncio.Lock()
         rejected_patterns: set[tuple[object, ...]] = set()
         queue: asyncio.Queue[tuple[int, Candidate]] = asyncio.Queue()

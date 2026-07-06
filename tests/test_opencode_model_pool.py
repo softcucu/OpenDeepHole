@@ -29,6 +29,8 @@ def _reset_model_pool():
     model_pool_module._scope_updated_at.clear()
     model_pool_module._global_updated_at = ""
     model_pool_module._active_tasks.clear()
+    model_pool_module._pending_requests.clear()
+    model_pool_module._pending_sequence = 0
     yield
 
 
@@ -171,6 +173,8 @@ def test_model_pool_snapshot_tracks_scope_queue_and_outcomes() -> None:
             queued_snapshot = model_pool_snapshot(scope)
             assert queued_snapshot["global_running"] == 1
             assert queued_snapshot["global_queued"] == 1
+            assert len(queued_snapshot["queued_tasks"]) == 1
+            assert all(item["queued"] == 0 for item in queued_snapshot["models"])
 
             assert first is not None
             await release_model_lease(first, outcome="success", duration_seconds=2.0)
@@ -193,6 +197,7 @@ def test_model_pool_snapshot_tracks_scope_queue_and_outcomes() -> None:
             snapshot = model_pool_snapshot(scope)
             by_id = {item["id"]: item for item in snapshot["models"]}
             assert snapshot["global_queued"] == 0
+            assert snapshot["queued_tasks"] == []
             assert by_id["fast"]["total"] == 1
             assert by_id["fast"]["success"] == 1
             assert by_id["fast"]["avg_duration_seconds"] == 2.0
@@ -239,6 +244,7 @@ def test_waiting_lease_does_not_refresh_snapshot_timestamp() -> None:
             first_snapshot = model_pool_snapshot(scope)
             first_global_snapshot = model_pool_snapshot()
             assert first_snapshot["global_queued"] == 1
+            assert first_snapshot["queued_tasks"][0]["scope_id"] == scope
 
             await asyncio.sleep(0.35)
             later_snapshot = model_pool_snapshot(scope)
@@ -252,7 +258,10 @@ def test_waiting_lease_does_not_refresh_snapshot_timestamp() -> None:
             async with model_pool_module._condition:
                 model_pool_module._condition.notify_all()
             if not second_task.done():
-                await asyncio.wait_for(second_task, timeout=1)
+                result = await asyncio.wait_for(second_task, timeout=1)
+                assert result is None
+            assert model_pool_snapshot(scope)["global_queued"] == 0
+            assert model_pool_snapshot(scope)["queued_tasks"] == []
             await release_model_lease(first)
 
     asyncio.run(run())
@@ -304,8 +313,7 @@ def test_global_concurrency_is_hard_gate_across_models() -> None:
 
 
 def test_queued_task_falls_back_to_other_free_model() -> None:
-    """A task queued behind one model must run as soon as any other eligible
-    model frees up, instead of waiting for its original queue target."""
+    """A queued task must not be pinned to a model before it starts running."""
 
     async def run():
         cfg = SimpleNamespace(
@@ -334,22 +342,82 @@ def test_queued_task_falls_back_to_other_free_model() -> None:
         try:
             await asyncio.sleep(0.05)
             snapshot = model_pool_snapshot(scope)
-            queued_ids = [item["id"] for item in snapshot["models"] if item["queued"]]
-            assert len(queued_ids) == 1
-            queued_id = queued_ids[0]
-            other_id = "b" if queued_id == "a" else "a"
+            assert snapshot["global_queued"] == 1
+            assert len(snapshot["queued_tasks"]) == 1
+            assert all(item["queued"] == 0 for item in snapshot["models"])
 
-            # Free the model the third task is NOT queued on.
-            await release_model_lease(held.pop(other_id), outcome="success", duration_seconds=0.1)
+            released_id = next(iter(held))
+            await release_model_lease(held.pop(released_id), outcome="success", duration_seconds=0.1)
             third = await asyncio.wait_for(third_task, timeout=1)
             assert third is not None
-            assert third.option.id == other_id
+            assert third.option.id == released_id
             await release_model_lease(third, outcome="success", duration_seconds=0.1)
         finally:
             if not third_task.done():
                 third_task.cancel()
             for lease in held.values():
                 await release_model_lease(lease, outcome="success", duration_seconds=0.1)
+
+    asyncio.run(run())
+
+
+def test_global_queue_skips_blocked_capability_head() -> None:
+    """A high-only waiter must not keep lower-capability models idle."""
+
+    async def run():
+        cfg = SimpleNamespace(
+            models=[
+                {"id": "deep", "model": "deep-model", "capability": "high", "weight": 1, "max_concurrency": 1},
+                {"id": "fast", "model": "fast-model", "capability": "low", "weight": 1, "max_concurrency": 1},
+            ],
+        )
+        scope = "test-scope-capability-skip"
+
+        deep = await acquire_model_lease(
+            cfg, global_concurrency=2, required_capability="high", stats_scope_id=scope
+        )
+        high_waiter = asyncio.create_task(
+            acquire_model_lease(
+                cfg,
+                global_concurrency=2,
+                required_capability="high",
+                stats_scope_id=scope,
+                task_context={"task_type": "threat_analysis"},
+            )
+        )
+        try:
+            await asyncio.sleep(0.05)
+            queued = model_pool_snapshot(scope)
+            assert queued["global_queued"] == 1
+            assert queued["queued_tasks"][0]["task_type"] == "threat_analysis"
+
+            any_task = asyncio.create_task(
+                acquire_model_lease(
+                    cfg,
+                    global_concurrency=2,
+                    required_capability="any",
+                    stats_scope_id=scope,
+                    task_context={"task_type": "audit", "checker": "npd"},
+                )
+            )
+            any_lease = await asyncio.wait_for(any_task, timeout=1)
+            assert any_lease is not None
+            assert any_lease.option.id == "fast"
+            still_queued = model_pool_snapshot(scope)
+            assert still_queued["global_queued"] == 1
+            assert still_queued["queued_tasks"][0]["task_type"] == "threat_analysis"
+
+            await release_model_lease(any_lease, outcome="success", duration_seconds=0.1)
+            await release_model_lease(deep, outcome="success", duration_seconds=0.1)
+            deep = None
+            high_lease = await asyncio.wait_for(high_waiter, timeout=1)
+            assert high_lease is not None
+            assert high_lease.option.id == "deep"
+            await release_model_lease(high_lease, outcome="success", duration_seconds=0.1)
+        finally:
+            if not high_waiter.done():
+                high_waiter.cancel()
+            await release_model_lease(deep, outcome="success", duration_seconds=0.1)
 
     asyncio.run(run())
 

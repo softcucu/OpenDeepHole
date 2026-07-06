@@ -448,6 +448,7 @@ class OpenCodePoolStatus(BaseModel):
     agent_session_id: str = ""
     global_running: int = 0
     global_queued: int = 0
+    queued_tasks: list[dict] = []
     models: list[OpenCodePoolModelStats] = []
     updated_at: str = ""
 

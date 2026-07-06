@@ -303,6 +303,7 @@ export interface OpenCodePoolStatus {
   agent_session_id?: string;
   global_running: number;
   global_queued: number;
+  queued_tasks: Record<string, unknown>[];
   models: OpenCodePoolModelStats[];
   updated_at: string;
 }

@@ -59,6 +59,21 @@ class ModelRuntimeStats:
     last_finished_at: str = ""
 
 
+@dataclass
+class _PendingLeaseRequest:
+    request_id: str
+    sequence: int
+    cli_config: Any
+    global_concurrency: int | Any
+    required_capability: str
+    prefer_high: bool
+    cancel_event: Any
+    stats_scope_id: str
+    task_context: dict[str, Any]
+    queued_at: float
+    queued_at_iso: str
+
+
 _condition = asyncio.Condition()
 _running_by_model: dict[str, int] = {}
 _global_running = 0
@@ -69,6 +84,8 @@ _options_by_id: dict[str, ModelOption] = {}
 _scope_updated_at: dict[str, str] = {}
 _global_updated_at: str = ""
 _active_tasks: dict[str, dict[str, Any]] = {}
+_pending_requests: list[_PendingLeaseRequest] = []
+_pending_sequence = 0
 
 
 def _now_iso() -> str:
@@ -320,19 +337,146 @@ def _choose_available(
     )
 
 
-def _choose_queue_target(options: list[ModelOption], stats: dict[str, ModelRuntimeStats]) -> ModelOption:
-    return min(
-        options,
-        key=lambda option: (
-            (
-                (stats.get(option.id).queued if option.id in stats else 0)
-                + _running_by_model.get(option.id, 0)
-            ) / option.weight,
-            stats.get(option.id).queued if option.id in stats else 0,
-            _running_by_model.get(option.id, 0),
-            -option.weight,
-            option.id,
-        ),
+def _current_request_cli_config(request: _PendingLeaseRequest) -> Any:
+    return request.cli_config() if callable(request.cli_config) else request.cli_config
+
+
+def _current_request_global_concurrency(request: _PendingLeaseRequest) -> int:
+    value = (
+        request.global_concurrency()
+        if callable(request.global_concurrency)
+        else request.global_concurrency
+    )
+    return max(1, int(value or 1))
+
+
+def _request_options_locked(
+    request: _PendingLeaseRequest,
+) -> tuple[Any, int, list[ModelOption], list[ModelOption], bool]:
+    active_cli_config = _current_request_cli_config(request)
+    hard_global_concurrency = _current_request_global_concurrency(request)
+    pool_enabled = _configured_model_pool_enabled(active_cli_config)
+    all_options = model_options(active_cli_config, global_concurrency=hard_global_concurrency)
+    _ensure_global_models_locked(all_options)
+    if request.stats_scope_id:
+        _ensure_scope_models_locked(request.stats_scope_id, all_options)
+    active_options = _active_options(all_options) if pool_enabled else all_options
+    return active_cli_config, hard_global_concurrency, all_options, active_options, pool_enabled
+
+
+def _eligible_options_for_request_locked(
+    request: _PendingLeaseRequest,
+) -> tuple[list[ModelOption], int, list[ModelOption]]:
+    _active_cli_config, hard_global_concurrency, all_options, active_options, pool_enabled = (
+        _request_options_locked(request)
+    )
+    eligible = _eligible_options(
+        active_options,
+        required_capability=request.required_capability,
+    )
+    configured_match = _eligible_options(
+        all_options,
+        required_capability=request.required_capability,
+    )
+    if not eligible and active_options and (not pool_enabled or not configured_match):
+        # Configuration is too restrictive for the requested capability. Fall
+        # back to all currently time-eligible models, but never use a model that
+        # is outside its configured time window.
+        eligible = active_options
+    return eligible, hard_global_concurrency, all_options
+
+
+def _choose_available_for_request_locked(
+    request: _PendingLeaseRequest,
+) -> tuple[ModelOption | None, list[ModelOption]]:
+    eligible, hard_global_concurrency, all_options = _eligible_options_for_request_locked(request)
+    option = _choose_available(
+        eligible,
+        global_concurrency=hard_global_concurrency,
+        prefer_high=request.prefer_high,
+    )
+    return option, all_options
+
+
+def _touch_queue_locked(*scope_ids: str) -> None:
+    global _global_updated_at
+    now = _now_iso()
+    _global_updated_at = now
+    for scope_id in scope_ids:
+        if scope_id:
+            _scope_updated_at[scope_id] = now
+
+
+def _remove_pending_request_locked(request: _PendingLeaseRequest) -> bool:
+    try:
+        _pending_requests.remove(request)
+    except ValueError:
+        return False
+    return True
+
+
+def _prune_cancelled_pending_locked() -> None:
+    removed_scope_ids: set[str] = set()
+    for request in list(_pending_requests):
+        cancel_event = request.cancel_event
+        if cancel_event is not None and cancel_event.is_set():
+            _pending_requests.remove(request)
+            removed_scope_ids.add(request.stats_scope_id)
+    if removed_scope_ids:
+        _touch_queue_locked(*removed_scope_ids)
+
+
+def _next_runnable_pending_locked() -> tuple[_PendingLeaseRequest, ModelOption, list[ModelOption]] | None:
+    _prune_cancelled_pending_locked()
+    for request in _pending_requests:
+        option, all_options = _choose_available_for_request_locked(request)
+        if option is not None:
+            return request, option, all_options
+    return None
+
+
+def _grant_lease_locked(
+    request: _PendingLeaseRequest,
+    option: ModelOption,
+    all_options: list[ModelOption],
+) -> ModelLease:
+    global _global_running, _global_updated_at
+
+    _global_running += 1
+    _running_by_model[option.id] = _running_by_model.get(option.id, 0) + 1
+    _last_used[option.id] = time.monotonic()
+    started_at = time.monotonic()
+    started_at_iso = _now_iso()
+    task_id = uuid4().hex
+    global_item = _global_stats_by_model[option.id]
+    global_item.running += 1
+    global_item.total += 1
+    global_item.last_status = "running"
+    global_item.last_started_at = started_at_iso
+    _active_tasks[task_id] = {
+        "task_id": task_id,
+        "model_id": option.id,
+        "scope_id": request.stats_scope_id,
+        "started_at": started_at_iso,
+        "context": dict(request.task_context or {}),
+    }
+    if request.stats_scope_id:
+        stats = _ensure_scope_models_locked(request.stats_scope_id, all_options)
+        item = stats[option.id]
+        item.running += 1
+        item.total += 1
+        item.last_status = "running"
+        item.last_started_at = started_at_iso
+        _scope_updated_at[request.stats_scope_id] = item.last_started_at
+    _global_updated_at = started_at_iso
+    return ModelLease(
+        option=option,
+        running=_running_by_model[option.id],
+        global_running=_global_running,
+        stats_scope_id=request.stats_scope_id,
+        started_at=started_at,
+        started_at_iso=started_at_iso,
+        task_id=task_id,
     )
 
 
@@ -399,16 +543,6 @@ def _ensure_global_models_locked(options: list[ModelOption]) -> dict[str, ModelR
     return _global_stats_by_model
 
 
-def _decrement_queued_locked(scope_id: str, model_id: str) -> None:
-    stats = _stats_by_scope.get(scope_id)
-    if not stats:
-        return
-    item = stats.get(model_id)
-    if item is not None:
-        item.queued = max(0, item.queued - 1)
-        _scope_updated_at[scope_id] = _now_iso()
-
-
 async def acquire_model_lease(
     cli_config: Any,
     *,
@@ -419,110 +553,48 @@ async def acquire_model_lease(
     stats_scope_id: str = "",
     task_context: dict[str, Any] | None = None,
 ) -> ModelLease | None:
-    def current_cli_config() -> Any:
-        return cli_config() if callable(cli_config) else cli_config
-
-    def current_global_concurrency() -> int:
-        value = global_concurrency() if callable(global_concurrency) else global_concurrency
-        return max(1, int(value or 1))
-
     required = normalize_requirement(required_capability)
-    active_cli_config = current_cli_config()
-    hard_global_concurrency = current_global_concurrency()
-    pool_enabled = _configured_model_pool_enabled(active_cli_config)
-    all_options = model_options(active_cli_config, global_concurrency=hard_global_concurrency)
-
-    global _global_running
-    queued_model_id = ""
+    request: _PendingLeaseRequest | None = None
 
     while True:
         if cancel_event is not None and cancel_event.is_set():
-            if stats_scope_id and queued_model_id:
+            if request is not None:
                 async with _condition:
-                    _decrement_queued_locked(stats_scope_id, queued_model_id)
+                    if _remove_pending_request_locked(request):
+                        _touch_queue_locked(request.stats_scope_id)
+                        _condition.notify_all()
             return None
         async with _condition:
-            active_cli_config = current_cli_config()
-            hard_global_concurrency = current_global_concurrency()
-            pool_enabled = _configured_model_pool_enabled(active_cli_config)
-            all_options = model_options(active_cli_config, global_concurrency=hard_global_concurrency)
-            _ensure_global_models_locked(all_options)
-            active_options = _active_options(all_options) if pool_enabled else all_options
-            eligible = _eligible_options(active_options, required_capability=required)
-            configured_match = _eligible_options(all_options, required_capability=required)
-            if not eligible and active_options and (not pool_enabled or not configured_match):
-                # Configuration is too restrictive for the requested capability.
-                # Fall back to all currently time-eligible models rather than
-                # using a model outside its configured window.
-                eligible = active_options
-            if stats_scope_id:
-                stats = _ensure_scope_models_locked(stats_scope_id, all_options)
-            else:
-                stats = {}
-            option = None
-            if queued_model_id and eligible:
-                assigned = [candidate for candidate in eligible if candidate.id == queued_model_id]
-                if assigned:
-                    option = _choose_available(
-                        assigned,
-                        global_concurrency=hard_global_concurrency,
-                        prefer_high=prefer_high,
-                    )
-            if option is None and eligible:
-                # Queued-target model is busy: take any other eligible model
-                # with free capacity instead of idling behind the pinned one.
-                option = _choose_available(
-                    eligible,
-                    global_concurrency=hard_global_concurrency,
+            if request is None:
+                global _pending_sequence
+                _pending_sequence += 1
+                queued_at_iso = _now_iso()
+                request = _PendingLeaseRequest(
+                    request_id=uuid4().hex,
+                    sequence=_pending_sequence,
+                    cli_config=cli_config,
+                    global_concurrency=global_concurrency,
+                    required_capability=required,
                     prefer_high=prefer_high,
-                )
-            if option is not None:
-                _global_running += 1
-                _running_by_model[option.id] = _running_by_model.get(option.id, 0) + 1
-                _last_used[option.id] = time.monotonic()
-                started_at = time.monotonic()
-                started_at_iso = _now_iso()
-                task_id = uuid4().hex
-                global_item = _global_stats_by_model[option.id]
-                global_item.running += 1
-                global_item.total += 1
-                global_item.last_status = "running"
-                global_item.last_started_at = started_at_iso
-                _active_tasks[task_id] = {
-                    "task_id": task_id,
-                    "model_id": option.id,
-                    "scope_id": stats_scope_id,
-                    "started_at": started_at_iso,
-                    "context": dict(task_context or {}),
-                }
-                if stats_scope_id:
-                    stats = _ensure_scope_models_locked(stats_scope_id, all_options)
-                    if queued_model_id:
-                        _decrement_queued_locked(stats_scope_id, queued_model_id)
-                    item = stats[option.id]
-                    item.running += 1
-                    item.total += 1
-                    item.last_status = "running"
-                    item.last_started_at = started_at_iso
-                    _scope_updated_at[stats_scope_id] = item.last_started_at
-                global _global_updated_at
-                _global_updated_at = started_at_iso
-                return ModelLease(
-                    option=option,
-                    running=_running_by_model[option.id],
-                    global_running=_global_running,
+                    cancel_event=cancel_event,
                     stats_scope_id=stats_scope_id,
-                    started_at=started_at,
-                    started_at_iso=started_at_iso,
-                    task_id=task_id,
+                    task_context=dict(task_context or {}),
+                    queued_at=time.monotonic(),
+                    queued_at_iso=queued_at_iso,
                 )
-            if stats_scope_id and not queued_model_id:
-                queue_candidates = eligible or _eligible_options(all_options, required_capability=required) or all_options
-                queued_option = _choose_queue_target(queue_candidates, stats)
-                queued_model_id = queued_option.id
-                stats[queued_model_id].queued += 1
-                stats[queued_model_id].last_status = "queued"
-                _scope_updated_at[stats_scope_id] = _now_iso()
+                option, all_options = _choose_available_for_request_locked(request)
+                if option is not None and not _pending_requests:
+                    return _grant_lease_locked(request, option, all_options)
+                _pending_requests.append(request)
+                _touch_queue_locked(stats_scope_id)
+                _condition.notify_all()
+
+            next_runnable = _next_runnable_pending_locked()
+            if next_runnable is not None:
+                selected, option, all_options = next_runnable
+                if selected is request:
+                    _remove_pending_request_locked(request)
+                    return _grant_lease_locked(request, option, all_options)
             try:
                 await asyncio.wait_for(_condition.wait(), timeout=0.2)
             except asyncio.TimeoutError:
@@ -666,6 +738,29 @@ def _stats_item_snapshot(
     }
 
 
+def _pending_request_matches_scope(request: _PendingLeaseRequest, scope_id: str) -> bool:
+    return not scope_id or request.stats_scope_id == scope_id
+
+
+def _pending_request_snapshot(request: _PendingLeaseRequest) -> dict[str, Any]:
+    return {
+        "request_id": request.request_id,
+        "scope_id": request.stats_scope_id,
+        "queued_at": request.queued_at_iso,
+        "required_capability": request.required_capability,
+        "prefer_high": request.prefer_high,
+        **dict(request.task_context or {}),
+    }
+
+
+def _pending_requests_snapshot(scope_id: str = "") -> list[dict[str, Any]]:
+    return [
+        _pending_request_snapshot(request)
+        for request in _pending_requests
+        if _pending_request_matches_scope(request, scope_id)
+    ]
+
+
 def model_pool_snapshot(scope_id: str = "") -> dict[str, Any]:
     if scope_id:
         stats = _stats_by_scope.get(scope_id, {})
@@ -673,18 +768,22 @@ def model_pool_snapshot(scope_id: str = "") -> dict[str, Any]:
             _stats_item_snapshot(item, option=_options_by_id.get(item.id), scope_id=scope_id)
             for item in stats.values()
         ]
+        queued_tasks = _pending_requests_snapshot(scope_id)
         return {
             "scope_id": scope_id,
             "global_running": sum(item.running for item in stats.values()),
-            "global_queued": sum(item.queued for item in stats.values()),
+            "global_queued": len(queued_tasks),
+            "queued_tasks": queued_tasks,
             "models": sorted(models, key=lambda item: item["id"]),
             "updated_at": _scope_updated_at.get(scope_id, ""),
         }
     stats = _global_stats_by_model
     models = [_stats_item_snapshot(item, option=_options_by_id.get(item.id)) for item in stats.values()]
+    queued_tasks = _pending_requests_snapshot()
     return {
         "global_running": _global_running,
-        "global_queued": 0,
+        "global_queued": len(queued_tasks),
+        "queued_tasks": queued_tasks,
         "models": sorted(models, key=lambda item: item["id"]),
         "updated_at": _global_updated_at,
     }
