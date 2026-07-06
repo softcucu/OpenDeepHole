@@ -10,6 +10,49 @@ from agent.reporter import Reporter
 
 
 class AgentReporterTests(unittest.TestCase):
+    def test_index_status_payload_includes_stage_and_stats(self) -> None:
+        class FakeClient:
+            def __init__(self) -> None:
+                self.posts: list[dict] = []
+
+            async def post(self, url, json=None, timeout=None):
+                self.posts.append({"url": url, "json": json, "timeout": timeout})
+                request = httpx.Request("POST", url)
+                return httpx.Response(200, request=request)
+
+        reporter = Reporter("http://server")
+        fake_client = FakeClient()
+        reporter._client = fake_client  # type: ignore[assignment]
+
+        stats = {
+            "files": 3,
+            "functions": 8,
+            "structs": 1,
+            "global_variables": 2,
+            "function_calls": 13,
+            "global_variable_references": 5,
+        }
+        asyncio.run(reporter.send_index_status(
+            "scan-1",
+            "parsing",
+            2,
+            3,
+            stage="tree-sitter refs",
+            stage_current=4,
+            stage_total=8,
+            stats=stats,
+        ))
+
+        self.assertEqual(len(fake_client.posts), 1)
+        payload = fake_client.posts[0]["json"]
+        self.assertEqual(payload["status"], "parsing")
+        self.assertEqual(payload["parsed_files"], 2)
+        self.assertEqual(payload["total_files"], 3)
+        self.assertEqual(payload["stage"], "tree-sitter refs")
+        self.assertEqual(payload["stage_current"], 4)
+        self.assertEqual(payload["stage_total"], 8)
+        self.assertEqual(payload["stats"], stats)
+
     def test_static_progress_http_error_is_visible(self) -> None:
         class FakeClient:
             async def post(self, url, json=None, timeout=None):

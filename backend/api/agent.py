@@ -1427,22 +1427,60 @@ class _IndexStatusBody(BaseModel):
     status: str           # "parsing" | "done" | "error"
     parsed_files: int = 0
     total_files: int = 0
+    stage: str = ""
+    stage_current: int = 0
+    stage_total: int = 0
+    stats: dict[str, int] | None = None
+
+
+def _index_file_counts(body: _IndexStatusBody) -> tuple[int, int] | None:
+    """Return real source-file index counts, excluding sub-stage progress."""
+    if body.status == "done":
+        stats_files = int((body.stats or {}).get("files") or 0)
+        total = body.total_files or stats_files
+        if total <= 0:
+            return None
+        parsed = body.parsed_files or total
+        return parsed, total
+    if body.status == "parsing" and body.total_files > 0:
+        return body.parsed_files, body.total_files
+    return None
 
 
 @router.post("/scan/{scan_id}/index-status")
 async def agent_push_index_status(scan_id: str, body: _IndexStatusBody) -> dict:
     """Agent pushes code-indexing progress. Stored in memory for frontend polling."""
-    _scan_index_statuses[scan_id] = body.model_dump()
+    payload = body.model_dump(exclude_none=True)
+    _scan_index_statuses[scan_id] = payload
 
     # Mirror counts into the running scan so the frontend can read them via the
     # existing scan-status polling endpoint (scan.static_total_files, etc.)
+    file_counts = _index_file_counts(body)
+    store = get_scan_store()
     scan = _ensure_running_scan(scan_id)
-    if scan is not None:
-        scan.static_total_files = body.total_files
-        scan.static_scanned_files = body.parsed_files
+    if file_counts is not None:
+        parsed_files, total_files = file_counts
+        if scan is not None:
+            scan.static_total_files = total_files
+            scan.static_scanned_files = parsed_files
+        store.update_scan_progress(
+            scan_id,
+            static_total_files=total_files,
+            static_scanned_files=parsed_files,
+        )
 
     from backend.sse import publish
-    publish(scan_id, "index_status", body.model_dump())
+    publish(scan_id, "index_status", payload)
+    if scan is not None and file_counts is not None:
+        publish(scan_id, "scan_status", {
+            "status": scan.status,
+            "progress": scan.progress,
+            "total_candidates": scan.total_candidates,
+            "processed_candidates": scan.processed_candidates,
+            "static_total_files": scan.static_total_files,
+            "static_scanned_files": scan.static_scanned_files,
+            "static_analysis_done": scan.static_analysis_done,
+        })
 
     return {"ok": True}
 
@@ -1476,9 +1514,17 @@ async def agent_push_static_progress(scan_id: str, body: _StaticProgressBody) ->
     elif not body.done and current_status == ScanItemStatus.PENDING:
         status = ScanItemStatus.ANALYZING
 
+    reported_total = body.total
+    reported_scanned = body.scanned
+    if body.done and body.total == 0 and body.scanned == 0:
+        existing_total = (scan.static_total_files if scan is not None else 0) or (stored_scan.static_total_files if stored_scan is not None else 0)
+        existing_scanned = (scan.static_scanned_files if scan is not None else 0) or (stored_scan.static_scanned_files if stored_scan is not None else 0)
+        reported_total = existing_total
+        reported_scanned = existing_scanned or existing_total
+
     if scan is not None:
-        scan.static_total_files = body.total
-        scan.static_scanned_files = body.scanned
+        scan.static_total_files = reported_total
+        scan.static_scanned_files = reported_scanned
         scan.static_analysis_done = effective_done
         if status is not None:
             scan.status = status
@@ -1486,8 +1532,8 @@ async def agent_push_static_progress(scan_id: str, body: _StaticProgressBody) ->
     store.update_scan_progress(
         scan_id,
         status=status,
-        static_total_files=body.total,
-        static_scanned_files=body.scanned,
+        static_total_files=reported_total,
+        static_scanned_files=reported_scanned,
         static_analysis_done=effective_done,
     )
     if scan is not None:

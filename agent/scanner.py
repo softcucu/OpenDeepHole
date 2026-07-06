@@ -897,8 +897,10 @@ async def run_scan(
                     except Exception:
                         pass
 
-        def _index_stats_message(index_db) -> str:
-            stats = index_db.get_index_stats()
+        def _index_stats(index_db) -> dict[str, int]:
+            return index_db.get_index_stats()
+
+        def _index_stats_message(stats: dict[str, int]) -> str:
             return (
                 "代码索引统计: "
                 f"文件 {stats['files']} 个，"
@@ -909,6 +911,10 @@ async def run_scan(
                 f"全局变量引用 {stats['global_variable_references']} 条"
             )
 
+        async def _send_index_done(stats: dict[str, int]) -> None:
+            files = int(stats.get("files") or 0)
+            await reporter.send_index_status(scan_id, "done", files, files, stats=stats)
+
         do_index = True  # set False when a valid existing DB is found
 
         if db_path.exists():
@@ -918,12 +924,16 @@ async def run_scan(
                 if need_db_open:
                     from code_parser import CodeDatabase
                     db = CodeDatabase(db_path)
-                    await emit("init", _index_stats_message(db))
+                    stats = _index_stats(db)
+                    await emit("init", _index_stats_message(stats))
+                    await _send_index_done(stats)
                 else:
                     from code_parser import CodeDatabase
                     stats_db = CodeDatabase(db_path)
                     try:
-                        await emit("init", _index_stats_message(stats_db))
+                        stats = _index_stats(stats_db)
+                        await emit("init", _index_stats_message(stats))
+                        await _send_index_done(stats)
                     finally:
                         stats_db.close()
                 do_index = False
@@ -940,8 +950,11 @@ async def run_scan(
             db = index_db
             analyzer = CppAnalyzer(db)
             loop = asyncio.get_running_loop()
+            latest_index_file_progress = {"parsed": 0, "total": 0}
 
             def _on_index_progress(parsed: int, total: int) -> None:
+                latest_index_file_progress["parsed"] = parsed
+                latest_index_file_progress["total"] = total
                 pct = round(parsed / total * 100) if total else 0
                 print(f"\r  [index] {parsed}/{total} files ({pct}%)", end="", flush=True)
                 asyncio.run_coroutine_threadsafe(
@@ -953,7 +966,15 @@ async def run_scan(
                 pct = round(current / total * 100) if total else 0
                 print(f"\r  [index] {stage}: {current}/{total} ({pct}%)", end="", flush=True)
                 asyncio.run_coroutine_threadsafe(
-                    reporter.send_index_status(scan_id, stage, current, total),
+                    reporter.send_index_status(
+                        scan_id,
+                        "parsing",
+                        latest_index_file_progress["parsed"],
+                        latest_index_file_progress["total"],
+                        stage=stage,
+                        stage_current=current,
+                        stage_total=total,
+                    ),
                     loop,
                 )
 
@@ -986,10 +1007,11 @@ async def run_scan(
             index_db.close()
             _replace_sqlite_db(temp_db_path, db_path)
             db = CodeDatabase(db_path)
+            stats = _index_stats(db)
             await emit("init", "Code indexing complete")
-            await emit("init", _index_stats_message(db))
+            await emit("init", _index_stats_message(stats))
             await emit("init", f"代码索引已保存（路径: {db_path}）")
-            await reporter.send_index_status(scan_id, "done", 0, 0)
+            await _send_index_done(stats)
 
         # --- Phase 2: Use selected feedback for SKILL enrichment ---
         selected_feedback = [

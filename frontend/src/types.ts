@@ -362,10 +362,23 @@ export interface FeedbackEntry {
   updated_at: string;
 }
 
+export interface CodeIndexStats {
+  files: number;
+  functions: number;
+  structs: number;
+  global_variables: number;
+  function_calls: number;
+  global_variable_references: number;
+}
+
 export interface IndexStatus {
   status: "not_started" | "parsing" | "done" | "error" | "unknown";
   parsed_files?: number;
   total_files?: number;
+  stage?: string;
+  stage_current?: number;
+  stage_total?: number;
+  stats?: CodeIndexStats;
   error?: string;
 }
 

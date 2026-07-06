@@ -2,6 +2,8 @@
 
 ## 2026-07-04
 
+- **优化** 扫描详情页「静态分析」拆分为「调用图构建」和「候选点生成」两个子页；调用图构建展示索引文件数、函数数量、调用关系、结构体/类/联合体、全局变量和引用数量，候选点生成保留原候选列表、分页、筛选和状态展示
+- **修复** 静态分析/代码索引完成事件不再用 `0/0` 覆盖已有文件进度；刷新扫描详情页也会重新读取索引状态，避免扫描文件数长期显示为 0
 - **优化** OpenCode/nga serve 启动前会在 Agent 命令行打印完整诊断信息，包括解析后的可执行文件、端口、CWD、marker/startup log 路径、argv、可复现 shell 形式命令、Popen 参数以及完整 `OPENCODE_CONFIG_CONTENT` 注入内容，便于定位本机 serve 启动失败原因
 - **变更** `git_history` 历史提交分析和同类变体排查在扫描管线中硬禁用；实现代码和配置字段继续保留，但即使配置文件里 `git_history.enabled: true` 也不会执行该阶段
 - **修复** Agent 远端配置和 Web 配置面板的默认 OpenCode/兼容 CLI 改为与下载包 `agent.yaml` 一致的 `nga`/`nga`、并发 4，避免仅保存 `git_history.enabled: false` 等配置时把本地可用的 `nga serve` 覆盖成默认 `opencode serve`，导致 serve 无法启动

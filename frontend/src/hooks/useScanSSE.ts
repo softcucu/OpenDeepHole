@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, useCallback } from "react";
-import { scanSSEUrl, getScanStatus, getFpReview } from "../api/client";
+import { scanSSEUrl, getScanStatus, getFpReview, getAgentIndexStatus } from "../api/client";
 import type {
   FpReviewJob,
   FpReviewStatus,
@@ -128,7 +128,7 @@ export interface SSEStateSetters {
 
 async function refreshFullState(
   scanId: string,
-  { setScan, setFpReview }: SSEStateSetters,
+  { setScan, setFpReview, setIndexStatus }: SSEStateSetters,
 ) {
   try {
     const data = await getScanStatus(scanId);
@@ -164,6 +164,12 @@ async function refreshFullState(
     });
   } catch {
     // 404 = no review yet
+  }
+  try {
+    const index = await getAgentIndexStatus(scanId);
+    setIndexStatus(index);
+  } catch {
+    // transient — index_status SSE may still arrive later
   }
 }
 

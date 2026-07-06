@@ -1,8 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { getScanStatus, stopScan, downloadScanReport, downloadScanReportZip, getCheckers, updateScanFeedback, getSkillContent, triggerFpReview, stopFpReview, getFpReview, getFpReviewSkill, getScanGitHistory, getSkillReports, getScanThreatAnalysis, retryIncompleteScan, triggerVulnerabilityValidation, stopVulnerabilityValidation } from "../api/client";
-import type { Candidate, FpReviewJob, HistoryPattern, IndexStatus, ScanItemStatus, ScanStatus as ScanStatusType, ScanEvent, CheckerInfo, SkillReport, OpenCodePoolStatus, ScanCandidate, Vulnerability, OutputSource, VulnerabilityValidation, ThreatAnalysis, ThreatAsset, ThreatAttackTree, ThreatAttackTreeNode, ThreatCodePathMapping, ThreatRisk } from "../types";
+import { getScanStatus, stopScan, downloadScanReport, downloadScanReportZip, getCheckers, updateScanFeedback, getSkillContent, triggerFpReview, stopFpReview, getFpReview, getFpReviewSkill, getScanGitHistory, getSkillReports, getScanThreatAnalysis, getAgentIndexStatus, retryIncompleteScan, triggerVulnerabilityValidation, stopVulnerabilityValidation } from "../api/client";
+import type { Candidate, CodeIndexStats, FpReviewJob, HistoryPattern, IndexStatus, ScanItemStatus, ScanStatus as ScanStatusType, ScanEvent, CheckerInfo, SkillReport, OpenCodePoolStatus, ScanCandidate, Vulnerability, OutputSource, VulnerabilityValidation, ThreatAnalysis, ThreatAsset, ThreatAttackTree, ThreatAttackTreeNode, ThreatCodePathMapping, ThreatRisk } from "../types";
 import { useScanSSE } from "../hooks/useScanSSE";
 import type { ScanSSEHandlers, SSEStateSetters } from "../hooks/useScanSSE";
 import VulnerabilityList from "./VulnerabilityList";
@@ -15,6 +15,7 @@ const FINAL_USER_VERDICTS = new Set(["confirmed", "false_positive"]);
 
 type MainTab = "overview" | "threat" | "static" | "mining" | "validation" | "issues";
 type MiningTab = "candidate_audit" | "variant_hunt";
+type StaticTab = "call_graph" | "candidate_generation";
 type TaskTone = "slate" | "cyan" | "amber" | "green" | "red" | "purple" | "blue";
 
 const MAIN_TABS: { key: MainTab; label: string }[] = [
@@ -29,6 +30,11 @@ const MAIN_TABS: { key: MainTab; label: string }[] = [
 const MINING_TABS: { key: MiningTab; label: string }[] = [
   { key: "candidate_audit", label: "候选点 AI 审计" },
   { key: "variant_hunt", label: "历史同类问题挖掘" },
+];
+
+const STATIC_TABS: { key: StaticTab; label: string }[] = [
+  { key: "call_graph", label: "调用图构建" },
+  { key: "candidate_generation", label: "候选点生成" },
 ];
 
 function hasOutputSource(source?: OutputSource | null): boolean {
@@ -130,13 +136,36 @@ function taskStateLabel(done: boolean, running: boolean, failed = false): string
   return "等待";
 }
 
-function formatIndexProgress(indexStatus: IndexStatus | null, scan: ScanStatusType): { current: number; total: number; done: boolean; running: boolean; failed: boolean } {
-  const current = indexStatus?.parsed_files ?? scan.static_scanned_files ?? 0;
-  const total = indexStatus?.total_files ?? scan.static_total_files ?? 0;
-  const failed = indexStatus?.status === "error";
-  const running = indexStatus?.status === "parsing";
-  const done = !running && (indexStatus?.status === "done" || scan.static_analysis_done || (indexStatus == null && scan.static_total_files > 0));
-  return { current, total, done, running, failed };
+function formatIndexProgress(indexStatus: IndexStatus | null, scan: ScanStatusType): {
+  current: number;
+  total: number;
+  done: boolean;
+  running: boolean;
+  failed: boolean;
+  stage: string;
+  stageCurrent: number;
+  stageTotal: number;
+  stats?: CodeIndexStats;
+} {
+  const status = indexStatus?.status ?? "unknown";
+  const statsFiles = indexStatus?.stats?.files ?? 0;
+  const total = indexStatus?.total_files || statsFiles || scan.static_total_files || 0;
+  let current = indexStatus?.parsed_files ?? scan.static_scanned_files ?? 0;
+  const failed = status === "error";
+  const running = status === "parsing";
+  const done = !running && (status === "done" || scan.static_analysis_done || (indexStatus == null && scan.static_total_files > 0));
+  if (done && total > 0 && current === 0) current = total;
+  return {
+    current,
+    total,
+    done,
+    running,
+    failed,
+    stage: indexStatus?.stage ?? "",
+    stageCurrent: indexStatus?.stage_current ?? 0,
+    stageTotal: indexStatus?.stage_total ?? 0,
+    stats: indexStatus?.stats,
+  };
 }
 
 interface Props {
@@ -207,6 +236,9 @@ export default function ScanStatus({ scanId, onBack }: Props) {
       .catch(() => {});
     getFpReview(scanId)
       .then(setFpReview)
+      .catch(() => {});
+    getAgentIndexStatus(scanId)
+      .then(setIndexStatus)
       .catch(() => {});
     getScanGitHistory(scanId)
       .then(setGitHistory)
@@ -390,6 +422,17 @@ export default function ScanStatus({ scanId, onBack }: Props) {
     },
     onIndexStatus: (data) => {
       setIndexStatus(data);
+      const totalFiles = data.total_files || data.stats?.files || 0;
+      const parsedFiles = data.status === "done" && (data.parsed_files ?? 0) === 0
+        ? totalFiles
+        : data.parsed_files;
+      if (totalFiles > 0 && parsedFiles != null) {
+        setScan((prev) => prev ? {
+          ...prev,
+          static_total_files: totalFiles,
+          static_scanned_files: parsedFiles,
+        } : prev);
+      }
     },
   }), [scanId]);
 
@@ -974,12 +1017,15 @@ export default function ScanStatus({ scanId, onBack }: Props) {
         {activeTab === "static" && (
           <StaticTaskPanel
             scan={scan}
+            indexStatus={indexStatus}
+            indexProgress={indexProgress}
             candidates={scan.candidates ?? []}
             vulnerabilities={scan.vulnerabilities}
             validations={scan.validations ?? []}
             currentCandidate={scan.current_candidate}
             processedCandidates={scan.processed_candidates}
             events={filterEvents(scan.events, ["static_analysis"])}
+            indexEvents={filterEvents(scan.events, ["init"])}
           />
         )}
         {activeTab === "mining" && (
@@ -1317,8 +1363,8 @@ function ScanOverview({
   onNavigate: (tab: MainTab) => void;
 }) {
   const staticSeen = scan.static_analysis_done || scan.status === "analyzing" || scan.status === "auditing" || hasEvent(scan.events, ["static_analysis"]);
-  const staticScannedFiles = staticSeen ? scan.static_scanned_files : 0;
-  const staticTotalFiles = staticSeen ? scan.static_total_files : 0;
+  const staticScannedFiles = staticSeen ? (scan.static_scanned_files || indexProgress.current) : 0;
+  const staticTotalFiles = staticSeen ? (scan.static_total_files || indexProgress.total) : 0;
   const staticPct = percent(staticScannedFiles, staticTotalFiles);
   const auditRunning = scan.status === "auditing";
   const staticRunning = scan.status === "analyzing" && !scan.static_analysis_done;
@@ -2007,21 +2053,28 @@ function threatNodeClass(value: string): string {
 
 function StaticTaskPanel({
   scan,
+  indexStatus,
+  indexProgress,
   candidates,
   vulnerabilities,
   validations,
   currentCandidate,
   processedCandidates,
   events,
+  indexEvents,
 }: {
   scan: ScanStatusType;
+  indexStatus: IndexStatus | null;
+  indexProgress: ReturnType<typeof formatIndexProgress>;
   candidates: ScanCandidate[];
   vulnerabilities: Vulnerability[];
   validations: VulnerabilityValidation[];
   currentCandidate: Candidate | null;
   processedCandidates: number;
   events: ScanEvent[];
+  indexEvents: ScanEvent[];
 }) {
+  const [activeStaticTab, setActiveStaticTab] = useState<StaticTab>("call_graph");
   const [selectedIndex, setSelectedIndex] = useState<number | null>(null);
   const [typeFilter, setTypeFilter] = useState(ALL_STATIC_FILTER);
   const [auditFilter, setAuditFilter] = useState(ALL_STATIC_FILTER);
@@ -2029,8 +2082,8 @@ function StaticTaskPanel({
   const [currentPage, setCurrentPage] = useState(1);
   const running = scan.status === "analyzing" && !scan.static_analysis_done;
   const seen = scan.static_analysis_done || running || scan.status === "auditing" || events.length > 0;
-  const scannedFiles = seen ? scan.static_scanned_files : 0;
-  const totalFiles = seen ? scan.static_total_files : 0;
+  const scannedFiles = seen ? (scan.static_scanned_files || indexProgress.current) : 0;
+  const totalFiles = seen ? (scan.static_total_files || indexProgress.total) : 0;
   const displayedCandidates = useMemo<ScanCandidate[]>(() => {
     if (candidates.length > 0) return candidates;
     return vulnerabilities.map((vuln, index) => ({
@@ -2127,17 +2180,26 @@ function StaticTaskPanel({
 
   return (
     <TaskPanel
-      title="静态分析过程"
+      title="静态分析"
       status={taskStateLabel(scan.static_analysis_done, running, scan.status === "error")}
       tone={scan.static_analysis_done ? "green" : running ? "cyan" : scan.status === "error" ? "red" : "slate"}
-      summary="运行已选择的静态规则，产出候选点并进入后续 AI 审计。"
+      summary="构建代码索引和调用关系后，运行静态规则产出后续 AI 审计候选点。"
     >
+      <TabbedPanel tabs={STATIC_TABS} active={activeStaticTab} onChange={setActiveStaticTab}>
+        {activeStaticTab === "call_graph" ? (
+          <CallGraphBuildPanel
+            indexStatus={indexStatus}
+            indexProgress={indexProgress}
+            events={indexEvents}
+          />
+        ) : (
+          <>
       <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
         <MiniMetric label="扫描文件" value={scannedFiles} tone="cyan" />
         <MiniMetric label="总文件" value={totalFiles} />
         <MiniMetric label="候选点" value={displayedCandidates.length || scan.total_candidates} tone="blue" />
       </div>
-      <ProgressBlock label="静态分析" current={scannedFiles} total={totalFiles} fallback="等待静态分析进度" />
+      <ProgressBlock label="候选点生成" current={scannedFiles} total={totalFiles} fallback="等待静态分析进度" />
       <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
         <MiniMetric label="已审计" value={processedCandidates} tone="blue" />
         <MiniMetric label="验证中" value={runningValidationCount} tone="cyan" />
@@ -2203,7 +2265,61 @@ function StaticTaskPanel({
         </div>
       </div>
       <EventList events={events} empty="暂无静态分析日志" />
+          </>
+        )}
+      </TabbedPanel>
     </TaskPanel>
+  );
+}
+
+function CallGraphBuildPanel({
+  indexStatus,
+  indexProgress,
+  events,
+}: {
+  indexStatus: IndexStatus | null;
+  indexProgress: ReturnType<typeof formatIndexProgress>;
+  events: ScanEvent[];
+}) {
+  const stats = indexProgress.stats;
+  const files = stats?.files ?? indexProgress.total;
+  const functions = stats?.functions ?? 0;
+  const structs = stats?.structs ?? 0;
+  const globals = stats?.global_variables ?? 0;
+  const calls = stats?.function_calls ?? 0;
+  const globalRefs = stats?.global_variable_references ?? 0;
+  const statusText = indexProgress.failed
+    ? (indexStatus?.error || "索引构建失败")
+    : indexProgress.done
+      ? "索引已完成"
+      : indexProgress.running
+        ? "索引构建中"
+        : "等待索引状态";
+
+  return (
+    <>
+      <div className="grid grid-cols-1 gap-3 md:grid-cols-3 xl:grid-cols-6">
+        <MiniMetric label="文件数" value={files} tone="cyan" />
+        <MiniMetric label="函数数量" value={functions} tone="blue" />
+        <MiniMetric label="调用关系" value={calls} tone="purple" />
+        <MiniMetric label="结构体/类/联合体" value={structs} />
+        <MiniMetric label="全局变量" value={globals} />
+        <MiniMetric label="全局变量引用" value={globalRefs} />
+      </div>
+      <ProgressBlock label="文件解析" current={indexProgress.current} total={indexProgress.total} fallback="等待索引文件进度" />
+      {indexProgress.stage && (
+        <ProgressBlock
+          label={`索引阶段：${indexProgress.stage}`}
+          current={indexProgress.stageCurrent}
+          total={indexProgress.stageTotal}
+          fallback="等待阶段进度"
+        />
+      )}
+      <div className="rounded-lg border border-slate-700 bg-slate-900/40 px-4 py-3 text-sm text-slate-300">
+        {statusText}
+      </div>
+      <EventList events={events} empty="暂无调用图构建日志" />
+    </>
   );
 }
 

@@ -73,6 +73,7 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
         agent_api._agent_ws.clear()
         agent_api._agent_ws_locks.clear()
         agent_api._agent_disconnect_tasks.clear()
+        agent_api._scan_index_statuses.clear()
 
     def tearDown(self) -> None:
         agent_api._running_scans.clear()
@@ -81,6 +82,7 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
         agent_api._agent_ws.clear()
         agent_api._agent_ws_locks.clear()
         agent_api._agent_disconnect_tasks.clear()
+        agent_api._scan_index_statuses.clear()
 
     def test_agent_websocket_heartbeat_gets_ack(self) -> None:
         class FakeClient:
@@ -390,10 +392,72 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
             stored = store.load_scan("scan-1")[0]
             self.assertEqual(stored.status, ScanItemStatus.AUDITING)
             self.assertTrue(stored.static_analysis_done)
+            self.assertEqual(stored.static_scanned_files, 128)
+            self.assertEqual(stored.static_total_files, 128)
             status_events = [data for _scan_id, event_type, data in published if event_type == "scan_status"]
             self.assertTrue(status_events)
             self.assertEqual(status_events[-1]["status"], ScanItemStatus.AUDITING)
             self.assertTrue(status_events[-1]["static_analysis_done"])
+            self.assertEqual(status_events[-1]["static_scanned_files"], 128)
+            self.assertEqual(status_events[-1]["static_total_files"], 128)
+
+    def test_index_status_done_persists_stats_and_file_counts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = SqliteScanStore(Path(tmp) / "scans.db")
+            scan = _scan("scan-1", ScanItemStatus.ANALYZING)
+            store.save_scan(scan, _meta())
+            agent_api._running_scans["scan-1"] = scan
+
+            stats = {
+                "files": 7,
+                "functions": 31,
+                "structs": 4,
+                "global_variables": 5,
+                "function_calls": 42,
+                "global_variable_references": 9,
+            }
+            published: list[tuple[str, str, dict]] = []
+            body = agent_api._IndexStatusBody(status="done", stats=stats)
+            with (
+                patch("backend.api.agent.get_scan_store", return_value=store),
+                patch("backend.sse.publish", side_effect=lambda scan_id, event_type, data: published.append((scan_id, event_type, data))),
+            ):
+                asyncio.run(agent_api.agent_push_index_status("scan-1", body))
+
+            stored = store.load_scan("scan-1")[0]
+            self.assertEqual(stored.static_scanned_files, 7)
+            self.assertEqual(stored.static_total_files, 7)
+            self.assertEqual(agent_api._scan_index_statuses["scan-1"]["stats"]["function_calls"], 42)
+            index_events = [data for _scan_id, event_type, data in published if event_type == "index_status"]
+            self.assertTrue(index_events)
+            self.assertEqual(index_events[-1]["parsed_files"], 0)
+            self.assertEqual(index_events[-1]["stats"], stats)
+            status_events = [data for _scan_id, event_type, data in published if event_type == "scan_status"]
+            self.assertTrue(status_events)
+            self.assertEqual(status_events[-1]["static_scanned_files"], 7)
+            self.assertEqual(status_events[-1]["static_total_files"], 7)
+
+    def test_index_status_done_zero_counts_does_not_clear_existing_file_counts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = SqliteScanStore(Path(tmp) / "scans.db")
+            scan = _scan("scan-1", ScanItemStatus.ANALYZING)
+            scan.static_total_files = 128
+            scan.static_scanned_files = 127
+            store.save_scan(scan, _meta())
+            agent_api._running_scans["scan-1"] = scan
+
+            published: list[tuple[str, str, dict]] = []
+            body = agent_api._IndexStatusBody(status="done", parsed_files=0, total_files=0)
+            with (
+                patch("backend.api.agent.get_scan_store", return_value=store),
+                patch("backend.sse.publish", side_effect=lambda scan_id, event_type, data: published.append((scan_id, event_type, data))),
+            ):
+                asyncio.run(agent_api.agent_push_index_status("scan-1", body))
+
+            stored = store.load_scan("scan-1")[0]
+            self.assertEqual(stored.static_scanned_files, 127)
+            self.assertEqual(stored.static_total_files, 128)
+            self.assertFalse([data for _scan_id, event_type, data in published if event_type == "scan_status"])
 
     def test_static_progress_updates_pending_scan_to_analyzing(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

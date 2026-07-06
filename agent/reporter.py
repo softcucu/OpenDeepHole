@@ -217,14 +217,32 @@ class Reporter:
         status: str,
         parsed_files: int = 0,
         total_files: int = 0,
+        *,
+        stage: str = "",
+        stage_current: int = 0,
+        stage_total: int = 0,
+        stats: dict[str, int] | None = None,
     ) -> None:
         """Push code-indexing progress to the server (best-effort, never raises)."""
         if self.dry_run:
             return
+        payload = {
+            "status": status,
+            "parsed_files": parsed_files,
+            "total_files": total_files,
+        }
+        if stage:
+            payload.update({
+                "stage": stage,
+                "stage_current": stage_current,
+                "stage_total": stage_total,
+            })
+        if stats is not None:
+            payload["stats"] = stats
         try:
             await self._client.post(
                 f"{self.server_url}/api/agent/scan/{scan_id}/index-status",
-                json={"status": status, "parsed_files": parsed_files, "total_files": total_files},
+                json=payload,
                 timeout=5.0,
             )
         except Exception:
