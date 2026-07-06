@@ -105,7 +105,7 @@ ctx.publish_artifact("vulnerability.md", path=report_path, kind="report")
 
 把阶段性输出同步到漏洞验证页面的中间产出区域。长任务、重试、外部命令开始和结束时都应该调用它。
 
-验证函数执行期间，脚本自身以及运行期导入的同目录 helper 中的 `print(...)` 也会自动同步到中间产出，并保留在 Agent 控制台输出。不要对同一行同时 `print(...)` 和 `ctx.emit_stdout(...)`，否则页面会出现重复内容。
+验证函数执行期间，脚本自身以及运行期导入的同目录 helper 中的 `print(...)` 只会保留在 Agent 控制台输出，不会同步到漏洞验证页面。需要页面展示的进度必须显式调用 `ctx.emit_stdout(...)`，或者通过 `ctx.run_command(...)` 执行外部命令。
 
 ```python
 ctx.emit_stdout("STEP 1 running poc generation")
@@ -225,7 +225,7 @@ ValidationResult(
 - 需要 nga 在项目根目录内发现 skill 或读写文件时，可以使用 `ctx.project_path`，但必须先判断它是否为空。
 - 如果验证只针对本次扫描范围，优先参考 `ctx.code_scan_path`。
 - 传给外部工具的漏洞输入建议来自 `ctx.get_report_markdown()`，不要重新拼一个第二格式。
-- 每个重要阶段都用 `print(...)` 或 `ctx.emit_stdout(...)` 打印开始、结束、失败和重试信息。
+- 每个重要阶段都用 `print(...)` 写 Agent 控制台诊断；需要漏洞验证页面可见的开始、结束、失败和重试信息必须调用 `ctx.emit_stdout(...)`。
 - 每个需要页面保留的报告、PoC、日志摘要或验证代码都用 `ctx.publish_artifact(...)` 发布。
 
 ## nga 多阶段验证建议

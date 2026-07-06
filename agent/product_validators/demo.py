@@ -35,8 +35,7 @@ def register(registry) -> None:
 
 def _emit(ctx, message: str) -> None:
     print(message, flush=True)
-    if not getattr(ctx, "captures_print", False):
-        ctx.emit_stdout(message)
+    ctx.emit_stdout(message)
 
 
 def validate_demo(ctx) -> ValidationResult:
