@@ -1392,7 +1392,6 @@ async def run_scan(
         queue: asyncio.Queue[tuple[int, Candidate]] = asyncio.Queue()
         for item in enumerate(remaining):
             queue.put_nowait(item)
-        validation_tasks: set[asyncio.Task] = set()
 
         _configure_backend(config, scan_dir)
 
@@ -1426,35 +1425,28 @@ async def run_scan(
             if not report_markdown:
                 report_markdown = _fallback_validation_report(vuln)
 
-            from agent.vulnerability_validation import run_vulnerability_validation
+            from agent import server as agent_server
 
-            task = asyncio.create_task(run_vulnerability_validation(
+            queued = await agent_server.enqueue_vulnerability_validation(
                 config=config,
                 reporter=reporter,
                 scan_id=scan_id,
                 vuln_index=vuln_index,
-                vulnerability=vuln,
+                vulnerability=vuln.model_dump(),
                 report_markdown=report_markdown,
-                scan_dir=scan_dir,
-                project_path=project_path,
-                code_scan_path=code_scan_path,
+                project_path=str(project_path),
+                code_scan_path=str(code_scan_path),
                 product=product,
                 validation_environment=validation_environment,
-                cancel_event=cancel_event,
-            ))
-            validation_tasks.add(task)
-
-            def _discard(done: asyncio.Task) -> None:
-                validation_tasks.discard(done)
-                try:
-                    done.result()
-                except Exception as exc:
-                    print(f"[validation] vuln[{vuln_index}] failed: {exc}")
-
-            task.add_done_callback(_discard)
+                report_queued=True,
+            )
             await emit(
                 "validation",
-                f"[{candidate_index + 1}] Validation started for vuln[{vuln_index}]",
+                (
+                    f"[{candidate_index + 1}] Validation queued for vuln[{vuln_index}]"
+                    if queued
+                    else f"[{candidate_index + 1}] Validation skipped: Agent validation queue unavailable"
+                ),
                 candidate_index=candidate_index,
             )
 
@@ -1722,10 +1714,6 @@ async def run_scan(
         else:
             await asyncio.gather(*(audit_worker() for _ in range(audit_concurrency)))
             cancelled = cancel_event.is_set()
-
-        if validation_tasks:
-            await emit("validation", f"Waiting for {len(validation_tasks)} validation task(s) to finish")
-            await asyncio.gather(*list(validation_tasks), return_exceptions=True)
 
         # --- Phase 8: Report results ---
         if cancelled:

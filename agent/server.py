@@ -12,8 +12,9 @@ import threading
 import zipfile
 from collections import deque
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 # Module-level globals injected by agent/main.py before connection starts
 _config = None       # AgentConfig
@@ -31,6 +32,8 @@ _validation_workers: dict[str, asyncio.Task] = {}
 
 @dataclass
 class _ValidationQueueItem:
+    config: Any
+    reporter: Any
     scan_id: str
     vuln_index: int
     project_path: str
@@ -284,17 +287,48 @@ async def handle_vulnerability_validation(
     report_markdown: str,
 ) -> None:
     """Handle a 'vulnerability_validation' command — queue local validation by scan."""
-    if _config is None or _reporter is None:
+    await enqueue_vulnerability_validation(
+        scan_id=scan_id,
+        vuln_index=vuln_index,
+        project_path=project_path,
+        code_scan_path=code_scan_path,
+        product=product,
+        validation_environment=validation_environment,
+        vulnerability=vulnerability,
+        report_markdown=report_markdown,
+    )
+
+
+async def enqueue_vulnerability_validation(
+    *,
+    scan_id: str,
+    vuln_index: int,
+    project_path: str,
+    code_scan_path: str,
+    product: str,
+    validation_environment: str,
+    vulnerability: dict,
+    report_markdown: str,
+    config: Any | None = None,
+    reporter: Any | None = None,
+    report_queued: bool = False,
+) -> bool:
+    """Queue local vulnerability validation independently from scan tasks."""
+    effective_config = config or _config
+    effective_reporter = reporter or _reporter
+    if effective_config is None or effective_reporter is None:
         print(f"Warning: agent not fully initialized, ignoring validation {scan_id}#{vuln_index}")
-        return
+        return False
     task_key = (scan_id, vuln_index)
     existing = _validation_tasks.get(task_key)
     if existing is not None and not existing.done():
         print(f"Warning: validation {scan_id}#{vuln_index} already running, ignoring duplicate")
-        return
+        return False
 
     cancel_event = threading.Event()
     item = _ValidationQueueItem(
+        config=effective_config,
+        reporter=effective_reporter,
         scan_id=scan_id,
         vuln_index=vuln_index,
         project_path=project_path,
@@ -305,6 +339,9 @@ async def handle_vulnerability_validation(
         report_markdown=report_markdown,
         cancel_event=cancel_event,
     )
+
+    if report_queued:
+        await _report_validation_queued(item)
 
     queue = _validation_queues.setdefault(scan_id, deque())
     queue.append(item)
@@ -317,6 +354,30 @@ async def handle_vulnerability_validation(
 
     path_hint = f" ({project_path})" if project_path else ""
     print(f"Queued vulnerability validation {scan_id}#{vuln_index}{path_hint}")
+    return True
+
+
+async def _report_validation_queued(item: _ValidationQueueItem) -> None:
+    from backend.models import VulnerabilityValidation
+
+    now = datetime.now(timezone.utc).isoformat()
+    try:
+        await item.reporter.report_vulnerability_validation(
+            item.scan_id,
+            VulnerabilityValidation(
+                scan_id=item.scan_id,
+                vuln_index=item.vuln_index,
+                status="queued",
+                running=True,
+                product=item.product,
+                validation_environment=item.validation_environment,
+                intermediate_output="验证任务已进入 Agent 本地验证队列，等待本地脚本启动。",
+                started_at=now,
+                updated_at=now,
+            ),
+        )
+    except Exception as exc:
+        print(f"Warning: failed to report queued validation {item.scan_id}#{item.vuln_index}: {exc}")
 
 
 async def _run_validation_worker(scan_id: str) -> None:
@@ -351,19 +412,19 @@ async def _run_single_validation(item: _ValidationQueueItem) -> None:
     from agent.vulnerability_validation import run_vulnerability_validation
     from backend.models import Vulnerability
 
-    if _reporter is not None and _agent_id is not None:
+    if item.reporter is not None and _agent_id is not None:
         try:
-            remote_cfg = await _reporter.fetch_config(_agent_id)
+            remote_cfg = await item.reporter.fetch_config(_agent_id)
             if remote_cfg:
-                apply_remote_config(_config, remote_cfg)
-                apply_network_env(_config)
+                apply_remote_config(item.config, remote_cfg)
+                apply_network_env(item.config)
         except Exception:
             pass
     try:
         work_root = Path.home() / ".opendeephole" / "vulnerability_validation" / "runs" / item.scan_id
         await run_vulnerability_validation(
-            config=_config,
-            reporter=_reporter,
+            config=item.config,
+            reporter=item.reporter,
             scan_id=item.scan_id,
             vuln_index=item.vuln_index,
             vulnerability=Vulnerability(**item.vulnerability),
