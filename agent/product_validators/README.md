@@ -56,6 +56,7 @@ def validate_lte(ctx) -> ValidationResult:
 - `ctx.vulnerability`：当前漏洞对象。需要字典时优先使用 `ctx.get_validation_info()["vulnerability"]`。
 - `ctx.report_markdown`：后端下发的单漏洞 Markdown 报告原文，推荐通过 `ctx.get_report_markdown()` 读取。
 - `ctx.work_dir`：该漏洞验证任务的工作目录，通常位于扫描目录下的 `validation/vuln-{idx}`。
+- `ctx.validator_dir`：当前验证脚本所在目录。验证函数运行时的当前目录默认就是这个目录。
 - `ctx.report_path`：Agent 已写入的单漏洞 Markdown 报告路径。
 - `ctx.project_path`：项目根目录。可能为空，使用前需要判断。
 - `ctx.code_scan_path`：本次代码扫描范围。可能为空，使用前需要判断。
@@ -83,6 +84,7 @@ ctx.publish_artifact("vulnerability.md", path=report_path, kind="report")
 - `vuln_index`
 - `product`
 - `work_dir`
+- `validator_dir`
 - `report_path`
 - `project_path`
 - `code_scan_path`
@@ -94,6 +96,8 @@ ctx.publish_artifact("vulnerability.md", path=report_path, kind="report")
 ### `ctx.emit_stdout(text)`
 
 把阶段性输出同步到漏洞验证页面的中间产出区域。长任务、重试、外部命令开始和结束时都应该调用它。
+
+验证函数执行期间，脚本自身以及运行期导入的同目录 helper 中的 `print(...)` 也会自动同步到中间产出，并保留在 Agent 控制台输出。不要对同一行同时 `print(...)` 和 `ctx.emit_stdout(...)`，否则页面会出现重复内容。
 
 ```python
 ctx.emit_stdout("STEP 1 running poc generation")
@@ -151,7 +155,7 @@ if return_code != 0:
 注意事项：
 
 - `command` 使用参数列表，不要拼接成单个 shell 字符串。
-- `cwd` 未传时默认使用 `ctx.work_dir`。
+- `cwd` 未传时默认使用 `ctx.validator_dir`，也就是当前验证脚本所在目录。
 - `timeout` 是单条命令超时。整体验证仍受 `ctx.timeout_seconds` 限制。
 - 命令超时时返回 `124`。
 - 用户停止验证时，运行器会终止正在执行的子进程，并返回负数退出码或已结束进程的退出码。
@@ -205,11 +209,13 @@ ValidationResult(
 
 ## 路径和产物建议
 
+- 验证函数运行时当前目录是 `ctx.validator_dir`。脚本目录下的 `input/input.json` 可直接用 `open("input/input.json", encoding="utf-8")` 读取。
+- 同目录辅助文件可以直接 `import helper as h`；Agent 加载和执行验证器时都会临时把验证器目录放入 `sys.path`。
 - 普通中间文件优先写入 `ctx.work_dir`，它是当前漏洞验证任务的隔离工作目录。
 - 需要 nga 在项目根目录内发现 skill 或读写文件时，可以使用 `ctx.project_path`，但必须先判断它是否为空。
 - 如果验证只针对本次扫描范围，优先参考 `ctx.code_scan_path`。
 - 传给外部工具的漏洞输入建议来自 `ctx.get_report_markdown()`，不要重新拼一个第二格式。
-- 每个重要阶段都用 `ctx.emit_stdout(...)` 打印开始、结束、失败和重试信息。
+- 每个重要阶段都用 `print(...)` 或 `ctx.emit_stdout(...)` 打印开始、结束、失败和重试信息。
 - 每个需要页面保留的报告、PoC、日志摘要或验证代码都用 `ctx.publish_artifact(...)` 发布。
 
 ## nga 多阶段验证建议

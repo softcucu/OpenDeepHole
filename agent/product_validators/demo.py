@@ -27,6 +27,12 @@ def register(registry) -> None:
     registry.register("LTE", validate_demo, timeout_seconds=VALIDATION_TIMEOUT_SECONDS)
 
 
+def _emit(ctx, message: str) -> None:
+    print(message, flush=True)
+    if not getattr(ctx, "captures_print", False):
+        ctx.emit_stdout(message)
+
+
 def validate_demo(ctx) -> ValidationResult:
     if ctx.project_path is None:
         return ValidationResult(
@@ -55,15 +61,13 @@ def validate_demo(ctx) -> ValidationResult:
     report_path.write_text(report_markdown, encoding="utf-8")
 
     start_message = f"demo validator started for product={ctx.product}"
-    print(start_message, flush=True)
-    ctx.emit_stdout(start_message)
+    _emit(ctx, start_message)
     validation_message = (
         "validating "
         f"{vulnerability.get('vuln_type')} at {vulnerability.get('file')}:{vulnerability.get('line')}; "
         f"report={report_path}"
     )
-    print(validation_message, flush=True)
-    ctx.emit_stdout(validation_message)
+    _emit(ctx, validation_message)
     ctx.publish_artifact("vulnerability.md", path=report_path, kind="report")
 
     # STEP 1：修改第一阶段时，同步调整 STEP_1_SKILL、STEP_1_ARTIFACT、STEP_1_RETRIES 和这里的提示词。
@@ -90,8 +94,7 @@ def validate_demo(ctx) -> ValidationResult:
             f"STEP 1 running {STEP_1_SKILL}, "
             f"attempt {step_1_attempt}/{STEP_1_RETRIES + 1}"
         )
-        print(step_1_message, flush=True)
-        ctx.emit_stdout(step_1_message)
+        _emit(ctx, step_1_message)
         try:
             step_1_return_code = ctx.run_command(
                 ["nga", "run", "--dir", str(project_dir), step_1_prompt],
@@ -101,8 +104,7 @@ def validate_demo(ctx) -> ValidationResult:
         except OSError as exc:
             step_1_return_code = 1
             step_1_message = f"STEP 1 failed to start nga: {exc}"
-            print(step_1_message, flush=True)
-            ctx.emit_stdout(step_1_message)
+            _emit(ctx, step_1_message)
         if (
             step_1_return_code == 0
             and step_1_artifact.is_file()
@@ -122,8 +124,7 @@ def validate_demo(ctx) -> ValidationResult:
             f"STEP 1 attempt {step_1_attempt}/{STEP_1_RETRIES + 1} failed, "
             f"return_code={step_1_return_code}"
         )
-        print(step_1_message, flush=True)
-        ctx.emit_stdout(step_1_message)
+        _emit(ctx, step_1_message)
     if not step_1_success:
         return ValidationResult(
             validation_success=False,
@@ -134,8 +135,7 @@ def validate_demo(ctx) -> ValidationResult:
         )
     ctx.publish_artifact(STEP_1_ARTIFACT, path=step_1_artifact, kind="artifact")
     step_1_message = f"STEP 1 completed: {step_1_artifact}"
-    print(step_1_message, flush=True)
-    ctx.emit_stdout(step_1_message)
+    _emit(ctx, step_1_message)
 
     # STEP 2：修改第二阶段时，同步调整 STEP_2_SKILL、STEP_2_ARTIFACT、STEP_2_RETRIES 和这里的提示词。
     step_2_artifact = validation_dir / STEP_2_ARTIFACT
@@ -161,8 +161,7 @@ def validate_demo(ctx) -> ValidationResult:
             f"STEP 2 running {STEP_2_SKILL}, "
             f"attempt {step_2_attempt}/{STEP_2_RETRIES + 1}"
         )
-        print(step_2_message, flush=True)
-        ctx.emit_stdout(step_2_message)
+        _emit(ctx, step_2_message)
         try:
             step_2_return_code = ctx.run_command(
                 ["nga", "run", "--dir", str(project_dir), step_2_prompt],
@@ -172,8 +171,7 @@ def validate_demo(ctx) -> ValidationResult:
         except OSError as exc:
             step_2_return_code = 1
             step_2_message = f"STEP 2 failed to start nga: {exc}"
-            print(step_2_message, flush=True)
-            ctx.emit_stdout(step_2_message)
+            _emit(ctx, step_2_message)
         if (
             step_2_return_code == 0
             and step_2_artifact.is_file()
@@ -193,8 +191,7 @@ def validate_demo(ctx) -> ValidationResult:
             f"STEP 2 attempt {step_2_attempt}/{STEP_2_RETRIES + 1} failed, "
             f"return_code={step_2_return_code}"
         )
-        print(step_2_message, flush=True)
-        ctx.emit_stdout(step_2_message)
+        _emit(ctx, step_2_message)
     if not step_2_success:
         return ValidationResult(
             validation_success=False,
@@ -205,8 +202,7 @@ def validate_demo(ctx) -> ValidationResult:
         )
     ctx.publish_artifact(STEP_2_ARTIFACT, path=step_2_artifact, kind="artifact")
     step_2_message = f"STEP 2 completed: {step_2_artifact}"
-    print(step_2_message, flush=True)
-    ctx.emit_stdout(step_2_message)
+    _emit(ctx, step_2_message)
 
     # STEP 3：修改第三阶段时，同步调整 STEP_3_SKILL、STEP_3_ARTIFACT、STEP_3_RETRIES 和这里的提示词。
     step_3_artifact = validation_dir / STEP_3_ARTIFACT
@@ -232,8 +228,7 @@ def validate_demo(ctx) -> ValidationResult:
             f"STEP 3 running {STEP_3_SKILL}, "
             f"attempt {step_3_attempt}/{STEP_3_RETRIES + 1}"
         )
-        print(step_3_message, flush=True)
-        ctx.emit_stdout(step_3_message)
+        _emit(ctx, step_3_message)
         try:
             step_3_return_code = ctx.run_command(
                 ["nga", "run", "--dir", str(project_dir), step_3_prompt],
@@ -243,8 +238,7 @@ def validate_demo(ctx) -> ValidationResult:
         except OSError as exc:
             step_3_return_code = 1
             step_3_message = f"STEP 3 failed to start nga: {exc}"
-            print(step_3_message, flush=True)
-            ctx.emit_stdout(step_3_message)
+            _emit(ctx, step_3_message)
         if (
             step_3_return_code == 0
             and step_3_artifact.is_file()
@@ -264,8 +258,7 @@ def validate_demo(ctx) -> ValidationResult:
             f"STEP 3 attempt {step_3_attempt}/{STEP_3_RETRIES + 1} failed, "
             f"return_code={step_3_return_code}"
         )
-        print(step_3_message, flush=True)
-        ctx.emit_stdout(step_3_message)
+        _emit(ctx, step_3_message)
     if not step_3_success:
         return ValidationResult(
             validation_success=False,
@@ -276,8 +269,7 @@ def validate_demo(ctx) -> ValidationResult:
         )
     ctx.publish_artifact(STEP_3_ARTIFACT, path=step_3_artifact, kind="artifact")
     step_3_message = f"STEP 3 completed: {step_3_artifact}"
-    print(step_3_message, flush=True)
-    ctx.emit_stdout(step_3_message)
+    _emit(ctx, step_3_message)
 
     # STEP 4：修改第四阶段时，同步调整 STEP_4_SKILL、STEP_4_ARTIFACT、STEP_4_RETRIES 和这里的提示词。
     step_4_artifact = validation_dir / STEP_4_ARTIFACT
@@ -303,8 +295,7 @@ def validate_demo(ctx) -> ValidationResult:
             f"STEP 4 running {STEP_4_SKILL}, "
             f"attempt {step_4_attempt}/{STEP_4_RETRIES + 1}"
         )
-        print(step_4_message, flush=True)
-        ctx.emit_stdout(step_4_message)
+        _emit(ctx, step_4_message)
         try:
             step_4_return_code = ctx.run_command(
                 ["nga", "run", "--dir", str(project_dir), step_4_prompt],
@@ -314,8 +305,7 @@ def validate_demo(ctx) -> ValidationResult:
         except OSError as exc:
             step_4_return_code = 1
             step_4_message = f"STEP 4 failed to start nga: {exc}"
-            print(step_4_message, flush=True)
-            ctx.emit_stdout(step_4_message)
+            _emit(ctx, step_4_message)
         if (
             step_4_return_code == 0
             and step_4_artifact.is_file()
@@ -335,8 +325,7 @@ def validate_demo(ctx) -> ValidationResult:
             f"STEP 4 attempt {step_4_attempt}/{STEP_4_RETRIES + 1} failed, "
             f"return_code={step_4_return_code}"
         )
-        print(step_4_message, flush=True)
-        ctx.emit_stdout(step_4_message)
+        _emit(ctx, step_4_message)
     if not step_4_success:
         return ValidationResult(
             validation_success=False,
@@ -347,8 +336,7 @@ def validate_demo(ctx) -> ValidationResult:
         )
     ctx.publish_artifact(STEP_4_ARTIFACT, path=step_4_artifact, kind="artifact")
     step_4_message = f"STEP 4 completed: {step_4_artifact}"
-    print(step_4_message, flush=True)
-    ctx.emit_stdout(step_4_message)
+    _emit(ctx, step_4_message)
 
     return ValidationResult(
         validation_success=True,
