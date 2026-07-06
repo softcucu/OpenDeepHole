@@ -15,6 +15,7 @@
 - **变更** 同一扫描的漏洞验证改为 Agent 侧串行排队执行；多个漏洞可连续提交为等待状态，但本地验证脚本同一时刻只会运行一个，停止排队项不会影响队列中的其它漏洞
 - **修复** 手动重新点击漏洞验证不再携带或执行 Agent runtime 自动更新，避免修改 demo 后验证按钮触发整包下载或 Agent 重启；产品验证器更新继续通过客户端「同步验证方法」推送到在线 Agent
 - **优化** 产品漏洞验证脚本默认在脚本所在目录运行，支持直接读取同目录 `input/input.json` 和导入同目录 helper；脚本及 helper 的 `print()` 输出会实时同步到漏洞验证页中间产物
+- **修复** Windows 漏洞验证子命令会合并当前 PATH、注册表用户/系统 PATH 和常见 npm/pnpm/Volta/Scoop/Chocolatey 目录，避免终端可运行 `nga`/`opencode` 但 Agent 验证脚本提示找不到命令
 - **修复** Windows Agent 在静态分析完成后进入 git 历史挖掘时，git 子进程输出不再按系统默认 `gbk` 解码，避免非 GBK 字节触发 `UnicodeDecodeError` 并打断后续扫描
 - **修复** OpenCode/nga serve 启动失败时不再只返回 `code 1`；Agent 会捕获启动阶段 stdout/stderr 并在健康检查失败或子进程提前退出时带上日志尾部，同时强制子进程使用 UTF-8 友好环境，便于定位 provider、配置或本机 CLI 启动错误
 - **修复** OpenCode/nga serve 启动进程改为显式使用受控运行目录作为 CWD，并在该目录内准备最小 git 仓库，避免 Agent 从非 git 目录启动时 OpenCode 自身 VCS 探测报 `fatal: not a git repository`；真实项目目录继续通过 session 请求参数传递，不会污染被扫源码目录

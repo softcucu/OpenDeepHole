@@ -156,8 +156,10 @@ if return_code != 0:
 
 - `command` 使用参数列表，不要拼接成单个 shell 字符串。
 - `cwd` 未传时默认使用 `ctx.validator_dir`，也就是当前验证脚本所在目录。
+- 运行器会给子进程合并当前 PATH、Windows 用户/系统 PATH 和常见工具目录，例如 `%APPDATA%\npm`、`%LOCALAPPDATA%\pnpm`、`%LOCALAPPDATA%\Volta\bin`、`%USERPROFILE%\scoop\shims`、`%ProgramData%\chocolatey\bin`。
 - `timeout` 是单条命令超时。整体验证仍受 `ctx.timeout_seconds` 限制。
 - 命令超时时返回 `124`。
+- `nga`、`opencode`、`claude`、`hac` 找不到时返回 `127`，并把当前 PATH 和处理建议写入中间产物。
 - 用户停止验证时，运行器会终止正在执行的子进程，并返回负数退出码或已结束进程的退出码。
 
 ### `ctx.cancelled()`
