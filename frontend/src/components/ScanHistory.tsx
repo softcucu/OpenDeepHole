@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { getAgentOpenCodePool, getAgents, getScanProducts, getScans, resumeScan, deleteScan, updateScanProduct, retryIncompleteScan } from "../api/client";
-import type { AgentOpenCodePoolStatus, ScanSummary, ScanItemStatus, User } from "../types";
+import { getScanProducts, getScans, resumeScan, deleteScan, updateScanProduct, retryIncompleteScan } from "../api/client";
+import type { ScanSummary, ScanItemStatus, User } from "../types";
 
 interface Props {
   onViewScan: (scanId: string) => void;
@@ -35,7 +35,6 @@ const NAV_BUTTON_STYLES: Record<NavButtonVariant, string> = {
 
 const ALL_FILTER = "__all__";
 const UNCONFIGURED_PRODUCT_FILTER = "__unconfigured__";
-const HOME_QUEUE_PAGE_SIZE = 12;
 
 function projectName(scan: ScanSummary) {
   return scan.scan_name || scan.project_id || scan.scan_id.slice(0, 8);
@@ -56,19 +55,6 @@ function uniqueOptions(values: string[]) {
 interface HeaderFilterOption {
   value: string;
   label: string;
-}
-
-type HomeQueueTaskStatus = "planned" | "queued" | "running";
-
-interface HomeQueueTask {
-  id: string;
-  status: HomeQueueTaskStatus;
-  agentId: string;
-  agentName: string;
-  modelId: string;
-  scopeId: string;
-  task: Record<string, unknown>;
-  timestamp: string;
 }
 
 function FilterIcon({ active }: { active: boolean }) {
@@ -212,120 +198,10 @@ function NavButton({
   );
 }
 
-function collectHomeQueueTasks(pools: AgentOpenCodePoolStatus[]): HomeQueueTask[] {
-  const out: HomeQueueTask[] = [];
-  for (const pool of pools) {
-    const agentName = pool.agent_name || pool.agent_id;
-    for (const [index, task] of (pool.planned_tasks ?? []).entries()) {
-      out.push({
-        id: String(task.planned_task_id || `${pool.agent_id}-planned-${index}`),
-        status: "planned",
-        agentId: pool.agent_id,
-        agentName,
-        modelId: "",
-        scopeId: String(task.scope_id || ""),
-        task,
-        timestamp: String(task.planned_at || ""),
-      });
-    }
-    for (const [index, task] of (pool.queued_tasks ?? []).entries()) {
-      out.push({
-        id: String(task.request_id || `${pool.agent_id}-queued-${index}`),
-        status: "queued",
-        agentId: pool.agent_id,
-        agentName,
-        modelId: "",
-        scopeId: String(task.scope_id || ""),
-        task,
-        timestamp: String(task.queued_at || ""),
-      });
-    }
-    for (const model of pool.models ?? []) {
-      for (const [index, task] of (model.active_tasks ?? []).entries()) {
-        out.push({
-          id: String(task.task_id || `${pool.agent_id}-${model.id}-running-${index}`),
-          status: "running",
-          agentId: pool.agent_id,
-          agentName,
-          modelId: model.id,
-          scopeId: String(task.scope_id || ""),
-          task,
-          timestamp: String(task.started_at || ""),
-        });
-      }
-    }
-  }
-  return out.sort((a, b) => queueStatusRank(a.status) - queueStatusRank(b.status) || compareTime(a.timestamp, b.timestamp));
-}
-
-function queueStatusRank(status: HomeQueueTaskStatus): number {
-  if (status === "running") return 0;
-  if (status === "queued") return 1;
-  return 2;
-}
-
-function compareTime(a: string, b: string): number {
-  const at = Date.parse(a);
-  const bt = Date.parse(b);
-  if (Number.isNaN(at) && Number.isNaN(bt)) return 0;
-  if (Number.isNaN(at)) return 1;
-  if (Number.isNaN(bt)) return -1;
-  return at - bt;
-}
-
-function taskTypeLabel(value: unknown): string {
-  const type = String(value || "audit");
-  if (type === "audit") return "候选点审计";
-  if (type === "fp_review") return "对抗式去误报";
-  if (type === "threat_analysis") return "威胁分析";
-  if (type === "validation") return "漏洞验证";
-  return type;
-}
-
-function queueTaskTitle(task: Record<string, unknown>): string {
-  const type = taskTypeLabel(task.task_type);
-  const stage = task.stage ? `/${String(task.stage)}` : "";
-  const checker = task.checker ? String(task.checker) : "";
-  const vulnType = task.vuln_type ? String(task.vuln_type) : "";
-  return [type + stage, checker || vulnType].filter(Boolean).join(" · ");
-}
-
-function queueTaskTarget(task: Record<string, unknown>): string {
-  const file = task.file ? String(task.file) : "";
-  const line = task.line ? `:${String(task.line)}` : "";
-  const fn = task.function ? String(task.function) : "";
-  const auditIndex = task.audit_index != null ? `#${String(task.audit_index)}` : "";
-  const vulnIndex = task.vuln_index != null ? `漏洞 #${String(task.vuln_index)}` : "";
-  return [auditIndex || vulnIndex, file ? `${file}${line}` : "", fn].filter(Boolean).join(" ");
-}
-
-function queueStatusLabel(status: HomeQueueTaskStatus): string {
-  if (status === "running") return "运行中";
-  if (status === "queued") return "排队中";
-  return "计划中";
-}
-
-function queueStatusClass(status: HomeQueueTaskStatus): string {
-  if (status === "running") return "border-cyan-500/30 bg-cyan-500/10 text-cyan-300";
-  if (status === "queued") return "border-amber-500/30 bg-amber-500/10 text-amber-300";
-  return "border-slate-600 bg-slate-800 text-slate-300";
-}
-
-function formatTaskTime(value: string): string {
-  if (!value) return "-";
-  try {
-    return new Date(value).toLocaleString();
-  } catch {
-    return value;
-  }
-}
-
 export default function ScanHistory({ onViewScan, onDownloadAgent, onNewScan, user, onLogout, onManageUsers, onCheckerDashboard, onCheckerCatalog }: Props) {
   const [scans, setScans] = useState<ScanSummary[]>([]);
   const [products, setProducts] = useState<string[]>([]);
-  const [agentPools, setAgentPools] = useState<AgentOpenCodePoolStatus[]>([]);
   const [loading, setLoading] = useState(true);
-  const [queueLoading, setQueueLoading] = useState(false);
   const [actionLoading, setActionLoading] = useState<string | null>(null);
   const [productSavingId, setProductSavingId] = useState<string | null>(null);
   const [deleteConfirmId, setDeleteConfirmId] = useState<string | null>(null);
@@ -333,7 +209,6 @@ export default function ScanHistory({ onViewScan, onDownloadAgent, onNewScan, us
   const [projectFilter, setProjectFilter] = useState(ALL_FILTER);
   const [creatorFilter, setCreatorFilter] = useState(ALL_FILTER);
   const [openFilter, setOpenFilter] = useState<string | null>(null);
-  const [taskPage, setTaskPage] = useState(1);
 
   const fetchScans = async () => {
     try {
@@ -346,47 +221,14 @@ export default function ScanHistory({ onViewScan, onDownloadAgent, onNewScan, us
     }
   };
 
-  const fetchTaskQueues = async () => {
-    setQueueLoading(true);
-    try {
-      const agents = await getAgents();
-      const pools = await Promise.all(
-        agents.map(async (agent) => {
-          try {
-            return await getAgentOpenCodePool(agent.agent_id);
-          } catch {
-            return null;
-          }
-        }),
-      );
-      setAgentPools(pools.filter((pool): pool is AgentOpenCodePoolStatus => Boolean(pool)));
-    } catch {
-      // silently fail
-    } finally {
-      setQueueLoading(false);
-    }
-  };
-
-  const fetchDashboard = () => {
-    fetchScans();
-    fetchTaskQueues();
-  };
-
   // 自适应轮询：有运行中扫描时 5s，全部空闲时降为 30s；页面不可见时暂停，
   // 重新可见时立即刷新一次。
   const hasRunningScans = scans.some((s) => isRunning(s.status));
-  const hasOpenCodeTasks = agentPools.some(
-    (pool) =>
-      pool.global_running > 0
-      || pool.global_queued > 0
-      || (pool.planned_tasks?.length ?? 0) > 0
-      || (pool.queued_tasks?.length ?? 0) > 0,
-  );
-  const hasRunningRef = useRef(hasRunningScans || hasOpenCodeTasks);
-  hasRunningRef.current = hasRunningScans || hasOpenCodeTasks;
+  const hasRunningRef = useRef(hasRunningScans);
+  hasRunningRef.current = hasRunningScans;
 
   useEffect(() => {
-    fetchDashboard();
+    fetchScans();
     getScanProducts().then(setProducts).catch(() => {});
 
     let lastFetch = Date.now();
@@ -395,13 +237,13 @@ export default function ScanHistory({ onViewScan, onDownloadAgent, onNewScan, us
       const interval = hasRunningRef.current ? 5000 : 30000;
       if (Date.now() - lastFetch < interval) return;
       lastFetch = Date.now();
-      fetchDashboard();
+      fetchScans();
     }, 5000);
 
     const onVisibilityChange = () => {
       if (document.visibilityState === "visible") {
         lastFetch = Date.now();
-        fetchDashboard();
+        fetchScans();
       }
     };
     document.addEventListener("visibilitychange", onVisibilityChange);
@@ -514,17 +356,6 @@ export default function ScanHistory({ onViewScan, onDownloadAgent, onNewScan, us
       }),
     [creatorFilter, productFilter, projectFilter, scans],
   );
-  const queueTasks = useMemo(() => collectHomeQueueTasks(agentPools), [agentPools]);
-  const runningQueueCount = queueTasks.filter((task) => task.status === "running").length;
-  const queuedQueueCount = queueTasks.filter((task) => task.status === "queued").length;
-  const plannedQueueCount = queueTasks.filter((task) => task.status === "planned").length;
-  const totalTaskPages = Math.max(1, Math.ceil(queueTasks.length / HOME_QUEUE_PAGE_SIZE));
-  const safeTaskPage = Math.min(taskPage, totalTaskPages);
-  const pagedQueueTasks = queueTasks.slice((safeTaskPage - 1) * HOME_QUEUE_PAGE_SIZE, safeTaskPage * HOME_QUEUE_PAGE_SIZE);
-
-  useEffect(() => {
-    if (taskPage > totalTaskPages) setTaskPage(totalTaskPages);
-  }, [taskPage, totalTaskPages]);
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-900 via-slate-800 to-slate-900 flex flex-col">
@@ -610,113 +441,6 @@ export default function ScanHistory({ onViewScan, onDownloadAgent, onNewScan, us
 
       {/* Content */}
       <div className="flex-1 px-6 py-6">
-        <section className="mb-6 rounded-xl border border-slate-700 bg-slate-900/50">
-          <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-800 px-4 py-3">
-            <div>
-              <h2 className="text-sm font-semibold text-slate-300 uppercase tracking-wider">
-                任务队列
-              </h2>
-              <p className="mt-1 text-xs text-slate-500">
-                OpenCode Session 当前计划、排队和运行中的任务
-              </p>
-            </div>
-            <div className="flex flex-wrap items-center gap-2">
-              {queueLoading && (
-                <span className="flex items-center gap-1.5 text-xs text-slate-500">
-                  <span className="h-3 w-3 rounded-full border border-slate-600 border-t-cyan-300 animate-spin" />
-                  刷新中
-                </span>
-              )}
-              <span className="rounded border border-slate-700 bg-slate-950 px-2 py-1 text-xs text-slate-400">
-                计划中 {plannedQueueCount}
-              </span>
-              <span className="rounded border border-amber-500/30 bg-amber-500/10 px-2 py-1 text-xs text-amber-300">
-                排队中 {queuedQueueCount}
-              </span>
-              <span className="rounded border border-cyan-500/30 bg-cyan-500/10 px-2 py-1 text-xs text-cyan-300">
-                运行中 {runningQueueCount}
-              </span>
-            </div>
-          </div>
-          {queueTasks.length === 0 ? (
-            <div className="px-4 py-8 text-center text-sm text-slate-500">
-              当前没有等待或运行中的 OpenCode 任务
-            </div>
-          ) : (
-            <>
-              <div className="overflow-x-auto">
-                <table className="w-full min-w-[62rem] text-sm">
-                  <thead>
-                    <tr className="bg-slate-950/60 border-b border-slate-800">
-                      <th className="px-4 py-2 text-left text-xs font-semibold text-slate-500 uppercase tracking-wider">状态</th>
-                      <th className="px-4 py-2 text-left text-xs font-semibold text-slate-500 uppercase tracking-wider">任务</th>
-                      <th className="px-4 py-2 text-left text-xs font-semibold text-slate-500 uppercase tracking-wider">目标</th>
-                      <th className="px-4 py-2 text-left text-xs font-semibold text-slate-500 uppercase tracking-wider">Agent</th>
-                      <th className="px-4 py-2 text-left text-xs font-semibold text-slate-500 uppercase tracking-wider">模型</th>
-                      <th className="px-4 py-2 text-left text-xs font-semibold text-slate-500 uppercase tracking-wider">时间</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {pagedQueueTasks.map((task) => (
-                      <tr key={`${task.status}-${task.id}`} className="border-b border-slate-800/70 last:border-b-0">
-                        <td className="px-4 py-3 align-top">
-                          <span className={`inline-flex rounded border px-2 py-0.5 text-xs font-semibold ${queueStatusClass(task.status)}`}>
-                            {queueStatusLabel(task.status)}
-                          </span>
-                        </td>
-                        <td className="px-4 py-3 align-top">
-                          <div className="font-medium text-slate-200">{queueTaskTitle(task.task)}</div>
-                          {task.scopeId && (
-                            <div className="mt-1 font-mono text-[11px] text-slate-600">{task.scopeId}</div>
-                          )}
-                        </td>
-                        <td className="max-w-[28rem] px-4 py-3 align-top">
-                          <div className="truncate font-mono text-xs text-slate-400" title={queueTaskTarget(task.task)}>
-                            {queueTaskTarget(task.task) || "-"}
-                          </div>
-                        </td>
-                        <td className="px-4 py-3 align-top text-xs text-slate-300">
-                          <div>{task.agentName}</div>
-                          <div className="mt-1 font-mono text-[11px] text-slate-600">{task.agentId.slice(0, 8)}</div>
-                        </td>
-                        <td className="px-4 py-3 align-top text-xs text-slate-400">
-                          {task.modelId || "-"}
-                        </td>
-                        <td className="px-4 py-3 align-top text-xs text-slate-500">
-                          {formatTaskTime(task.timestamp)}
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-              {queueTasks.length > HOME_QUEUE_PAGE_SIZE && (
-                <div className="flex items-center justify-between gap-2 border-t border-slate-800 px-4 py-3">
-                  <button
-                    type="button"
-                    disabled={safeTaskPage === 1}
-                    onClick={() => setTaskPage((page) => Math.max(1, page - 1))}
-                    className="rounded-lg border border-slate-700 px-3 py-1.5 text-xs text-slate-300 transition-colors hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-30"
-                  >
-                    上一页
-                  </button>
-                  <span className="text-xs text-slate-500">
-                    第 {safeTaskPage}/{totalTaskPages} 页 · 共 {queueTasks.length} 条
-                  </span>
-                  <button
-                    type="button"
-                    disabled={safeTaskPage === totalTaskPages}
-                    onClick={() => setTaskPage((page) => Math.min(totalTaskPages, page + 1))}
-                    className="rounded-lg border border-slate-700 px-3 py-1.5 text-xs text-slate-300 transition-colors hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-30"
-                  >
-                    下一页
-                  </button>
-                </div>
-              )}
-            </>
-          )}
-        </section>
-
         <h2 className="text-sm font-semibold text-slate-400 uppercase tracking-wider mb-4">
           扫描历史
         </h2>

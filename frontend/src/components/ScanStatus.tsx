@@ -10,6 +10,7 @@ import FeedbackManager from "./FeedbackManager";
 
 const MAX_LOG_LINES = 500;
 const STATIC_CANDIDATE_PAGE_SIZE = 20;
+const SCAN_QUEUE_PAGE_SIZE = 12;
 const AGENT_DISCONNECT_ERROR = "Agent 断开连接";
 const FINAL_USER_VERDICTS = new Set(["confirmed", "false_positive"]);
 
@@ -17,6 +18,16 @@ type MainTab = "overview" | "threat" | "static" | "mining" | "validation" | "iss
 type MiningTab = "candidate_audit" | "fp_review";
 type StaticTab = "call_graph" | "candidate_generation";
 type TaskTone = "slate" | "cyan" | "amber" | "green" | "red" | "purple" | "blue";
+type ScanQueueTaskStatus = "planned" | "queued" | "running";
+
+interface ScanQueueTask {
+  id: string;
+  status: ScanQueueTaskStatus;
+  modelId: string;
+  scopeId: string;
+  task: Record<string, unknown>;
+  timestamp: string;
+}
 
 const MAIN_TABS: { key: MainTab; label: string }[] = [
   { key: "overview", label: "首页" },
@@ -1408,6 +1419,8 @@ function ScanOverview({
         <OverviewMetric icon="queue" label="未完成候选" value={retryableCount} detail={retryableCount > 0 ? "可续扫" : "无待处理项"} tone="amber" />
       </div>
 
+      <ScanTaskQueuePanel pool={scan.opencode_pool ?? null} />
+
       <div className="grid grid-cols-1 gap-4 xl:grid-cols-[1fr_22rem]">
         <section className="rounded-lg border border-slate-700 bg-slate-900/50 p-4">
           <div className="mb-3 flex items-center justify-between">
@@ -1493,6 +1506,201 @@ function ScanOverview({
       </div>
     </div>
   );
+}
+
+function ScanTaskQueuePanel({ pool }: { pool: OpenCodePoolStatus | null }) {
+  const [page, setPage] = useState(1);
+  const tasks = useMemo(() => collectScanQueueTasks(pool), [pool]);
+  const runningCount = tasks.filter((task) => task.status === "running").length;
+  const queuedCount = tasks.filter((task) => task.status === "queued").length;
+  const plannedCount = tasks.filter((task) => task.status === "planned").length;
+  const totalPages = Math.max(1, Math.ceil(tasks.length / SCAN_QUEUE_PAGE_SIZE));
+  const safePage = Math.min(page, totalPages);
+  const pagedTasks = tasks.slice((safePage - 1) * SCAN_QUEUE_PAGE_SIZE, safePage * SCAN_QUEUE_PAGE_SIZE);
+
+  useEffect(() => {
+    if (page > totalPages) setPage(totalPages);
+  }, [page, totalPages]);
+
+  return (
+    <section className="rounded-lg border border-slate-700 bg-slate-900/50 p-4">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <h3 className="text-sm font-semibold text-slate-200">任务队列</h3>
+          <p className="mt-1 text-xs text-slate-500">
+            当前扫描的 OpenCode Session 计划、排队和运行任务
+          </p>
+        </div>
+        <div className="flex flex-wrap items-center gap-2">
+          <StatusPill label={`计划中 ${plannedCount}`} tone="slate" />
+          <StatusPill label={`排队中 ${queuedCount}`} tone="amber" />
+          <StatusPill label={`运行中 ${runningCount}`} tone="cyan" />
+        </div>
+      </div>
+
+      {tasks.length === 0 ? (
+        <div className="mt-4 rounded-lg border border-slate-800 bg-slate-950/50 px-4 py-6 text-center text-sm text-slate-500">
+          当前扫描没有等待或运行中的 OpenCode 任务
+        </div>
+      ) : (
+        <div className="mt-4 overflow-hidden rounded-lg border border-slate-800">
+          <div className="overflow-x-auto">
+            <table className="w-full min-w-[52rem] text-sm">
+              <thead className="bg-slate-950/70">
+                <tr>
+                  <th className={thCls}>状态</th>
+                  <th className={thCls}>任务</th>
+                  <th className={thCls}>目标</th>
+                  <th className={thCls}>模型</th>
+                  <th className={thCls}>时间</th>
+                </tr>
+              </thead>
+              <tbody>
+                {pagedTasks.map((task) => (
+                  <tr key={`${task.status}-${task.id}`} className="border-t border-slate-800/70">
+                    <td className="px-3 py-3 align-top">
+                      <StatusPill label={scanQueueStatusLabel(task.status)} tone={scanQueueStatusTone(task.status)} />
+                    </td>
+                    <td className="px-3 py-3 align-top">
+                      <div className="font-medium text-slate-200">{scanQueueTaskTitle(task.task)}</div>
+                      {task.scopeId && (
+                        <div className="mt-1 font-mono text-[11px] text-slate-600">{task.scopeId}</div>
+                      )}
+                    </td>
+                    <td className="max-w-[28rem] px-3 py-3 align-top">
+                      <div className="truncate font-mono text-xs text-slate-400" title={scanQueueTaskTarget(task.task)}>
+                        {scanQueueTaskTarget(task.task) || "-"}
+                      </div>
+                    </td>
+                    <td className="px-3 py-3 align-top text-xs text-slate-400">
+                      {task.modelId || "-"}
+                    </td>
+                    <td className="px-3 py-3 align-top text-xs text-slate-500">
+                      {formatDateTime(task.timestamp)}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          {tasks.length > SCAN_QUEUE_PAGE_SIZE && (
+            <div className="flex items-center justify-between gap-2 border-t border-slate-800 px-3 py-2">
+              <button
+                type="button"
+                disabled={safePage === 1}
+                onClick={() => setPage((current) => Math.max(1, current - 1))}
+                className="rounded-lg border border-slate-700 px-2.5 py-1 text-xs text-slate-300 transition-colors hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-30"
+              >
+                上一页
+              </button>
+              <span className="text-xs text-slate-500">
+                第 {safePage}/{totalPages} 页 · 共 {tasks.length} 条
+              </span>
+              <button
+                type="button"
+                disabled={safePage === totalPages}
+                onClick={() => setPage((current) => Math.min(totalPages, current + 1))}
+                className="rounded-lg border border-slate-700 px-2.5 py-1 text-xs text-slate-300 transition-colors hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-30"
+              >
+                下一页
+              </button>
+            </div>
+          )}
+        </div>
+      )}
+    </section>
+  );
+}
+
+function collectScanQueueTasks(pool: OpenCodePoolStatus | null): ScanQueueTask[] {
+  if (!pool) return [];
+  const out: ScanQueueTask[] = [];
+  for (const [index, task] of (pool.planned_tasks ?? []).entries()) {
+    out.push({
+      id: String(task.planned_task_id || `planned-${index}`),
+      status: "planned",
+      modelId: "",
+      scopeId: String(task.scope_id || pool.scope_id || ""),
+      task,
+      timestamp: String(task.planned_at || ""),
+    });
+  }
+  for (const [index, task] of (pool.queued_tasks ?? []).entries()) {
+    out.push({
+      id: String(task.request_id || `queued-${index}`),
+      status: "queued",
+      modelId: "",
+      scopeId: String(task.scope_id || pool.scope_id || ""),
+      task,
+      timestamp: String(task.queued_at || ""),
+    });
+  }
+  for (const model of pool.models ?? []) {
+    for (const [index, task] of (model.active_tasks ?? []).entries()) {
+      out.push({
+        id: String(task.task_id || `${model.id}-running-${index}`),
+        status: "running",
+        modelId: model.id,
+        scopeId: String(task.scope_id || pool.scope_id || ""),
+        task,
+        timestamp: String(task.started_at || ""),
+      });
+    }
+  }
+  return out.sort((a, b) => scanQueueStatusRank(a.status) - scanQueueStatusRank(b.status) || compareScanQueueTime(a.timestamp, b.timestamp));
+}
+
+function scanQueueStatusRank(status: ScanQueueTaskStatus): number {
+  if (status === "running") return 0;
+  if (status === "queued") return 1;
+  return 2;
+}
+
+function compareScanQueueTime(a: string, b: string): number {
+  const at = Date.parse(a);
+  const bt = Date.parse(b);
+  if (Number.isNaN(at) && Number.isNaN(bt)) return 0;
+  if (Number.isNaN(at)) return 1;
+  if (Number.isNaN(bt)) return -1;
+  return at - bt;
+}
+
+function scanQueueTaskTypeLabel(value: unknown): string {
+  const type = String(value || "audit");
+  if (type === "audit") return "候选点审计";
+  if (type === "fp_review") return "对抗式去误报";
+  if (type === "threat_analysis") return "威胁分析";
+  if (type === "validation") return "漏洞验证";
+  return type;
+}
+
+function scanQueueTaskTitle(task: Record<string, unknown>): string {
+  const type = scanQueueTaskTypeLabel(task.task_type);
+  const stage = task.stage ? `/${String(task.stage)}` : "";
+  const checker = task.checker ? String(task.checker) : "";
+  const vulnType = task.vuln_type ? String(task.vuln_type) : "";
+  return [type + stage, checker || vulnType].filter(Boolean).join(" · ");
+}
+
+function scanQueueTaskTarget(task: Record<string, unknown>): string {
+  const file = task.file ? String(task.file) : "";
+  const line = task.line ? `:${String(task.line)}` : "";
+  const fn = task.function ? String(task.function) : "";
+  const auditIndex = task.audit_index != null ? `#${String(task.audit_index)}` : "";
+  const vulnIndex = task.vuln_index != null ? `漏洞 #${String(task.vuln_index)}` : "";
+  return [auditIndex || vulnIndex, file ? `${file}${line}` : "", fn].filter(Boolean).join(" ");
+}
+
+function scanQueueStatusLabel(status: ScanQueueTaskStatus): string {
+  if (status === "running") return "运行中";
+  if (status === "queued") return "排队中";
+  return "计划中";
+}
+
+function scanQueueStatusTone(status: ScanQueueTaskStatus): TaskTone {
+  if (status === "running") return "cyan";
+  if (status === "queued") return "amber";
+  return "slate";
 }
 
 function OverviewMetric({
