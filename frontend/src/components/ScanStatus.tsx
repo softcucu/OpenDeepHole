@@ -1515,22 +1515,21 @@ function ProcessFlowNav({
               <div className="text-sm font-semibold text-slate-100">漏洞挖掘</div>
             </div>
             <div className="flex items-stretch gap-3">
-              <div className="w-[420px] space-y-3">
-                <div className="rounded-lg border border-cyan-500/20 bg-cyan-500/5 p-3">
-                  <FlowNodeButton node={nodes.static_analysis} onClick={onNodeClick} wide />
-                  <div className="mt-3 flex items-center gap-2">
-                    <FlowNodeButton node={nodes.call_graph} onClick={onNodeClick} compact />
-                    <FlowArrow compact />
-                    <FlowNodeButton node={nodes.candidate_generation} onClick={onNodeClick} compact />
-                  </div>
-                </div>
-                <div className="flex justify-end">
-                  <FlowNodeButton node={nodes.fp_review} onClick={onNodeClick} compact />
+              <div className="w-[420px] rounded-lg border border-cyan-500/20 bg-cyan-500/5 p-3">
+                <FlowNodeButton node={nodes.static_analysis} onClick={onNodeClick} wide />
+                <div className="mt-3 flex items-center gap-2">
+                  <FlowNodeButton node={nodes.call_graph} onClick={onNodeClick} compact />
+                  <FlowArrow compact />
+                  <FlowNodeButton node={nodes.candidate_generation} onClick={onNodeClick} compact />
                 </div>
               </div>
               <FlowArrow />
-              <div className="flex items-center">
+              <div className="flex flex-col items-center justify-center gap-2">
                 <FlowNodeButton node={nodes.candidate_audit} onClick={onNodeClick} />
+                <FlowDownArrow />
+                <div className="flex justify-center">
+                  <FlowNodeButton node={nodes.fp_review} onClick={onNodeClick} compact />
+                </div>
               </div>
             </div>
           </div>
@@ -1628,6 +1627,17 @@ function FlowArrow({ label, compact = false }: { label?: string; compact?: boole
         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
       </svg>
       {label && !compact && <span className="sr-only">{label}</span>}
+    </div>
+  );
+}
+
+function FlowDownArrow() {
+  return (
+    <div className="flex h-7 shrink-0 flex-col items-center justify-center">
+      <div className="w-px flex-1 bg-slate-600" />
+      <svg className="h-4 w-4 text-slate-500" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+      </svg>
     </div>
   );
 }
