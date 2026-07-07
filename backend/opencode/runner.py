@@ -22,6 +22,7 @@ from backend.logger import get_logger
 from backend.models import Candidate, OutputSource, ThreatAnalysis, Vulnerability
 from backend.opencode.model_pool import (
     acquire_model_lease,
+    clear_planned_task,
     configured_global_concurrency,
     release_model_lease,
     update_model_lease_context,
@@ -128,6 +129,7 @@ async def run_audit(
     config = get_config()
 
     if config.opencode.mock:
+        await _clear_candidate_planned_task(candidate)
         return _mock_result(candidate)
 
     effective_timeout = timeout if timeout is not None else config.opencode.timeout
@@ -149,6 +151,7 @@ async def run_audit(
             # 优先使用 workspace 中合并了反馈的 prompt
             merged_prompt = workspace / ".opencode" / "skills" / candidate.vuln_type / "PROMPT.md"
             prompt_path = merged_prompt if merged_prompt.is_file() else checker_entry.prompt_path
+            await _clear_candidate_planned_task(candidate)
             return await run_audit_via_api(
                 candidate, project_id,
                 prompt_path=prompt_path,
@@ -317,6 +320,7 @@ async def run_project_audit(
     """Run a SKILL-only checker once and collect all submitted results."""
     config = get_config()
     if config.opencode.mock:
+        await _clear_candidate_planned_task(candidate)
         return [_mock_result(candidate)]
 
     effective_timeout = timeout if timeout is not None else config.opencode.timeout
@@ -541,6 +545,7 @@ async def run_sensitive_clear_audit(
     """Run one sensitive_clear function audit and collect one Markdown result."""
     config = get_config()
     if config.opencode.mock:
+        await _clear_candidate_planned_task(candidate)
         return SensitiveClearAuditResult(
             vulnerabilities=[_mock_result(candidate)],
             reports=[],
@@ -727,6 +732,7 @@ async def run_project_report_audit(
     """Run a report-mode project SKILL and collect Markdown files from report_dir."""
     config = get_config()
     if config.opencode.mock:
+        await _clear_candidate_planned_task(candidate)
         report_dir.mkdir(parents=True, exist_ok=True)
         mock_path = report_dir / f"{candidate.vuln_type}-mock-report.md"
         mock_path.write_text(
@@ -843,6 +849,7 @@ async def run_threat_analysis_audit(
     """Run the attack-tree threat-analysis skill and parse ``res.json``."""
     config = get_config()
     if config.opencode.mock:
+        await _clear_planned_task_id(planned_task_id)
         return ThreatAnalysis(schema_version="1.0", analysis_id=f"mock-{project_id}")
 
     from backend.opencode.config import install_attack_tree_threat_analysis_skill
@@ -1102,6 +1109,21 @@ def _candidate_task_context(candidate: Candidate, task_type: str = "audit") -> d
     if metadata.get("_opencode_audit_index") is not None:
         context["audit_index"] = metadata.get("_opencode_audit_index")
     return context
+
+
+async def _clear_planned_task_id(planned_task_id: str) -> None:
+    planned_task_id = str(planned_task_id or "").strip()
+    if not planned_task_id:
+        return
+    try:
+        await clear_planned_task(planned_task_id)
+    except Exception as exc:
+        logger.debug("clear planned task failed for %s: %s", planned_task_id, exc)
+
+
+async def _clear_candidate_planned_task(candidate: Candidate) -> None:
+    metadata = candidate.metadata if isinstance(candidate.metadata, dict) else {}
+    await _clear_planned_task_id(str(metadata.get("_opencode_planned_task_id") or ""))
 
 
 def _normalize_tool(config_obj) -> str:
@@ -2335,6 +2357,8 @@ async def run_audit_batch(
     config = get_config()
 
     if config.opencode.mock:
+        for candidate in candidates:
+            await _clear_candidate_planned_task(candidate)
         return [_mock_result(c) for c in candidates]
 
     # 按 checker 的 mode 决定调用方式
@@ -2354,6 +2378,8 @@ async def run_audit_batch(
             # 优先使用 workspace 中合并了反馈的 prompt
             merged_prompt = workspace / ".opencode" / "skills" / candidates[0].vuln_type / "PROMPT.md"
             prompt_path = merged_prompt if merged_prompt.is_file() else checker_entry.prompt_path
+            for candidate in candidates:
+                await _clear_candidate_planned_task(candidate)
             return await run_batch_audit_via_api(
                 candidates, project_id,
                 prompt_path=prompt_path,

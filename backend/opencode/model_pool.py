@@ -324,21 +324,35 @@ def _choose_available(
     global_concurrency: int,
     prefer_high: bool = False,
 ) -> ModelOption | None:
+    available = _available_options(
+        options,
+        global_concurrency=global_concurrency,
+        prefer_high=prefer_high,
+    )
+    return available[0] if available else None
+
+
+def _available_options(
+    options: list[ModelOption],
+    *,
+    global_concurrency: int,
+    prefer_high: bool = False,
+) -> list[ModelOption]:
     if _global_running >= global_concurrency:
-        return None
+        return []
     available = [
         option for option in options
         if _running_by_model.get(option.id, 0) < option.max_concurrency
     ]
     if not available:
-        return None
+        return []
     if prefer_high:
         # Soft preference: pick a high-capability model when one has free
         # capacity, but never leave other eligible models idle waiting for one.
         high = [option for option in available if option.capability == "high"]
         if high:
             available = high
-    return min(
+    return sorted(
         available,
         key=lambda option: (
             _running_by_model.get(option.id, 0) / option.weight,
@@ -403,12 +417,53 @@ def _choose_available_for_request_locked(
     request: _PendingLeaseRequest,
 ) -> tuple[ModelOption | None, list[ModelOption]]:
     eligible, hard_global_concurrency, all_options = _eligible_options_for_request_locked(request)
-    option = _choose_available(
+    for option in _available_options(
         eligible,
         global_concurrency=hard_global_concurrency,
         prefer_high=request.prefer_high,
-    )
-    return option, all_options
+    ):
+        if _planned_order_allows_option_locked(request, option):
+            return option, all_options
+    return None, all_options
+
+
+def _context_queue_group(context: dict[str, Any] | None) -> str:
+    if not isinstance(context, dict):
+        return ""
+    return str(context.get("queue_group") or "").strip()
+
+
+def _context_planned_task_id(context: dict[str, Any] | None) -> str:
+    if not isinstance(context, dict):
+        return ""
+    return str(context.get("planned_task_id") or "").strip()
+
+
+def _planned_required_capability(planned: _PlannedTask) -> str:
+    return normalize_requirement((planned.task_context or {}).get("required_capability"))
+
+
+def _planned_order_allows_option_locked(
+    request: _PendingLeaseRequest,
+    option: ModelOption,
+) -> bool:
+    planned_task_id = _context_planned_task_id(request.task_context)
+    if not planned_task_id:
+        return True
+    planned = _planned_tasks.get(planned_task_id)
+    if planned is None:
+        return True
+    queue_group = _context_queue_group(planned.task_context) or _context_queue_group(request.task_context)
+    if not queue_group:
+        return True
+    for earlier in sorted(_planned_tasks.values(), key=lambda item: item.sequence):
+        if earlier.sequence >= planned.sequence:
+            break
+        if _context_queue_group(earlier.task_context) != queue_group:
+            continue
+        if capability_satisfies(option.capability, _planned_required_capability(earlier)):
+            return False
+    return True
 
 
 def _touch_queue_locked(*scope_ids: str) -> None:
@@ -438,8 +493,8 @@ def _remove_planned_task_locked(task_id: str) -> bool:
 
 
 def _consume_planned_task_locked(request: _PendingLeaseRequest) -> None:
-    raw_id = request.task_context.get("planned_task_id")
-    if raw_id and _remove_planned_task_locked(str(raw_id)):
+    raw_id = _context_planned_task_id(request.task_context)
+    if raw_id and _remove_planned_task_locked(raw_id):
         _touch_queue_locked(request.stats_scope_id)
 
 
@@ -452,6 +507,8 @@ async def register_planned_task(
     """Register a future OpenCode invocation that has not requested a lease yet."""
     global _planned_sequence
     context = dict(task_context or {})
+    if "required_capability" in context:
+        context["required_capability"] = normalize_requirement(context.get("required_capability"))
     async with _condition:
         if task_key:
             existing_id = _planned_task_ids_by_key.get((scope_id, task_key))
@@ -509,6 +566,7 @@ def _prune_cancelled_pending_locked() -> None:
     for request in list(_pending_requests):
         cancel_event = request.cancel_event
         if cancel_event is not None and cancel_event.is_set():
+            _consume_planned_task_locked(request)
             _pending_requests.remove(request)
             removed_scope_ids.add(request.stats_scope_id)
     if removed_scope_ids:
@@ -531,6 +589,7 @@ def _grant_lease_locked(
 ) -> ModelLease:
     global _global_running, _global_updated_at
 
+    _consume_planned_task_locked(request)
     _global_running += 1
     _running_by_model[option.id] = _running_by_model.get(option.id, 0) + 1
     _last_used[option.id] = time.monotonic()
@@ -644,11 +703,14 @@ async def acquire_model_lease(
 ) -> ModelLease | None:
     required = normalize_requirement(required_capability)
     request: _PendingLeaseRequest | None = None
+    context = dict(task_context or {})
+    context.setdefault("required_capability", required)
 
     while True:
         if cancel_event is not None and cancel_event.is_set():
             if request is not None:
                 async with _condition:
+                    _consume_planned_task_locked(request)
                     if _remove_pending_request_locked(request):
                         _touch_queue_locked(request.stats_scope_id)
                         _condition.notify_all()
@@ -667,11 +729,10 @@ async def acquire_model_lease(
                     prefer_high=prefer_high,
                     cancel_event=cancel_event,
                     stats_scope_id=stats_scope_id,
-                    task_context=dict(task_context or {}),
+                    task_context=dict(context),
                     queued_at=time.monotonic(),
                     queued_at_iso=queued_at_iso,
                 )
-                _consume_planned_task_locked(request)
                 option, all_options = _choose_available_for_request_locked(request)
                 if option is not None and not _pending_requests:
                     return _grant_lease_locked(request, option, all_options)
@@ -861,10 +922,15 @@ def _pending_requests_snapshot(scope_id: str = "") -> list[dict[str, Any]]:
 
 
 def _planned_tasks_snapshot(scope_id: str = "") -> list[dict[str, Any]]:
+    pending_planned_ids = {
+        _context_planned_task_id(request.task_context)
+        for request in _pending_requests
+    }
     return [
         _planned_task_snapshot(planned)
         for planned in sorted(_planned_tasks.values(), key=lambda item: item.sequence)
         if not scope_id or planned.scope_id == scope_id
+        if planned.task_id not in pending_planned_ids
     ]
 
 

@@ -1091,7 +1091,10 @@ async def run_scan(
             from backend.opencode.model_pool import register_planned_task
             threat_planned_task_id = await register_planned_task(
                 scan_id,
-                {"task_type": "threat_analysis"},
+                {
+                    "task_type": "threat_analysis",
+                    "required_capability": "high",
+                },
                 task_key=f"{scan_id}:threat_analysis",
             )
             threat_analysis_task = asyncio.create_task(_run_threat_analysis_phase(
@@ -1414,6 +1417,12 @@ async def run_scan(
         rejected_patterns: set[tuple[object, ...]] = set()
 
         def planned_candidate_context(global_index: int, candidate: Candidate) -> dict:
+            checker_entry = registry.get(candidate.vuln_type)
+            required_capability = (
+                checker_entry.model_capability
+                if checker_entry is not None and checker_entry.model_capability
+                else "any"
+            )
             return {
                 "task_type": "audit",
                 "checker": candidate.vuln_type,
@@ -1421,6 +1430,8 @@ async def run_scan(
                 "line": candidate.line,
                 "function": candidate.function,
                 "audit_index": global_index,
+                "required_capability": required_capability,
+                "queue_group": f"{scan_id}:audit",
             }
 
         for local_index, candidate in enumerate(remaining):

@@ -501,6 +501,160 @@ def test_global_queue_skips_blocked_capability_head() -> None:
     asyncio.run(run())
 
 
+def test_planned_order_blocks_later_same_capability_request() -> None:
+    """Planned audit order is the FIFO boundary even if workers request out of order."""
+
+    async def run():
+        cfg = SimpleNamespace(
+            models=[
+                {"id": "a", "model": "model-a", "capability": "low", "weight": 1, "max_concurrency": 1},
+                {"id": "b", "model": "model-b", "capability": "low", "weight": 1, "max_concurrency": 1},
+            ],
+        )
+        scope = "test-scope-planned-audit-order"
+        group = f"{scope}:audit"
+        first_id = await register_planned_task(
+            scope,
+            {
+                "task_type": "audit",
+                "audit_index": 0,
+                "queue_group": group,
+                "required_capability": "any",
+            },
+            task_key="audit:0",
+        )
+        second_id = await register_planned_task(
+            scope,
+            {
+                "task_type": "audit",
+                "audit_index": 1,
+                "queue_group": group,
+                "required_capability": "any",
+            },
+            task_key="audit:1",
+        )
+        second_cancel = asyncio.Event()
+        second = None
+        first = None
+        second_task = asyncio.create_task(
+            acquire_model_lease(
+                cfg,
+                global_concurrency=2,
+                required_capability="any",
+                stats_scope_id=scope,
+                cancel_event=second_cancel,
+                task_context={
+                    "planned_task_id": second_id,
+                    "task_type": "audit",
+                    "audit_index": 1,
+                },
+            )
+        )
+        try:
+            await asyncio.sleep(0.05)
+            assert not second_task.done()
+            snapshot = model_pool_snapshot(scope)
+            assert [task["audit_index"] for task in snapshot["queued_tasks"]] == [1]
+            assert [task["audit_index"] for task in snapshot["planned_tasks"]] == [0]
+
+            first = await acquire_model_lease(
+                cfg,
+                global_concurrency=2,
+                required_capability="any",
+                stats_scope_id=scope,
+                task_context={
+                    "planned_task_id": first_id,
+                    "task_type": "audit",
+                    "audit_index": 0,
+                },
+            )
+            assert first is not None
+            second = await asyncio.wait_for(second_task, timeout=1)
+            assert second is not None
+            active_indexes = sorted(
+                task["audit_index"]
+                for model in model_pool_snapshot(scope)["models"]
+                for task in model["active_tasks"]
+            )
+            assert active_indexes == [0, 1]
+        finally:
+            if not second_task.done():
+                second_cancel.set()
+                async with model_pool_module._condition:
+                    model_pool_module._condition.notify_all()
+                second = await asyncio.wait_for(second_task, timeout=1)
+            await release_model_lease(second, outcome="success", duration_seconds=0.1)
+            await release_model_lease(first, outcome="success", duration_seconds=0.1)
+
+    asyncio.run(run())
+
+
+def test_planned_order_allows_later_task_when_earlier_cannot_use_free_model() -> None:
+    """A high-only planned head must not block an any-capability task from a free low model."""
+
+    async def run():
+        cfg = SimpleNamespace(
+            models=[
+                {"id": "deep", "model": "deep-model", "capability": "high", "weight": 1, "max_concurrency": 1},
+                {"id": "fast", "model": "fast-model", "capability": "low", "weight": 1, "max_concurrency": 1},
+            ],
+        )
+        scope = "test-scope-planned-capability-skip"
+        group = f"{scope}:audit"
+        deep = await acquire_model_lease(
+            cfg,
+            global_concurrency=2,
+            required_capability="high",
+            stats_scope_id=scope,
+        )
+        high_id = await register_planned_task(
+            scope,
+            {
+                "task_type": "audit",
+                "audit_index": 0,
+                "queue_group": group,
+                "required_capability": "high",
+            },
+            task_key="audit:0",
+        )
+        low_id = await register_planned_task(
+            scope,
+            {
+                "task_type": "audit",
+                "audit_index": 1,
+                "queue_group": group,
+                "required_capability": "any",
+            },
+            task_key="audit:1",
+        )
+        low = None
+        try:
+            assert deep is not None
+            low = await asyncio.wait_for(
+                acquire_model_lease(
+                    cfg,
+                    global_concurrency=2,
+                    required_capability="any",
+                    stats_scope_id=scope,
+                    task_context={
+                        "planned_task_id": low_id,
+                        "task_type": "audit",
+                        "audit_index": 1,
+                    },
+                ),
+                timeout=1,
+            )
+            assert low is not None
+            assert low.option.id == "fast"
+            assert [task["audit_index"] for task in model_pool_snapshot(scope)["planned_tasks"]] == [0]
+        finally:
+            await clear_planned_task(high_id)
+            await release_model_lease(low, outcome="success", duration_seconds=0.1)
+            await release_model_lease(deep, outcome="success", duration_seconds=0.1)
+
+    asyncio.run(run())
+
+
 def test_total_model_capacity_honors_active_time_windows(monkeypatch: pytest.MonkeyPatch) -> None:
     cfg = SimpleNamespace(
         models=[
