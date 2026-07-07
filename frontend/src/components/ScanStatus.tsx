@@ -1504,18 +1504,18 @@ function ProcessFlowNav({
         </div>
       </div>
 
-      <div className="overflow-x-auto pb-1">
-        <div className="flex min-w-[1180px] items-stretch gap-3">
+      <div className="overflow-x-auto rounded-xl border border-slate-700/50 bg-slate-900/35 p-3 shadow-inner">
+        <div className="flex min-w-[1280px] items-stretch gap-4">
           <div className="flex items-center">
             <FlowNodeButton node={nodes.threat} onClick={onNodeClick} />
           </div>
           <FlowArrow label="进入" />
-          <div className="flex-1 rounded-lg border border-slate-700 bg-slate-950/30 p-3">
-            <div className="mb-3 flex items-center justify-between gap-3">
+          <div className="flex-1 rounded-xl border border-cyan-500/25 bg-gradient-to-br from-slate-950/80 via-slate-900/60 to-cyan-950/20 p-4 shadow-sm">
+            <div className="mb-4 flex items-center justify-center">
               <div className="text-sm font-semibold text-slate-100">漏洞挖掘</div>
             </div>
-            <div className="flex items-stretch gap-3">
-              <div className="w-[420px] rounded-lg border border-cyan-500/20 bg-cyan-500/5 p-3">
+            <div className="flex min-h-[12rem] items-center justify-center gap-4">
+              <div className="w-[430px] rounded-lg border border-cyan-500/25 bg-cyan-500/5 p-3 shadow-sm">
                 <FlowNodeButton node={nodes.static_analysis} onClick={onNodeClick} wide />
                 <div className="mt-3 flex items-center gap-2">
                   <FlowNodeButton node={nodes.call_graph} onClick={onNodeClick} compact />
@@ -1524,13 +1524,11 @@ function ProcessFlowNav({
                 </div>
               </div>
               <FlowArrow />
-              <div className="flex flex-col items-center justify-center gap-2">
-                <FlowNodeButton node={nodes.candidate_audit} onClick={onNodeClick} />
-                <FlowDownArrow />
-                <div className="flex justify-center">
-                  <FlowNodeButton node={nodes.fp_review} onClick={onNodeClick} compact />
-                </div>
-              </div>
+              <FlowAuditBranch
+                auditNode={nodes.candidate_audit}
+                fpReviewNode={nodes.fp_review}
+                onNodeClick={onNodeClick}
+              />
             </div>
           </div>
           <FlowArrow label="正报验证" />
@@ -1631,13 +1629,28 @@ function FlowArrow({ label, compact = false }: { label?: string; compact?: boole
   );
 }
 
-function FlowDownArrow() {
+function FlowAuditBranch({
+  auditNode,
+  fpReviewNode,
+  onNodeClick,
+}: {
+  auditNode: FlowNodeView;
+  fpReviewNode: FlowNodeView;
+  onNodeClick: (node: FlowNodeId) => void;
+}) {
   return (
-    <div className="flex h-7 shrink-0 flex-col items-center justify-center">
-      <div className="w-px flex-1 bg-slate-600" />
-      <svg className="h-4 w-4 text-slate-500" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
-        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
-      </svg>
+    <div className="grid grid-cols-[12.5rem_2rem_11.5rem] grid-rows-[minmax(0,1fr)_auto] items-center gap-x-2 gap-y-3">
+      <div className="row-span-2 flex items-center">
+        <FlowNodeButton node={auditNode} onClick={onNodeClick} />
+      </div>
+      <div className="flex h-full items-center">
+        <FlowArrow compact />
+      </div>
+      <div />
+      <div className="flex items-center">
+        <FlowArrow compact />
+      </div>
+      <FlowNodeButton node={fpReviewNode} onClick={onNodeClick} compact />
     </div>
   );
 }
