@@ -3627,9 +3627,15 @@ function ValidationDetail({
               {validation.product && <StatusPill label={`产品：${validation.product}`} tone="slate" />}
               {validation.validation_environment && <StatusPill label={`环境：${validation.validation_environment}`} tone="slate" />}
             </div>
-            <div className="grid grid-cols-1 gap-3 xl:grid-cols-2">
-              <ValidationOutputSections validation={validation} />
-              <ValidationArtifacts validation={validation} />
+            <div className="space-y-3">
+              <div className="grid grid-cols-1 gap-3 xl:grid-cols-2">
+                <div className="space-y-3">
+                  <ValidationOutputSections validation={validation} />
+                </div>
+                <div className="space-y-3">
+                  <ValidationArtifacts validation={validation} />
+                </div>
+              </div>
               <ValidationBlock title="最终结论" content={validation.final_output || validation.validation_output} />
             </div>
           </div>
