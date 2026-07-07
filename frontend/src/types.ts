@@ -150,6 +150,7 @@ export interface VulnerabilityValidation {
   validation_code: string;
   validation_output: string;
   intermediate_output: string;
+  output_sections?: ValidationOutputSection[];
   final_output?: string;
   artifacts?: ValidationArtifact[];
   started_at: string;
@@ -158,10 +159,17 @@ export interface VulnerabilityValidation {
 }
 
 export interface ValidationArtifact {
+  title?: string;
   name: string;
   kind?: string;
   content?: string;
   path?: string;
+  updated_at?: string;
+}
+
+export interface ValidationOutputSection {
+  title: string;
+  content: string;
   updated_at?: string;
 }
 

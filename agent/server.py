@@ -515,6 +515,7 @@ async def _report_validation_queued(item: _ValidationQueueItem) -> None:
     from backend.models import VulnerabilityValidation
 
     now = datetime.now(timezone.utc).isoformat()
+    queued_output = "验证任务已进入 Agent 本地验证队列，等待本地脚本启动。"
     try:
         await item.reporter.report_vulnerability_validation(
             item.scan_id,
@@ -525,7 +526,12 @@ async def _report_validation_queued(item: _ValidationQueueItem) -> None:
                 running=True,
                 product=item.product,
                 validation_environment=item.validation_environment,
-                intermediate_output="验证任务已进入 Agent 本地验证队列，等待本地脚本启动。",
+                intermediate_output=queued_output,
+                output_sections=[{
+                    "title": "中间产出",
+                    "content": queued_output,
+                    "updated_at": now,
+                }],
                 started_at=now,
                 updated_at=now,
             ),

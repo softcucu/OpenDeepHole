@@ -411,6 +411,7 @@ class VulnerabilityValidation(BaseModel):
     validation_code: str = ""
     validation_output: str = ""
     intermediate_output: str = ""
+    output_sections: list[dict] = []
     final_output: str = ""
     artifacts: list[dict] = []
     started_at: str = ""
@@ -529,6 +530,7 @@ class AgentVulnerabilityValidationUpdate(BaseModel):
     validation_code: str = ""
     validation_output: str = ""
     intermediate_output: str = ""
+    output_sections: list[dict] = []
     final_output: str = ""
     artifacts: list[dict] = []
     started_at: str = ""

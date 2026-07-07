@@ -163,6 +163,7 @@ CREATE TABLE IF NOT EXISTS vulnerability_validations (
     validation_code     TEXT NOT NULL DEFAULT '',
     validation_output   TEXT NOT NULL DEFAULT '',
     intermediate_output TEXT NOT NULL DEFAULT '',
+    output_sections     TEXT NOT NULL DEFAULT '[]',
     final_output        TEXT NOT NULL DEFAULT '',
     artifacts           TEXT NOT NULL DEFAULT '[]',
     started_at          TEXT NOT NULL DEFAULT '',
@@ -596,6 +597,7 @@ class SqliteScanStore(ScanStoreBase):
                 validation_code     TEXT NOT NULL DEFAULT '',
                 validation_output   TEXT NOT NULL DEFAULT '',
                 intermediate_output TEXT NOT NULL DEFAULT '',
+                output_sections     TEXT NOT NULL DEFAULT '[]',
                 final_output        TEXT NOT NULL DEFAULT '',
                 artifacts           TEXT NOT NULL DEFAULT '[]',
                 started_at          TEXT NOT NULL DEFAULT '',
@@ -635,6 +637,10 @@ class SqliteScanStore(ScanStoreBase):
         if "final_output" not in validation_cols:
             self._conn.execute(
                 "ALTER TABLE vulnerability_validations ADD COLUMN final_output TEXT NOT NULL DEFAULT ''"
+            )
+        if "output_sections" not in validation_cols:
+            self._conn.execute(
+                "ALTER TABLE vulnerability_validations ADD COLUMN output_sections TEXT NOT NULL DEFAULT '[]'"
             )
         if "artifacts" not in validation_cols:
             self._conn.execute(
@@ -1512,9 +1518,9 @@ class SqliteScanStore(ScanStoreBase):
                 INSERT INTO vulnerability_validations
                     (scan_id, vuln_index, status, running, product, validation_environment, validator_name,
                      validation_success, is_problem, requires_human_intervention, validation_code,
-                     validation_output, intermediate_output, final_output, artifacts,
+                     validation_output, intermediate_output, output_sections, final_output, artifacts,
                      started_at, finished_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(scan_id, vuln_index) DO UPDATE SET
                     status = excluded.status,
                     running = excluded.running,
@@ -1527,6 +1533,7 @@ class SqliteScanStore(ScanStoreBase):
                     validation_code = excluded.validation_code,
                     validation_output = excluded.validation_output,
                     intermediate_output = excluded.intermediate_output,
+                    output_sections = excluded.output_sections,
                     final_output = excluded.final_output,
                     artifacts = excluded.artifacts,
                     started_at = excluded.started_at,
@@ -1547,6 +1554,7 @@ class SqliteScanStore(ScanStoreBase):
                     validation.validation_code,
                     validation.validation_output,
                     validation.intermediate_output,
+                    json.dumps(validation.output_sections or [], ensure_ascii=False),
                     validation.final_output,
                     json.dumps(validation.artifacts or [], ensure_ascii=False),
                     validation.started_at,
@@ -1592,6 +1600,7 @@ class SqliteScanStore(ScanStoreBase):
                 validation_code=r["validation_code"] or "",
                 validation_output=r["validation_output"] or "",
                 intermediate_output=r["intermediate_output"] or "",
+                output_sections=_artifacts(r["output_sections"]),
                 final_output=r["final_output"] or "",
                 artifacts=_artifacts(r["artifacts"]),
                 started_at=r["started_at"] or "",

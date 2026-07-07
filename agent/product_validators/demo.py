@@ -35,7 +35,7 @@ def register(registry) -> None:
 
 def _emit(ctx, message: str) -> None:
     print(message, flush=True)
-    ctx.emit_stdout(message)
+    ctx.emit_stdout("验证过程", message)
 
 
 def validate_demo(ctx) -> ValidationResult:
@@ -76,7 +76,7 @@ def validate_demo(ctx) -> ValidationResult:
         f"report={report_path}"
     )
     _emit(ctx, validation_message)
-    ctx.publish_artifact("vulnerability.md", path=report_path, kind="report")
+    ctx.publish_artifact("vulnerability.md", path=report_path, title="输入报告", kind="report")
 
     # STEP 1：修改第一阶段时，同步调整 STEP_1_SKILL、STEP_1_ARTIFACT、STEP_1_RETRIES 和这里的提示词。
     step_1_artifact = validation_dir / STEP_1_ARTIFACT
@@ -108,6 +108,7 @@ def validate_demo(ctx) -> ValidationResult:
                 ["nga", "run", "--dir", str(project_dir), step_1_prompt],
                 cwd=project_dir,
                 timeout=ctx.timeout_seconds,
+                output_title="命令输出",
             )
         except OSError as exc:
             step_1_return_code = 1
@@ -141,7 +142,7 @@ def validate_demo(ctx) -> ValidationResult:
             status="failed",
             summary=f"STEP 1 {STEP_1_SKILL} did not produce required artifact: {step_1_artifact}",
         )
-    ctx.publish_artifact(STEP_1_ARTIFACT, path=step_1_artifact, kind="artifact")
+    ctx.publish_artifact(STEP_1_ARTIFACT, path=step_1_artifact, title="阶段产物", kind="artifact")
     step_1_message = f"STEP 1 completed: {step_1_artifact}"
     _emit(ctx, step_1_message)
 
@@ -175,6 +176,7 @@ def validate_demo(ctx) -> ValidationResult:
                 ["nga", "run", "--dir", str(project_dir), step_2_prompt],
                 cwd=project_dir,
                 timeout=ctx.timeout_seconds,
+                output_title="命令输出",
             )
         except OSError as exc:
             step_2_return_code = 1
@@ -208,7 +210,7 @@ def validate_demo(ctx) -> ValidationResult:
             status="failed",
             summary=f"STEP 2 {STEP_2_SKILL} did not produce required artifact: {step_2_artifact}",
         )
-    ctx.publish_artifact(STEP_2_ARTIFACT, path=step_2_artifact, kind="artifact")
+    ctx.publish_artifact(STEP_2_ARTIFACT, path=step_2_artifact, title="阶段产物", kind="artifact")
     step_2_message = f"STEP 2 completed: {step_2_artifact}"
     _emit(ctx, step_2_message)
 
@@ -242,6 +244,7 @@ def validate_demo(ctx) -> ValidationResult:
                 ["nga", "run", "--dir", str(project_dir), step_3_prompt],
                 cwd=project_dir,
                 timeout=ctx.timeout_seconds,
+                output_title="命令输出",
             )
         except OSError as exc:
             step_3_return_code = 1
@@ -275,7 +278,7 @@ def validate_demo(ctx) -> ValidationResult:
             status="failed",
             summary=f"STEP 3 {STEP_3_SKILL} did not produce required artifact: {step_3_artifact}",
         )
-    ctx.publish_artifact(STEP_3_ARTIFACT, path=step_3_artifact, kind="artifact")
+    ctx.publish_artifact(STEP_3_ARTIFACT, path=step_3_artifact, title="阶段产物", kind="artifact")
     step_3_message = f"STEP 3 completed: {step_3_artifact}"
     _emit(ctx, step_3_message)
 
@@ -309,6 +312,7 @@ def validate_demo(ctx) -> ValidationResult:
                 ["nga", "run", "--dir", str(project_dir), step_4_prompt],
                 cwd=project_dir,
                 timeout=ctx.timeout_seconds,
+                output_title="命令输出",
             )
         except OSError as exc:
             step_4_return_code = 1
@@ -342,7 +346,7 @@ def validate_demo(ctx) -> ValidationResult:
             status="failed",
             summary=f"STEP 4 {STEP_4_SKILL} did not produce required artifact: {step_4_artifact}",
         )
-    ctx.publish_artifact(STEP_4_ARTIFACT, path=step_4_artifact, kind="artifact")
+    ctx.publish_artifact(STEP_4_ARTIFACT, path=step_4_artifact, title="阶段产物", kind="artifact")
     step_4_message = f"STEP 4 completed: {step_4_artifact}"
     _emit(ctx, step_4_message)
 

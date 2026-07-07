@@ -3628,7 +3628,7 @@ function ValidationDetail({
               {validation.validation_environment && <StatusPill label={`环境：${validation.validation_environment}`} tone="slate" />}
             </div>
             <div className="grid grid-cols-1 gap-3 xl:grid-cols-2">
-              <ValidationBlock title="中间产出" content={validation.intermediate_output} />
+              <ValidationOutputSections validation={validation} />
               <ValidationArtifacts validation={validation} />
               <ValidationBlock title="最终结论" content={validation.final_output || validation.validation_output} />
             </div>
@@ -3641,20 +3641,37 @@ function ValidationDetail({
   );
 }
 
+function ValidationOutputSections({ validation }: { validation: VulnerabilityValidation }) {
+  const sections = validationOutputSections(validation);
+  if (sections.length === 0) return null;
+  return (
+    <>
+      {sections.map((section, idx) => (
+        <ValidationBlock
+          key={`${section.title}-${idx}`}
+          title={section.title || "中间产出"}
+          content={section.content || ""}
+        />
+      ))}
+    </>
+  );
+}
+
 function ValidationArtifacts({ validation }: { validation: VulnerabilityValidation }) {
   const artifacts = validation.artifacts && validation.artifacts.length > 0
     ? validation.artifacts
     : validation.validation_code
-      ? [{ name: "validation.py", kind: "code", content: validation.validation_code }]
+      ? [{ title: "产物", name: "validation.py", kind: "code", content: validation.validation_code }]
       : [];
+  const groups = groupedValidationArtifacts(artifacts);
+  if (groups.length === 0) return null;
   return (
-    <div className="min-w-0 rounded border border-slate-800 bg-slate-950">
-      <div className="border-b border-slate-800 px-3 py-2 text-xs font-semibold text-slate-500">产物</div>
-      {artifacts.length === 0 ? (
-        <div className="px-3 py-2 text-xs text-slate-500">（暂无）</div>
-      ) : (
+    <>
+      {groups.map(([title, items]) => (
+        <div key={title} className="min-w-0 rounded border border-slate-800 bg-slate-950">
+          <div className="border-b border-slate-800 px-3 py-2 text-xs font-semibold text-slate-500">{title}</div>
         <div className="max-h-72 overflow-auto">
-          {artifacts.map((artifact, idx) => (
+          {items.map((artifact, idx) => (
             <div key={`${artifact.name}-${idx}`} className="border-b border-slate-900 last:border-b-0">
               <div className="flex flex-wrap items-center gap-2 px-3 py-2 text-xs">
                 <span className="font-mono text-slate-200">{artifact.name}</span>
@@ -3669,9 +3686,36 @@ function ValidationArtifacts({ validation }: { validation: VulnerabilityValidati
             </div>
           ))}
         </div>
-      )}
-    </div>
+        </div>
+      ))}
+    </>
   );
+}
+
+function validationOutputSections(validation: VulnerabilityValidation) {
+  const sections = (validation.output_sections ?? [])
+    .filter((section) => section && (section.title || section.content))
+    .map((section) => ({
+      title: section.title || "中间产出",
+      content: section.content || "",
+      updated_at: section.updated_at || "",
+    }));
+  if (sections.length > 0) return sections;
+  if (validation.intermediate_output) {
+    return [{ title: "中间产出", content: validation.intermediate_output, updated_at: validation.updated_at }];
+  }
+  return [];
+}
+
+function groupedValidationArtifacts(artifacts: NonNullable<VulnerabilityValidation["artifacts"]>) {
+  const groups = new Map<string, typeof artifacts>();
+  for (const artifact of artifacts) {
+    const title = artifact.title?.trim() || "产物";
+    const items = groups.get(title) ?? [];
+    items.push(artifact);
+    groups.set(title, items);
+  }
+  return Array.from(groups.entries());
 }
 
 function ValidationBlock({ title, content }: { title: string; content: string }) {

@@ -29,12 +29,13 @@ def validate_lte(ctx) -> ValidationResult:
     vuln = info["vulnerability"]
 
     ctx.emit_stdout(
+        "验证过程",
         f"validating {vuln.get('vuln_type')} at {vuln.get('file')}:{vuln.get('line')}"
     )
 
     artifact_path = Path(ctx.work_dir) / "validation-notes.md"
     artifact_path.write_text(report, encoding="utf-8")
-    ctx.publish_artifact("validation-notes.md", path=artifact_path, kind="report")
+    ctx.publish_artifact("validation-notes.md", path=artifact_path, title="验证报告", kind="report")
 
     return ValidationResult(
         validation_success=True,
@@ -78,7 +79,7 @@ def validate_lte(ctx) -> ValidationResult:
 ```python
 report_path = Path(ctx.work_dir) / "vulnerability.md"
 report_path.write_text(ctx.get_report_markdown(), encoding="utf-8")
-ctx.publish_artifact("vulnerability.md", path=report_path, kind="report")
+ctx.publish_artifact("vulnerability.md", path=report_path, title="输入报告", kind="report")
 ```
 
 ### `ctx.get_validation_info()`
@@ -101,23 +102,25 @@ ctx.publish_artifact("vulnerability.md", path=report_path, kind="report")
 
 `vulnerability` 是漏洞对象的字典形式，常用字段包括 `file`、`line`、`function`、`vuln_type`、`severity`、`description`、`ai_analysis`、`confirmed`、`ai_verdict`。
 
-### `ctx.emit_stdout(text)`
+### `ctx.emit_stdout(title, content)` / `ctx.emit_stdout(text)`
 
-把阶段性输出同步到漏洞验证页面的中间产出区域。长任务、重试、外部命令开始和结束时都应该调用它。
+把阶段性输出同步到漏洞验证页面。推荐传入标题和内容：同标题的输出会追加到同一个栏位，不存在的标题会自动创建新栏。旧的单参数写法仍兼容，会写入默认的“中间产出”栏。
 
 验证函数执行期间，脚本自身以及运行期导入的同目录 helper 中的 `print(...)` 只会保留在 Agent 控制台输出，不会同步到漏洞验证页面。需要页面展示的进度必须显式调用 `ctx.emit_stdout(...)`，或者通过 `ctx.run_command(...)` 执行外部命令。
 
 ```python
-ctx.emit_stdout("STEP 1 running poc generation")
-ctx.emit_stdout(f"artifact will be saved to {artifact_path}")
+ctx.emit_stdout("验证过程", "STEP 1 running poc generation")
+ctx.emit_stdout("验证过程", f"artifact will be saved to {artifact_path}")
+ctx.emit_stdout("调试信息", "extra diagnostic text")
 ```
 
-输出会被截断保留尾部内容，不要依赖它作为唯一持久化结果。需要页面长期展示的文件或代码应使用 `ctx.publish_artifact(...)`。
+每个输出栏会被截断保留尾部内容，不要依赖它作为唯一持久化结果。需要页面长期展示的文件或代码应使用 `ctx.publish_artifact(...)`。
 
-### `ctx.publish_artifact(name, content=None, *, path=None, kind="artifact")`
+### `ctx.publish_artifact(name, content=None, *, title="产物", path=None, kind="artifact")`
 
-发布中间产物或最终产物到漏洞验证页面。
+发布中间产物或最终产物到漏洞验证页面。同 `title` 的产物会在页面和导出报告中归为一栏。
 
+- `title`：页面展示的产物栏标题。
 - `name`：页面展示的产物名。
 - `content`：直接发布的文本内容。
 - `path`：产物文件路径。未传 `content` 时，运行器会尝试读取该文件内容。
@@ -126,21 +129,22 @@ ctx.emit_stdout(f"artifact will be saved to {artifact_path}")
 当 `kind` 为 `code` 或 `validation_code` 时，内容会同步到页面的验证代码展示区。
 
 ```python
-ctx.publish_artifact("poc.py", "print('poc')", kind="code")
-ctx.publish_artifact("step-1.md", path=step_1_artifact, kind="artifact")
+ctx.publish_artifact("poc.py", "print('poc')", title="PoC", kind="code")
+ctx.publish_artifact("step-1.md", path=step_1_artifact, title="阶段产物", kind="artifact")
 ```
 
-同名且同 `kind` 的产物会被新内容替换。产物内容会被截断保留尾部内容，超大文件应保存摘要或关键片段。
+同 `title`、同名且同 `kind` 的产物会被新内容替换。产物内容会被截断保留尾部内容，超大文件应保存摘要或关键片段。
 
-### `ctx.run_command(command, *, cwd=None, timeout=None)`
+### `ctx.run_command(command, *, cwd=None, timeout=None, output_title=None)`
 
-执行外部命令，并把 stdout 和 stderr 合并同步到 `ctx.emit_stdout(...)`。返回进程退出码。
+执行外部命令，并把 stdout 和 stderr 合并同步到 `ctx.emit_stdout(...)`。`output_title` 可指定命令输出进入哪个页面栏，不传时进入默认“中间产出”栏。返回进程退出码。
 
 ```python
 return_code = ctx.run_command(
     ["nga", "run", "--dir", str(project_dir), prompt],
     cwd=project_dir,
     timeout=ctx.timeout_seconds,
+    output_title="命令输出",
 )
 if return_code == 124:
     return ValidationResult(
@@ -164,6 +168,7 @@ if return_code != 0:
 
 - `command` 使用参数列表，不要拼接成单个 shell 字符串。
 - `cwd` 未传时默认使用 `ctx.validator_dir`，也就是当前验证脚本所在目录。
+- `output_title` 未传时会使用默认“中间产出”栏；建议长流程显式传入“命令输出”或阶段名称。
 - 运行器会给子进程合并当前 PATH、Windows 用户/系统 PATH 和常见工具目录，例如 `%APPDATA%\npm`、`%LOCALAPPDATA%\pnpm`、`%LOCALAPPDATA%\Volta\bin`、`%USERPROFILE%\scoop\shims`、`%ProgramData%\chocolatey\bin`。
 - `timeout` 是单条命令超时。整体验证仍受 `ctx.timeout_seconds` 限制。
 - 命令超时时返回 `124`。
@@ -225,8 +230,8 @@ ValidationResult(
 - 需要 nga 在项目根目录内发现 skill 或读写文件时，可以使用 `ctx.project_path`，但必须先判断它是否为空。
 - 如果验证只针对本次扫描范围，优先参考 `ctx.code_scan_path`。
 - 传给外部工具的漏洞输入建议来自 `ctx.get_report_markdown()`，不要重新拼一个第二格式。
-- 每个重要阶段都用 `print(...)` 写 Agent 控制台诊断；需要漏洞验证页面可见的开始、结束、失败和重试信息必须调用 `ctx.emit_stdout(...)`。
-- 每个需要页面保留的报告、PoC、日志摘要或验证代码都用 `ctx.publish_artifact(...)` 发布。
+- 每个重要阶段都用 `print(...)` 写 Agent 控制台诊断；需要漏洞验证页面可见的开始、结束、失败和重试信息必须调用 `ctx.emit_stdout("标题", "内容")`。
+- 每个需要页面保留的报告、PoC、日志摘要或验证代码都用 `ctx.publish_artifact(..., title="标题")` 发布。
 
 ## nga 多阶段验证建议
 
@@ -235,7 +240,7 @@ ValidationResult(
 多阶段流程建议遵守以下规则：
 
 - 每个 STEP 开始前调用 `ctx.cancelled()`。
-- 每个 STEP 开始、失败重试、成功完成都调用 `ctx.emit_stdout(...)`。
-- 每个 STEP 产物生成后调用 `ctx.publish_artifact(...)`。
-- 子命令统一用 `ctx.run_command(...)`，并处理 `124` 超时返回码。
+- 每个 STEP 开始、失败重试、成功完成都调用 `ctx.emit_stdout("验证过程", ...)`。
+- 每个 STEP 产物生成后调用 `ctx.publish_artifact(..., title="阶段产物")`。
+- 子命令统一用 `ctx.run_command(..., output_title="命令输出")`，并处理 `124` 超时返回码。
 - 某个必需 STEP 没有产物时，应返回 `validation_success=False`，`requires_human_intervention=True`，并在 `summary` 写清楚缺失的 STEP 和产物路径。

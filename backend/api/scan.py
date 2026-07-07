@@ -362,6 +362,16 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _validation_output_sections(content: str, *, updated_at: str | None = None) -> list[dict]:
+    if not content:
+        return []
+    return [{
+        "title": "中间产出",
+        "content": content,
+        "updated_at": updated_at or _now_iso(),
+    }]
+
+
 def _publish_validation(scan_id: str, validation: VulnerabilityValidation) -> None:
     from backend.sse import publish
 
@@ -1035,7 +1045,121 @@ def _format_output_source(source) -> str:
     return " / ".join(parts)
 
 
-def _vuln_report_markdown(idx, vuln, fp_result: FpReviewResult | None) -> str:
+def _validation_sections_for_report(validation: VulnerabilityValidation) -> list[dict]:
+    sections: list[dict] = []
+    for raw in validation.output_sections or []:
+        if not isinstance(raw, dict):
+            continue
+        title = str(raw.get("title") or "").strip() or "中间产出"
+        content = str(raw.get("content") or "")
+        sections.append({
+            "title": title,
+            "content": content,
+            "updated_at": str(raw.get("updated_at") or ""),
+        })
+    if not sections and validation.intermediate_output:
+        sections.append({
+            "title": "中间产出",
+            "content": validation.intermediate_output,
+            "updated_at": validation.updated_at,
+        })
+    return sections
+
+
+def _artifact_title(artifact: dict) -> str:
+    return str(artifact.get("title") or "").strip() or "产物"
+
+
+def _markdown_fence(content: str) -> tuple[str, str]:
+    fence = "```"
+    while fence in content:
+        fence += "`"
+    return fence, fence
+
+
+def _append_fenced_block(lines: list[str], content: str) -> None:
+    fence_start, fence_end = _markdown_fence(content)
+    lines.append(fence_start)
+    lines.append(content)
+    lines.append(fence_end)
+    lines.append("")
+
+
+def _append_validation_markdown(lines: list[str], validation: VulnerabilityValidation | None) -> None:
+    if validation is None:
+        return
+
+    lines.append("## 漏洞验证")
+    lines.append("")
+    lines.append("| 字段 | 内容 |")
+    lines.append("| --- | --- |")
+    lines.append(f"| 状态 | {validation.status} |")
+    if validation.product:
+        lines.append(f"| 产品 | {validation.product} |")
+    if validation.validation_environment:
+        lines.append(f"| 验证环境 | {validation.validation_environment} |")
+    lines.append(f"| 验证成功 | {validation.validation_success} |")
+    lines.append(f"| 是否问题 | {validation.is_problem} |")
+    lines.append(f"| 人工介入 | {validation.requires_human_intervention} |")
+    if validation.started_at:
+        lines.append(f"| 开始时间 | {validation.started_at} |")
+    if validation.finished_at:
+        lines.append(f"| 结束时间 | {validation.finished_at} |")
+    lines.append("")
+
+    final_output = validation.final_output or validation.validation_output
+    if final_output:
+        lines.append("### 最终结论")
+        lines.append("")
+        lines.append(final_output)
+        lines.append("")
+
+    sections = _validation_sections_for_report(validation)
+    if sections:
+        lines.append("### 输出栏")
+        lines.append("")
+        for section in sections:
+            lines.append(f"#### {section['title']}")
+            lines.append("")
+            _append_fenced_block(lines, section["content"] or "（暂无）")
+
+    artifacts = [item for item in (validation.artifacts or []) if isinstance(item, dict)]
+    if artifacts:
+        lines.append("### 验证产物")
+        lines.append("")
+        groups: dict[str, list[dict]] = {}
+        for artifact in artifacts:
+            groups.setdefault(_artifact_title(artifact), []).append(artifact)
+        for title, items in groups.items():
+            lines.append(f"#### {title}")
+            lines.append("")
+            for artifact in items:
+                name = str(artifact.get("name") or "artifact")
+                kind = str(artifact.get("kind") or "")
+                path = str(artifact.get("path") or "")
+                updated_at = str(artifact.get("updated_at") or "")
+                lines.append(f"##### {name}")
+                lines.append("")
+                if kind:
+                    lines.append(f"- **类型**：{kind}")
+                if path:
+                    lines.append(f"- **路径**：`{path}`")
+                if updated_at:
+                    lines.append(f"- **更新时间**：{updated_at}")
+                content = str(artifact.get("content") or "")
+                if content:
+                    lines.append("")
+                    _append_fenced_block(lines, content)
+                else:
+                    lines.append("")
+
+
+def _vuln_report_markdown(
+    idx,
+    vuln,
+    fp_result: FpReviewResult | None,
+    validation: VulnerabilityValidation | None = None,
+) -> str:
     """Render a single vulnerability (AI analysis + FP-review stages) as Markdown."""
     lines: list[str] = []
     lines.append(f"# 漏洞报告 — {vuln.vuln_type} @ {vuln.file}:{vuln.line}")
@@ -1102,6 +1226,8 @@ def _vuln_report_markdown(idx, vuln, fp_result: FpReviewResult | None) -> str:
             lines.append(stage_md)
             lines.append("")
 
+    _append_validation_markdown(lines, validation)
+
     return "\n".join(lines).rstrip() + "\n"
 
 
@@ -1118,7 +1244,8 @@ async def download_vulnerability_report(
         raise HTTPException(status_code=404, detail="Vulnerability index out of range")
     vuln = scan.vulnerabilities[idx]
     fp_map = _scan_fp_result_map(scan_id)
-    markdown = _vuln_report_markdown(idx, vuln, fp_map.get(idx))
+    validation_map = {item.vuln_index: item for item in scan.validations}
+    markdown = _vuln_report_markdown(idx, vuln, fp_map.get(idx), validation_map.get(idx))
     fname = f"vuln-{idx}-{_safe_filename_part(vuln.file)}_{vuln.line}.md"
     return Response(
         content=markdown,
@@ -1163,6 +1290,7 @@ async def _trigger_vulnerability_validation(
         store.update_scan_agent(scan_id, agent_id, meta.agent_name)
 
     now = _now_iso()
+    queued_output = "验证任务已提交到 Agent，等待本地脚本启动。"
     validation = store.upsert_vulnerability_validation(
         scan_id,
         VulnerabilityValidation(
@@ -1172,7 +1300,8 @@ async def _trigger_vulnerability_validation(
             running=True,
             product=meta.product,
             validation_environment=meta.validation_environment or _default_validation_environment(),
-            intermediate_output="验证任务已提交到 Agent，等待本地脚本启动。",
+            intermediate_output=queued_output,
+            output_sections=_validation_output_sections(queued_output, updated_at=now),
             started_at=now,
             updated_at=now,
         ),
@@ -1296,6 +1425,7 @@ async def download_report_zip(
     _check_scan_owner(scan_id, current_user)
     scan = await get_scan_status(scan_id, current_user)
     fp_map = _scan_fp_result_map(scan_id)
+    validation_map = {item.vuln_index: item for item in scan.validations}
 
     confirmed = [
         (i, v)
@@ -1311,7 +1441,7 @@ async def download_report_zip(
             for i, v in confirmed:
                 entry = f"vuln-{i}-{_safe_filename_part(v.file)}_{v.line}.md"
                 index_lines.append(f"- [{v.vuln_type} @ {v.file}:{v.line}]({entry})")
-                zf.writestr(entry, _vuln_report_markdown(i, v, fp_map.get(i)))
+                zf.writestr(entry, _vuln_report_markdown(i, v, fp_map.get(i), validation_map.get(i)))
             zf.writestr("README.md", "\n".join(index_lines) + "\n")
     buf.seek(0)
     return Response(
