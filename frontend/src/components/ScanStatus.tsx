@@ -1512,32 +1512,25 @@ function ProcessFlowNav({
           <FlowArrow label="进入" />
           <div className="flex-1 rounded-lg border border-slate-700 bg-slate-950/30 p-3">
             <div className="mb-3 flex items-center justify-between gap-3">
-              <div className="text-xs font-semibold uppercase tracking-wider text-slate-500">漏洞挖掘</div>
+              <div className="text-sm font-semibold text-slate-100">漏洞挖掘</div>
             </div>
             <div className="flex items-stretch gap-3">
-              <div className="w-[420px] rounded-lg border border-cyan-500/20 bg-cyan-500/5 p-3">
-                <FlowNodeButton node={nodes.static_analysis} onClick={onNodeClick} wide />
-                <div className="mt-3 flex items-center gap-2">
-                  <FlowNodeButton node={nodes.call_graph} onClick={onNodeClick} compact />
-                  <FlowArrow compact />
-                  <FlowNodeButton node={nodes.candidate_generation} onClick={onNodeClick} compact />
+              <div className="w-[420px] space-y-3">
+                <div className="rounded-lg border border-cyan-500/20 bg-cyan-500/5 p-3">
+                  <FlowNodeButton node={nodes.static_analysis} onClick={onNodeClick} wide />
+                  <div className="mt-3 flex items-center gap-2">
+                    <FlowNodeButton node={nodes.call_graph} onClick={onNodeClick} compact />
+                    <FlowArrow compact />
+                    <FlowNodeButton node={nodes.candidate_generation} onClick={onNodeClick} compact />
+                  </div>
+                </div>
+                <div className="flex justify-end">
+                  <FlowNodeButton node={nodes.fp_review} onClick={onNodeClick} compact />
                 </div>
               </div>
               <FlowArrow />
               <div className="flex items-center">
                 <FlowNodeButton node={nodes.candidate_audit} onClick={onNodeClick} />
-              </div>
-              <div className="flex w-[250px] flex-col justify-center gap-2">
-                <div className="flex items-center gap-2">
-                  <FlowArrow compact />
-                  <FlowNodeButton node={nodes.fp_review} onClick={onNodeClick} compact />
-                </div>
-                <div className="flex items-center gap-2">
-                  <FlowArrow compact />
-                  <div className="rounded-lg border border-purple-500/20 bg-purple-500/5 px-3 py-2 text-xs text-purple-200">
-                    正报进入漏洞验证
-                  </div>
-                </div>
               </div>
             </div>
           </div>
