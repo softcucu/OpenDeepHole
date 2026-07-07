@@ -1505,7 +1505,7 @@ function ProcessFlowNav({
       </div>
 
       <div className="overflow-x-auto rounded-xl border border-slate-700/50 bg-slate-900/35 p-2.5 shadow-inner">
-        <div className="flex w-max items-stretch gap-3">
+        <div className="mx-auto flex w-max items-stretch gap-3">
           <div className="flex items-center">
             <FlowNodeButton node={nodes.threat} onClick={onNodeClick} />
           </div>
