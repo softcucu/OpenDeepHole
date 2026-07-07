@@ -52,9 +52,18 @@ def test_inf_loop_uses_semgrep_json_file_after_timeout(tmp_path: Path) -> None:
 
 
 def test_resleak_cppcheck_output_uses_utf8_replace(tmp_path: Path) -> None:
+    (tmp_path / "sample.c").write_text("int main(void) { return 0; }\n", encoding="utf-8")
+    internal = tmp_path / ".opendeephole" / "opencode" / "generated.c"
+    internal.parent.mkdir(parents=True)
+    internal.write_text("int generated(void) { return 0; }\n", encoding="utf-8")
+
     def fake_run(cmd, **kwargs):
         assert kwargs["encoding"] == "utf-8"
         assert kwargs["errors"] == "replace"
+        file_list_arg = next(arg for arg in cmd if arg.startswith("--file-list="))
+        listed_files = Path(file_list_arg.split("=", 1)[1]).read_text(encoding="utf-8").splitlines()
+        assert listed_files == [(tmp_path / "sample.c").as_posix()]
+        assert str(tmp_path) not in cmd
         return CompletedProcess(cmd, 0, stdout="", stderr="<results><errors /></results>")
 
     with patch("checkers.resleak.analyzer.subprocess.run", side_effect=fake_run):

@@ -22,6 +22,7 @@ import tree_sitter_cpp
 from tree_sitter import Language
 
 from backend.analyzers.base import BaseAnalyzer, Candidate
+from backend.source_filter import iter_source_files
 
 if TYPE_CHECKING:
     from code_parser import CodeDatabase
@@ -956,14 +957,7 @@ _SKIP_DIRS = {
 
 
 def _collect_source_files(root: Path) -> list[Path]:
-    import os
-    files = []
-    for dirpath, dirnames, filenames in os.walk(root):
-        dirnames[:] = [d for d in dirnames if d not in _SKIP_DIRS]
-        for fname in filenames:
-            if Path(fname).suffix.lower() in _SOURCE_EXTS:
-                files.append(Path(dirpath) / fname)
-    return sorted(files)
+    return sorted(iter_source_files(root, _SOURCE_EXTS, skip_dirs=_SKIP_DIRS))
 
 
 # ============================================================

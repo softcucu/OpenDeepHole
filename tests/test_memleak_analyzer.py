@@ -1,12 +1,23 @@
 from pathlib import Path
 
-from checkers.memleak.analyzer import Analyzer
+from checkers.memleak.analyzer import Analyzer, _collect_source_files
 
 MEMLEAK_CASES_DIR = Path(__file__).parent / "test_data" / "memleak_cases"
 
 
 def _write_source(tmp_path: Path, content: str) -> None:
     (tmp_path / "sample.c").write_text(content, encoding="utf-8")
+
+
+def test_memleak_source_collection_excludes_project_opendeephole(tmp_path: Path) -> None:
+    _write_source(tmp_path, "int kept(void) { return 0; }\n")
+    internal = tmp_path / ".opendeephole" / "opencode" / "generated.c"
+    internal.parent.mkdir(parents=True)
+    internal.write_text("int generated(void) { return 0; }\n", encoding="utf-8")
+
+    assert [path.relative_to(tmp_path).as_posix() for path in _collect_source_files(tmp_path)] == [
+        "sample.c"
+    ]
 
 
 def test_memleak_candidates_are_grouped_by_function(tmp_path: Path) -> None:
@@ -35,8 +46,8 @@ void grouped(int mode) {
     assert candidate.file == "sample.c"
     assert candidate.function == "grouped"
     assert candidate.vuln_type == "memleak"
-    assert candidate.description.count("疑似内存泄漏点") == 1
-    assert "发现 2 个疑似内存泄漏点" in candidate.description
+    assert "共有 2 个待核实位置" in candidate.description
+    assert "相关线索" in candidate.description
     assert "1. 第" in candidate.description
     assert "2. 第" in candidate.description
     assert "release_buffer" in candidate.related_functions
@@ -69,7 +80,7 @@ void second(int flag) {
 
     assert len(candidates) == 2
     assert [candidate.function for candidate in candidates] == ["first", "second"]
-    assert all("发现 1 个疑似内存泄漏点" in c.description for c in candidates)
+    assert all("共有 1 个待核实位置" in c.description for c in candidates)
 
 
 def test_memleak_path_sensitive_cases_use_single_auditable_c_file() -> None:

@@ -31,6 +31,7 @@ import tree_sitter_cpp
 from tree_sitter import Language
 
 from backend.analyzers.base import BaseAnalyzer, Candidate
+from backend.source_filter import iter_source_files
 
 if TYPE_CHECKING:
     from code_parser import CodeDatabase
@@ -51,11 +52,7 @@ _SKIP_DIRS = {
 
 
 def _iter_sources(root: Path) -> Iterator[Path]:
-    for dirpath, dirnames, filenames in os.walk(root):
-        dirnames[:] = [d for d in dirnames if d not in _SKIP_DIRS]
-        for fname in filenames:
-            if Path(fname).suffix.lower() in _SRC_EXTS:
-                yield Path(dirpath) / fname
+    yield from iter_source_files(root, _SRC_EXTS, skip_dirs=_SKIP_DIRS)
 
 
 # ------------------------------------------------------------------ #
@@ -346,6 +343,10 @@ def _run_cppcheck(
     extra_lib_path: str | None = None,
 ) -> Iterator[tuple]:
     """运行 cppcheck，yield (rel_file, abs_file, line, symbol, eid, msg)。"""
+    source_files = sorted(_iter_sources(project_path))
+    if not source_files:
+        return
+
     libs = "posix,gnu,sqlite3"
     cmd = [
         bin_path,
@@ -359,19 +360,37 @@ def _run_cppcheck(
     ]
     if extra_lib_path:
         cmd.append(f"--library={extra_lib_path}")
-    cmd.append(str(project_path))
 
+    file_list = tempfile.NamedTemporaryFile(
+        mode="w",
+        suffix=".files",
+        delete=False,
+        prefix="resleak_cppcheck_",
+        encoding="utf-8",
+    )
     try:
-        proc = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=600,
-        )
-    except Exception:
-        return
+        try:
+            file_list.write("\n".join(path.as_posix() for path in source_files) + "\n")
+        finally:
+            file_list.close()
+        cmd.append(f"--file-list={file_list.name}")
+
+        try:
+            proc = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=600,
+            )
+        except Exception:
+            return
+    finally:
+        try:
+            os.unlink(file_list.name)
+        except OSError:
+            pass
 
     try:
         root = ET.fromstring(proc.stderr)

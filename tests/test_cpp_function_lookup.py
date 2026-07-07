@@ -640,6 +640,48 @@ int caller(void) {
         db.close()
 
 
+def test_code_index_excludes_project_opendeephole_directory(tmp_path: Path) -> None:
+    (tmp_path / "sample.cpp").write_text(
+        "int indexed(void) { return 0; }\n",
+        encoding="utf-8",
+    )
+    internal = tmp_path / ".opendeephole" / "opencode" / "generated.cpp"
+    internal.parent.mkdir(parents=True)
+    internal.write_text(
+        "int generated(void) { return 1; }\n",
+        encoding="utf-8",
+    )
+    entries = [
+        {
+            "_type": "tag",
+            "name": "indexed",
+            "path": "sample.cpp",
+            "line": 1,
+            "end": 1,
+            "kind": "function",
+            "signature": "(void)",
+        },
+    ]
+    seen_files: list[list[str]] = []
+    db = CodeDatabase(tmp_path / "code_index.db")
+    analyzer = CppAnalyzer(db)
+    analyzer._ensure_tools_available = lambda: None
+
+    def fake_ctags(_root, files, _work_dir):
+        seen_files.append([path.relative_to(tmp_path).as_posix() for path in files])
+        return entries
+
+    analyzer._run_ctags_json = fake_ctags
+
+    try:
+        analyzer.analyze_directory(tmp_path)
+        assert seen_files == [["sample.cpp"]]
+        assert db.get_index_stats()["files"] == 1
+        assert [row["name"] for row in db.get_all_functions()] == ["indexed"]
+    finally:
+        db.close()
+
+
 def test_normal_index_path_does_not_start_cscope(
     tmp_path: Path,
     monkeypatch,

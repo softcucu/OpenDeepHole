@@ -7,7 +7,6 @@ opencode skill because static filtering cannot prove it reliably.
 
 from __future__ import annotations
 
-import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -17,6 +16,7 @@ import tree_sitter_cpp
 from tree_sitter import Language, Node, Parser
 
 from backend.analyzers.base import BaseAnalyzer, Candidate, in_scope as _in_scope, scope_prefix as _scope_prefix
+from backend.source_filter import iter_source_files
 
 if TYPE_CHECKING:
     from code_parser import CodeDatabase
@@ -234,13 +234,7 @@ def _walk(node: Node) -> Iterator[Node]:
 
 
 def _collect_source_files(project_path: Path) -> list[Path]:
-    files: list[Path] = []
-    for dirpath, dirnames, filenames in os.walk(project_path):
-        dirnames[:] = [d for d in dirnames if d not in _SKIP_DIRS]
-        for fname in filenames:
-            if Path(fname).suffix.lower() in _C_CPP_EXTS:
-                files.append(Path(dirpath) / fname)
-    return sorted(files)
+    return sorted(iter_source_files(project_path, _C_CPP_EXTS, skip_dirs=_SKIP_DIRS))
 
 
 def _first_named_child(node: Node, types: Iterable[str]) -> Node | None:

@@ -10,10 +10,16 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from backend.logger import get_logger
+from backend.source_filter import OP_DEEP_HOLE_DIR
 
 _log = get_logger(__name__)
 
 DEFAULT_SEMGREP_TIMEOUT_SECONDS = 15 * 60
+SEMGREP_INTERNAL_EXCLUDES = (
+    OP_DEEP_HOLE_DIR,
+    f"{OP_DEEP_HOLE_DIR}/**",
+    f"**/{OP_DEEP_HOLE_DIR}/**",
+)
 
 
 @dataclass(frozen=True)
@@ -68,8 +74,10 @@ def run_semgrep(
             "--metrics=off",
             "--disable-version-check",
             "--no-autofix",
-            str(project_path),
         ]
+        for pattern in SEMGREP_INTERNAL_EXCLUDES:
+            cmd.extend(["--exclude", pattern])
+        cmd.append(str(project_path))
         env = os.environ.copy()
         env["PYTHONUTF8"] = "1"
         env["PYTHONIOENCODING"] = "utf-8"

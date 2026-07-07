@@ -3,7 +3,7 @@ from pathlib import Path
 from subprocess import CompletedProcess, TimeoutExpired
 from unittest.mock import patch
 
-from backend.analyzers.semgrep_runner import run_semgrep
+from backend.analyzers.semgrep_runner import SEMGREP_INTERNAL_EXCLUDES, run_semgrep
 
 
 def test_semgrep_runner_sets_noninteractive_env(tmp_path: Path) -> None:
@@ -15,6 +15,12 @@ def test_semgrep_runner_sets_noninteractive_env(tmp_path: Path) -> None:
         assert "--metrics=off" in cmd
         assert "--disable-version-check" in cmd
         assert "--no-autofix" in cmd
+        exclude_values = [
+            cmd[index + 1]
+            for index, value in enumerate(cmd)
+            if value == "--exclude"
+        ]
+        assert exclude_values == list(SEMGREP_INTERNAL_EXCLUDES)
         assert kwargs["stdin"] == subprocess.DEVNULL
         assert kwargs["env"]["PYTHONUTF8"] == "1"
         assert kwargs["env"]["PYTHONIOENCODING"] == "utf-8"

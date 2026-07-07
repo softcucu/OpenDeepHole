@@ -19,6 +19,7 @@ from agent.reporter import Reporter
 from backend.checker_sync import unpack_checker_packages
 from backend.models import Candidate, FeedbackEntry, ScanEvent, ThreatAnalysis, Vulnerability
 from backend.registry import CHECKERS_DIR_ENV
+from backend.source_filter import source_path_has_ignored_dir
 
 
 FunctionSourceSnapshot = tuple[str, int | None]
@@ -615,9 +616,18 @@ def _normalize_candidate_for_project(
 
 
 def _candidate_in_scan_scope(candidate: Candidate, project_root: Path, scan_root: Path) -> bool:
+    resolved = _resolve_candidate_path(candidate.file, project_root, scan_root)
+    if resolved is not None:
+        try:
+            if source_path_has_ignored_dir(resolved.relative_to(project_root)):
+                return False
+        except ValueError:
+            pass
+    elif source_path_has_ignored_dir(candidate.file):
+        return False
+
     if scan_root == project_root:
         return True
-    resolved = _resolve_candidate_path(candidate.file, project_root, scan_root)
     if resolved is None:
         return candidate.file.replace("\\", "/").startswith(
             scan_root.relative_to(project_root).as_posix().rstrip("/") + "/"

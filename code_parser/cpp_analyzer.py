@@ -10,7 +10,6 @@ longer invokes cscope.
 from __future__ import annotations
 
 import json
-import os
 import re
 import shutil
 import subprocess
@@ -22,6 +21,8 @@ from typing import Callable
 
 import tree_sitter_cpp
 from tree_sitter import Language, Node, Parser
+
+from backend.source_filter import iter_source_files
 
 from .code_database import CodeDatabase
 
@@ -973,19 +974,12 @@ class CppAnalyzer:
 
     @staticmethod
     def _collect_source_files(directory: Path) -> list[Path]:
-        files: list[Path] = []
-        for dirpath, dirnames, filenames in os.walk(directory):
-            dirnames[:] = [
-                d
-                for d in dirnames
-                if d not in _SKIP_DIRS
-                and not d.startswith(_SKIP_DIR_PREFIXES)
-            ]
-            for fname in filenames:
-                path = Path(dirpath) / fname
-                if path.suffix in _C_CPP_EXTS:
-                    files.append(path)
-        return sorted(files)
+        return sorted(iter_source_files(
+            directory,
+            _C_CPP_EXTS,
+            skip_dirs=_SKIP_DIRS,
+            skip_prefixes=_SKIP_DIR_PREFIXES,
+        ))
 
     @staticmethod
     def _relative_path(project_root: Path, filepath: Path) -> str:

@@ -1,10 +1,21 @@
 from pathlib import Path
 
-from checkers.multi_ptr_leak2.analyzer import Analyzer
+from checkers.multi_ptr_leak2.analyzer import Analyzer, _collect_source_files
 
 
 def _write_source(tmp_path: Path, content: str, name: str = "sample.c") -> None:
     (tmp_path / name).write_text(content, encoding="utf-8")
+
+
+def test_multi_ptr_leak2_source_collection_excludes_project_opendeephole(tmp_path: Path) -> None:
+    _write_source(tmp_path, "int kept(void) { return 0; }\n")
+    internal = tmp_path / ".opendeephole" / "opencode" / "generated.c"
+    internal.parent.mkdir(parents=True)
+    internal.write_text("int generated(void) { return 0; }\n", encoding="utf-8")
+
+    assert [path.relative_to(tmp_path).as_posix() for path in _collect_source_files(tmp_path)] == [
+        "sample.c"
+    ]
 
 
 def test_multi_ptr_leak2_detects_outer_struct_free(tmp_path: Path) -> None:
@@ -256,7 +267,7 @@ void caller(Packet *pkt) {
     assert len(method_candidates) == 1
     candidate = method_candidates[0]
     assert "调用形式: method_call" in candidate.description
-    assert "静态分析实参: receiver" in candidate.description
+    assert "释放实参: receiver" in candidate.description
     assert "receiver: pkt" in candidate.description
     assert "结构体: Packet" in candidate.description
 
@@ -284,7 +295,7 @@ void use(Pool *pool, Resource *res) {
     assert len(candidates) == 1
     candidate = candidates[0]
     assert "调用形式: method_call" in candidate.description
-    assert "静态分析实参: first_argument" in candidate.description
+    assert "释放实参: first_argument" in candidate.description
     assert "receiver: pool" in candidate.description
     assert "结构体: Resource" in candidate.description
 
@@ -335,7 +346,7 @@ void use(Packet *pkt) {
     candidates = list(Analyzer().find_candidates(tmp_path))
     assert len(candidates) == 1
     candidate = candidates[0]
-    assert "静态分析实参: receiver" in candidate.description
+    assert "释放实参: receiver" in candidate.description
     assert "receiver: pkt" in candidate.description
 
 
@@ -440,9 +451,9 @@ void destroy_packet(Packet *pkt) {
     candidates = list(Analyzer().find_candidates(tmp_path))
     assert len(candidates) == 1
     candidate = candidates[0]
-    assert "释放调用命中关键字: free" in candidate.description
+    assert "释放调用: free(pkt)" in candidate.description
     assert "调用形式: function_call" in candidate.description
-    assert "静态分析实参: first_argument" in candidate.description
+    assert "释放实参: first_argument" in candidate.description
 
 
 def test_multi_ptr_leak2_reports_correct_line_in_nested_if_for(tmp_path: Path) -> None:

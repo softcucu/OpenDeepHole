@@ -124,6 +124,51 @@ class AgentScanPathTests(unittest.TestCase):
 
             self.assertFalse(_candidate_in_scan_scope(candidate, project.resolve(), scan_dir.resolve()))
 
+    def test_candidate_scope_filter_excludes_project_opendeephole_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp) / "project"
+            internal_source = project / ".opendeephole" / "opencode" / "generated.c"
+            internal_source.parent.mkdir(parents=True)
+            internal_source.write_text("int generated(void) { return 1; }\n", encoding="utf-8")
+            candidate = Candidate(
+                file=".opendeephole/opencode/generated.c",
+                line=1,
+                function="generated",
+                description="candidate",
+                vuln_type="npd",
+            )
+
+            self.assertFalse(
+                _candidate_in_scan_scope(
+                    candidate,
+                    project.resolve(),
+                    project.resolve(),
+                )
+            )
+
+    def test_candidate_scope_filter_excludes_when_scan_root_is_opendeephole(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp) / "project"
+            scan_dir = project / ".opendeephole"
+            source = scan_dir / "generated.c"
+            source.parent.mkdir(parents=True)
+            source.write_text("int generated(void) { return 1; }\n", encoding="utf-8")
+            candidate = Candidate(
+                file="generated.c",
+                line=1,
+                function="generated",
+                description="candidate",
+                vuln_type="npd",
+            )
+
+            self.assertFalse(
+                _candidate_in_scan_scope(
+                    candidate,
+                    project.resolve(),
+                    scan_dir.resolve(),
+                )
+            )
+
     def test_project_level_candidate_represents_code_scan_path(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             project = Path(tmp) / "project"
