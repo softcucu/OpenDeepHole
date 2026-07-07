@@ -173,7 +173,7 @@ if return_code != 0:
 - `timeout` 是单条命令超时。整体验证仍受 `ctx.timeout_seconds` 限制。
 - 命令超时时返回 `124`。
 - `nga`、`opencode`、`claude`、`hac` 找不到时返回 `127`，并把当前 PATH 和处理建议写入中间产物。
-- 用户停止验证时，运行器会终止正在执行的子进程，并返回负数退出码或已结束进程的退出码。
+- 用户停止验证时，运行器会终止正在执行的命令进程树，并返回负数退出码或已结束进程的退出码。
 
 ### `ctx.cancelled()`
 
@@ -192,7 +192,7 @@ for item in work_items:
     run_one_step(item)
 ```
 
-外部命令优先通过 `ctx.run_command(...)` 执行，因为它已经处理了停止和超时。
+外部命令优先通过 `ctx.run_command(...)` 执行，因为它已经处理了停止和超时。整体验证运行在独立 worker 进程中；用户点击停止或整体验证超时时，Agent 会在 Linux 上终止 worker 进程组，在 Windows 上通过 `taskkill /T /F` 终止 worker 进程树，覆盖验证函数直接启动的普通子进程。脚本如果主动 daemonize、脱离当前进程树或复用外部既有服务，运行器只做 best-effort，不会按进程名清理可能属于其它任务的无关进程。
 
 ## 返回结果
 
