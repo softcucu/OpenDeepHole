@@ -1,4 +1,3 @@
-import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -6,6 +5,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from backend.models import Candidate
+from backend.opencode.submit_sink import record_submission
 from backend.opencode.runner import _read_sensitive_clear_audit_result, _sensitive_clear_prompt
 from checkers.sensitive_clear.analyzer import Analyzer
 
@@ -116,12 +116,11 @@ class SensitiveClearFunctionTests(unittest.TestCase):
             "sensitive-variable-clear-check",
             _candidate(),
             "project-1",
-            "result-sensitive",
         )
 
         self.assertIn("`src/auth.c` 文件中的 `login` 函数敏感信息未清0问题", prompt)
         self.assertIn("project_id: `project-1`", prompt)
-        self.assertIn("result-sensitive", prompt)
+        self.assertNotIn("result_id", prompt)
         self.assertNotIn("初始提示词只提供函数名", prompt)
         self.assertNotIn("Markdown", prompt)
         self.assertNotIn("password", prompt)
@@ -131,26 +130,21 @@ class SensitiveClearFunctionTests(unittest.TestCase):
     def test_sensitive_clear_result_stores_markdown_in_vulnerability_entry_only(self) -> None:
         candidate = _candidate()
         with tempfile.TemporaryDirectory() as tmp:
-            result_id = "result-sensitive"
-            Path(tmp, f"{result_id}.json").write_text(
-                json.dumps(
-                    {
-                        "confirmed": True,
-                        "severity": "high",
-                        "description": "login leaves password uncleared",
-                        "file": "src/auth.c",
-                        "line": 25,
-                        "function": "login",
-                        "ai_analysis": MARKDOWN_ANALYSIS,
-                    },
-                    ensure_ascii=False,
-                ),
-                encoding="utf-8",
-            )
+            session_id = "session-sensitive"
+            payload = {
+                "confirmed": True,
+                "severity": "high",
+                "description": "login leaves password uncleared",
+                "file": "src/auth.c",
+                "line": 25,
+                "function": "login",
+                "ai_analysis": MARKDOWN_ANALYSIS,
+            }
 
             fake_config = SimpleNamespace(storage=SimpleNamespace(scans_dir=tmp))
-            with patch("backend.opencode.runner.get_config", return_value=fake_config):
-                result = _read_sensitive_clear_audit_result(result_id, candidate)
+            with patch("backend.opencode.submit_sink.get_config", return_value=fake_config):
+                record_submission(session_id, "submit_result", payload)
+                result = _read_sensitive_clear_audit_result(session_id, candidate)
 
         self.assertIsNotNone(result)
         self.assertTrue(result.complete)
@@ -164,23 +158,18 @@ class SensitiveClearFunctionTests(unittest.TestCase):
     def test_sensitive_clear_result_accepts_single_false_markdown_result(self) -> None:
         candidate = _candidate()
         with tempfile.TemporaryDirectory() as tmp:
-            result_id = "result-sensitive"
-            Path(tmp, f"{result_id}.json").write_text(
-                json.dumps(
-                    {
-                        "confirmed": False,
-                        "severity": "low",
-                        "description": "login clears all sensitive data",
-                        "ai_analysis": MARKDOWN_ANALYSIS.replace("confirmed=true", "confirmed=false"),
-                    },
-                    ensure_ascii=False,
-                ),
-                encoding="utf-8",
-            )
+            session_id = "session-sensitive"
+            payload = {
+                "confirmed": False,
+                "severity": "low",
+                "description": "login clears all sensitive data",
+                "ai_analysis": MARKDOWN_ANALYSIS.replace("confirmed=true", "confirmed=false"),
+            }
 
             fake_config = SimpleNamespace(storage=SimpleNamespace(scans_dir=tmp))
-            with patch("backend.opencode.runner.get_config", return_value=fake_config):
-                result = _read_sensitive_clear_audit_result(result_id, candidate)
+            with patch("backend.opencode.submit_sink.get_config", return_value=fake_config):
+                record_submission(session_id, "submit_result", payload)
+                result = _read_sensitive_clear_audit_result(session_id, candidate)
 
         self.assertIsNotNone(result)
         self.assertTrue(result.complete)
@@ -193,33 +182,23 @@ class SensitiveClearFunctionTests(unittest.TestCase):
     def test_sensitive_clear_result_rejects_multiple_submit_results(self) -> None:
         candidate = _candidate()
         with tempfile.TemporaryDirectory() as tmp:
-            result_id = "result-sensitive"
-            Path(tmp, f"{result_id}.json").write_text(
-                json.dumps(
-                    {
-                        "results": [
-                            {
-                                "confirmed": False,
-                                "severity": "low",
-                                "description": "first",
-                                "ai_analysis": MARKDOWN_ANALYSIS,
-                            },
-                            {
-                                "confirmed": False,
-                                "severity": "low",
-                                "description": "second",
-                                "ai_analysis": MARKDOWN_ANALYSIS,
-                            },
-                        ]
-                    },
-                    ensure_ascii=False,
-                ),
-                encoding="utf-8",
-            )
+            session_id = "session-sensitive"
 
             fake_config = SimpleNamespace(storage=SimpleNamespace(scans_dir=tmp))
-            with patch("backend.opencode.runner.get_config", return_value=fake_config):
-                result = _read_sensitive_clear_audit_result(result_id, candidate)
+            with patch("backend.opencode.submit_sink.get_config", return_value=fake_config):
+                record_submission(session_id, "submit_result", {
+                    "confirmed": False,
+                    "severity": "low",
+                    "description": "first",
+                    "ai_analysis": MARKDOWN_ANALYSIS,
+                })
+                record_submission(session_id, "submit_result", {
+                    "confirmed": False,
+                    "severity": "low",
+                    "description": "second",
+                    "ai_analysis": MARKDOWN_ANALYSIS,
+                })
+                result = _read_sensitive_clear_audit_result(session_id, candidate)
 
         self.assertIsNone(result)
 

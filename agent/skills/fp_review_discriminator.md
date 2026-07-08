@@ -29,7 +29,7 @@ compatibility: opencode
 - `prove-bug.md` 的文件路径
 - `prove-bug` 给出的结构化阶段摘要
 - 部分上下文代码
-- project_id 和 result_id
+- project_id
 
 你必须先读取提示中给出的 `prove-bug.md` 文件，再主动阅读代码寻找反证。不要直接接受 `prove-bug` 的结论。
 
@@ -182,7 +182,6 @@ for (...; byteNum != 0; byteNum -= contentLen, loop++) {
 
 调用 `submit_result`，提供：
 
-- `result_id`：提示中给出的 ID，原样传入
 - `confirmed`：
   - `false`：已证明非问题
   - `true`：未能证明非问题，仍保留真实代码问题

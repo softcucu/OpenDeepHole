@@ -71,7 +71,7 @@ class AgentFeedbackTests(unittest.TestCase):
 
     def test_fp_review_final_judge_false_as_fp(self) -> None:
         final_judge = fp_reviewer._FpStageResult(
-            result_id="final",
+            session_id="final",
             result=Vulnerability(
                 file="a.c",
                 line=10,
@@ -94,7 +94,7 @@ class AgentFeedbackTests(unittest.TestCase):
         # 二元定级：confirmed 但非外部可触发（severity!=high）一律归一为 low，
         # 报告仍需保留（confirmed=true）。
         final_judge = fp_reviewer._FpStageResult(
-            result_id="final",
+            session_id="final",
             result=Vulnerability(
                 file="a.c",
                 line=10,
@@ -116,7 +116,7 @@ class AgentFeedbackTests(unittest.TestCase):
 
     def test_fp_review_final_judge_high_preserved(self) -> None:
         final_judge = fp_reviewer._FpStageResult(
-            result_id="final",
+            session_id="final",
             result=Vulnerability(
                 file="a.c",
                 line=10,
@@ -190,7 +190,7 @@ class AgentFeedbackTests(unittest.TestCase):
                     patch.object(fp_reviewer, "_cleanup_fp_workspace"),
                     patch("backend.config.get_config", return_value=SimpleNamespace()),
                     patch("backend.opencode.runner._invoke_opencode", new=invoke),
-                    patch("backend.opencode.runner._read_result", return_value=None),
+                    patch("backend.opencode.runner._read_result_from_source", return_value=None),
                 ):
                     await fp_reviewer.run_fp_review(
                         config=config,
@@ -286,7 +286,10 @@ class AgentFeedbackTests(unittest.TestCase):
                     patch.object(fp_reviewer, "_cleanup_fp_workspace"),
                     patch("backend.config.get_config", return_value=SimpleNamespace()),
                     patch("backend.opencode.runner._invoke_opencode", new=invoke),
-                    patch("backend.opencode.runner._read_result", side_effect=[prove_bug_result, prove_bug_result, None]),
+                    patch(
+                        "backend.opencode.runner._read_result_from_source",
+                        side_effect=[prove_bug_result, prove_bug_result, None],
+                    ),
                 ):
                     await fp_reviewer.run_fp_review(
                         config=config,
@@ -380,7 +383,7 @@ class AgentFeedbackTests(unittest.TestCase):
                     patch.object(fp_reviewer, "_cleanup_fp_workspace"),
                     patch("backend.config.get_config", return_value=SimpleNamespace()),
                     patch("backend.opencode.runner._invoke_opencode", new=invoke),
-                    patch("backend.opencode.runner._read_result", return_value=prove_bug_result),
+                    patch("backend.opencode.runner._read_result_from_source", return_value=prove_bug_result),
                 ):
                     await fp_reviewer.run_fp_review(
                         config=config,

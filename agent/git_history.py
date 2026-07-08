@@ -122,7 +122,7 @@ def _ensure_skill(workspace: Path) -> None:
     )
 
 
-def _build_prompt(commit: _Commit, diff: str, result_id: str) -> str:
+def _build_prompt(commit: _Commit, diff: str) -> str:
     return (
         "你在对一份 C/C++ 源码树做白盒漏洞挖掘的**历史问题模式挖掘**子任务"
         "——只分析**一条 git 提交**。\n"
@@ -139,7 +139,7 @@ def _build_prompt(commit: _Commit, diff: str, result_id: str) -> str:
         "标注最相关的 lens_hint（memory/integer/race/injection/authn/crypto/dos/infoleak）、涉及文件，"
         "并在 rationale 里简述改动要点与判定理由。\n"
         "(3) 若不相关：security_related=false 即可，其它字段可留空。\n\n"
-        f"分析完成后，你**必须**使用 result_id `{result_id}` 调用 `submit_history_pattern` MCP 工具提交结论。"
+        "分析完成后，你**必须**调用 `submit_history_pattern` MCP 工具提交结论。"
     )
 
 
@@ -157,7 +157,11 @@ async def mine_history(
 
     返回去重后的 HistoryPattern 列表。非 git 仓库或无提交时返回 []。
     """
-    from backend.opencode.runner import _invoke_opencode, _read_result_file
+    from backend.opencode.runner import (
+        _invoke_opencode,
+        _read_session_result_file,
+        _session_id_from_output_source,
+    )
     from backend.opencode.model_pool import total_model_capacity
 
     gh = config.git_history
@@ -196,9 +200,15 @@ async def mine_history(
         if cancel_event is not None and cancel_event.is_set():
             return
         diff = await asyncio.to_thread(_commit_diff, project_path, commit.hash)
-        result_id = uuid4().hex
-        prompt = _build_prompt(commit, diff, result_id)
-        log_path = scan_dir / f"git_history_{commit.hash[:10]}_{result_id}.log"
+        attempt_id = uuid4().hex
+        prompt = _build_prompt(commit, diff)
+        log_path = scan_dir / f"git_history_{commit.hash[:10]}_{attempt_id}.log"
+        attempt_source = None
+
+        def capture_source(source) -> None:
+            nonlocal attempt_source
+            attempt_source = source
+
         fake_candidate = Candidate(
             file="", line=0, function="", description=commit.subject,
             vuln_type="git_history",
@@ -215,6 +225,7 @@ async def mine_history(
                 project_dir=project_path,
                 model_capability="any",
                 stats_scope_id=scan_id,
+                on_invocation_metadata=capture_source,
             )
         except asyncio.CancelledError:
             raise
@@ -227,11 +238,11 @@ async def mine_history(
             except Exception:
                 pass
 
-        payload = _read_result_file(result_id, fake_candidate)
-        try:
-            (scan_dir / f"{result_id}.json").unlink(missing_ok=True)
-        except Exception:
-            pass
+        payload = _read_session_result_file(
+            _session_id_from_output_source(attempt_source),
+            fake_candidate,
+            tool_name="submit_history_pattern",
+        )
 
         async with lock:
             processed += 1

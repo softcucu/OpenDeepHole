@@ -16,7 +16,7 @@ by analyzing the code in depth.
 
 ## Available Tools
 
-- `submit_result(result_id, confirmed, severity, description, ai_analysis)` — **Submit your final result (required)**
+- `submit_result(confirmed, severity, description, ai_analysis)` — **Submit your final result (required)**
 
 ## Analysis Steps
 
@@ -48,7 +48,6 @@ by analyzing the code in depth.
 
 When you have completed your analysis, you **MUST** call the `submit_result` tool with:
 
-- `result_id`: the value provided in the prompt (do not change it)
 - `confirmed`: `true` if this is a real vulnerability, `false` if it is a false positive
 - `severity`: `"high"`, `"medium"`, or `"low"` (only meaningful when confirmed is true)
 - `description`: one-line summary of the finding

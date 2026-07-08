@@ -11,7 +11,7 @@ description: 验证循环中变化索引、循环累加指针或 copy_from_user 
 
 ## 可用工具
 
-- `submit_result(result_id, confirmed, severity, description, ai_analysis)` - 审计完成后必须调用
+- `submit_result(confirmed, severity, description, ai_analysis)` - 审计完成后必须调用
 
 ## 审计流程
 

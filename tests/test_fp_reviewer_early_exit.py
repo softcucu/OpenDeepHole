@@ -1,4 +1,5 @@
 import asyncio
+import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -21,7 +22,7 @@ def _make_reporter() -> SimpleNamespace:
 
 def _stage_result(confirmed: bool) -> _FpStageResult:
     return _FpStageResult(
-        result_id="rid",
+        session_id="sid",
         result=SimpleNamespace(
             confirmed=confirmed,
             severity="low",
@@ -51,22 +52,24 @@ class FpReviewerEarlyExitTests(unittest.TestCase):
             "ai_analysis": "analysis",
         }]
 
-        with (
-            patch("agent.mcp_registry.lookup", return_value=(12345, "active-scan")),
-            patch.object(fp_reviewer, "_create_fp_workspace", side_effect=lambda p, *a, **k: Path(p)),
-            patch.object(fp_reviewer, "_cleanup_fp_workspace"),
-            patch.object(fp_reviewer, "_run_fp_review_stage", stage_mock),
-            patch.object(fp_reviewer, "effective_fp_review_cli_config", return_value=cli_config),
-            patch("backend.opencode.model_pool.total_model_capacity", return_value=1),
-        ):
-            asyncio.run(fp_reviewer.run_fp_review(
-                config=config,
-                reporter=reporter,
-                scan_id="scan-1",
-                review_id="review-early-exit-test",
-                project_path="/tmp/does-not-matter",
-                vulnerabilities=vulnerabilities,
-            ))
+        with tempfile.TemporaryDirectory() as tmp:
+            with (
+                patch("agent.fp_reviewer.Path.home", return_value=Path(tmp)),
+                patch("agent.mcp_registry.lookup", return_value=(12345, "active-scan")),
+                patch.object(fp_reviewer, "_create_fp_workspace", side_effect=lambda p, *a, **k: Path(p)),
+                patch.object(fp_reviewer, "_cleanup_fp_workspace"),
+                patch.object(fp_reviewer, "_run_fp_review_stage", stage_mock),
+                patch.object(fp_reviewer, "effective_fp_review_cli_config", return_value=cli_config),
+                patch("backend.opencode.model_pool.total_model_capacity", return_value=1),
+            ):
+                asyncio.run(fp_reviewer.run_fp_review(
+                    config=config,
+                    reporter=reporter,
+                    scan_id="scan-1",
+                    review_id="review-early-exit-test",
+                    project_path="/tmp/does-not-matter",
+                    vulnerabilities=vulnerabilities,
+                ))
 
         # Only the prove_bug stage ran — prove_fp and final_judge were skipped.
         self.assertEqual(stage_mock.await_count, 1)
@@ -99,22 +102,24 @@ class FpReviewerEarlyExitTests(unittest.TestCase):
             "ai_analysis": "analysis",
         }]
 
-        with (
-            patch("agent.mcp_registry.lookup", return_value=(12345, "active-scan")),
-            patch.object(fp_reviewer, "_create_fp_workspace", side_effect=lambda p, *a, **k: Path(p)),
-            patch.object(fp_reviewer, "_cleanup_fp_workspace"),
-            patch.object(fp_reviewer, "_run_fp_review_stage", stage_mock),
-            patch.object(fp_reviewer, "effective_fp_review_cli_config", return_value=cli_config),
-            patch("backend.opencode.model_pool.total_model_capacity", return_value=1),
-        ):
-            asyncio.run(fp_reviewer.run_fp_review(
-                config=config,
-                reporter=reporter,
-                scan_id="scan-1",
-                review_id="review-full-stages-test",
-                project_path="/tmp/does-not-matter",
-                vulnerabilities=vulnerabilities,
-            ))
+        with tempfile.TemporaryDirectory() as tmp:
+            with (
+                patch("agent.fp_reviewer.Path.home", return_value=Path(tmp)),
+                patch("agent.mcp_registry.lookup", return_value=(12345, "active-scan")),
+                patch.object(fp_reviewer, "_create_fp_workspace", side_effect=lambda p, *a, **k: Path(p)),
+                patch.object(fp_reviewer, "_cleanup_fp_workspace"),
+                patch.object(fp_reviewer, "_run_fp_review_stage", stage_mock),
+                patch.object(fp_reviewer, "effective_fp_review_cli_config", return_value=cli_config),
+                patch("backend.opencode.model_pool.total_model_capacity", return_value=1),
+            ):
+                asyncio.run(fp_reviewer.run_fp_review(
+                    config=config,
+                    reporter=reporter,
+                    scan_id="scan-1",
+                    review_id="review-full-stages-test",
+                    project_path="/tmp/does-not-matter",
+                    vulnerabilities=vulnerabilities,
+                ))
 
         self.assertEqual(stage_mock.await_count, 3)
         stages = [call.kwargs["stage"] for call in stage_mock.await_args_list]

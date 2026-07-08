@@ -7,7 +7,7 @@ import json
 import os
 from pathlib import Path
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server.fastmcp import Context, FastMCP
 
 # 按 DB 路径缓存连接，MCP Server 是长驻进程，避免每次重新打开
 _db_cache: dict[str, tuple[object, tuple[int, int, int, int]]] = {}
@@ -194,6 +194,47 @@ def _append_result_payload(result_path: Path, payload: dict) -> None:
     else:
         data = payload
     result_path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+
+
+def _opencode_session_from_context(ctx: Context | None) -> str:
+    if ctx is None:
+        return ""
+    try:
+        request_context = ctx.request_context
+    except Exception:
+        return ""
+    candidates = [
+        getattr(request_context, "request", None),
+        getattr(getattr(request_context, "experimental", None), "request", None),
+        getattr(request_context, "meta", None),
+    ]
+    for name in ("x-opencode-session", "x-opencode-session-id", "x-opencode-sessionid"):
+        for source in candidates:
+            headers = getattr(source, "headers", None)
+            if headers is None and isinstance(source, dict):
+                headers = source.get("headers")
+            if headers is None:
+                continue
+            try:
+                value = headers.get(name)
+            except Exception:
+                value = None
+            if value:
+                return str(value).strip()
+    return ""
+
+
+def _submit_payload(tool_name: str, ctx: Context | None, payload: dict) -> tuple[bool, str]:
+    session_id = _opencode_session_from_context(ctx)
+    if not session_id:
+        return False, "无法提交结果：MCP 请求缺少 x-opencode-session，无法判断 OpenCode session。"
+    try:
+        from backend.opencode.submit_sink import record_submission
+
+        seq = record_submission(session_id, tool_name, payload)
+    except Exception as exc:
+        return False, f"无法提交结果：保存 {tool_name} 结果失败：{exc}"
+    return True, f"结果已提交（session_id={session_id}, tool={tool_name}, seq={seq}）。"
 
 
 def register_tools(mcp: FastMCP, project_dir: Path | str | None = None) -> None:
@@ -393,7 +434,6 @@ def register_tools(mcp: FastMCP, project_dir: Path | str | None = None) -> None:
 
     @mcp.tool()
     def submit_result(
-        result_id: str,
         confirmed: bool,
         severity: str,
         description: str,
@@ -402,12 +442,12 @@ def register_tools(mcp: FastMCP, project_dir: Path | str | None = None) -> None:
         file: str = "",
         line: int = 0,
         function: str = "",
+        ctx: Context | None = None,
     ) -> str:
         """
         提交本次漏洞分析的最终结论。分析完成后必须调用此工具，否则结果将丢失。
 
         参数：
-            result_id: 分析任务标识符（以 "result-" 开头，由分析提示中提供，原样传入，不要修改）。
             confirmed: 是否存在真实漏洞。true 表示确认漏洞，false 表示误报。
             severity: 严重程度，可选值为 "high"、"medium"、"low"（仅 confirmed=true 时有意义）。
             description: 漏洞的一句话摘要。
@@ -420,47 +460,38 @@ def register_tools(mcp: FastMCP, project_dir: Path | str | None = None) -> None:
         返回：
             提交成功的确认消息。
         """
+        payload = {
+            "confirmed": confirmed,
+            "severity": severity,
+            "description": description,
+            "ai_analysis": ai_analysis,
+            "vulnerability_report": vulnerability_report,
+            "file": file,
+            "line": line,
+            "function": function,
+        }
+        session_id = _opencode_session_from_context(ctx)
         _mcp_log_call("submit_result", _json_preview({
-            "result_id": result_id,
-            "confirmed": confirmed,
-            "severity": severity,
-            "description": description,
-            "ai_analysis": ai_analysis,
-            "vulnerability_report": vulnerability_report,
-            "file": file,
-            "line": line,
-            "function": function,
+            "session_id": session_id,
+            **payload,
         }))
-        scans_dir = _get_config().storage.scans_dir
-        result_path = Path(scans_dir) / f"{result_id}.json"
-        result_path.parent.mkdir(parents=True, exist_ok=True)
-        _append_result_payload(result_path, {
-            "confirmed": confirmed,
-            "severity": severity,
-            "description": description,
-            "ai_analysis": ai_analysis,
-            "vulnerability_report": vulnerability_report,
-            "file": file,
-            "line": line,
-            "function": function,
-        })
-        _mcp_log_return("submit_result", f"saved -> {result_path}")
-        return f"结果已提交（result_id={result_id}）。"
+        ok, message = _submit_payload("submit_result", ctx, payload)
+        _mcp_log_return("submit_result", message)
+        return message
 
     @mcp.tool()
     def submit_history_pattern(
-        result_id: str,
         security_related: bool,
         pattern: str = "",
         lens_hint: str = "",
         files: str = "",
         rationale: str = "",
+        ctx: Context | None = None,
     ) -> str:
         """
         提交一条 git 历史提交的安全问题模式判定结论。分析完单条提交后必须调用此工具。
 
         参数：
-            result_id: 分析任务标识符（由分析提示中提供，原样传入，不要修改）。
             security_related: 该提交是否是一次安全修复。
             pattern: 若相关，提炼出的可复用问题模式（根因 + 缺陷类型 + 触发条件的抽象描述，不要只抄提交标题）。
             lens_hint: 安全视角，可选值 memory/integer/race/injection/authn/crypto/dos/infoleak。
@@ -470,44 +501,42 @@ def register_tools(mcp: FastMCP, project_dir: Path | str | None = None) -> None:
         返回：
             提交成功的确认消息。
         """
-        _mcp_log_call("submit_history_pattern", _json_preview({
-            "result_id": result_id,
-            "security_related": security_related,
-            "pattern": pattern,
-            "lens_hint": lens_hint,
-            "files": files,
-            "rationale": rationale,
-        }))
-        scans_dir = _get_config().storage.scans_dir
-        result_path = Path(scans_dir) / f"{result_id}.json"
-        result_path.parent.mkdir(parents=True, exist_ok=True)
         file_list = [s.strip() for s in str(files or "").replace("\n", ",").split(",") if s.strip()]
-        result_path.write_text(json.dumps({
+        payload = {
             "kind": "history_pattern",
             "security_related": bool(security_related),
             "pattern": pattern,
             "lens_hint": lens_hint,
             "files": file_list,
             "rationale": rationale,
-        }, ensure_ascii=False), encoding="utf-8")
-        _mcp_log_return("submit_history_pattern", f"saved -> {result_path}")
-        return f"历史问题模式已提交（result_id={result_id}）。"
+        }
+        session_id = _opencode_session_from_context(ctx)
+        _mcp_log_call("submit_history_pattern", _json_preview({
+            "session_id": session_id,
+            "security_related": security_related,
+            "pattern": pattern,
+            "lens_hint": lens_hint,
+            "files": files,
+            "rationale": rationale,
+        }))
+        ok, message = _submit_payload("submit_history_pattern", ctx, payload)
+        _mcp_log_return("submit_history_pattern", message)
+        return message
 
     @mcp.tool()
     def submit_variant_finding(
-        result_id: str,
         file: str,
         line: int,
         function: str,
         vuln_type: str,
         description: str,
         rationale: str = "",
+        ctx: Context | None = None,
     ) -> str:
         """
         提交一处同类变体排查命中的疑似缺陷站点。每核实坐实一处即调用一次（可多次调用累加）。
 
         参数：
-            result_id: 任务标识符（由分析提示中提供，原样传入，不要修改）。
             file: 命中站点所在文件路径（相对项目根）。
             line: 命中站点行号。
             function: 命中站点所在函数。
@@ -518,19 +547,7 @@ def register_tools(mcp: FastMCP, project_dir: Path | str | None = None) -> None:
         返回：
             提交成功的确认消息。
         """
-        _mcp_log_call("submit_variant_finding", _json_preview({
-            "result_id": result_id,
-            "file": file,
-            "line": line,
-            "function": function,
-            "vuln_type": vuln_type,
-            "description": description,
-            "rationale": rationale,
-        }))
-        scans_dir = _get_config().storage.scans_dir
-        result_path = Path(scans_dir) / f"{result_id}.json"
-        result_path.parent.mkdir(parents=True, exist_ok=True)
-        _append_result_payload(result_path, {
+        payload = {
             "kind": "variant_finding",
             "file": file,
             "line": line,
@@ -538,26 +555,31 @@ def register_tools(mcp: FastMCP, project_dir: Path | str | None = None) -> None:
             "vuln_type": vuln_type,
             "description": description,
             "rationale": rationale,
-        })
-        _mcp_log_return("submit_variant_finding", f"saved -> {result_path}")
-        return f"变体站点已提交（result_id={result_id}）。"
+        }
+        session_id = _opencode_session_from_context(ctx)
+        _mcp_log_call("submit_variant_finding", _json_preview({
+            "session_id": session_id,
+            **payload,
+        }))
+        ok, message = _submit_payload("submit_variant_finding", ctx, payload)
+        _mcp_log_return("submit_variant_finding", message)
+        return message
 
     @mcp.tool()
     def submit_match_result(
-        result_id: str,
         matched: bool,
         match_type: str = "",
         match_reference: str = "",
         description: str = "",
         ai_analysis: str = "",
         vulnerability_report: str = "",
+        ctx: Context | None = None,
     ) -> str:
         """
         提交去误报「历史/校验匹配」阶段的结论。判断该候选是否能与历史问题模式或其它函数的
         正确校验对应上；若能对应，则直接判定为 high。
 
         参数：
-            result_id: 任务标识符（由分析提示中提供，原样传入，不要修改）。
             matched: 是否成立匹配（true 表示与历史问题或其它函数校验对应上，可直接定为 high）。
             match_type: 匹配类型，"history"（对应历史问题模式）或 "validation"（对应其它函数的正确校验）。
             match_reference: 对应的修复/校验描述：历史模式根因摘要+出处提交，或正确校验站点 path:line + 一句话说明。
@@ -568,19 +590,7 @@ def register_tools(mcp: FastMCP, project_dir: Path | str | None = None) -> None:
         返回：
             提交成功的确认消息。
         """
-        _mcp_log_call("submit_match_result", _json_preview({
-            "result_id": result_id,
-            "matched": matched,
-            "match_type": match_type,
-            "match_reference": match_reference,
-            "description": description,
-            "ai_analysis": ai_analysis,
-            "vulnerability_report": vulnerability_report,
-        }))
-        scans_dir = _get_config().storage.scans_dir
-        result_path = Path(scans_dir) / f"{result_id}.json"
-        result_path.parent.mkdir(parents=True, exist_ok=True)
-        result_path.write_text(json.dumps({
+        payload = {
             "kind": "match_result",
             "confirmed": bool(matched),
             "severity": "high" if matched else "low",
@@ -592,6 +602,17 @@ def register_tools(mcp: FastMCP, project_dir: Path | str | None = None) -> None:
             "file": "",
             "line": 0,
             "function": "",
-        }, ensure_ascii=False), encoding="utf-8")
-        _mcp_log_return("submit_match_result", f"saved -> {result_path}")
-        return f"匹配结论已提交（result_id={result_id}）。"
+        }
+        session_id = _opencode_session_from_context(ctx)
+        _mcp_log_call("submit_match_result", _json_preview({
+            "session_id": session_id,
+            "matched": matched,
+            "match_type": match_type,
+            "match_reference": match_reference,
+            "description": description,
+            "ai_analysis": ai_analysis,
+            "vulnerability_report": vulnerability_report,
+        }))
+        ok, message = _submit_payload("submit_match_result", ctx, payload)
+        _mcp_log_return("submit_match_result", message)
+        return message

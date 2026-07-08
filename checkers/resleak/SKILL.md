@@ -34,7 +34,7 @@ description: 验证各类资源泄露候选漏洞（文件/套接字/锁/内存/
 
 ## 可用工具
 
-- `submit_result(result_id, confirmed, severity, description, ai_analysis)` — 提交分析结论（**必须调用**）
+- `submit_result(confirmed, severity, description, ai_analysis)` — 提交分析结论（**必须调用**）
 
 ## 分析步骤
 
@@ -76,7 +76,6 @@ description: 验证各类资源泄露候选漏洞（文件/套接字/锁/内存/
 
 | 参数 | 规则 |
 |------|------|
-| `result_id` | 由 prompt 提供，原样传入 |
 | `confirmed` | true = 确认漏洞；false = 误报 |
 | `severity` | high：文件描述符/套接字/锁持有必定泄露；medium：内存或条件性泄露；low：边缘情况 |
 | `description` | 一句话摘要，注明资源类型和函数名，例："函数 process_conn 的错误路径未关闭套接字 sock_fd" |

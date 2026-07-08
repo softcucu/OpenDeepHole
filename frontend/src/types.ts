@@ -112,6 +112,7 @@ export interface OutputSource {
   task_id?: string;
   attempt?: number;
   started_at?: string;
+  serve_session_id?: string;
 }
 
 export interface Vulnerability {

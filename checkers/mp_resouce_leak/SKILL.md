@@ -22,7 +22,7 @@ description: 验证多层指针成员资源泄露候选漏洞（CWE-401 / CWE-77
 
 ## 可用工具
 
-- `submit_result(result_id, confirmed, severity, description, ai_analysis)` — 提交分析结论（必须调用）
+- `submit_result(confirmed, severity, description, ai_analysis)` — 提交分析结论（必须调用）
 
 ## 分析步骤
 
@@ -131,7 +131,6 @@ ctx ─owns─► session ─owns─► buf
 
 分析完成后**必须**调用 `submit_result` 提交结论：
 
-- `result_id`：由分析提示中提供，原样传入
 - `confirmed`：true 表示确认漏洞，false 表示误报
 - `severity`：`"high"` / `"medium"` / `"low"`
 - `description`：一句话摘要，例如 "init_session 错误分支返回前未释放 ctx->session->buf，且 caller 不会再调用 destroy_session 形成泄露"

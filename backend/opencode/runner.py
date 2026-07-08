@@ -207,7 +207,7 @@ async def _run_audit_via_opencode(
 
     for attempt in range(1, max_retries + 2):  # attempt 1 .. max_retries+1
         attempt_source: OutputSource | None = None
-        result_id = f"result-{uuid4().hex}"
+        attempt_id = uuid4().hex
 
         def capture_source(source: OutputSource) -> None:
             nonlocal attempt_source, last_source
@@ -220,20 +220,19 @@ async def _run_audit_via_opencode(
             f"潜在的 {candidate.vuln_type.upper()} 漏洞。"
             f"project_id 为 `{project_id}`。"
             f"详情：{candidate.description} "
-            f"你的 result_id 是 `{result_id}`。"
-            f"分析完成后，你**必须**使用此 result_id 调用 submit_result MCP 工具提交你的结论。"
+            f"分析完成后，你**必须**调用 submit_result MCP 工具提交你的结论。"
         )
         prompt = _with_source_reading_priority_instruction(prompt.replace('\n', ' '))
 
-        log_path = workspace / f"opencode_{result_id}.log"
+        log_path = workspace / f"opencode_attempt_{attempt_id}.log"
 
         if on_output:
             on_output(f"[{tool}] 初始提示词:\n{prompt}")
 
         logger.info(
-            "Running %s audit: %s:%d (%s) result_id=%s timeout=%ds attempt=%d/%d",
+            "Running %s audit: %s:%d (%s) timeout=%ds attempt=%d/%d",
             tool,
-            candidate.file, candidate.line, candidate.vuln_type, result_id,
+            candidate.file, candidate.line, candidate.vuln_type,
             effective_timeout, attempt, max_retries + 1,
         )
 
@@ -251,9 +250,9 @@ async def _run_audit_via_opencode(
         except asyncio.TimeoutError:
             # Timeout — no retry; check if result was submitted before kill
             logger.error("%s timed out for %s:%d (timeout=%ds)", tool, candidate.file, candidate.line, effective_timeout)
-            result = _read_result(result_id, candidate)
+            result = _read_result_from_source(attempt_source, candidate)
             if result is not None:
-                logger.info("Result file found despite timeout — using submitted result")
+                logger.info("Submitted result found despite timeout — using it")
                 return _apply_output_source(result, attempt_source)
             return Vulnerability(
                 file=candidate.file,
@@ -284,7 +283,7 @@ async def _run_audit_via_opencode(
             ), attempt_source)
 
         # Process completed — check result
-        result = _read_result(result_id, candidate)
+        result = _read_result_from_source(attempt_source, candidate)
         if result is not None:
             return _apply_output_source(result, attempt_source)
 
@@ -337,7 +336,7 @@ async def run_project_audit(
 
     for attempt in range(1, max_retries + 2):
         attempt_source: OutputSource | None = None
-        result_id = f"result-{uuid4().hex}"
+        attempt_id = uuid4().hex
 
         def capture_source(source: OutputSource) -> None:
             nonlocal attempt_source, last_source
@@ -348,20 +347,20 @@ async def run_project_audit(
             f"使用 `{skill_name}` 技能，审计代码扫描路径 `{candidate.file}` 对应的目标代码。"
             f"project_id 为 `{project_id}`。"
             f"这是项目级审计任务，不是单个候选点复核。"
-            f"每发现一个真实问题，都必须使用此 result_id `{result_id}` 调用一次 submit_result MCP 工具，"
+            f"每发现一个真实问题，都必须调用一次 submit_result MCP 工具，"
             f"并在 submit_result 参数中填写真实的 file、line、function。"
-            f"如果没有发现真实问题，也必须使用此 result_id 调用一次 submit_result，confirmed=false，"
+            f"如果没有发现真实问题，也必须调用一次 submit_result，confirmed=false，"
             f"file=`{candidate.file}`，line={candidate.line}，function=`{candidate.function}`。"
         ).replace("\n", " ")
         prompt = _with_source_reading_priority_instruction(prompt)
-        log_path = workspace / f"opencode_{result_id}.log"
+        log_path = workspace / f"opencode_attempt_{attempt_id}.log"
 
         if on_output:
             on_output(f"[{tool}] 初始提示词:\n{prompt}")
 
         logger.info(
-            "Running %s project audit: %s (%s) result_id=%s timeout=%ds attempt=%d/%d",
-            tool, candidate.file, candidate.vuln_type, result_id,
+            "Running %s project audit: %s (%s) timeout=%ds attempt=%d/%d",
+            tool, candidate.file, candidate.vuln_type,
             effective_timeout, attempt, max_retries + 1,
         )
 
@@ -378,7 +377,7 @@ async def run_project_audit(
             )
         except asyncio.TimeoutError:
             logger.error("%s project audit timed out for %s (timeout=%ds)", tool, candidate.vuln_type, effective_timeout)
-            results = _read_results(result_id, candidate)
+            results = _read_results_from_source(attempt_source, candidate)
             if results:
                 return _apply_output_source_to_list(results, attempt_source)
             return [
@@ -409,7 +408,7 @@ async def run_project_audit(
                 attempt_source,
             )
 
-        results = _read_results(result_id, candidate)
+        results = _read_results_from_source(attempt_source, candidate)
         if results:
             return _apply_output_source_to_list(results, attempt_source)
         if attempt <= max_retries:
@@ -442,13 +441,13 @@ def _sensitive_clear_function(candidate: Candidate) -> dict:
     return metadata
 
 
-def _sensitive_clear_prompt(skill_name: str, candidate: Candidate, project_id: str, result_id: str) -> str:
+def _sensitive_clear_prompt(skill_name: str, candidate: Candidate, project_id: str) -> str:
     metadata = _sensitive_clear_function(candidate)
     function_name = str(metadata.get("function_name") or candidate.function or "")
     file_path = str(metadata.get("file") or candidate.file or "")
     return (
         f"使用 `{skill_name}` 技能分析 `{file_path}` 文件中的 `{function_name}` 函数敏感信息未清0问题。"
-        f"project_id: `{project_id}`。result_id: `{result_id}`。"
+        f"project_id: `{project_id}`。"
     ).replace("\n", " ")
 
 
@@ -485,25 +484,25 @@ def _safe_int(value, default: int) -> int:
     return parsed if parsed > 0 else default
 
 
-def _read_sensitive_clear_audit_result(result_id: str, candidate: Candidate) -> SensitiveClearAuditResult | None:
+def _read_sensitive_clear_audit_result(session_id: str, candidate: Candidate) -> SensitiveClearAuditResult | None:
     metadata = _sensitive_clear_function(candidate)
     if not metadata:
         return None
-    payload_data = _read_result_file(result_id, candidate)
+    payload_data = _read_session_result_file(session_id, candidate, tool_name="submit_result")
     if payload_data is None:
         return None
     payloads = _result_payloads(payload_data)
     if len(payloads) != 1:
         logger.warning(
-            "Expected exactly one sensitive_clear result for result_id=%s, got %d",
-            result_id, len(payloads),
+            "Expected exactly one sensitive_clear result for session_id=%s, got %d",
+            session_id, len(payloads),
         )
         return None
 
     payload = payloads[0]
     markdown = str(payload.get("ai_analysis") or "").strip()
     if not markdown:
-        logger.warning("Empty sensitive_clear Markdown ai_analysis for result_id=%s", result_id)
+        logger.warning("Empty sensitive_clear Markdown ai_analysis for session_id=%s", session_id)
         return None
 
     function_name = str(payload.get("function") or metadata.get("function_name") or candidate.function or "")
@@ -566,7 +565,7 @@ async def run_sensitive_clear_audit(
 
     for attempt in range(1, max_retries + 2):
         attempt_source: OutputSource | None = None
-        result_id = f"result-{uuid4().hex}"
+        attempt_id = uuid4().hex
 
         def capture_source(source: OutputSource) -> None:
             nonlocal attempt_source, last_source
@@ -574,14 +573,14 @@ async def run_sensitive_clear_audit(
             last_source = source
 
         prompt = _with_source_reading_priority_instruction(
-            _sensitive_clear_prompt(skill_name, candidate, project_id, result_id)
+            _sensitive_clear_prompt(skill_name, candidate, project_id)
         )
-        log_path = workspace / f"opencode_{result_id}.log"
+        log_path = workspace / f"opencode_attempt_{attempt_id}.log"
         if on_output:
             on_output(f"[{tool}] 初始提示词:\n{prompt}")
         logger.info(
-            "Running %s sensitive_clear function audit: %s result_id=%s timeout=%ds attempt=%d/%d",
-            tool, candidate.file, result_id, effective_timeout, attempt, max_retries + 1,
+            "Running %s sensitive_clear function audit: %s timeout=%ds attempt=%d/%d",
+            tool, candidate.file, effective_timeout, attempt, max_retries + 1,
         )
 
         try:
@@ -601,7 +600,7 @@ async def run_sensitive_clear_audit(
             )
         except asyncio.TimeoutError:
             logger.error("%s sensitive_clear audit timed out for %s", tool, candidate.file)
-            parsed = _read_sensitive_clear_audit_result(result_id, candidate)
+            parsed = _read_sensitive_clear_audit_result(_session_id_from_output_source(attempt_source), candidate)
             if parsed is not None:
                 _apply_output_source_to_list(parsed.vulnerabilities, attempt_source)
                 return parsed
@@ -641,7 +640,7 @@ async def run_sensitive_clear_audit(
                 complete=False,
             )
 
-        parsed = _read_sensitive_clear_audit_result(result_id, candidate)
+        parsed = _read_sensitive_clear_audit_result(_session_id_from_output_source(attempt_source), candidate)
         if parsed is not None:
             _apply_output_source_to_list(parsed.vulnerabilities, attempt_source)
             return parsed
@@ -755,7 +754,7 @@ async def run_project_report_audit(
 
     for attempt in range(1, max_retries + 2):
         attempt_source: OutputSource | None = None
-        result_id = f"result-{uuid4().hex}"
+        attempt_id = uuid4().hex
 
         def capture_source(source: OutputSource) -> None:
             nonlocal attempt_source
@@ -770,21 +769,20 @@ async def run_project_report_audit(
             f"使用 `{skill_name}` 技能，审计代码扫描路径 `{candidate.file}` 对应的目标代码。"
             f"project_id 为 `{project_id}`。"
             f"这是用户创建的 Markdown 报告型项目级审计任务。"
-            f"你的 result_id 是 `{result_id}`。"
             f"REPORT_DIR 为 `{report_dir.resolve()}`。"
             f"你必须将一个或多个 Markdown 报告写入 REPORT_DIR，文件扩展名必须是 .md。"
             f"不得修改 REPORT_DIR 之外的任何文件。"
             f"如果没有发现问题，也要写入一个 Markdown 报告说明审计范围和未发现问题的原因。"
         ).replace("\n", " ")
         prompt = _with_source_reading_priority_instruction(prompt)
-        log_path = workspace / f"opencode_{result_id}.log"
+        log_path = workspace / f"opencode_attempt_{attempt_id}.log"
 
         if on_output:
             on_output(f"[{tool}] 初始提示词:\n{prompt}")
 
         logger.info(
-            "Running %s report audit: %s (%s) result_id=%s timeout=%ds attempt=%d/%d report_dir=%s",
-            tool, candidate.file, candidate.vuln_type, result_id, effective_timeout,
+            "Running %s report audit: %s (%s) timeout=%ds attempt=%d/%d report_dir=%s",
+            tool, candidate.file, candidate.vuln_type, effective_timeout,
             attempt, max_retries + 1, report_dir,
         )
 
@@ -1011,9 +1009,9 @@ def _output_source_from_invocation(
         use_default_model=bool(getattr(option, "use_default_model", False)),
         capability=option.capability,
         required_capability=required_capability or "any",
-        task_id=lease.task_id,
+        task_id=str(getattr(lease, "task_id", "") or ""),
         attempt=attempt,
-        started_at=lease.started_at_iso,
+        started_at=str(getattr(lease, "started_at_iso", "") or ""),
     )
 
 
@@ -2029,16 +2027,15 @@ async def _invoke_opencode(
         model_label = _invocation_model_label(lease.option, model)
         prompt = _with_project_root_instruction(prompt, project_dir)
         emit_line = _model_line_emitter(on_line, model_label)
+        invocation_source = _output_source_from_invocation(
+            lease=lease,
+            tool=tool,
+            model=model,
+            required_capability=model_capability,
+            attempt=attempt,
+        )
         if on_invocation_metadata:
-            on_invocation_metadata(
-                _output_source_from_invocation(
-                    lease=lease,
-                    tool=tool,
-                    model=model,
-                    required_capability=model_capability,
-                    attempt=attempt,
-                )
-            )
+            on_invocation_metadata(invocation_source)
         invocation_mode = _invocation_mode(effective_cli_config)
         runtime_namespace = (
             _serve_runtime_namespace(workspace)
@@ -2069,6 +2066,7 @@ async def _invoke_opencode(
             )
 
             async def record_serve_session(session_id: str) -> None:
+                invocation_source.serve_session_id = session_id
                 await update_model_lease_context(lease, {"serve_session_id": session_id})
 
             try:
@@ -2300,6 +2298,93 @@ def _vulnerability_from_payload(data: dict, candidate: Candidate) -> Vulnerabili
         ai_analysis=data.get("ai_analysis", ""),
         confirmed=confirmed,
         ai_verdict="confirmed" if confirmed else "not_confirmed",
+    )
+
+
+def _session_id_from_output_source(source: OutputSource | None) -> str:
+    if source is None:
+        return ""
+    return str(getattr(source, "serve_session_id", "") or "").strip()
+
+
+def _read_session_result_file(
+    session_id: str,
+    candidate: Candidate,
+    *,
+    tool_name: str = "submit_result",
+):
+    normalized_session = str(session_id or "").strip()
+    if not normalized_session:
+        logger.warning(
+            "%s was not called for %s:%d (missing serve_session_id)",
+            tool_name, candidate.file, candidate.line,
+        )
+        return None
+    try:
+        from backend.opencode.submit_sink import read_submissions_as_result_file
+
+        data = read_submissions_as_result_file(normalized_session, tool_name=tool_name)
+    except Exception as exc:
+        logger.error(
+            "Failed to read %s payloads for session_id=%s: %s",
+            tool_name, normalized_session, exc,
+        )
+        return None
+    if data is None:
+        logger.warning(
+            "%s was not called for %s:%d (session_id=%s)",
+            tool_name, candidate.file, candidate.line, normalized_session,
+        )
+    return data
+
+
+def _read_session_results(
+    session_id: str,
+    candidate: Candidate,
+    *,
+    tool_name: str = "submit_result",
+) -> list[Vulnerability]:
+    data = _read_session_result_file(session_id, candidate, tool_name=tool_name)
+    if data is None:
+        return []
+    return [_vulnerability_from_payload(item, candidate) for item in _result_payloads(data)]
+
+
+def _read_session_result(
+    session_id: str,
+    candidate: Candidate,
+    *,
+    tool_name: str = "submit_result",
+) -> Vulnerability | None:
+    results = _read_session_results(session_id, candidate, tool_name=tool_name)
+    if not results:
+        return None
+    return results[-1]
+
+
+def _read_result_from_source(
+    source: OutputSource | None,
+    candidate: Candidate,
+    *,
+    tool_name: str = "submit_result",
+) -> Vulnerability | None:
+    return _read_session_result(
+        _session_id_from_output_source(source),
+        candidate,
+        tool_name=tool_name,
+    )
+
+
+def _read_results_from_source(
+    source: OutputSource | None,
+    candidate: Candidate,
+    *,
+    tool_name: str = "submit_result",
+) -> list[Vulnerability]:
+    return _read_session_results(
+        _session_id_from_output_source(source),
+        candidate,
+        tool_name=tool_name,
     )
 
 

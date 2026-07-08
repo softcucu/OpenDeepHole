@@ -30,7 +30,7 @@ description: 判断安全内存函数调用是否存在真实的越界写风险
 
 ## 可用工具
 
-- `submit_result(result_id, confirmed, severity, description, ai_analysis)` - 审计完成后必须调用
+- `submit_result(confirmed, severity, description, ai_analysis)` - 审计完成后必须调用
 
 ## 标准流程
 

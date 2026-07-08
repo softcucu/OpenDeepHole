@@ -1,7 +1,9 @@
 import inspect
 from pathlib import Path
+from types import SimpleNamespace
 
 from code_parser import CodeDatabase
+from mcp.server.fastmcp.tools.base import Tool
 from mcp_server.tools import clear_db_cache, register_tools
 
 
@@ -36,6 +38,16 @@ def _write_code_index(project_dir: Path, body: str) -> None:
     db.close()
 
 
+def _fake_context(session_id: str):
+    return SimpleNamespace(
+        request_context=SimpleNamespace(
+            request=SimpleNamespace(
+                headers={"x-opencode-session": session_id},
+            ),
+        ),
+    )
+
+
 def test_reference_lookup_helpers_are_not_registered_as_mcp_tools() -> None:
     mcp = _FakeMCP()
 
@@ -64,6 +76,23 @@ def test_registered_mcp_tools_do_not_expose_caller_model() -> None:
         "submit_match_result",
     ):
         assert "caller_model" not in inspect.signature(mcp.tools[name]).parameters
+
+
+def test_submit_tools_do_not_expose_result_id() -> None:
+    mcp = _FakeMCP()
+
+    register_tools(mcp)
+
+    for name in (
+        "submit_result",
+        "submit_history_pattern",
+        "submit_variant_finding",
+        "submit_match_result",
+    ):
+        assert "result_id" not in inspect.signature(mcp.tools[name]).parameters
+        properties = Tool.from_function(mcp.tools[name]).parameters.get("properties", {})
+        assert "result_id" not in properties
+        assert "ctx" not in properties
 
 
 def test_source_lookup_tools_describe_deephole_code_priority() -> None:
@@ -137,32 +166,65 @@ def test_mcp_tool_log_has_no_model_placeholder(tmp_path, capsys) -> None:
 
 
 def test_mcp_submit_log_summarizes_long_fields(tmp_path, monkeypatch, capsys) -> None:
-    class FakeStorage:
-        scans_dir = str(tmp_path / "scans")
+    import backend.opencode.submit_sink as submit_sink
 
-    class FakeConfig:
-        storage = FakeStorage()
-
-    monkeypatch.setattr("mcp_server.tools._get_config", lambda: FakeConfig())
+    monkeypatch.setattr(submit_sink, "_db_path", lambda: tmp_path / "scans" / "scans.db")
     mcp = _FakeMCP()
     register_tools(mcp, project_dir=tmp_path)
 
     mcp.tools["submit_result"](
-        "result-1",
         True,
         "high",
         "desc",
         "line 1\n" + "A" * 500,
         vulnerability_report="report\n" + "B" * 500,
+        ctx=_fake_context("session-submit"),
     )
 
     output = capsys.readouterr().out
-    assert output.count("submit_result") == 2
+    assert output.count("[MCP ▶] submit_result") == 1
+    assert output.count("[MCP ◀] submit_result") == 1
     assert "[MCP ▶] submit_result" in output
     assert "[MCP ◀] submit_result" in output
     assert "<chars=" in output
     assert "[truncated" in output
     assert "AAAAA" in output
+    assert submit_sink.read_submissions("session-submit", "submit_result")[0]["description"] == "desc"
+
+
+def test_submit_sink_separates_submit_tools_by_session_and_tool(tmp_path, monkeypatch) -> None:
+    import backend.opencode.submit_sink as submit_sink
+
+    monkeypatch.setattr(submit_sink, "_db_path", lambda: tmp_path / "scans" / "scans.db")
+    mcp = _FakeMCP()
+    register_tools(mcp, project_dir=tmp_path)
+    ctx = _fake_context("session-mixed")
+
+    mcp.tools["submit_history_pattern"](
+        True,
+        pattern="missing clamp",
+        lens_hint="integer",
+        files="a.c\nb.c",
+        rationale="fix adds clamp",
+        ctx=ctx,
+    )
+    mcp.tools["submit_variant_finding"](
+        "src/a.c",
+        10,
+        "parse",
+        "oob",
+        "same missing clamp",
+        rationale="no bound check",
+        ctx=ctx,
+    )
+
+    history = submit_sink.read_submissions("session-mixed", "submit_history_pattern")
+    variants = submit_sink.read_submissions("session-mixed", "submit_variant_finding")
+
+    assert len(history) == 1
+    assert history[0]["files"] == ["a.c", "b.c"]
+    assert len(variants) == 1
+    assert variants[0]["file"] == "src/a.c"
 
 
 def test_code_index_cache_reopens_after_db_replacement(tmp_path) -> None:

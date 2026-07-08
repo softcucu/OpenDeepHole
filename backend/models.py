@@ -90,6 +90,7 @@ class OutputSource(BaseModel):
     task_id: str = ""
     attempt: int = 0
     started_at: str = ""
+    serve_session_id: str = ""
 
 
 class Vulnerability(BaseModel):

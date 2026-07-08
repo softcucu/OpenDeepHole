@@ -23,7 +23,7 @@ description: >
 
 ## Quick Start
 
-输入：prompt 中会提供 `function_name`（可能附带 `file_path`）、`project_id` 和 `result_id`。
+输入：prompt 中会提供 `function_name`（可能附带 `file_path`）、`project_id`。
 
 
 ```
@@ -57,11 +57,11 @@ description: >
 
 | 工具 | 何时调用 |
 |------|---------|
-| `submit_result(result_id, confirmed, severity, description, ai_analysis)` | **审计完成后必须调用一次** |
+| `submit_result(confirmed, severity, description, ai_analysis)` | **审计完成后必须调用一次** |
 
 **调用链追踪上限：向上 2 层。** 超过则在分析中标记信息不足。
 
-**注意：** `project_id` 和 `result_id` 由 prompt 提供，原样传入即可。
+**注意：** `project_id` 由 prompt 提供，原样传入即可。
 
 ---
 
@@ -113,7 +113,6 @@ description: >
 
 | 参数 | 取值规则 |
 |------|---------|
-| `result_id` | prompt 中提供的 result_id，原样传入 |
 | `confirmed` | 存在任何一个确认或疑似风险点时为 `true`；全部安全时为 `false` |
 | `severity` | 按最严重的风险点取值：外部输入可控的越界为 `"high"`，内部逻辑缺陷为 `"medium"`，边界情况为 `"low"` |
 | `description` | 一句话摘要，例如 `"函数 XXX 存在 S1 安全内存函数误用和 S2 整数溢出风险"` |

@@ -28,7 +28,7 @@ compatibility: opencode
 - 相关变量名，例如 len、idx、loop、count、contentLen、dstsz
 - 相关 sink，例如数组访问、指针偏移、memcpy_s、memmove_s、strncpy_s
 - 原始描述和原始 AI 分析
-- project_id 和 result_id
+- project_id
 - 本阶段 Markdown 输出路径
 
 你需要主动阅读代码，补齐上下文。静态分析结果只是候选线索，不是结论。
@@ -137,7 +137,6 @@ Markdown 至少包含：
 
 调用 `submit_result`，提供：
 
-- `result_id`：提示中给出的 ID，原样传入
 - `confirmed`：真实代码问题存在为 `true`，否则为 `false`
 - `severity`：
   - `high`：真实代码问题存在，且证明外部可触发

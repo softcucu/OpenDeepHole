@@ -21,7 +21,7 @@ description: 验证多层指针空指针解引用候选漏洞（CWE-476），判
 
 ## 可用工具
 
-- `submit_result(result_id, confirmed, severity, description, ai_analysis)` — 提交分析结论（必须调用)
+- `submit_result(confirmed, severity, description, ai_analysis)` — 提交分析结论（必须调用)
 
 ## 分析步骤
 
@@ -125,7 +125,6 @@ description: 验证多层指针空指针解引用候选漏洞（CWE-476），判
 
 分析完成后**必须**调用 `submit_result` 提交结论：
 
-- `result_id`：由分析提示中提供，原样传入
 - `confirmed`：true 表示确认漏洞，false 表示误报
 - `severity`：`"high"` / `"medium"` / `"low"`
 - `description`：一句话摘要，例如 "process_request 中访问 ctx->session->buf 前未校验 ctx->session，错误路径下 session 可能为 NULL 导致崩溃"

@@ -21,7 +21,7 @@ compatibility: opencode
 - `prove-bug.md` 文件路径
 - `prove-fp.md` 文件路径
 - 本阶段 `final-judge.md` 输出路径
-- project_id 和 result_id
+- project_id
 
 你必须读取两个阶段 Markdown 文件。不要只根据提示中的阶段摘要裁决。
 
@@ -53,7 +53,6 @@ Markdown 至少包含：
 
 分析完成后，必须调用 `submit_result`，提供：
 
-- `result_id`：提示中给出的 ID，原样传入
 - `confirmed`：真实问题为 `true`，误报为 `false`
 - `severity`：`high` / `medium` / `low`
 - `description`：一句话总结最终裁决

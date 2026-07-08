@@ -15,7 +15,7 @@ description: 管理员测试用项目级 SKILL-only checker，用于验证无 an
 
 ## 可用工具
 
-- `submit_result(result_id, confirmed, severity, description, ai_analysis, file="", line=0, function="")` - 提交审计结果
+- `submit_result(confirmed, severity, description, ai_analysis, file="", line=0, function="")` - 提交审计结果
 
 ## 审计要求
 

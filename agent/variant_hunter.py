@@ -34,7 +34,6 @@ def _build_prompt(
     pattern: HistoryPattern,
     checker_types: list[str],
     project_id: str,
-    result_id: str,
 ) -> str:
     files = ", ".join(pattern.files) if pattern.files else "(自行定位)"
     checkers = ", ".join(checker_types) if checker_types else "(无)"
@@ -52,7 +51,7 @@ def _build_prompt(
         "- 对**坐实**的站点，调用 `submit_variant_finding` 提交（每处一次，可多次调用）；\n"
         "- 已修复或不满足相似条件的站点不要提交。\n\n"
         f"`vuln_type` 必须从以下可选检查项中选最贴切的一个：{checkers}。\n"
-        f"你的 result_id 是 `{result_id}`。若全仓未发现同类缺陷，可以不调用提交工具直接结束。"
+        "若全仓未发现同类缺陷，可以不调用提交工具直接结束。"
     )
 
 
@@ -70,7 +69,12 @@ async def hunt_variants(
     cli_config,
 ) -> list[Candidate]:
     """对每条历史问题模式做全仓同类变体排查，返回命中候选列表。"""
-    from backend.opencode.runner import _invoke_opencode, _read_result_file, _result_payloads
+    from backend.opencode.runner import (
+        _invoke_opencode,
+        _read_session_result_file,
+        _result_payloads,
+        _session_id_from_output_source,
+    )
     from backend.opencode.model_pool import total_model_capacity
 
     if not patterns:
@@ -99,9 +103,15 @@ async def hunt_variants(
         nonlocal processed
         if cancel_event is not None and cancel_event.is_set():
             return
-        result_id = uuid4().hex
-        prompt = _build_prompt(pattern, checker_types, scan_id, result_id)
-        log_path = scan_dir / f"variant_hunt_{result_id}.log"
+        attempt_id = uuid4().hex
+        prompt = _build_prompt(pattern, checker_types, scan_id)
+        log_path = scan_dir / f"variant_hunt_{attempt_id}.log"
+        attempt_source = None
+
+        def capture_source(source) -> None:
+            nonlocal attempt_source
+            attempt_source = source
+
         fake_candidate = Candidate(
             file="", line=0, function="", description=pattern.pattern,
             vuln_type="variant",
@@ -118,6 +128,7 @@ async def hunt_variants(
                 project_dir=project_path,
                 model_capability="any",
                 stats_scope_id=scan_id,
+                on_invocation_metadata=capture_source,
             )
         except asyncio.CancelledError:
             raise
@@ -130,11 +141,11 @@ async def hunt_variants(
             except Exception:
                 pass
 
-        payload = _read_result_file(result_id, fake_candidate)
-        try:
-            (scan_dir / f"{result_id}.json").unlink(missing_ok=True)
-        except Exception:
-            pass
+        payload = _read_session_result_file(
+            _session_id_from_output_source(attempt_source),
+            fake_candidate,
+            tool_name="submit_variant_finding",
+        )
         if payload is None:
             payload = {}
 

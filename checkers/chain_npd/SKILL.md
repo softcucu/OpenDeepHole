@@ -28,7 +28,6 @@ description: 验证链式指针空指针解引用候选漏洞
 
 分析完成后，**必须**调用 `submit_result` 工具提交结论：
 
-- `result_id`：由分析提示中提供，原样传入
 - `confirmed`：true 表示确认漏洞，false 表示误报
 - `severity`：置信程度 "high" / "medium" / "low"
 - `description`：一句话摘要

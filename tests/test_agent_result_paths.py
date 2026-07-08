@@ -11,7 +11,8 @@ import yaml
 from agent.config import AgentConfig
 from agent.scanner import _configure_backend
 from backend.models import Candidate
-from backend.opencode.runner import _read_result, _read_results
+from backend.opencode.submit_sink import record_submission
+from backend.opencode.runner import _read_result, _read_results, _read_session_result, _read_session_results
 
 
 class AgentResultPathTests(unittest.TestCase):
@@ -125,6 +126,46 @@ class AgentResultPathTests(unittest.TestCase):
             self.assertTrue(results[0].confirmed)
             self.assertEqual(results[1].file, ".")
             self.assertFalse(results[1].confirmed)
+
+    def test_read_session_results_uses_result_sink_and_tool_filter(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            candidate = Candidate(
+                file="test.c",
+                line=42,
+                function="demo",
+                description="candidate issue",
+                vuln_type="npd",
+            )
+            fake_config = SimpleNamespace(
+                storage=SimpleNamespace(scans_dir=str(Path(tmp) / "scan-123"))
+            )
+
+            with patch("backend.opencode.submit_sink.get_config", return_value=fake_config):
+                record_submission("session-1", "submit_history_pattern", {
+                    "security_related": True,
+                    "pattern": "history-only",
+                })
+                record_submission("session-1", "submit_result", {
+                    "confirmed": True,
+                    "severity": "high",
+                    "description": "confirmed issue",
+                    "ai_analysis": "analysis text",
+                })
+                record_submission("session-1", "submit_result", {
+                    "confirmed": False,
+                    "severity": "low",
+                    "description": "not this one",
+                    "ai_analysis": "second analysis",
+                })
+
+                results = _read_session_results("session-1", candidate, tool_name="submit_result")
+                latest = _read_session_result("session-1", candidate, tool_name="submit_result")
+
+            self.assertEqual(len(results), 2)
+            self.assertEqual(results[0].description, "confirmed issue")
+            self.assertEqual(results[1].description, "not this one")
+            self.assertIsNotNone(latest)
+            self.assertEqual(latest.description, "not this one")
 
 
 if __name__ == "__main__":

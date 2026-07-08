@@ -1,5 +1,9 @@
 # 更新日志
 
+## 2026-07-08
+
+- **变更** OpenCode/nga serve 模式下 MCP `submit_*` 工具不再要求模型传入 `result_id`；结果改由 MCP 请求中的 OpenCode session 归属写入 SQLite ResultSink，并按 `tool_name` 区分普通审计、历史模式、变体命中和去误报匹配提交
+
 ## 2026-07-07
 
 - **修复** 漏洞验证停止按钮会终止本次验证的独立 worker 进程树：Linux 终止验证进程组和子命令进程树，Windows 通过 `taskkill /T /F` 清理验证脚本及其启动的 `opencode`/`nga` 等子进程，避免页面已取消但本机验证进程继续运行

@@ -25,7 +25,7 @@ receiver（`obj->destroy()` 中的 `obj`），而**不是**显式参数；如果
 
 ## 可用工具
 
-- `submit_result(result_id, confirmed, severity, description, ai_analysis)` - 提交结论，必须调用
+- `submit_result(confirmed, severity, description, ai_analysis)` - 提交结论，必须调用
 
 ## 必查步骤
 
@@ -62,7 +62,6 @@ receiver（`obj->destroy()` 中的 `obj`），而**不是**显式参数；如果
 
 分析完成后必须调用 `submit_result`：
 
-- `result_id`: 由分析提示中提供，原样传入，不要自己生成
 - `confirmed`: true 表示确认漏洞，false 表示误报
 - `severity`: `"high"`、`"medium"` 或 `"low"`
 - `description`: 一句话说明结论

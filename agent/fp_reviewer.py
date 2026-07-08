@@ -48,7 +48,7 @@ _ISSUE_REPORT_HEADINGS = (
 
 @dataclass(frozen=True)
 class _FpStageResult:
-    result_id: str
+    session_id: str
     result: object | None
     payload: dict
     markdown: str = ""
@@ -60,7 +60,7 @@ class _FpStageFailure(RuntimeError):
         self,
         *,
         stage: str,
-        result_id: str,
+        session_id: str,
         artifact_path: Path,
         log_path: Path,
         reason: str,
@@ -68,7 +68,7 @@ class _FpStageFailure(RuntimeError):
     ) -> None:
         super().__init__(reason)
         self.stage = stage
-        self.result_id = result_id
+        self.session_id = session_id
         self.artifact_path = artifact_path
         self.log_path = log_path
         self.reason = reason
@@ -636,7 +636,12 @@ async def _run_fp_review_stage(
     history_patterns: list[dict] | None = None,
     variant_of: str = "",
 ) -> _FpStageResult | None:
-    from backend.opencode.runner import _invoke_opencode, _read_result
+    from backend.opencode.runner import (
+        _invoke_opencode,
+        _read_result_from_source,
+        _read_session_result_file,
+        _session_id_from_output_source,
+    )
 
     max_retries = max(0, int(getattr(cli_config, "max_retries", 0) or 0))
     last_failure: _FpStageFailure | None = None
@@ -644,7 +649,8 @@ async def _run_fp_review_stage(
 
     for attempt in range(1, max_retries + 2):
         attempt_source: OutputSource | None = None
-        result_id = uuid4().hex
+        attempt_id = uuid4().hex
+        submit_tool_name = "submit_match_result" if stage == "history_match" else "submit_result"
 
         def capture_source(source: OutputSource) -> None:
             nonlocal attempt_source, last_source
@@ -655,7 +661,6 @@ async def _run_fp_review_stage(
             stage=stage,
             vuln=vuln,
             project_id_for_prompt=project_id_for_prompt,
-            result_id=result_id,
             review_id=review_id,
             vuln_index=vuln_index,
             output_markdown_path=output_markdown_path,
@@ -668,11 +673,11 @@ async def _run_fp_review_stage(
         )
         if attempt > 1:
             prompt += (
-                "上一次尝试未写入 Markdown 工件或未调用 submit_result。"
+                f"上一次尝试未写入 Markdown 工件或未调用 {submit_tool_name}。"
                 "即使结论是非问题（confirmed=false），也必须把论证写入指定 Markdown 路径，"
-                "并使用给定 result_id 调用 submit_result 提交结论。"
+                f"并调用 {submit_tool_name} 提交结论。"
             )
-        log_path = review_dir / f"fp_{stage}_{result_id}.log"
+        log_path = review_dir / f"fp_{stage}_{attempt_id}.log"
 
         try:
             try:
@@ -711,7 +716,7 @@ async def _run_fp_review_stage(
         except Exception as exc:
             last_failure = _FpStageFailure(
                 stage=stage,
-                result_id=result_id,
+                session_id=_session_id_from_output_source(attempt_source),
                 artifact_path=output_markdown_path,
                 log_path=log_path,
                 reason=f"CLI invocation failed on attempt {attempt}/{max_retries + 1}: {exc}",
@@ -720,24 +725,24 @@ async def _run_fp_review_stage(
             continue
 
         markdown = _read_stage_markdown(output_markdown_path)
-        result = _read_result(result_id, candidate)
+        result = _read_result_from_source(attempt_source, candidate, tool_name=submit_tool_name)
         missing: list[str] = []
         if not markdown.strip():
             missing.append("Markdown artifact")
         if result is None:
-            missing.append("submit_result")
+            missing.append(submit_tool_name)
         if not missing:
             return _FpStageResult(
-                result_id=result_id,
+                session_id=_session_id_from_output_source(attempt_source),
                 result=result,
-                payload=_read_fp_result_payload(result_id),
+                payload=_read_fp_result_payload(_session_id_from_output_source(attempt_source), submit_tool_name),
                 markdown=markdown,
                 output_source=attempt_source or OutputSource(),
             )
 
         last_failure = _FpStageFailure(
             stage=stage,
-            result_id=result_id,
+            session_id=_session_id_from_output_source(attempt_source),
             artifact_path=output_markdown_path,
             log_path=log_path,
             reason=(
@@ -751,7 +756,7 @@ async def _run_fp_review_stage(
         raise last_failure
     raise _FpStageFailure(
         stage=stage,
-        result_id="",
+        session_id="",
         artifact_path=output_markdown_path,
         log_path=review_dir,
         reason="Stage did not run",
@@ -764,7 +769,6 @@ def _build_fp_review_prompt(
     stage: str,
     vuln: dict,
     project_id_for_prompt: str,
-    result_id: str,
     review_id: str = "",
     vuln_index: int = 0,
     output_markdown_path: Path | None = None,
@@ -802,8 +806,7 @@ def _build_fp_review_prompt(
             f"判断标准（满足任一即视为匹配）：(a) 与某条历史问题模式**同根因**（同缺陷类型、同触发条件）；"
             f"(b) 全仓存在对**同一被调点/危险原语**把校验做对了的另一处调用站点，而本候选缺失该校验。"
             f"你必须将本阶段 Markdown 论证写入 `{output_path}`，不得写入其它路径。"
-            f"你的 result_id 是 `{result_id}`。"
-            f"分析完成后，你**必须**使用此 result_id 调用 `submit_match_result` MCP 工具提交结论："
+            f"分析完成后，你**必须**调用 `submit_match_result` MCP 工具提交结论："
             f"matched=true 表示对应上（match_type 填 history 或 validation，match_reference 填"
             f"历史模式根因摘要+出处提交，或正确校验站点 path:line + 一句话说明，并提交 vulnerability_report，"
             f"包含 Summary、Vulnerable Code、Full Call Stack、Root Cause、Why It is Reachable、Impact、Evidence 七个二级标题）；"
@@ -819,8 +822,7 @@ def _build_fp_review_prompt(
             f"原始描述：{vuln['description']} "
             f"{ai_analysis_ref}"
             f"你必须将本阶段 Markdown 论证写入 `{output_path}`，不得写入其它路径。"
-            f"你的 result_id 是 `{result_id}`。"
-            f"分析完成后，你**必须**使用此 result_id 调用 submit_result MCP 工具提交阶段结论。"
+            f"分析完成后，你**必须**调用 submit_result MCP 工具提交阶段结论。"
             f"默认假设代码是安全的；只有证明真实代码问题时才使用 confirmed=true。"
             f"severity 只分两档：外部可触发的问题使用 high；其余（无法证明外部可触发或非问题）一律使用 low。"
             f"只要 confirmed=true，"
@@ -842,8 +844,7 @@ def _build_fp_review_prompt(
             f"正方阶段结构化摘要：{bug_summary} "
             f"你必须先读取正方 Markdown 文件 `{prove_bug_path}`，再进行反方论证。"
             f"你必须将本阶段 Markdown 论证写入 `{output_path}`，不得写入其它路径。"
-            f"你的 result_id 是 `{result_id}`。"
-            f"分析完成后，你**必须**使用此 result_id 调用 submit_result MCP 工具提交阶段结论。"
+            f"分析完成后，你**必须**调用 submit_result MCP 工具提交阶段结论。"
             f"如果找到足以证明非问题的理由，使用 confirmed=false 且 severity=low。"
             f"如果反方未能证明非问题，仍使用 confirmed=true；severity 只分两档："
             f"外部可触发为 high，其余一律为 low。"
@@ -867,8 +868,7 @@ def _build_fp_review_prompt(
             f"反方阶段结构化摘要：{fp_summary} "
             f"你必须读取正方 Markdown 文件 `{bug_path}` 和反方 Markdown 文件 `{fp_path}`。"
             f"你必须将最终裁决 Markdown 写入 `{output_path}`，不得写入其它路径。"
-            f"你的 result_id 是 `{result_id}`。"
-            f"分析完成后，你**必须**使用此 result_id 调用 submit_result MCP 工具提交最终结论。"
+            f"分析完成后，你**必须**调用 submit_result MCP 工具提交最终结论。"
             f"最终 confirmed=false 表示误报；confirmed=true 表示真实问题。"
             f"severity 只分两档：论证为外部可触发的问题使用 high；其余（无法证明外部可触发或非问题）一律使用 low。"
             f"最终 ai_analysis 必须像 memleak 输出一样包含完整代码链、关键代码片段和说明，"
@@ -1022,7 +1022,7 @@ def _stage_failure_markdown(exc: _FpStageFailure) -> str:
         f"{exc.reason}\n\n"
         "## 调试信息\n\n"
         f"- stage: `{exc.stage}`\n"
-        f"- result_id: `{exc.result_id}`\n"
+        f"- session_id: `{exc.session_id}`\n"
         f"- artifact: `{exc.artifact_path}`\n"
         f"- log: `{exc.log_path}`\n"
     )
@@ -1039,15 +1039,19 @@ def _has_required_issue_report_sections(report: str) -> bool:
     return True
 
 
-def _read_fp_result_payload(result_id: str) -> dict:
+def _dummy_candidate():
+    from backend.models import Candidate
+
+    return Candidate(file="", line=0, function="", description="", vuln_type="fp_review")
+
+
+def _read_fp_result_payload(session_id: str, tool_name: str) -> dict:
     """Read optional FP review fields that are not part of Vulnerability."""
     try:
-        from backend.config import get_config
+        from backend.opencode.runner import _read_session_result_file
 
-        result_path = Path(get_config().storage.scans_dir) / f"{result_id}.json"
-        if not result_path.exists():
-            return {}
-        return json.loads(result_path.read_text(encoding="utf-8"))
+        payload = _read_session_result_file(session_id, candidate=_dummy_candidate(), tool_name=tool_name)
+        return payload if isinstance(payload, dict) else {}
     except Exception:
         return {}
 

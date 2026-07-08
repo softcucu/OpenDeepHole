@@ -19,7 +19,7 @@ description: 分析 C/C++ 代码中函数返回值或参数赋值后未判空导
 
 ## 可用工具
 
-- `submit_result(result_id, confirmed, severity, description, ai_analysis)` — **提交最终结果（必须调用）**
+- `submit_result(confirmed, severity, description, ai_analysis)` — **提交最终结果（必须调用）**
 
 ## 分析步骤
 
@@ -61,7 +61,6 @@ description: 分析 C/C++ 代码中函数返回值或参数赋值后未判空导
 
 分析完成后，**必须**调用 `submit_result` 工具提交结果：
 
-- `result_id`：使用 prompt 中提供的值（不要修改）
 - `confirmed`：`true` 表示真实漏洞，`false` 表示误报
 - `severity`：`"high"`、`"medium"` 或 `"low"`（仅 confirmed 为 true 时有意义）
   - **high**：malloc/calloc 等内存分配函数返回值未检查，可能导致崩溃或可利用漏洞
