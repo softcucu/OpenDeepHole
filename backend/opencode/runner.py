@@ -873,6 +873,7 @@ async def run_threat_audit(
     timeout: int | None = None,
     project_dir: Path | None = None,
     planned_task_id: str = "",
+    scan_path: Path | str | None = None,
 ) -> list[Vulnerability]:
     """Run one attack-tree-derived audit task and collect submitted results."""
     config = get_config()
@@ -897,8 +898,16 @@ async def run_threat_audit(
 
         surface_label = task.surface_name or task.surface_node_id or "相关攻击面"
         method_label = task.method_name or task.method_node_id or "相关攻击方式"
+        if isinstance(scan_path, Path):
+            scan_path_label = scan_path.resolve().as_posix()
+        else:
+            scan_path_label = str(scan_path or "").strip()
+        if not scan_path_label and project_dir is not None:
+            scan_path_label = project_dir.resolve().as_posix()
+        if not scan_path_label:
+            scan_path_label = "当前扫描目录"
         prompt = (
-            f"审计代码仓中{surface_label}的实现是否存在漏洞，导致{method_label}。"
+            f"审计代码仓{scan_path_label}中{surface_label}的实现是否存在漏洞，导致{method_label}。"
             "每发现一个真实问题，都必须调用一次 submit_result MCP 工具，并填写真实 file、line、function。"
             "如果未发现真实漏洞，也必须调用一次 submit_result，confirmed=false。"
         ).replace("\n", " ")

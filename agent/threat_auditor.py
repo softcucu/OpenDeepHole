@@ -94,6 +94,17 @@ def _description(
     )
 
 
+def _scan_path_from_analysis(analysis: ThreatAnalysis, project_path: Path) -> str:
+    scope = analysis.scan_scope
+    scan_path = str(scope.code_scan_path or "").strip()
+    if scan_path:
+        return scan_path
+    relative = str(scope.code_scan_relative_path or "").strip()
+    if relative and relative != ".":
+        return (project_path / relative).resolve().as_posix()
+    return project_path.resolve().as_posix()
+
+
 def build_threat_audit_tasks(scan_id: str, analysis: ThreatAnalysis) -> list[ThreatAuditTask]:
     """Build stable audit tasks from attack-tree surface/method/path mappings."""
     risk_by_id = _risk_lookup(analysis)
@@ -210,6 +221,7 @@ async def run_threat_audit_tasks(
     from backend.opencode.model_pool import register_planned_task, total_model_capacity
     from backend.opencode.runner import run_threat_audit
 
+    scan_path = _scan_path_from_analysis(analysis, project_path)
     for task in pending:
         await reporter.push_threat_audit_task(scan_id, task)
 
@@ -265,6 +277,7 @@ async def run_threat_audit_tasks(
                     timeout=config.opencode.timeout,
                     project_dir=project_path,
                     planned_task_id=planned_ids.get(running.task_id, ""),
+                    scan_path=scan_path,
                 )
                 result_indexes: list[int] = []
                 for vuln in results:

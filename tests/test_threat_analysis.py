@@ -3,7 +3,7 @@ import unittest
 import time
 from pathlib import Path
 
-from agent.threat_auditor import build_threat_audit_tasks
+from agent.threat_auditor import _scan_path_from_analysis, build_threat_audit_tasks
 from backend.opencode.runner import _read_fresh_threat_analysis_result
 from backend.models import ScanItemStatus, ScanMeta, ScanStatus, ThreatAuditTask, Vulnerability
 from backend.store.sqlite import SqliteScanStore
@@ -160,6 +160,22 @@ class ThreatAnalysisParserTests(unittest.TestCase):
             self.assertEqual(scoped.scan_scope.code_scan_relative_path, "src")
             self.assertTrue(threat_analysis_scope_matches(scoped, project, scan_root))
             self.assertFalse(threat_analysis_scope_matches(scoped, project, project))
+
+    def test_threat_audit_scan_path_uses_analysis_scan_scope(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp) / "project"
+            scan_root = project / "src"
+            scan_root.mkdir(parents=True)
+            analysis = apply_threat_analysis_scan_scope(
+                parse_threat_analysis_data({"schema_version": "1.0", "assets": []}),
+                project,
+                scan_root,
+            )
+
+            self.assertEqual(
+                _scan_path_from_analysis(analysis, project),
+                scan_root.resolve().as_posix(),
+            )
 
     def test_write_scan_scope_to_result_file(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

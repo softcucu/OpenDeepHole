@@ -354,6 +354,7 @@ def test_threat_audit_prompt_uses_only_surface_and_method(tmp_path: Path) -> Non
             code_path_description="API 入口",
             description="旧描述不应进入 prompt",
         )
+        scan_root = tmp_path / "project" / "src"
         captured: dict[str, str] = {}
 
         async def fake_invoke(call_workspace: Path, prompt: str, *args, **kwargs) -> None:
@@ -368,10 +369,14 @@ def test_threat_audit_prompt_uses_only_surface_and_method(tmp_path: Path) -> Non
                 task,
                 "scan-1",
                 project_dir=tmp_path / "project",
+                scan_path=scan_root,
             )
 
         prompt = captured["prompt"]
-        assert "审计代码仓中管理接口的实现是否存在漏洞，导致认证绕过。" in prompt
+        assert (
+            f"审计代码仓{scan_root.resolve().as_posix()}中管理接口的实现是否存在漏洞，导致认证绕过。"
+            in prompt
+        )
         assert "submit_result MCP 工具" in prompt
         for removed in (
             "project_id",
