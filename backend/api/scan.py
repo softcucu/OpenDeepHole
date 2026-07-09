@@ -46,6 +46,7 @@ from backend.models import (
     ScanSummary,
     SkillReport,
     ThreatAnalysis,
+    ThreatAuditTask,
     UnmarkRequest,
     UpdateScanProductRequest,
     User,
@@ -1890,6 +1891,16 @@ async def get_scan_threat_analysis(
     if analysis is None:
         raise HTTPException(status_code=404, detail="No threat analysis found for this scan")
     return analysis
+
+
+@router.get("/api/scan/{scan_id}/threat-audit-tasks", response_model=list[ThreatAuditTask])
+async def get_scan_threat_audit_tasks(
+    scan_id: str,
+    current_user: User = Depends(get_current_user),
+) -> list[ThreatAuditTask]:
+    """Return threat-analysis-derived audit tasks for a scan."""
+    _check_scan_owner(scan_id, current_user)
+    return get_scan_store().list_threat_audit_tasks(scan_id)
 
 
 @router.get("/api/scan/{scan_id}/events")

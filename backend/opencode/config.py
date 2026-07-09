@@ -18,6 +18,7 @@ logger = get_logger(__name__)
 
 # Subdirectories in checker dirs that should be symlinked into the workspace
 _SKILL_RESOURCE_DIRS = {"references", "scripts", "assets"}
+THREAT_AUDIT_SKILLS_DIR = Path(__file__).resolve().parent.parent.parent / "agent" / "threat_audit_skills"
 
 _workspace_locks: dict[str, threading.RLock] = {}
 _workspace_locks_guard = threading.Lock()
@@ -104,6 +105,33 @@ def _link_skill_resources(entry, link_dir: Path) -> None:
             if link_dest.exists() or link_dest.is_symlink():
                 os.remove(link_dest)
             link_dest.symlink_to(src.resolve())
+
+
+def _link_threat_audit_skills(skills_target: Path) -> int:
+    """Copy Agent-local threat-audit skills into the isolated OpenCode workspace."""
+    if not THREAT_AUDIT_SKILLS_DIR.is_dir():
+        return 0
+    count = 0
+    for skill_dir in sorted(THREAT_AUDIT_SKILLS_DIR.iterdir()):
+        if not skill_dir.is_dir():
+            continue
+        skill_file = skill_dir / "SKILL.md"
+        if not skill_file.is_file():
+            continue
+        target_dir = skills_target / skill_dir.name
+        if target_dir.exists() or target_dir.is_symlink():
+            shutil.rmtree(target_dir)
+        target_dir.mkdir(parents=True, exist_ok=True)
+        (target_dir / "SKILL.md").write_text(
+            skill_file.read_text(encoding="utf-8"),
+            encoding="utf-8",
+        )
+        for dir_name in _SKILL_RESOURCE_DIRS:
+            src = skill_dir / dir_name
+            if src.is_dir():
+                shutil.copytree(src, target_dir / dir_name)
+        count += 1
+    return count
 
 
 def writable_edit_patterns(path: str | os.PathLike[str]) -> list[str]:
@@ -262,7 +290,8 @@ def _link_skills(
 
         _link_skill_resources(entry, link_dir)
 
-    logger.debug("Linked skills for %d checkers", len(registry))
+    threat_skill_count = _link_threat_audit_skills(skills_target)
+    logger.debug("Linked skills for %d checkers and %d threat-audit skill(s)", len(registry), threat_skill_count)
 
 
 def cleanup_workspace(workspace: Path) -> None:

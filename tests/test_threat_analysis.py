@@ -3,8 +3,9 @@ import unittest
 import time
 from pathlib import Path
 
+from agent.threat_auditor import build_threat_audit_tasks
 from backend.opencode.runner import _read_fresh_threat_analysis_result
-from backend.models import ScanItemStatus, ScanMeta, ScanStatus
+from backend.models import ScanItemStatus, ScanMeta, ScanStatus, ThreatAuditTask, Vulnerability
 from backend.store.sqlite import SqliteScanStore
 from backend.threat_analysis import (
     apply_threat_analysis_scan_scope,
@@ -92,6 +93,49 @@ class ThreatAnalysisParserTests(unittest.TestCase):
         self.assertEqual(analysis.code_path_mappings[0].code_paths[0].path, "src/api")
         self.assertEqual(analysis.scan_scope.code_scan_relative_path, "src")
 
+    def test_build_threat_audit_tasks_from_surface_methods_and_paths(self) -> None:
+        analysis = parse_threat_analysis_data({
+            "schema_version": "1.0",
+            "analysis_id": "ATA-001",
+            "assets": [
+                {
+                    "asset_id": "ASSET-001",
+                    "name": "基站服务",
+                    "risks": [{"risk_id": "RISK-001", "name": "服务不可用"}],
+                }
+            ],
+            "attack_trees": [
+                {
+                    "tree_id": "TREE-001",
+                    "asset_id": "ASSET-001",
+                    "risk_id": "RISK-001",
+                    "attack_goal": "造成基站服务中断",
+                    "root_node_id": "NODE-001",
+                    "nodes": [
+                        {"node_id": "NODE-001", "node_type": "goal", "name": "造成基站服务中断"},
+                        {"node_id": "NODE-002", "parent_id": "NODE-001", "node_type": "domain", "name": "管理面"},
+                        {"node_id": "NODE-003", "parent_id": "NODE-002", "node_type": "surface", "name": "管理接口"},
+                        {"node_id": "NODE-004", "parent_id": "NODE-003", "node_type": "method", "name": "认证绕过", "order": 1},
+                        {"node_id": "NODE-005", "parent_id": "NODE-003", "node_type": "method", "name": "接口泛洪", "order": 2},
+                    ],
+                }
+            ],
+            "code_path_mappings": [
+                {
+                    "surface_node_id": "NODE-003",
+                    "code_paths": [{"path": "src/api", "description": "管理接口实现"}],
+                }
+            ],
+        })
+
+        tasks = build_threat_audit_tasks("scan-1", analysis)
+
+        self.assertEqual(len(tasks), 2)
+        self.assertEqual({task.method_name for task in tasks}, {"认证绕过", "接口泛洪"})
+        self.assertTrue(all(task.code_path == "src/api" for task in tasks))
+        self.assertTrue(all(task.task_id.startswith("threat-audit-") for task in tasks))
+        self.assertIn("攻击面节点", tasks[0].description)
+
     def test_parse_file_accepts_fenced_json(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "res.json"
@@ -177,3 +221,44 @@ class ThreatAnalysisStoreTests(unittest.TestCase):
             self.assertEqual(loaded.analysis_id, "ATA-STORE")
             self.assertTrue(stored.updated_at)
             self.assertEqual(scan.threat_analysis.analysis_id, "ATA-STORE")
+
+    def test_threat_audit_tasks_and_source_fields_round_trip(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = SqliteScanStore(Path(tmp) / "scan.db")
+            store.save_scan(*_scan("scan-1"))
+            task = ThreatAuditTask(
+                task_id="threat-audit-1",
+                surface_node_id="SURFACE-1",
+                surface_name="管理接口",
+                method_node_id="METHOD-1",
+                method_name="认证绕过",
+                code_path="src/api",
+                status="completed",
+                result_vuln_indexes=[0],
+            )
+            vuln = Vulnerability(
+                file="src/api/auth.c",
+                line=12,
+                function="auth",
+                vuln_type="threat_audit",
+                severity="high",
+                description="认证绕过",
+                ai_analysis="analysis",
+                confirmed=True,
+                ai_verdict="confirmed",
+                analysis_source="threat_audit",
+                source_task_id=task.task_id,
+                threat_surface_node_id=task.surface_node_id,
+                threat_method_node_id=task.method_node_id,
+                threat_code_path=task.code_path,
+            )
+
+            stored_task = store.upsert_threat_audit_task("scan-1", task)
+            store.add_vulnerability("scan-1", vuln)
+            loaded_scan, _meta = store.load_scan("scan-1")  # type: ignore[misc]
+
+            self.assertEqual(stored_task.scan_id, "scan-1")
+            self.assertEqual(loaded_scan.threat_audit_tasks[0].method_name, "认证绕过")
+            self.assertEqual(loaded_scan.threat_audit_tasks[0].result_vuln_indexes, [0])
+            self.assertEqual(loaded_scan.vulnerabilities[0].analysis_source, "threat_audit")
+            self.assertEqual(loaded_scan.vulnerabilities[0].source_task_id, "threat-audit-1")

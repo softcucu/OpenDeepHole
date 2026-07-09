@@ -19,7 +19,7 @@ from datetime import datetime, timezone
 
 from backend.config import get_config
 from backend.logger import get_logger
-from backend.models import Candidate, OutputSource, ThreatAnalysis, Vulnerability
+from backend.models import Candidate, OutputSource, ThreatAnalysis, ThreatAuditTask, Vulnerability
 from backend.opencode.model_pool import (
     acquire_model_lease,
     clear_planned_task,
@@ -829,6 +829,190 @@ async def run_project_report_audit(
         return []
 
     return []
+
+
+def _threat_audit_candidate(task: ThreatAuditTask) -> Candidate:
+    return Candidate(
+        file=task.code_path or ".",
+        line=1,
+        function="__threat_path__",
+        description=task.description or (
+            f"Threat audit for surface `{task.surface_name}` via method `{task.method_name}` "
+            f"on code path `{task.code_path}`"
+        ),
+        vuln_type="threat_audit",
+        metadata={
+            "source": "threat_analysis",
+            "task_id": task.task_id,
+            "surface_node_id": task.surface_node_id,
+            "method_node_id": task.method_node_id,
+            "code_path": task.code_path,
+        },
+    )
+
+
+def _annotate_threat_audit_results(
+    results: list[Vulnerability],
+    task: ThreatAuditTask,
+) -> list[Vulnerability]:
+    for vuln in results:
+        vuln.analysis_source = "threat_audit"
+        vuln.source_task_id = task.task_id
+        vuln.threat_surface_node_id = task.surface_node_id
+        vuln.threat_method_node_id = task.method_node_id
+        vuln.threat_code_path = task.code_path
+    return results
+
+
+async def run_threat_audit(
+    workspace: Path,
+    task: ThreatAuditTask,
+    project_id: str,
+    on_output=None,
+    cancel_event=None,
+    timeout: int | None = None,
+    project_dir: Path | None = None,
+    planned_task_id: str = "",
+) -> list[Vulnerability]:
+    """Run one attack-tree-derived audit task and collect submitted results."""
+    config = get_config()
+    candidate = _threat_audit_candidate(task)
+    if config.opencode.mock:
+        await _clear_planned_task_id(planned_task_id)
+        return _annotate_threat_audit_results([_mock_result(candidate)], task)
+
+    effective_timeout = timeout if timeout is not None else config.opencode.timeout
+    tool = _normalize_tool(config.opencode)
+    max_retries = config.opencode.max_retries
+    last_source: OutputSource | None = None
+
+    for attempt in range(1, max_retries + 2):
+        attempt_source: OutputSource | None = None
+        attempt_id = uuid4().hex
+
+        def capture_source(source: OutputSource) -> None:
+            nonlocal attempt_source, last_source
+            attempt_source = source
+            last_source = source
+
+        prompt = (
+            "根据威胁分析结果执行一次独立审计。"
+            "你可以自行决定是否使用当前 workspace 中已加载的威胁审计相关 SKILL，不要求使用某个指定 SKILL。"
+            f"project_id 为 `{project_id}`。"
+            f"任务 ID 为 `{task.task_id}`。"
+            f"攻击目标：{task.attack_goal or '未标记'}。"
+            f"价值资产/风险：{task.asset_name or task.asset_id or '未标记'} / {task.risk_name or task.risk_id or '未标记'}。"
+            f"攻击面节点：{task.surface_name or task.surface_node_id}。"
+            f"攻击方式：{task.method_name or task.method_node_id}。"
+            f"代码路径：`{task.code_path}`。"
+            f"路径说明：{task.code_path_description or '无'}。"
+            f"任务描述：{task.description}。"
+            "请审计该攻击面和攻击方式在这条代码路径中是否存在真实可利用漏洞。"
+            "每发现一个真实问题，都必须调用一次 submit_result MCP 工具，并填写真实 file、line、function。"
+            "如果未发现真实漏洞，也必须调用一次 submit_result，confirmed=false，"
+            f"file=`{candidate.file}`，line=1，function=`{candidate.function}`。"
+        ).replace("\n", " ")
+        prompt = _with_source_reading_priority_instruction(prompt)
+        log_path = workspace / f"opencode_threat_audit_{attempt_id}.log"
+
+        if on_output:
+            on_output(f"[{tool}] 威胁审计提示词:\n{prompt}")
+
+        logger.info(
+            "Running %s threat audit: task_id=%s path=%s timeout=%ds attempt=%d/%d",
+            tool, task.task_id, task.code_path, effective_timeout, attempt, max_retries + 1,
+        )
+
+        task_context = {
+            "task_type": "threat_audit",
+            "checker": "threat_audit",
+            "file": task.code_path,
+            "function": candidate.function,
+            "threat_surface_node_id": task.surface_node_id,
+            "threat_method_node_id": task.method_node_id,
+        }
+        if planned_task_id:
+            task_context["planned_task_id"] = planned_task_id
+
+        try:
+            await _invoke_opencode(
+                workspace,
+                prompt,
+                effective_timeout,
+                log_path=log_path,
+                on_line=on_output,
+                cancel_event=cancel_event,
+                project_dir=project_dir,
+                model_capability="high",
+                prefer_high_model=True,
+                stats_scope_id=project_id,
+                task_context=task_context,
+                attempt=attempt,
+                on_invocation_metadata=capture_source,
+            )
+        except asyncio.TimeoutError:
+            logger.error("%s threat audit timed out for %s", tool, task.task_id)
+            results = _read_results_from_source(attempt_source, candidate)
+            if results:
+                return _annotate_threat_audit_results(
+                    _apply_output_source_to_list(results, attempt_source),
+                    task,
+                )
+            return _annotate_threat_audit_results([
+                Vulnerability(
+                    file=candidate.file,
+                    line=candidate.line,
+                    function=candidate.function,
+                    vuln_type=candidate.vuln_type,
+                    severity="unknown",
+                    description=candidate.description,
+                    ai_analysis="Threat audit timed out",
+                    confirmed=False,
+                    ai_verdict="timeout",
+                    failure_reason=_failure_reason(log_path, f"{tool} timed out after {effective_timeout} seconds"),
+                    output_source=attempt_source or OutputSource(),
+                )
+            ], task)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.exception("%s threat audit failed for %s (attempt %d)", tool, task.task_id, attempt)
+            if attempt <= max_retries:
+                if on_output:
+                    on_output(f"[retry {attempt}/{max_retries}] {tool} error: {exc}")
+                continue
+            return _annotate_threat_audit_results(
+                _apply_output_source_to_list([
+                    _failed_result(candidate, _failure_reason(log_path, f"{tool} error: {exc}"))
+                ], attempt_source),
+                task,
+            )
+
+        results = _read_results_from_source(attempt_source, candidate)
+        if results:
+            return _annotate_threat_audit_results(
+                _apply_output_source_to_list(results, attempt_source),
+                task,
+            )
+        if attempt <= max_retries:
+            logger.warning("%s threat audit did not call submit_result for %s (attempt %d)", tool, task.task_id, attempt)
+            if on_output:
+                on_output(f"[retry {attempt}/{max_retries}] No result submitted, retrying...")
+            continue
+        return _annotate_threat_audit_results(
+            _apply_output_source_to_list([
+                _failed_result(
+                    candidate,
+                    _failure_reason(log_path, f"{tool} completed but did not call submit_result"),
+                    analysis="OpenCode completed without submitting a threat audit result",
+                )
+            ], attempt_source),
+            task,
+        )
+
+    return _annotate_threat_audit_results([
+        _apply_output_source(_failed_result(candidate, "OpenCode did not return a result"), last_source)
+    ], task)
 
 
 async def run_threat_analysis_audit(

@@ -1,0 +1,338 @@
+"""Threat-analysis-derived audit task generation and execution."""
+
+from __future__ import annotations
+
+import asyncio
+import hashlib
+import threading
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Callable
+
+from agent.config import AgentConfig
+from agent.reporter import Reporter
+from backend.models import (
+    ThreatAnalysis,
+    ThreatAttackTree,
+    ThreatAttackTreeNode,
+    ThreatAuditTask,
+    ThreatCodePath,
+    Vulnerability,
+)
+
+
+COMPLETED_THREAT_AUDIT_STATUS = "completed"
+RETRYABLE_THREAT_AUDIT_STATUSES = {"failed", "timeout", "no_result", "cancelled"}
+
+
+def _now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _stable_task_id(
+    scan_id: str,
+    surface_node_id: str,
+    method_node_id: str,
+    code_path: str,
+) -> str:
+    raw = f"{scan_id}\0{surface_node_id}\0{method_node_id}\0{code_path}"
+    digest = hashlib.sha1(raw.encode("utf-8")).hexdigest()[:20]
+    return f"threat-audit-{digest}"
+
+
+def _node_map(tree: ThreatAttackTree) -> dict[str, ThreatAttackTreeNode]:
+    return {node.node_id: node for node in tree.nodes if node.node_id}
+
+
+def _child_map(tree: ThreatAttackTree) -> dict[str, list[ThreatAttackTreeNode]]:
+    children: dict[str, list[ThreatAttackTreeNode]] = {}
+    for node in tree.nodes:
+        if node.parent_id:
+            children.setdefault(node.parent_id, []).append(node)
+    for group in children.values():
+        group.sort(key=lambda item: item.order)
+    return children
+
+
+def _method_descendants(
+    surface: ThreatAttackTreeNode,
+    children: dict[str, list[ThreatAttackTreeNode]],
+) -> list[ThreatAttackTreeNode]:
+    methods: list[ThreatAttackTreeNode] = []
+    stack = list(reversed(children.get(surface.node_id, [])))
+    while stack:
+        node = stack.pop()
+        if node.node_type.lower() == "method":
+            methods.append(node)
+            continue
+        stack.extend(reversed(children.get(node.node_id, [])))
+    return methods
+
+
+def _risk_lookup(analysis: ThreatAnalysis) -> dict[str, tuple[str, str, str]]:
+    out: dict[str, tuple[str, str, str]] = {}
+    for asset in analysis.assets:
+        for risk in asset.risks:
+            if risk.risk_id:
+                out[risk.risk_id] = (risk.name, asset.asset_id, asset.name)
+    return out
+
+
+def _description(
+    *,
+    surface: ThreatAttackTreeNode,
+    method: ThreatAttackTreeNode,
+    path: ThreatCodePath,
+    tree: ThreatAttackTree,
+) -> str:
+    return (
+        f"审计攻击面节点 `{surface.name or surface.node_id}`，"
+        f"攻击方式 `{method.name or method.node_id or '未标记攻击方式'}`，"
+        f"代码路径 `{path.path}`。"
+        f"攻击目标：{tree.attack_goal or '未标记'}。"
+        f"路径说明：{path.description or '无'}。"
+    )
+
+
+def build_threat_audit_tasks(scan_id: str, analysis: ThreatAnalysis) -> list[ThreatAuditTask]:
+    """Build stable audit tasks from attack-tree surface/method/path mappings."""
+    risk_by_id = _risk_lookup(analysis)
+    trees_by_surface: dict[str, tuple[ThreatAttackTree, ThreatAttackTreeNode, list[ThreatAttackTreeNode]]] = {}
+    for tree in analysis.attack_trees:
+        nodes = _node_map(tree)
+        children = _child_map(tree)
+        for node in tree.nodes:
+            if node.node_type.lower() != "surface":
+                continue
+            methods = _method_descendants(node, children)
+            if not methods:
+                methods = [ThreatAttackTreeNode(node_id="", node_type="method", name="未标记攻击方式")]
+            trees_by_surface[node.node_id] = (tree, node, methods)
+
+    tasks: list[ThreatAuditTask] = []
+    seen: set[tuple[str, str, str]] = set()
+    now = _now()
+    for mapping in analysis.code_path_mappings:
+        surface_info = trees_by_surface.get(mapping.surface_node_id)
+        if surface_info is None:
+            continue
+        tree, surface, methods = surface_info
+        risk_name, asset_id, asset_name = risk_by_id.get(tree.risk_id, ("", tree.asset_id, ""))
+        for raw_path in mapping.code_paths:
+            code_path = str(raw_path.path or "").strip()
+            if not code_path:
+                continue
+            for method in methods:
+                key = (surface.node_id, method.node_id, code_path)
+                if key in seen:
+                    continue
+                seen.add(key)
+                task_id = _stable_task_id(scan_id, surface.node_id, method.node_id, code_path)
+                tasks.append(
+                    ThreatAuditTask(
+                        task_id=task_id,
+                        scan_id=scan_id,
+                        status="pending",
+                        surface_node_id=surface.node_id,
+                        surface_name=surface.name,
+                        method_node_id=method.node_id,
+                        method_name=method.name,
+                        attack_goal=tree.attack_goal,
+                        risk_id=tree.risk_id,
+                        risk_name=risk_name,
+                        asset_id=asset_id,
+                        asset_name=asset_name,
+                        code_path=code_path,
+                        code_path_description=raw_path.description,
+                        description=_description(surface=surface, method=method, path=raw_path, tree=tree),
+                        created_at=now,
+                        updated_at=now,
+                    )
+                )
+    return tasks
+
+
+def _task_status_from_results(results: list[Vulnerability]) -> str:
+    if not results:
+        return "no_result"
+    verdicts = {str(result.ai_verdict or "") for result in results}
+    if verdicts and verdicts <= {"timeout"}:
+        return "timeout"
+    if verdicts and verdicts <= {"failed"}:
+        return "failed"
+    if verdicts and verdicts <= {"no_result"}:
+        return "no_result"
+    return COMPLETED_THREAT_AUDIT_STATUS
+
+
+async def _maybe_emit(
+    emit: Callable[[str, str], object],
+    message: str,
+) -> None:
+    maybe = emit("threat_audit", message)
+    if asyncio.iscoroutine(maybe):
+        await maybe
+
+
+async def run_threat_audit_tasks(
+    *,
+    config: AgentConfig,
+    analysis: ThreatAnalysis,
+    reporter: Reporter,
+    scan_id: str,
+    project_path: Path,
+    workspace: Path,
+    cancel_event: threading.Event,
+    emit: Callable[[str, str], object],
+) -> None:
+    """Run threat-analysis-derived audits through the shared OpenCode queue."""
+    tasks = build_threat_audit_tasks(scan_id, analysis)
+    if not tasks:
+        await _maybe_emit(emit, "威胁分析未生成可审计的攻击面/代码路径任务")
+        return
+
+    existing = {task.task_id: task for task in await reporter.get_threat_audit_tasks(scan_id)}
+    pending = [
+        task
+        for task in tasks
+        if existing.get(task.task_id) is None
+        or existing[task.task_id].status != COMPLETED_THREAT_AUDIT_STATUS
+    ]
+    skipped = len(tasks) - len(pending)
+    await _maybe_emit(
+        emit,
+        f"威胁分析生成 {len(tasks)} 个独立审计任务"
+        + (f"，跳过 {skipped} 个已完成任务" if skipped else ""),
+    )
+    if not pending:
+        return
+
+    from backend.opencode.model_pool import register_planned_task, total_model_capacity
+    from backend.opencode.runner import run_threat_audit
+
+    for task in pending:
+        await reporter.push_threat_audit_task(scan_id, task)
+
+    capacity = total_model_capacity(
+        config.opencode,
+        global_concurrency=config.opencode_concurrency,
+        required_capability="high",
+    )
+    concurrency = max(1, min(capacity, len(pending)))
+    queue: asyncio.Queue[ThreatAuditTask] = asyncio.Queue()
+
+    planned_ids: dict[str, str] = {}
+    final_task_ids: set[str] = set()
+    for index, task in enumerate(pending):
+        planned_id = await register_planned_task(
+            scan_id,
+            {
+                "task_type": "threat_audit",
+                "checker": "threat_audit",
+                "file": task.code_path,
+                "function": "__threat_path__",
+                "threat_surface_node_id": task.surface_node_id,
+                "threat_method_node_id": task.method_node_id,
+                "required_capability": "high",
+                "queue_group": f"{scan_id}:threat_audit",
+                "audit_index": index,
+            },
+            task_key=f"threat_audit:{task.task_id}",
+        )
+        planned_ids[task.task_id] = planned_id
+        queued = task.model_copy(update={"status": "queued", "updated_at": _now()})
+        await reporter.push_threat_audit_task(scan_id, queued)
+        queue.put_nowait(queued)
+
+    async def worker() -> None:
+        while not queue.empty() and not cancel_event.is_set():
+            task = await queue.get()
+            try:
+                started = _now()
+                running = task.model_copy(update={"status": "running", "started_at": task.started_at or started, "updated_at": started})
+                await reporter.push_threat_audit_task(scan_id, running)
+                await _maybe_emit(
+                    emit,
+                    f"开始威胁审计：{running.surface_name or running.surface_node_id} / "
+                    f"{running.method_name or running.method_node_id or '未标记攻击方式'} / {running.code_path}",
+                )
+                results = await run_threat_audit(
+                    workspace,
+                    running,
+                    scan_id,
+                    on_output=lambda line: print(f"  [threat-audit] {line}", flush=True),
+                    cancel_event=cancel_event,
+                    timeout=config.opencode.timeout,
+                    project_dir=project_path,
+                    planned_task_id=planned_ids.get(running.task_id, ""),
+                )
+                result_indexes: list[int] = []
+                for vuln in results:
+                    response = await reporter.report_vulnerability(scan_id, vuln)
+                    if isinstance(response, dict) and response.get("index") is not None:
+                        try:
+                            result_indexes.append(int(response["index"]))
+                        except (TypeError, ValueError):
+                            pass
+                status = _task_status_from_results(results)
+                finished = _now()
+                failure_reason = ""
+                if status != COMPLETED_THREAT_AUDIT_STATUS:
+                    failure_reason = "\n\n".join(
+                        result.failure_reason or result.ai_analysis
+                        for result in results
+                        if result.failure_reason or result.ai_analysis
+                    )
+                done = running.model_copy(
+                    update={
+                        "status": status,
+                        "result_vuln_indexes": result_indexes,
+                        "failure_reason": failure_reason,
+                        "finished_at": finished,
+                        "updated_at": finished,
+                    }
+                )
+                await reporter.push_threat_audit_task(scan_id, done)
+                final_task_ids.add(done.task_id)
+                await _maybe_emit(
+                    emit,
+                    f"威胁审计完成：{done.code_path}，结果 {len(result_indexes)} 条，状态 {done.status}",
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                failed = task.model_copy(
+                    update={
+                        "status": "failed",
+                        "failure_reason": str(exc),
+                        "finished_at": _now(),
+                        "updated_at": _now(),
+                    }
+                )
+                await reporter.push_threat_audit_task(scan_id, failed)
+                final_task_ids.add(failed.task_id)
+                await _maybe_emit(emit, f"威胁审计异常：{task.code_path}，原因：{exc}")
+            finally:
+                queue.task_done()
+
+    await asyncio.gather(*(worker() for _ in range(concurrency)))
+    if cancel_event.is_set():
+        from backend.opencode.model_pool import clear_planned_task
+
+        for planned_id in planned_ids.values():
+            await clear_planned_task(planned_id)
+        for task in pending:
+            if task.task_id in final_task_ids:
+                continue
+            current = existing.get(task.task_id, task)
+            if current.status == COMPLETED_THREAT_AUDIT_STATUS:
+                continue
+            cancelled = task.model_copy(
+                update={
+                    "status": "cancelled",
+                    "failure_reason": "Scan cancelled",
+                    "finished_at": _now(),
+                    "updated_at": _now(),
+                }
+            )
+            await reporter.push_threat_audit_task(scan_id, cancelled)

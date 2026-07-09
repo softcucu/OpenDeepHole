@@ -113,6 +113,11 @@ class Vulnerability(BaseModel):
     function_start_line: int | None = None
     audit_index: int | None = None           # Static candidate audit order; DB idx remains the API handle.
     variant_of: str = ""                     # 同类变体排查命中时，来源历史问题模式（根因摘要+出处提交/文件）
+    analysis_source: str = "static_candidate"  # "static_candidate" | "threat_audit"
+    source_task_id: str = ""
+    threat_surface_node_id: str = ""
+    threat_method_node_id: str = ""
+    threat_code_path: str = ""
     output_source: OutputSource = Field(default_factory=OutputSource)
 
 
@@ -397,6 +402,32 @@ class ThreatAnalysis(BaseModel):
     updated_at: str = ""
 
 
+class ThreatAuditTask(BaseModel):
+    """One audit task derived from an attack-tree threat-analysis result."""
+    task_id: str
+    scan_id: str = ""
+    status: str = "pending"  # pending | queued | running | completed | failed | timeout | no_result | cancelled
+    surface_node_id: str = ""
+    surface_name: str = ""
+    method_node_id: str = ""
+    method_name: str = ""
+    attack_goal: str = ""
+    risk_id: str = ""
+    risk_name: str = ""
+    asset_id: str = ""
+    asset_name: str = ""
+    code_path: str = ""
+    code_path_description: str = ""
+    description: str = ""
+    result_vuln_indexes: list[int] = []
+    failure_reason: str = ""
+    output_source: OutputSource = Field(default_factory=OutputSource)
+    created_at: str = ""
+    started_at: str = ""
+    finished_at: str = ""
+    updated_at: str = ""
+
+
 class VulnerabilityValidation(BaseModel):
     """Runtime validation status and artifacts for one vulnerability."""
     scan_id: str = ""
@@ -476,6 +507,7 @@ class ScanStatus(BaseModel):
     vulnerabilities: list[Vulnerability]
     skill_reports: list[SkillReport] = []
     threat_analysis: ThreatAnalysis | None = None
+    threat_audit_tasks: list[ThreatAuditTask] = []
     validations: list[VulnerabilityValidation] = []
     events: list[ScanEvent] = []
     current_candidate: Candidate | None = None

@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { getScanStatus, stopScan, downloadScanReport, downloadScanReportZip, getCheckers, updateScanFeedback, getSkillContent, triggerFpReview, stopFpReview, getFpReview, getFpReviewSkill, getScanGitHistory, getSkillReports, getScanThreatAnalysis, getAgentIndexStatus, retryIncompleteScan, triggerVulnerabilityValidation, stopVulnerabilityValidation } from "../api/client";
-import type { Candidate, CodeIndexStats, FpReviewJob, HistoryPattern, IndexStatus, ScanItemStatus, ScanStatus as ScanStatusType, ScanEvent, CheckerInfo, SkillReport, OpenCodePoolStatus, ScanCandidate, Vulnerability, OutputSource, VulnerabilityValidation, ThreatAnalysis, ThreatAsset, ThreatAttackTree, ThreatAttackTreeNode, ThreatCodePathMapping, ThreatRisk } from "../types";
+import type { Candidate, CodeIndexStats, FpReviewJob, HistoryPattern, IndexStatus, ScanItemStatus, ScanStatus as ScanStatusType, ScanEvent, CheckerInfo, SkillReport, OpenCodePoolStatus, ScanCandidate, Vulnerability, OutputSource, VulnerabilityValidation, ThreatAnalysis, ThreatAsset, ThreatAttackTree, ThreatAttackTreeNode, ThreatCodePathMapping, ThreatRisk, ThreatAuditTask } from "../types";
 import { useScanSSE } from "../hooks/useScanSSE";
 import type { ScanSSEHandlers, SSEStateSetters } from "../hooks/useScanSSE";
 import VulnerabilityList from "./VulnerabilityList";
@@ -126,6 +126,7 @@ function currentStageLabel(scan: ScanStatusType, events: ScanEvent[]): string {
   if (latest?.phase === "fp_review") return "漏洞挖掘 / 对抗式去误报";
   if (latest?.phase === "variant_hunt") return "威胁分析 / 历史同类问题挖掘";
   if (latest?.phase === "threat_analysis") return "威胁分析 / 攻击树分析";
+  if (latest?.phase === "threat_audit") return "威胁分析 / 威胁审计";
   if (latest?.phase === "git_history") return "威胁分析 / Git 历史问题分析";
   if (latest?.phase === "auditing") return "漏洞挖掘 / 候选点 AI 审计";
   if (latest?.phase === "static_analysis") return "漏洞挖掘 / 静态分析";
@@ -316,6 +317,20 @@ export default function ScanStatus({ scanId, onBack }: Props) {
     onThreatAnalysis: (data) => {
       setThreatAnalysisLoading(false);
       setScan((prev) => prev ? { ...prev, threat_analysis: data.analysis } : prev);
+    },
+    onThreatAuditTask: (data) => {
+      setScan((prev) => {
+        if (!prev) return prev;
+        const tasks = [...(prev.threat_audit_tasks ?? [])];
+        const existing = tasks.findIndex((task) => task.task_id === data.task.task_id);
+        if (existing >= 0) {
+          tasks[existing] = data.task;
+        } else {
+          tasks.push(data.task);
+        }
+        tasks.sort((a, b) => String(a.created_at || "").localeCompare(String(b.created_at || "")) || a.task_id.localeCompare(b.task_id));
+        return { ...prev, threat_audit_tasks: tasks };
+      });
     },
     onScanEvent: (data) => {
       setScan((prev) => {
@@ -751,7 +766,7 @@ export default function ScanStatus({ scanId, onBack }: Props) {
     || variantIssueCount > 0
     || hasEvent(scan.events, ["git_history", "variant_hunt"]);
   const indexProgress = formatIndexProgress(indexStatus, scan);
-  const threatAnalysisEvents = filterEvents(scan.events, ["threat_analysis"]);
+  const threatAnalysisEvents = filterEvents(scan.events, ["threat_analysis", "threat_audit"]);
   const miningEvents = filterEvents(scan.events, ["auditing", "fp_review", "opencode_output"]);
   const validationEvents = filterEvents(scan.events, ["validation"]);
   const issuesView = scan.vulnerabilities.length === 0 && isDone ? (
@@ -1030,6 +1045,7 @@ export default function ScanStatus({ scanId, onBack }: Props) {
         {activeTab === "threat" && (
           <ThreatAnalysisPanel
             analysis={scan.threat_analysis ?? null}
+            threatAuditTasks={scan.threat_audit_tasks ?? []}
             events={threatAnalysisEvents}
             loading={threatAnalysisLoading && !scan.threat_analysis}
             isDone={!!isDone}
@@ -1999,6 +2015,7 @@ function scanQueueTaskTypeLabel(value: unknown): string {
   if (type === "audit") return "候选点审计";
   if (type === "fp_review") return "对抗式去误报";
   if (type === "threat_analysis") return "威胁分析";
+  if (type === "threat_audit") return "威胁审计";
   if (type === "validation") return "漏洞验证";
   return type;
 }
@@ -2104,11 +2121,13 @@ function TabbedPanel<T extends string>({
 
 function ThreatAnalysisPanel({
   analysis,
+  threatAuditTasks,
   events,
   loading,
   isDone,
 }: {
   analysis: ThreatAnalysis | null;
+  threatAuditTasks: ThreatAuditTask[];
   events: ScanEvent[];
   loading: boolean;
   isDone: boolean;
@@ -2145,6 +2164,7 @@ function ThreatAnalysisPanel({
             </div>
           </div>
         </div>
+        <ThreatAuditTaskList tasks={threatAuditTasks} />
         <EventList events={events} empty="暂无威胁分析日志" />
       </div>
     );
@@ -2158,6 +2178,7 @@ function ThreatAnalysisPanel({
           surfaceCount={surfaceCount}
           methodCount={methodCount}
         />
+        <ThreatAuditTaskList tasks={threatAuditTasks} />
         <EmptyState text="res.json 中未包含关键资产。" />
         <EventList events={events} empty="暂无威胁分析日志" />
       </div>
@@ -2171,6 +2192,7 @@ function ThreatAnalysisPanel({
         surfaceCount={surfaceCount}
         methodCount={methodCount}
       />
+      <ThreatAuditTaskList tasks={threatAuditTasks} />
       <div className="space-y-4">
         {analysis.assets.map((asset, index) => (
           <ThreatAssetCard
@@ -2182,6 +2204,75 @@ function ThreatAnalysisPanel({
         ))}
       </div>
       <EventList events={events} empty="暂无威胁分析日志" />
+    </div>
+  );
+}
+
+function threatAuditStatusLabel(status: string): string {
+  if (status === "pending") return "待创建";
+  if (status === "queued") return "排队中";
+  if (status === "running") return "运行中";
+  if (status === "completed") return "已完成";
+  if (status === "timeout") return "超时";
+  if (status === "no_result") return "无结果";
+  if (status === "cancelled") return "已取消";
+  if (status === "failed") return "失败";
+  return status || "未知";
+}
+
+function threatAuditStatusClass(status: string): string {
+  if (status === "completed") return statusClass("success");
+  if (status === "running") return statusClass("running");
+  if (status === "queued" || status === "pending") return statusClass("queued");
+  if (status === "failed" || status === "timeout" || status === "no_result" || status === "cancelled") return statusClass("failure");
+  return statusClass("");
+}
+
+function ThreatAuditTaskList({ tasks }: { tasks: ThreatAuditTask[] }) {
+  if (tasks.length === 0) {
+    return (
+      <div className="rounded-lg border border-slate-800 bg-slate-900/70 p-4">
+        <div className="text-sm font-semibold text-white">威胁审计任务</div>
+        <div className="mt-1 text-sm text-slate-500">威胁分析生成攻击面、攻击方式和代码路径后会创建独立审计任务。</div>
+      </div>
+    );
+  }
+  const completed = tasks.filter((task) => task.status === "completed").length;
+  const running = tasks.filter((task) => task.status === "running").length;
+  const queued = tasks.filter((task) => task.status === "queued" || task.status === "pending").length;
+  const failed = tasks.length - completed - running - queued;
+  return (
+    <div className="rounded-lg border border-slate-800 bg-slate-900/70 p-4">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <div className="text-sm font-semibold text-white">威胁审计任务</div>
+          <div className="mt-1 text-xs text-slate-500">
+            {tasks.length} 个任务 · 已完成 {completed} · 运行中 {running} · 排队 {queued} · 异常 {failed}
+          </div>
+        </div>
+      </div>
+      <div className="mt-3 max-h-72 overflow-auto divide-y divide-slate-800">
+        {tasks.map((task) => (
+          <div key={task.task_id} className="py-3">
+            <div className="flex flex-wrap items-center gap-2">
+              <span className={threatAuditStatusClass(task.status)}>{threatAuditStatusLabel(task.status)}</span>
+              <span className="text-sm font-medium text-slate-100">{task.surface_name || task.surface_node_id || "未标记攻击面"}</span>
+              <span className="text-xs text-slate-500">/</span>
+              <span className="text-sm text-slate-300">{task.method_name || task.method_node_id || "未标记攻击方式"}</span>
+            </div>
+            <div className="mt-1 font-mono text-xs text-slate-400 truncate">{task.code_path}</div>
+            {task.code_path_description && (
+              <div className="mt-1 text-xs text-slate-500 line-clamp-2">{task.code_path_description}</div>
+            )}
+            {(task.result_vuln_indexes?.length ?? 0) > 0 && (
+              <div className="mt-1 text-xs text-cyan-300">结果：{task.result_vuln_indexes?.map((idx) => `#${idx}`).join(", ")}</div>
+            )}
+            {task.failure_reason && task.status !== "completed" && (
+              <div className="mt-1 text-xs text-red-300 line-clamp-2">{task.failure_reason}</div>
+            )}
+          </div>
+        ))}
+      </div>
     </div>
   );
 }
@@ -4004,6 +4095,7 @@ function EventLine({ event }: { event: ScanEvent }) {
     init: "text-yellow-400",
     mcp_ready: "text-green-400",
     threat_analysis: "text-emerald-300",
+    threat_audit: "text-cyan-300",
     static_analysis: "text-cyan-400",
     git_history: "text-purple-300",
     variant_hunt: "text-purple-400",
@@ -4208,7 +4300,7 @@ function statusClass(value: string): string {
 
 function modelTaskLabel(task: Record<string, unknown> | undefined): string {
   if (!task) return "-";
-  const taskType = String(task.task_type || "audit");
+  const taskType = scanQueueTaskTypeLabel(task.task_type);
   const stage = task.stage ? `/${String(task.stage)}` : "";
   const checker = task.checker ? String(task.checker) : "";
   const file = task.file ? String(task.file) : "";

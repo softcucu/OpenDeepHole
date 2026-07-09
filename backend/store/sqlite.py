@@ -29,6 +29,7 @@ from backend.models import (
     ScanSummary,
     SkillReport,
     ThreatAnalysis,
+    ThreatAuditTask,
     UserInDB,
     Vulnerability,
     VulnerabilityValidation,
@@ -132,6 +133,11 @@ CREATE TABLE IF NOT EXISTS vulnerabilities (
     ticket_submitted    INTEGER NOT NULL DEFAULT 0,
     ticket_id           TEXT NOT NULL DEFAULT '',
     variant_of          TEXT NOT NULL DEFAULT '',
+    analysis_source     TEXT NOT NULL DEFAULT 'static_candidate',
+    source_task_id      TEXT NOT NULL DEFAULT '',
+    threat_surface_node_id TEXT NOT NULL DEFAULT '',
+    threat_method_node_id TEXT NOT NULL DEFAULT '',
+    threat_code_path    TEXT NOT NULL DEFAULT '',
     output_source       TEXT NOT NULL DEFAULT '{}',
     UNIQUE(scan_id, idx)
 );
@@ -210,6 +216,34 @@ CREATE TABLE IF NOT EXISTS threat_analysis (
     content    TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS threat_audit_tasks (
+    task_id                TEXT PRIMARY KEY,
+    scan_id                TEXT NOT NULL REFERENCES scans(scan_id) ON DELETE CASCADE,
+    status                 TEXT NOT NULL DEFAULT 'pending',
+    surface_node_id        TEXT NOT NULL DEFAULT '',
+    surface_name           TEXT NOT NULL DEFAULT '',
+    method_node_id         TEXT NOT NULL DEFAULT '',
+    method_name            TEXT NOT NULL DEFAULT '',
+    attack_goal            TEXT NOT NULL DEFAULT '',
+    risk_id                TEXT NOT NULL DEFAULT '',
+    risk_name              TEXT NOT NULL DEFAULT '',
+    asset_id               TEXT NOT NULL DEFAULT '',
+    asset_name             TEXT NOT NULL DEFAULT '',
+    code_path              TEXT NOT NULL DEFAULT '',
+    code_path_description  TEXT NOT NULL DEFAULT '',
+    description            TEXT NOT NULL DEFAULT '',
+    result_vuln_indexes    TEXT NOT NULL DEFAULT '[]',
+    failure_reason         TEXT NOT NULL DEFAULT '',
+    output_source          TEXT NOT NULL DEFAULT '{}',
+    created_at             TEXT NOT NULL DEFAULT '',
+    started_at             TEXT NOT NULL DEFAULT '',
+    finished_at            TEXT NOT NULL DEFAULT '',
+    updated_at             TEXT NOT NULL DEFAULT '',
+    UNIQUE(scan_id, surface_node_id, method_node_id, code_path)
+);
+
+CREATE INDEX IF NOT EXISTS idx_threat_audit_tasks_scan ON threat_audit_tasks(scan_id);
 
 CREATE TABLE IF NOT EXISTS feedback_entries (
     id              TEXT PRIMARY KEY,
@@ -427,6 +461,26 @@ class SqliteScanStore(ScanStoreBase):
             self._conn.execute(
                 "ALTER TABLE vulnerabilities ADD COLUMN output_source TEXT NOT NULL DEFAULT '{}'"
             )
+        if "analysis_source" not in vuln_cols:
+            self._conn.execute(
+                "ALTER TABLE vulnerabilities ADD COLUMN analysis_source TEXT NOT NULL DEFAULT 'static_candidate'"
+            )
+        if "source_task_id" not in vuln_cols:
+            self._conn.execute(
+                "ALTER TABLE vulnerabilities ADD COLUMN source_task_id TEXT NOT NULL DEFAULT ''"
+            )
+        if "threat_surface_node_id" not in vuln_cols:
+            self._conn.execute(
+                "ALTER TABLE vulnerabilities ADD COLUMN threat_surface_node_id TEXT NOT NULL DEFAULT ''"
+            )
+        if "threat_method_node_id" not in vuln_cols:
+            self._conn.execute(
+                "ALTER TABLE vulnerabilities ADD COLUMN threat_method_node_id TEXT NOT NULL DEFAULT ''"
+            )
+        if "threat_code_path" not in vuln_cols:
+            self._conn.execute(
+                "ALTER TABLE vulnerabilities ADD COLUMN threat_code_path TEXT NOT NULL DEFAULT ''"
+            )
 
         self._conn.executescript("""\
             CREATE TABLE IF NOT EXISTS scan_candidates (
@@ -488,6 +542,33 @@ class SqliteScanStore(ScanStoreBase):
                 content    TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS threat_audit_tasks (
+                task_id                TEXT PRIMARY KEY,
+                scan_id                TEXT NOT NULL REFERENCES scans(scan_id) ON DELETE CASCADE,
+                status                 TEXT NOT NULL DEFAULT 'pending',
+                surface_node_id        TEXT NOT NULL DEFAULT '',
+                surface_name           TEXT NOT NULL DEFAULT '',
+                method_node_id         TEXT NOT NULL DEFAULT '',
+                method_name            TEXT NOT NULL DEFAULT '',
+                attack_goal            TEXT NOT NULL DEFAULT '',
+                risk_id                TEXT NOT NULL DEFAULT '',
+                risk_name              TEXT NOT NULL DEFAULT '',
+                asset_id               TEXT NOT NULL DEFAULT '',
+                asset_name             TEXT NOT NULL DEFAULT '',
+                code_path              TEXT NOT NULL DEFAULT '',
+                code_path_description  TEXT NOT NULL DEFAULT '',
+                description            TEXT NOT NULL DEFAULT '',
+                result_vuln_indexes    TEXT NOT NULL DEFAULT '[]',
+                failure_reason         TEXT NOT NULL DEFAULT '',
+                output_source          TEXT NOT NULL DEFAULT '{}',
+                created_at             TEXT NOT NULL DEFAULT '',
+                started_at             TEXT NOT NULL DEFAULT '',
+                finished_at            TEXT NOT NULL DEFAULT '',
+                updated_at             TEXT NOT NULL DEFAULT '',
+                UNIQUE(scan_id, surface_node_id, method_node_id, code_path)
+            );
+            CREATE INDEX IF NOT EXISTS idx_threat_audit_tasks_scan
+                ON threat_audit_tasks(scan_id);
             CREATE TABLE IF NOT EXISTS users (
                 user_id       TEXT PRIMARY KEY,
                 username      TEXT NOT NULL UNIQUE,
@@ -689,6 +770,7 @@ class SqliteScanStore(ScanStoreBase):
             vulnerabilities=self.get_vulnerabilities(row["scan_id"]),
             skill_reports=self.list_skill_reports(row["scan_id"]),
             threat_analysis=self.get_threat_analysis(row["scan_id"]),
+            threat_audit_tasks=self.list_threat_audit_tasks(row["scan_id"]),
             validations=self.list_vulnerability_validations(row["scan_id"]),
             events=self.get_events(row["scan_id"]),
             current_candidate=current,
@@ -1245,8 +1327,10 @@ class SqliteScanStore(ScanStoreBase):
                      severity, description, ai_analysis, confirmed,
                      ai_verdict, failure_reason, user_verdict, user_verdict_reason,
                      ticket_submitted, ticket_id,
-                     function_source, function_start_line, variant_of, output_source)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     function_source, function_start_line, variant_of,
+                     analysis_source, source_task_id, threat_surface_node_id,
+                     threat_method_node_id, threat_code_path, output_source)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     scan_id,
@@ -1269,6 +1353,11 @@ class SqliteScanStore(ScanStoreBase):
                     vuln.function_source,
                     vuln.function_start_line,
                     vuln.variant_of,
+                    vuln.analysis_source,
+                    vuln.source_task_id,
+                    vuln.threat_surface_node_id,
+                    vuln.threat_method_node_id,
+                    vuln.threat_code_path,
                     vuln.output_source.model_dump_json(),
                 ),
             )
@@ -1314,6 +1403,11 @@ class SqliteScanStore(ScanStoreBase):
                         function_source = ?,
                         function_start_line = ?,
                         variant_of = ?,
+                        analysis_source = ?,
+                        source_task_id = ?,
+                        threat_surface_node_id = ?,
+                        threat_method_node_id = ?,
+                        threat_code_path = ?,
                         output_source = ?
                     WHERE scan_id = ? AND idx = ?
                     """,
@@ -1328,6 +1422,11 @@ class SqliteScanStore(ScanStoreBase):
                         vuln.function_source,
                         vuln.function_start_line,
                         vuln.variant_of,
+                        vuln.analysis_source,
+                        vuln.source_task_id,
+                        vuln.threat_surface_node_id,
+                        vuln.threat_method_node_id,
+                        vuln.threat_code_path,
                         vuln.output_source.model_dump_json(),
                         scan_id,
                         idx,
@@ -1348,8 +1447,10 @@ class SqliteScanStore(ScanStoreBase):
                      severity, description, ai_analysis, confirmed,
                      ai_verdict, failure_reason, user_verdict, user_verdict_reason,
                      ticket_submitted, ticket_id,
-                     function_source, function_start_line, variant_of, output_source)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     function_source, function_start_line, variant_of,
+                     analysis_source, source_task_id, threat_surface_node_id,
+                     threat_method_node_id, threat_code_path, output_source)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     scan_id,
@@ -1372,6 +1473,11 @@ class SqliteScanStore(ScanStoreBase):
                     vuln.function_source,
                     vuln.function_start_line,
                     vuln.variant_of,
+                    vuln.analysis_source,
+                    vuln.source_task_id,
+                    vuln.threat_surface_node_id,
+                    vuln.threat_method_node_id,
+                    vuln.threat_code_path,
                     vuln.output_source.model_dump_json(),
                 ),
             )
@@ -1497,6 +1603,11 @@ class SqliteScanStore(ScanStoreBase):
                 function_start_line=r["function_start_line"],
                 audit_index=(r["audit_index"] if "audit_index" in r.keys() else None),
                 variant_of=(r["variant_of"] if "variant_of" in r.keys() else "") or "",
+                analysis_source=(r["analysis_source"] if "analysis_source" in r.keys() else "static_candidate") or "static_candidate",
+                source_task_id=(r["source_task_id"] if "source_task_id" in r.keys() else "") or "",
+                threat_surface_node_id=(r["threat_surface_node_id"] if "threat_surface_node_id" in r.keys() else "") or "",
+                threat_method_node_id=(r["threat_method_node_id"] if "threat_method_node_id" in r.keys() else "") or "",
+                threat_code_path=(r["threat_code_path"] if "threat_code_path" in r.keys() else "") or "",
                 output_source=_output_source(r["output_source"] if "output_source" in r.keys() else "{}"),
             )
             for r in cur.fetchall()
@@ -1730,6 +1841,130 @@ class SqliteScanStore(ScanStoreBase):
         if not analysis.updated_at:
             analysis = analysis.model_copy(update={"updated_at": row["updated_at"] or ""})
         return analysis
+
+    def upsert_threat_audit_task(self, scan_id: str, task: ThreatAuditTask) -> ThreatAuditTask:
+        now = datetime.now(timezone.utc).isoformat()
+        created_at = task.created_at or now
+        updated_at = task.updated_at or now
+        stored = task.model_copy(
+            update={
+                "scan_id": scan_id,
+                "created_at": created_at,
+                "updated_at": updated_at,
+            }
+        )
+        with self._lock:
+            self._conn.execute(
+                """\
+                INSERT INTO threat_audit_tasks
+                    (task_id, scan_id, status, surface_node_id, surface_name,
+                     method_node_id, method_name, attack_goal, risk_id, risk_name,
+                     asset_id, asset_name, code_path, code_path_description,
+                     description, result_vuln_indexes, failure_reason, output_source,
+                     created_at, started_at, finished_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(task_id) DO UPDATE SET
+                    status = excluded.status,
+                    surface_node_id = excluded.surface_node_id,
+                    surface_name = excluded.surface_name,
+                    method_node_id = excluded.method_node_id,
+                    method_name = excluded.method_name,
+                    attack_goal = excluded.attack_goal,
+                    risk_id = excluded.risk_id,
+                    risk_name = excluded.risk_name,
+                    asset_id = excluded.asset_id,
+                    asset_name = excluded.asset_name,
+                    code_path = excluded.code_path,
+                    code_path_description = excluded.code_path_description,
+                    description = excluded.description,
+                    result_vuln_indexes = excluded.result_vuln_indexes,
+                    failure_reason = excluded.failure_reason,
+                    output_source = excluded.output_source,
+                    started_at = excluded.started_at,
+                    finished_at = excluded.finished_at,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    stored.task_id,
+                    scan_id,
+                    stored.status,
+                    stored.surface_node_id,
+                    stored.surface_name,
+                    stored.method_node_id,
+                    stored.method_name,
+                    stored.attack_goal,
+                    stored.risk_id,
+                    stored.risk_name,
+                    stored.asset_id,
+                    stored.asset_name,
+                    stored.code_path,
+                    stored.code_path_description,
+                    stored.description,
+                    json.dumps(stored.result_vuln_indexes, ensure_ascii=False),
+                    stored.failure_reason,
+                    stored.output_source.model_dump_json(),
+                    stored.created_at,
+                    stored.started_at,
+                    stored.finished_at,
+                    stored.updated_at,
+                ),
+            )
+            self._conn.commit()
+        return stored
+
+    def list_threat_audit_tasks(self, scan_id: str) -> list[ThreatAuditTask]:
+        cur = self._conn.execute(
+            """\
+            SELECT *
+            FROM threat_audit_tasks
+            WHERE scan_id = ?
+            ORDER BY created_at, task_id
+            """,
+            (scan_id,),
+        )
+
+        def _json_int_list(value: str | None) -> list[int]:
+            try:
+                raw = json.loads(value or "[]")
+            except Exception:
+                return []
+            if not isinstance(raw, list):
+                return []
+            out: list[int] = []
+            for item in raw:
+                try:
+                    out.append(int(item))
+                except (TypeError, ValueError):
+                    continue
+            return out
+
+        return [
+            ThreatAuditTask(
+                task_id=r["task_id"],
+                scan_id=r["scan_id"],
+                status=r["status"] or "pending",
+                surface_node_id=r["surface_node_id"] or "",
+                surface_name=r["surface_name"] or "",
+                method_node_id=r["method_node_id"] or "",
+                method_name=r["method_name"] or "",
+                attack_goal=r["attack_goal"] or "",
+                risk_id=r["risk_id"] or "",
+                risk_name=r["risk_name"] or "",
+                asset_id=r["asset_id"] or "",
+                asset_name=r["asset_name"] or "",
+                code_path=r["code_path"] or "",
+                code_path_description=r["code_path_description"] or "",
+                description=r["description"] or "",
+                result_vuln_indexes=_json_int_list(r["result_vuln_indexes"]),
+                failure_reason=r["failure_reason"] or "",
+                output_source=_output_source(r["output_source"]),
+                created_at=r["created_at"] or "",
+                started_at=r["started_at"] or "",
+                finished_at=r["finished_at"] or "",
+                updated_at=r["updated_at"] or "",
+            )
+            for r in cur.fetchall()
+        ]
 
     # -- Events --
 

@@ -26,6 +26,7 @@ from backend.models import (
     ScanSummary,
     SkillReport,
     ThreatAnalysis,
+    ThreatAuditTask,
     UserInDB,
     Vulnerability,
     VulnerabilityValidation,
@@ -171,6 +172,14 @@ class ScanStoreBase(ABC):
     @abstractmethod
     def get_threat_analysis(self, scan_id: str) -> ThreatAnalysis | None:
         """Return the attack-tree threat analysis result for a scan if present."""
+
+    @abstractmethod
+    def upsert_threat_audit_task(self, scan_id: str, task: ThreatAuditTask) -> ThreatAuditTask:
+        """Create or update one threat-analysis-derived audit task."""
+
+    @abstractmethod
+    def list_threat_audit_tasks(self, scan_id: str) -> list[ThreatAuditTask]:
+        """Return threat-analysis-derived audit tasks for a scan."""
 
     # -- Events --
 

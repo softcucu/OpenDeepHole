@@ -516,6 +516,19 @@ async def _run_threat_analysis_phase(
             )
             if asyncio.iscoroutine(maybe):
                 await maybe
+            if not cancel_event.is_set():
+                from agent.threat_auditor import run_threat_audit_tasks
+
+                await run_threat_audit_tasks(
+                    config=config,
+                    analysis=analysis,
+                    reporter=reporter,
+                    scan_id=scan_id,
+                    project_path=project_path,
+                    workspace=workspace,
+                    cancel_event=cancel_event,
+                    emit=emit,
+                )
         elif cancel_event.is_set():
             maybe = emit("threat_analysis", "威胁分析已停止")
             if asyncio.iscoroutine(maybe):
@@ -1371,7 +1384,7 @@ async def run_scan(
                 cancel_event=cancel_event,
                 emit=emit,
             )
-            await emit("complete", "No candidates found — nothing to audit")
+            await emit("complete", "No static candidates found")
             await reporter.finish_scan(scan_id, [], "complete", 0, 0)
             shutil.rmtree(scan_dir, ignore_errors=True)
             return

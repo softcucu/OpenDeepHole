@@ -134,6 +134,11 @@ export interface Vulnerability {
   function_start_line?: number | null;
   audit_index?: number | null;
   variant_of?: string;
+  analysis_source?: "static_candidate" | "threat_audit" | string;
+  source_task_id?: string;
+  threat_surface_node_id?: string;
+  threat_method_node_id?: string;
+  threat_code_path?: string;
   output_source?: OutputSource;
 }
 
@@ -261,6 +266,31 @@ export interface ThreatAnalysis {
   updated_at: string;
 }
 
+export interface ThreatAuditTask {
+  task_id: string;
+  scan_id?: string;
+  status: string;
+  surface_node_id?: string;
+  surface_name?: string;
+  method_node_id?: string;
+  method_name?: string;
+  attack_goal?: string;
+  risk_id?: string;
+  risk_name?: string;
+  asset_id?: string;
+  asset_name?: string;
+  code_path: string;
+  code_path_description?: string;
+  description?: string;
+  result_vuln_indexes?: number[];
+  failure_reason?: string;
+  output_source?: OutputSource;
+  created_at?: string;
+  started_at?: string;
+  finished_at?: string;
+  updated_at?: string;
+}
+
 export interface Candidate {
   file: string;
   line: number;
@@ -338,6 +368,7 @@ export interface ScanStatus {
   vulnerabilities: Vulnerability[];
   skill_reports: SkillReport[];
   threat_analysis?: ThreatAnalysis | null;
+  threat_audit_tasks?: ThreatAuditTask[];
   validations?: VulnerabilityValidation[];
   events: ScanEvent[];
   current_candidate: Candidate | null;

@@ -197,9 +197,19 @@ function formatDurationSeconds(value: number): string {
   return `${hours}h ${minutes % 60}m`;
 }
 
+function compactTaskTypeLabel(value: unknown): string {
+  const type = String(value || "audit");
+  if (type === "audit") return "候选点审计";
+  if (type === "fp_review") return "对抗式去误报";
+  if (type === "threat_analysis") return "威胁分析";
+  if (type === "threat_audit") return "威胁审计";
+  if (type === "validation") return "漏洞验证";
+  return type;
+}
+
 function compactTaskLabel(task: Record<string, unknown> | undefined): string {
   if (!task) return "—";
-  const taskType = String(task.task_type || "audit");
+  const taskType = compactTaskTypeLabel(task.task_type);
   const stage = task.stage ? `/${String(task.stage)}` : "";
   const checker = task.checker ? String(task.checker) : "";
   const file = task.file ? String(task.file) : "";

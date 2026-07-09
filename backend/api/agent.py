@@ -60,6 +60,7 @@ from backend.models import (
     ScanItemStatus,
     SkillReport,
     ThreatAnalysis,
+    ThreatAuditTask,
     User,
     Vulnerability,
     VulnerabilityValidation,
@@ -1264,6 +1265,35 @@ async def agent_get_threat_analysis(scan_id: str) -> ThreatAnalysis:
     if analysis is None:
         raise HTTPException(status_code=404, detail="No threat analysis found for this scan")
     return analysis
+
+
+@router.post("/scan/{scan_id}/threat-audit-task")
+async def agent_upsert_threat_audit_task(scan_id: str, body: dict) -> dict:
+    """Agent creates or updates one threat-analysis-derived audit task."""
+    try:
+        task = ThreatAuditTask(**body)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid threat audit task: {exc}") from exc
+
+    store = get_scan_store()
+    task = store.upsert_threat_audit_task(scan_id, task)
+
+    scan = _ensure_running_scan(scan_id)
+    if scan is not None:
+        tasks = [item for item in scan.threat_audit_tasks if item.task_id != task.task_id]
+        tasks.append(task)
+        tasks.sort(key=lambda item: (item.created_at, item.task_id))
+        scan.threat_audit_tasks = tasks
+
+    from backend.sse import publish
+    publish(scan_id, "threat_audit_task", {"task": task.model_dump()})
+    return {"ok": True, "task": task.model_dump()}
+
+
+@router.get("/scan/{scan_id}/threat-audit-tasks", response_model=list[ThreatAuditTask])
+async def agent_list_threat_audit_tasks(scan_id: str) -> list[ThreatAuditTask]:
+    """Return threat-analysis-derived audit tasks for scan resume."""
+    return get_scan_store().list_threat_audit_tasks(scan_id)
 
 
 @router.post("/scan/{scan_id}/skill-report")

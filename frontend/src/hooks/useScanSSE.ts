@@ -9,6 +9,7 @@ import type {
   ScanEvent,
   ScanStatus,
   ThreatAnalysis,
+  ThreatAuditTask,
   Vulnerability,
   VulnerabilityValidation,
 } from "../types";
@@ -97,6 +98,10 @@ interface ThreatAnalysisEvent {
   analysis: ThreatAnalysis;
 }
 
+interface ThreatAuditTaskEvent {
+  task: ThreatAuditTask;
+}
+
 /* ------------------------------------------------------------------ */
 /*  Handler map                                                        */
 /* ------------------------------------------------------------------ */
@@ -114,6 +119,7 @@ export interface ScanSSEHandlers {
   onFpReviewFinish?: (data: FpReviewFinishEvent) => void;
   onVulnerabilityValidation?: (data: VulnerabilityValidationEvent) => void;
   onThreatAnalysis?: (data: ThreatAnalysisEvent) => void;
+  onThreatAuditTask?: (data: ThreatAuditTaskEvent) => void;
   onIndexStatus?: (data: IndexStatus) => void;
 }
 
@@ -228,6 +234,7 @@ export function useScanSSE(
     handle<FpReviewFinishEvent>("fp_review_finish", (d) => handlersRef.current.onFpReviewFinish?.(d));
     handle<VulnerabilityValidationEvent>("vulnerability_validation", (d) => handlersRef.current.onVulnerabilityValidation?.(d));
     handle<ThreatAnalysisEvent>("threat_analysis", (d) => handlersRef.current.onThreatAnalysis?.(d));
+    handle<ThreatAuditTaskEvent>("threat_audit_task", (d) => handlersRef.current.onThreatAuditTask?.(d));
     handle<IndexStatus>("index_status", (d) => handlersRef.current.onIndexStatus?.(d));
 
     es.onopen = () => {

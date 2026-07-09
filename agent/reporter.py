@@ -17,6 +17,7 @@ from backend.models import (
     OutputSource,
     ScanEvent,
     ThreatAnalysis,
+    ThreatAuditTask,
     Vulnerability,
     VulnerabilityValidation,
 )
@@ -180,6 +181,46 @@ class Reporter:
             return ThreatAnalysis(**resp.json())
         except Exception:
             return None
+
+    async def push_threat_audit_task(self, scan_id: str, task: ThreatAuditTask) -> ThreatAuditTask | None:
+        """Create or update one threat-analysis-derived audit task."""
+        if self.dry_run:
+            print(f"  [THREAT_AUDIT] {task.status} {task.code_path} {task.method_name}")
+            return task
+        task.output_source = self._with_agent_source(task.output_source)
+        try:
+            resp = await self._client.post(
+                f"{self.server_url}/api/agent/scan/{scan_id}/threat-audit-task",
+                json=task.model_dump(),
+                timeout=10.0,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            payload = data.get("task") if isinstance(data, dict) else None
+            if isinstance(payload, dict):
+                return ThreatAuditTask(**payload)
+        except Exception as e:
+            print(f"Warning: failed to upload threat audit task: {e}")
+        return None
+
+    async def get_threat_audit_tasks(self, scan_id: str) -> list[ThreatAuditTask]:
+        """Fetch threat-analysis-derived audit tasks for scan resume."""
+        if self.dry_run:
+            return []
+        try:
+            resp = await self._client.get(
+                f"{self.server_url}/api/agent/scan/{scan_id}/threat-audit-tasks",
+                timeout=10.0,
+            )
+            if resp.status_code == 404:
+                return []
+            resp.raise_for_status()
+            data = resp.json()
+            if isinstance(data, list):
+                return [ThreatAuditTask(**item) for item in data if isinstance(item, dict)]
+        except Exception:
+            return []
+        return []
 
     async def send_event(self, scan_id: str, event: ScanEvent) -> None:
         """Push a progress event to the server (best-effort, never raises)."""

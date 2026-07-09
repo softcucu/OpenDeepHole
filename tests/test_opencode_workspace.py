@@ -238,6 +238,27 @@ class OpencodeWorkspaceTests(unittest.TestCase):
             self.assertEqual(config["skills"]["paths"], [str((workspace / ".opencode" / "skills").resolve())])
             assert_opencode_read_permissions(self, config)
 
+    def test_scan_workspace_loads_threat_audit_skills(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            project = root / "project"
+            project.mkdir()
+            scans_dir = root / "scans"
+            fake_config = SimpleNamespace(
+                storage=SimpleNamespace(scans_dir=str(scans_dir)),
+                mcp_server=SimpleNamespace(port=8100),
+            )
+
+            with (
+                patch("backend.opencode.config.get_config", return_value=fake_config),
+                patch("backend.opencode.config.get_registry", return_value={}),
+            ):
+                workspace = create_scan_workspace("scan-1", project_dir=project, mcp_port=9123)
+
+            self.assertTrue(
+                (workspace / ".opencode" / "skills" / "threat-path-audit" / "SKILL.md").is_file()
+            )
+
     def test_scan_workspaces_are_isolated_per_scan_for_same_project(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
