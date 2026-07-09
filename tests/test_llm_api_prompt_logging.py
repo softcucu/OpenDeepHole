@@ -143,6 +143,21 @@ def test_api_log_section_keeps_key_content_and_marks_truncation() -> None:
     assert "[API log truncated: 5 chars omitted" in logged
 
 
+def test_api_text_output_compacts_multiline_llm_text() -> None:
+    outputs: list[str] = []
+
+    llm_api_runner._emit_api_text_output(
+        outputs.append,
+        "test-model",
+        "[API] LLM 文本输出",
+        "first line\n\nsecond\tline",
+    )
+
+    assert len(outputs) == 1
+    assert "\n" not in outputs[0]
+    assert "[model=test-model] [API] LLM 文本输出: first line second line" in outputs[0]
+
+
 def test_api_tool_log_helpers_render_tool_names_and_capped_arguments() -> None:
     tools = [
         {"type": "function", "function": {"name": "view_function_code"}},
@@ -167,8 +182,9 @@ def test_api_stream_printer_emits_middle_llm_output() -> None:
     printer.flush()
 
     logged = "\n".join(outputs)
-    assert "[model=test-model] [API] LLM 流式输出: first line" in logged
-    assert "[model=test-model] [API] LLM 流式输出: second line" in logged
+    assert all("\n" not in line for line in outputs)
+    assert "[model=test-model] [API] LLM 文本输出: first line" in logged
+    assert "[model=test-model] [API] LLM 文本输出: second line" in logged
 
 
 def test_user_prompt_uses_agent_project_dir_code_index(tmp_path, monkeypatch) -> None:

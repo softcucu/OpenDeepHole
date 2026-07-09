@@ -175,6 +175,31 @@ def _one_line(text: object, limit: int = _API_LOG_ARGS_LIMIT) -> str:
     return f"{value[:limit]}...[truncated {len(value) - limit} chars]"
 
 
+def _api_text_for_log(text: object, limit: int = _API_LOG_TEXT_LIMIT) -> str:
+    value = "" if text is None else str(text)
+    if len(value) > limit:
+        remaining = len(value) - limit
+        value = f"{value[:limit]} [API log truncated: {remaining} chars omitted, total={len(value)}]"
+    return _one_line(value, limit + 120)
+
+
+def _emit_api_text_output(
+    on_output,
+    model: str,
+    title: str,
+    body: object,
+    *,
+    limit: int = _API_LOG_TEXT_LIMIT,
+) -> None:
+    if not on_output:
+        return
+    text = _api_text_for_log(body, limit)
+    if text:
+        _emit_api_output(on_output, model, f"{title}: {text}")
+    else:
+        _emit_api_output(on_output, model, title)
+
+
 def _summarize_log_value(value: object, *, max_string: int = 240) -> object:
     if isinstance(value, dict):
         return {str(key): _summarize_log_value(item, max_string=max_string) for key, item in value.items()}
@@ -239,14 +264,14 @@ class _ApiStreamPrinter:
         while "\n" in self._buffer:
             line, self._buffer = self._buffer.split("\n", 1)
             if line.strip():
-                _emit_api_output(self._on_output, self._model, f"[API] LLM 流式输出: {line.strip()}")
+                _emit_api_text_output(self._on_output, self._model, "[API] LLM 文本输出", line)
                 self.emitted = True
 
     def flush(self) -> None:
-        text = self._buffer.strip()
+        text = self._buffer
         self._buffer = ""
-        if text:
-            _emit_api_output(self._on_output, self._model, f"[API] LLM 流式输出: {text}")
+        if text.strip():
+            _emit_api_text_output(self._on_output, self._model, "[API] LLM 文本输出", text)
             self.emitted = True
 
 
@@ -889,7 +914,7 @@ async def run_audit_via_api(
 
         # 始终输出 LLM 的文本内容（分析过程）
         if message.content and not (llm_cfg.stream and on_output):
-            _emit_api_section(on_output, model_label, "[API] LLM 回复", message.content)
+            _emit_api_text_output(on_output, model_label, "[API] LLM 文本输出", message.content)
 
         # 如果没有 tool_calls，说明 LLM 直接返回了文本
         if not message.tool_calls:
@@ -1252,7 +1277,7 @@ async def run_batch_audit_via_api(
 
         # 始终输出 LLM 的文本内容（分析过程）
         if message.content and not (llm_cfg.stream and on_output):
-            _emit_api_section(on_output, model_label, "[API] LLM 回复", message.content)
+            _emit_api_text_output(on_output, model_label, "[API] LLM 文本输出", message.content)
 
         if not message.tool_calls:
             if message.content:

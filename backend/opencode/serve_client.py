@@ -804,6 +804,13 @@ class _BufferedEventEmitter:
         self._prefix = prefix
         self._buffer = ""
 
+    def _emit(self, text: object) -> bool:
+        preview = _one_line_preview(text)
+        if not preview:
+            return False
+        self._on_line(f"{self._prefix} {preview}")
+        return True
+
     def append(self, text: str) -> bool:
         if not text:
             return False
@@ -811,18 +818,13 @@ class _BufferedEventEmitter:
         emitted = False
         while "\n" in self._buffer:
             line, self._buffer = self._buffer.split("\n", 1)
-            if line.strip():
-                self._on_line(f"{self._prefix} {line.strip()}")
-                emitted = True
+            emitted = self._emit(line) or emitted
         return emitted
 
     def flush(self) -> bool:
-        text = self._buffer.strip()
+        text = self._buffer
         self._buffer = ""
-        if not text:
-            return False
-        self._on_line(f"{self._prefix} {text}")
-        return True
+        return self._emit(text)
 
 
 class _ServeEventState:
@@ -832,8 +834,8 @@ class _ServeEventState:
         self.on_line = on_line
         self.emitted_text = False
         self.seen_next_event = False
-        self.text = _BufferedEventEmitter(on_line, f"[{tool} serve llm]")
-        self.reasoning = _BufferedEventEmitter(on_line, f"[{tool} serve reasoning]")
+        self.text = _BufferedEventEmitter(on_line, f"[{tool} serve llm text]")
+        self.reasoning = _BufferedEventEmitter(on_line, f"[{tool} serve llm reasoning]")
 
     def flush(self) -> None:
         self.emitted_text = self.text.flush() or self.emitted_text
@@ -868,17 +870,17 @@ def _handle_serve_event(event: object, state: _ServeEventState) -> None:
         state.emitted_text = state.reasoning.flush() or state.emitted_text
     elif event_type == "session.next.tool.called":
         state.on_line(
-            f"[{state.tool} serve tool] session={state.session_id} call name={props.get('tool') or ''} "
+            f"[{state.tool} serve tool_call] session={state.session_id} name={props.get('tool') or ''} "
             f"id={props.get('callID') or ''} input={_json_one_line(props.get('input') or {})}"
         )
     elif event_type == "session.next.tool.success":
         state.on_line(
-            f"[{state.tool} serve tool] session={state.session_id} success id={props.get('callID') or ''} "
+            f"[{state.tool} serve tool_result] session={state.session_id} status=success id={props.get('callID') or ''} "
             f"{_tool_content_summary(props.get('content'))}"
         )
     elif event_type == "session.next.tool.failed":
         state.on_line(
-            f"[{state.tool} serve tool] session={state.session_id} failed id={props.get('callID') or ''} "
+            f"[{state.tool} serve tool_result] session={state.session_id} status=failed id={props.get('callID') or ''} "
             f"error={_one_line_preview(props.get('error') or '')}"
         )
     elif event_type == "message.part.delta" and not state.seen_next_event:
@@ -1054,7 +1056,9 @@ class OpenCodeServeManager:
                 lines = _extract_text(response.json())
                 for line in lines:
                     if on_line and not (event_state and event_state.emitted_text):
-                        on_line(line)
+                        preview = _one_line_preview(line)
+                        if preview:
+                            on_line(f"[{tool} serve llm text] {preview}")
                 return lines
         finally:
             if event_task is not None:

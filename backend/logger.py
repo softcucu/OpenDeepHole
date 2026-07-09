@@ -8,6 +8,13 @@ from pathlib import Path
 from backend.config import get_config
 
 _initialized = False
+_NOISY_HTTP_LOGGERS = ("httpx", "httpcore", "openai")
+
+
+def _suppress_third_party_http_logging() -> None:
+    """Keep SDK request summaries out of the Agent console by default."""
+    for logger_name in _NOISY_HTTP_LOGGERS:
+        logging.getLogger(logger_name).setLevel(logging.WARNING)
 
 
 def setup_logging() -> None:
@@ -16,6 +23,7 @@ def setup_logging() -> None:
     Sets up both console and file handlers. Call once at application startup.
     """
     global _initialized
+    _suppress_third_party_http_logging()
     if _initialized:
         return
     _initialized = True

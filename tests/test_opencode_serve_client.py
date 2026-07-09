@@ -52,6 +52,7 @@ class _FakeAsyncClient:
     instances: list["_FakeAsyncClient"] = []
     event_lines: list[str] = []
     tool_ids: list[str] | Exception = ["read", "grep", "mcp__deephole-code__view_function_code"]
+    message_text = "done"
 
     def __init__(self, *args, **kwargs) -> None:
         self.posts: list[dict] = []
@@ -80,7 +81,7 @@ class _FakeAsyncClient:
             return _FakeResponse({"id": "session-1"})
         if path == "/session/session-1/message":
             await asyncio.sleep(0)
-            return _FakeResponse({"parts": [{"type": "text", "text": "done"}]})
+            return _FakeResponse({"parts": [{"type": "text", "text": self.message_text}]})
         return _FakeResponse({})
 
     async def delete(self, path: str, **kwargs):
@@ -291,6 +292,8 @@ def test_run_prompt_streams_session_events_without_tool_result_body(monkeypatch,
             "",
             'data: {"type":"session.next.text.delta","properties":{"sessionID":"session-1","delta":"middle output\\n"}}',
             "",
+            'data: {"type":"session.next.reasoning.delta","properties":{"sessionID":"session-1","delta":"reasoning\\nstep\\n"}}',
+            "",
             'data: {"type":"session.next.tool.called","properties":{"sessionID":"session-1","callID":"call-1","tool":"read","input":{"filePath":"src/main.c"}}}',
             "",
             'data: {"type":"session.next.tool.success","properties":{"sessionID":"session-1","callID":"call-1","content":[{"type":"text","text":"secret source body"}]}}',
@@ -320,7 +323,14 @@ def test_run_prompt_streams_session_events_without_tool_result_body(monkeypatch,
 
         assert lines == ["done"]
         logged = "\n".join(output)
+        assert all("\n" not in line for line in output)
+        assert "[opencode serve llm text] middle output" in logged
+        assert "[opencode serve llm reasoning] reasoning" in logged
+        assert "[opencode serve llm reasoning] step" in logged
         assert "middle output" in logged
+        assert "tool_call" in logged
+        assert "tool_result" in logged
+        assert "status=success" in logged
         assert "session=session-1" in logged
         assert "name=read" in logged
         assert "src/main.c" in logged
@@ -328,6 +338,41 @@ def test_run_prompt_streams_session_events_without_tool_result_body(monkeypatch,
         assert "secret source body" not in logged
         assert "ignore" not in logged
         assert "done" not in logged
+
+    asyncio.run(run())
+
+
+def test_run_prompt_compacts_final_text_when_sse_has_no_text(monkeypatch, tmp_path: Path) -> None:
+    async def run() -> None:
+        _FakeAsyncClient.instances = []
+        _FakeAsyncClient.event_lines = []
+        monkeypatch.setattr(_FakeAsyncClient, "tool_ids", [])
+        monkeypatch.setattr(_FakeAsyncClient, "message_text", "first line\nsecond line")
+        monkeypatch.setattr(
+            "backend.opencode.serve_client.httpx.AsyncClient",
+            _FakeAsyncClient,
+        )
+
+        manager = OpenCodeServeManager()
+        manager._port = 12345
+        manager._acquire_session = AsyncMock()
+        project = tmp_path / "project"
+        project.mkdir()
+        output: list[str] = []
+
+        lines = await manager.run_prompt(
+            tool="opencode",
+            executable="opencode",
+            directory=project,
+            prompt="hello",
+            model="",
+            timeout=30,
+            on_line=output.append,
+        )
+
+        assert lines == ["first line\nsecond line"]
+        assert "[opencode serve llm text] first line second line" in output
+        assert all("\n" not in line for line in output)
 
     asyncio.run(run())
 
