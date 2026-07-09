@@ -1,5 +1,9 @@
 # 更新日志
 
+## 2026-07-09
+
+- **优化** OpenCode/nga serve 启动健康检查在 `/global/health` 未就绪时改为每秒重试一次，避免启动阶段过于频繁地轮询本地 health 接口
+
 ## 2026-07-08
 
 - **变更** OpenCode/nga serve 模式下 MCP `submit_*` 工具不再要求模型传入 `result_id`；Agent 会在运行时注入 OpenCode plugin，把 `sessionID`/`callID` 写入本项目 submit 工具参数，结果按 `session_id + tool_name` 写入 SQLite ResultSink，区分普通审计、历史模式、变体命中和去误报匹配提交

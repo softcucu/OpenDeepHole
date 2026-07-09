@@ -11,6 +11,7 @@ import pytest
 from backend.opencode.serve_client import (
     OpenCodeServeKey,
     OpenCodeServeManager,
+    _SERVE_HEALTH_POLL_INTERVAL_SECONDS,
     _serve_context_headers,
     _serve_port,
     _serve_startup_env_debug,
@@ -611,6 +612,64 @@ def test_wait_health_reports_startup_output_on_early_exit(tmp_path: Path) -> Non
         assert "OpenCode serve startup output:" in message
         assert "before bad byte" in message
         assert "after" in message
+
+    asyncio.run(run())
+
+
+def test_wait_health_polls_once_per_second_after_unhealthy_attempts(monkeypatch) -> None:
+    async def run() -> None:
+        class FakeProc:
+            returncode = None
+
+            def poll(self):
+                return None
+
+        class FakeHealthResponse:
+            def __init__(self, status_code: int) -> None:
+                self.status_code = status_code
+
+        class FakeHealthClient:
+            outcomes = [
+                OSError("not ready"),
+                FakeHealthResponse(500),
+                FakeHealthResponse(200),
+            ]
+            requests: list[str] = []
+
+            def __init__(self, *args, **kwargs) -> None:
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc, tb) -> None:
+                return None
+
+            async def get(self, path: str):
+                self.requests.append(path)
+                outcome = self.outcomes.pop(0)
+                if isinstance(outcome, Exception):
+                    raise outcome
+                return outcome
+
+        sleeps: list[float] = []
+
+        async def fake_sleep(delay: float) -> None:
+            sleeps.append(delay)
+
+        monkeypatch.setattr("backend.opencode.serve_client.httpx.AsyncClient", FakeHealthClient)
+        monkeypatch.setattr("backend.opencode.serve_client.asyncio.sleep", fake_sleep)
+        manager = OpenCodeServeManager()
+        manager._proc = FakeProc()
+        manager._port = 4096
+
+        await manager._wait_health_locked()
+
+        assert FakeHealthClient.requests == ["/global/health"] * 3
+        assert sleeps == [
+            _SERVE_HEALTH_POLL_INTERVAL_SECONDS,
+            _SERVE_HEALTH_POLL_INTERVAL_SECONDS,
+        ]
 
     asyncio.run(run())
 

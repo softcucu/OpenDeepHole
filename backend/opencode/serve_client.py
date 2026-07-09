@@ -30,6 +30,7 @@ logger = get_logger(__name__)
 _SERVE_START_TIMEOUT_SECONDS = 30.0
 _SERVE_STOP_TIMEOUT_SECONDS = 5.0
 _SERVE_REQUEST_TIMEOUT_SECONDS = 20.0
+_SERVE_HEALTH_POLL_INTERVAL_SECONDS = 1.0
 _SERVE_EVENT_PREVIEW_LIMIT = 500
 _SERVE_STARTUP_LOG_TAIL_LIMIT = 4000
 _DEFAULT_SERVE_PORT = 4096
@@ -1336,7 +1337,8 @@ class OpenCodeServeManager:
                     if response.status_code < 500:
                         return
             except Exception:
-                await asyncio.sleep(0.2)
+                pass
+            await asyncio.sleep(_SERVE_HEALTH_POLL_INTERVAL_SECONDS)
         cwd_note = f" startup_cwd={self._startup_cwd}" if self._startup_cwd else ""
         raise TimeoutError(_with_serve_startup_log(
             f"OpenCode serve did not become healthy{cwd_note}",
