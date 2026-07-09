@@ -358,6 +358,14 @@ def test_opencode_runtime_cwd_receives_config_and_fp_skills(tmp_path: Path) -> N
     assert (runtime_cwd / ".opencode" / "skills" / "final-judge" / "SKILL.md").is_file()
     assert runtime_config["skills"]["paths"] == [str((runtime_cwd / ".opencode" / "skills").resolve())]
     assert env_config["skills"]["paths"] == runtime_config["skills"]["paths"]
+    plugin_path = runtime_cwd / ".opencode" / "plugins" / "inject-mcp-session.ts"
+    assert plugin_path.is_file()
+    plugin_text = plugin_path.read_text(encoding="utf-8")
+    assert "tool.execute.before" in plugin_text
+    assert "opencode_session_id" in plugin_text
+    assert "submit_result" in plugin_text
+    assert str(plugin_path.resolve()) in runtime_config["plugin"]
+    assert str(plugin_path.resolve()) in env_config["plugin"]
 
 
 def test_opencode_env_merges_user_config_without_writing_provider_secrets(tmp_path: Path) -> None:
@@ -385,6 +393,7 @@ def test_opencode_env_merges_user_config_without_writing_provider_secrets(tmp_pa
             },
             "mcp": {"other": {"type": "remote", "url": "http://127.0.0.1:9999/mcp"}},
             "model": "corp/global-model",
+            "plugin": ["global-plugin"],
         }),
         encoding="utf-8",
     )
@@ -408,6 +417,7 @@ def test_opencode_env_merges_user_config_without_writing_provider_secrets(tmp_pa
         json.dumps({
             "mcp": {"deephole-code": {"url": "http://127.0.0.1:9123/mcp"}},
             "skills": {"paths": [str(skills_root.resolve())]},
+            "plugin": ["task-plugin"],
         }),
         encoding="utf-8",
     )
@@ -435,6 +445,9 @@ def test_opencode_env_merges_user_config_without_writing_provider_secrets(tmp_pa
     assert env_config["mcp"]["other"]["url"] == "http://127.0.0.1:9999/mcp"
     assert env_config["mcp"]["deephole-code"]["url"] == "http://127.0.0.1:9123/mcp"
     assert env_config["skills"]["paths"] == [str((runtime_cwd / ".opencode" / "skills").resolve())]
+    plugin_path = runtime_cwd / ".opencode" / "plugins" / "inject-mcp-session.ts"
+    assert runtime_config["plugin"] == ["task-plugin", str(plugin_path.resolve())]
+    assert env_config["plugin"] == ["global-plugin", "task-plugin", str(plugin_path.resolve())]
 
 
 def test_opencode_env_uses_env_config_path_and_strips_schema(tmp_path: Path) -> None:

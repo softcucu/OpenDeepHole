@@ -42,7 +42,7 @@ def _fake_context(session_id: str):
     return SimpleNamespace(
         request_context=SimpleNamespace(
             request=SimpleNamespace(
-                headers={"x-opencode-session": session_id},
+                headers={},
             ),
         ),
     )
@@ -93,6 +93,8 @@ def test_submit_tools_do_not_expose_result_id() -> None:
         properties = Tool.from_function(mcp.tools[name]).parameters.get("properties", {})
         assert "result_id" not in properties
         assert "ctx" not in properties
+        assert "opencode_session_id" in properties
+        assert "opencode_call_id" in properties
 
 
 def test_source_lookup_tools_describe_deephole_code_priority() -> None:
@@ -178,6 +180,8 @@ def test_mcp_submit_log_summarizes_long_fields(tmp_path, monkeypatch, capsys) ->
         "desc",
         "line 1\n" + "A" * 500,
         vulnerability_report="report\n" + "B" * 500,
+        opencode_session_id="session-submit",
+        opencode_call_id="call-submit",
         ctx=_fake_context("session-submit"),
     )
 
@@ -189,7 +193,9 @@ def test_mcp_submit_log_summarizes_long_fields(tmp_path, monkeypatch, capsys) ->
     assert "<chars=" in output
     assert "[truncated" in output
     assert "AAAAA" in output
-    assert submit_sink.read_submissions("session-submit", "submit_result")[0]["description"] == "desc"
+    submitted = submit_sink.read_submissions("session-submit", "submit_result")[0]
+    assert submitted["description"] == "desc"
+    assert submitted["opencode_call_id"] == "call-submit"
 
 
 def test_submit_sink_separates_submit_tools_by_session_and_tool(tmp_path, monkeypatch) -> None:
@@ -206,6 +212,8 @@ def test_submit_sink_separates_submit_tools_by_session_and_tool(tmp_path, monkey
         lens_hint="integer",
         files="a.c\nb.c",
         rationale="fix adds clamp",
+        opencode_session_id="session-mixed",
+        opencode_call_id="call-history",
         ctx=ctx,
     )
     mcp.tools["submit_variant_finding"](
@@ -215,6 +223,8 @@ def test_submit_sink_separates_submit_tools_by_session_and_tool(tmp_path, monkey
         "oob",
         "same missing clamp",
         rationale="no bound check",
+        opencode_session_id="session-mixed",
+        opencode_call_id="call-variant",
         ctx=ctx,
     )
 
@@ -223,8 +233,28 @@ def test_submit_sink_separates_submit_tools_by_session_and_tool(tmp_path, monkey
 
     assert len(history) == 1
     assert history[0]["files"] == ["a.c", "b.c"]
+    assert history[0]["opencode_call_id"] == "call-history"
     assert len(variants) == 1
     assert variants[0]["file"] == "src/a.c"
+    assert variants[0]["opencode_call_id"] == "call-variant"
+
+
+def test_submit_result_requires_opencode_session_injected_by_plugin(tmp_path, monkeypatch) -> None:
+    import backend.opencode.submit_sink as submit_sink
+
+    monkeypatch.setattr(submit_sink, "_db_path", lambda: tmp_path / "scans" / "scans.db")
+    mcp = _FakeMCP()
+    register_tools(mcp, project_dir=tmp_path)
+
+    message = mcp.tools["submit_result"](
+        True,
+        "high",
+        "desc",
+        "analysis",
+    )
+
+    assert "opencode_session_id" in message
+    assert submit_sink.read_submissions("session-submit", "submit_result") == []
 
 
 def test_code_index_cache_reopens_after_db_replacement(tmp_path) -> None:

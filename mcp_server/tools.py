@@ -196,45 +196,47 @@ def _append_result_payload(result_path: Path, payload: dict) -> None:
     result_path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
 
 
-def _opencode_session_from_context(ctx: Context | None) -> str:
+def _context_trace(ctx: Context | None) -> dict:
     if ctx is None:
-        return ""
+        return {}
+    trace: dict[str, str] = {}
     try:
-        request_context = ctx.request_context
+        request_id = str(ctx.request_id or "").strip()
     except Exception:
-        return ""
-    candidates = [
-        getattr(request_context, "request", None),
-        getattr(getattr(request_context, "experimental", None), "request", None),
-        getattr(request_context, "meta", None),
-    ]
-    for name in ("x-opencode-session", "x-opencode-session-id", "x-opencode-sessionid"):
-        for source in candidates:
-            headers = getattr(source, "headers", None)
-            if headers is None and isinstance(source, dict):
-                headers = source.get("headers")
-            if headers is None:
-                continue
-            try:
-                value = headers.get(name)
-            except Exception:
-                value = None
-            if value:
-                return str(value).strip()
-    return ""
+        request_id = ""
+    try:
+        client_id = str(ctx.client_id or "").strip()
+    except Exception:
+        client_id = ""
+    if request_id:
+        trace["mcp_request_id"] = request_id
+    if client_id:
+        trace["mcp_client_id"] = client_id
+    return trace
 
 
-def _submit_payload(tool_name: str, ctx: Context | None, payload: dict) -> tuple[bool, str]:
-    session_id = _opencode_session_from_context(ctx)
+def _submit_payload(
+    tool_name: str,
+    opencode_session_id: str | None,
+    opencode_call_id: str | None,
+    payload: dict,
+) -> tuple[bool, str]:
+    session_id = str(opencode_session_id or "").strip()
+    call_id = str(opencode_call_id or "").strip()
     if not session_id:
-        return False, "无法提交结果：MCP 请求缺少 x-opencode-session，无法判断 OpenCode session。"
+        return False, "无法提交结果：OpenCode plugin 未注入 opencode_session_id，无法判断 OpenCode session。"
+    payload_to_save = dict(payload)
+    payload_to_save["opencode_session_id"] = session_id
+    if call_id:
+        payload_to_save["opencode_call_id"] = call_id
     try:
         from backend.opencode.submit_sink import record_submission
 
-        seq = record_submission(session_id, tool_name, payload)
+        seq = record_submission(session_id, tool_name, payload_to_save)
     except Exception as exc:
         return False, f"无法提交结果：保存 {tool_name} 结果失败：{exc}"
-    return True, f"结果已提交（session_id={session_id}, tool={tool_name}, seq={seq}）。"
+    call_note = f", call_id={call_id}" if call_id else ""
+    return True, f"结果已提交（session_id={session_id}{call_note}, tool={tool_name}, seq={seq}）。"
 
 
 def register_tools(mcp: FastMCP, project_dir: Path | str | None = None) -> None:
@@ -442,6 +444,8 @@ def register_tools(mcp: FastMCP, project_dir: Path | str | None = None) -> None:
         file: str = "",
         line: int = 0,
         function: str = "",
+        opencode_session_id: str | None = None,
+        opencode_call_id: str | None = None,
         ctx: Context | None = None,
     ) -> str:
         """
@@ -456,6 +460,8 @@ def register_tools(mcp: FastMCP, project_dir: Path | str | None = None) -> None:
             file: 可选，真实问题所在文件路径。项目级审计发现问题时必须填写。
             line: 可选，真实问题所在行号。项目级审计发现问题时必须填写。
             function: 可选，真实问题所在函数。项目级审计发现问题时必须填写。
+            opencode_session_id: OpenCode plugin 自动注入的 session ID。
+            opencode_call_id: OpenCode plugin 自动注入的 tool call ID。
 
         返回：
             提交成功的确认消息。
@@ -470,12 +476,13 @@ def register_tools(mcp: FastMCP, project_dir: Path | str | None = None) -> None:
             "line": line,
             "function": function,
         }
-        session_id = _opencode_session_from_context(ctx)
         _mcp_log_call("submit_result", _json_preview({
-            "session_id": session_id,
+            "opencode_session_id": opencode_session_id,
+            "opencode_call_id": opencode_call_id,
+            **_context_trace(ctx),
             **payload,
         }))
-        ok, message = _submit_payload("submit_result", ctx, payload)
+        ok, message = _submit_payload("submit_result", opencode_session_id, opencode_call_id, payload)
         _mcp_log_return("submit_result", message)
         return message
 
@@ -486,6 +493,8 @@ def register_tools(mcp: FastMCP, project_dir: Path | str | None = None) -> None:
         lens_hint: str = "",
         files: str = "",
         rationale: str = "",
+        opencode_session_id: str | None = None,
+        opencode_call_id: str | None = None,
         ctx: Context | None = None,
     ) -> str:
         """
@@ -497,6 +506,8 @@ def register_tools(mcp: FastMCP, project_dir: Path | str | None = None) -> None:
             lens_hint: 安全视角，可选值 memory/integer/race/injection/authn/crypto/dos/infoleak。
             files: 涉及的文件，逗号分隔。
             rationale: 判定理由 + 改动要点摘要。
+            opencode_session_id: OpenCode plugin 自动注入的 session ID。
+            opencode_call_id: OpenCode plugin 自动注入的 tool call ID。
 
         返回：
             提交成功的确认消息。
@@ -510,16 +521,17 @@ def register_tools(mcp: FastMCP, project_dir: Path | str | None = None) -> None:
             "files": file_list,
             "rationale": rationale,
         }
-        session_id = _opencode_session_from_context(ctx)
         _mcp_log_call("submit_history_pattern", _json_preview({
-            "session_id": session_id,
+            "opencode_session_id": opencode_session_id,
+            "opencode_call_id": opencode_call_id,
+            **_context_trace(ctx),
             "security_related": security_related,
             "pattern": pattern,
             "lens_hint": lens_hint,
             "files": files,
             "rationale": rationale,
         }))
-        ok, message = _submit_payload("submit_history_pattern", ctx, payload)
+        ok, message = _submit_payload("submit_history_pattern", opencode_session_id, opencode_call_id, payload)
         _mcp_log_return("submit_history_pattern", message)
         return message
 
@@ -531,6 +543,8 @@ def register_tools(mcp: FastMCP, project_dir: Path | str | None = None) -> None:
         vuln_type: str,
         description: str,
         rationale: str = "",
+        opencode_session_id: str | None = None,
+        opencode_call_id: str | None = None,
         ctx: Context | None = None,
     ) -> str:
         """
@@ -543,6 +557,8 @@ def register_tools(mcp: FastMCP, project_dir: Path | str | None = None) -> None:
             vuln_type: 缺陷类型，必须从分析提示给出的可选检查项列表中选一个。
             description: 一句话描述该处缺陷及其与历史问题模式的相似点。
             rationale: 可选，核实推理过程（为何该站点缺少等价校验/存在同类缺陷）。
+            opencode_session_id: OpenCode plugin 自动注入的 session ID。
+            opencode_call_id: OpenCode plugin 自动注入的 tool call ID。
 
         返回：
             提交成功的确认消息。
@@ -556,12 +572,13 @@ def register_tools(mcp: FastMCP, project_dir: Path | str | None = None) -> None:
             "description": description,
             "rationale": rationale,
         }
-        session_id = _opencode_session_from_context(ctx)
         _mcp_log_call("submit_variant_finding", _json_preview({
-            "session_id": session_id,
+            "opencode_session_id": opencode_session_id,
+            "opencode_call_id": opencode_call_id,
+            **_context_trace(ctx),
             **payload,
         }))
-        ok, message = _submit_payload("submit_variant_finding", ctx, payload)
+        ok, message = _submit_payload("submit_variant_finding", opencode_session_id, opencode_call_id, payload)
         _mcp_log_return("submit_variant_finding", message)
         return message
 
@@ -573,6 +590,8 @@ def register_tools(mcp: FastMCP, project_dir: Path | str | None = None) -> None:
         description: str = "",
         ai_analysis: str = "",
         vulnerability_report: str = "",
+        opencode_session_id: str | None = None,
+        opencode_call_id: str | None = None,
         ctx: Context | None = None,
     ) -> str:
         """
@@ -586,6 +605,8 @@ def register_tools(mcp: FastMCP, project_dir: Path | str | None = None) -> None:
             description: 一句话结论摘要。
             ai_analysis: 详细推理（含代码路径与匹配依据）。
             vulnerability_report: 匹配成立时填写的 Markdown 问题报告。
+            opencode_session_id: OpenCode plugin 自动注入的 session ID。
+            opencode_call_id: OpenCode plugin 自动注入的 tool call ID。
 
         返回：
             提交成功的确认消息。
@@ -603,9 +624,10 @@ def register_tools(mcp: FastMCP, project_dir: Path | str | None = None) -> None:
             "line": 0,
             "function": "",
         }
-        session_id = _opencode_session_from_context(ctx)
         _mcp_log_call("submit_match_result", _json_preview({
-            "session_id": session_id,
+            "opencode_session_id": opencode_session_id,
+            "opencode_call_id": opencode_call_id,
+            **_context_trace(ctx),
             "matched": matched,
             "match_type": match_type,
             "match_reference": match_reference,
@@ -613,6 +635,6 @@ def register_tools(mcp: FastMCP, project_dir: Path | str | None = None) -> None:
             "ai_analysis": ai_analysis,
             "vulnerability_report": vulnerability_report,
         }))
-        ok, message = _submit_payload("submit_match_result", ctx, payload)
+        ok, message = _submit_payload("submit_match_result", opencode_session_id, opencode_call_id, payload)
         _mcp_log_return("submit_match_result", message)
         return message

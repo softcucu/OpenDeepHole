@@ -2,7 +2,7 @@
 
 ## 2026-07-08
 
-- **变更** OpenCode/nga serve 模式下 MCP `submit_*` 工具不再要求模型传入 `result_id`；结果改由 MCP 请求中的 OpenCode session 归属写入 SQLite ResultSink，并按 `tool_name` 区分普通审计、历史模式、变体命中和去误报匹配提交
+- **变更** OpenCode/nga serve 模式下 MCP `submit_*` 工具不再要求模型传入 `result_id`；Agent 会在运行时注入 OpenCode plugin，把 `sessionID`/`callID` 写入本项目 submit 工具参数，结果按 `session_id + tool_name` 写入 SQLite ResultSink，区分普通审计、历史模式、变体命中和去误报匹配提交
 
 ## 2026-07-07
 

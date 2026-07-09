@@ -1295,10 +1295,28 @@ def _deep_merge_dicts(base: dict, override: dict) -> dict:
     merged = copy.deepcopy(base)
     for key, value in override.items():
         current = merged.get(key)
-        if isinstance(current, dict) and isinstance(value, dict):
+        if key == "plugin" and isinstance(current, list) and isinstance(value, list):
+            merged[key] = _merge_opencode_plugin_lists(current, value)
+        elif isinstance(current, dict) and isinstance(value, dict):
             merged[key] = _deep_merge_dicts(current, value)
         else:
             merged[key] = copy.deepcopy(value)
+    return merged
+
+
+def _merge_opencode_plugin_lists(*plugin_lists: list) -> list:
+    merged: list = []
+    seen: set[str] = set()
+    for plugin_list in plugin_lists:
+        for entry in plugin_list:
+            try:
+                key = json.dumps(entry, sort_keys=True, ensure_ascii=False)
+            except TypeError:
+                key = str(entry)
+            if key in seen:
+                continue
+            seen.add(key)
+            merged.append(copy.deepcopy(entry))
     return merged
 
 
@@ -1589,6 +1607,65 @@ def _copy_skill_tree(src_root: Path, dst_root: Path) -> None:
         shutil.copytree(src, dst, symlinks=True)
 
 
+_OPENCODE_SESSION_PLUGIN = """\
+export const OpenDeepHoleMcpSession = async () => {
+  const submitTools = new Set([
+    "submit_result",
+    "submit_history_pattern",
+    "submit_variant_finding",
+    "submit_match_result",
+  ])
+
+  const isOpenDeepHoleSubmitTool = (tool: string): boolean => {
+    if (!tool) return false
+    const hasServerMarker = tool.includes("deephole-code") || tool.includes("deephole_code")
+    for (const name of submitTools) {
+      if (tool === name) return true
+      if (hasServerMarker && (tool.endsWith(`__${name}`) || tool.endsWith(`_${name}`))) return true
+    }
+    return false
+  }
+
+  return {
+    "tool.execute.before": async (
+      input: { tool: string; sessionID: string; callID: string },
+      output: { args: any },
+    ) => {
+      if (!isOpenDeepHoleSubmitTool(String(input.tool || ""))) return
+
+      output.args = output.args ?? {}
+      output.args.opencode_session_id = input.sessionID
+      output.args.opencode_call_id = input.callID
+    },
+  }
+}
+"""
+
+
+def _write_opencode_session_plugin(runtime_cwd: Path) -> Path:
+    plugin_path = runtime_cwd / ".opencode" / "plugins" / "inject-mcp-session.ts"
+    plugin_path.parent.mkdir(parents=True, exist_ok=True)
+    if not plugin_path.is_file() or plugin_path.read_text(encoding="utf-8") != _OPENCODE_SESSION_PLUGIN:
+        plugin_path.write_text(_OPENCODE_SESSION_PLUGIN, encoding="utf-8")
+    return plugin_path
+
+
+def _with_opencode_session_plugin(config: dict, plugin_path: Path | None) -> dict:
+    if plugin_path is None:
+        return config
+    next_config = copy.deepcopy(config)
+    plugin_entry = str(plugin_path.resolve())
+    existing = next_config.get("plugin")
+    if isinstance(existing, list):
+        plugins = existing
+    elif existing:
+        plugins = [existing]
+    else:
+        plugins = []
+    next_config["plugin"] = _merge_opencode_plugin_lists(plugins, [plugin_entry])
+    return next_config
+
+
 def _merge_json_file(path: Path, data: dict) -> None:
     current: dict = {}
     if path.is_file():
@@ -1611,12 +1688,13 @@ def _opencode_config_for_runtime(
     workspace: Path,
     skills_dir: Path,
     writable_paths: list[Path] | None = None,
+    plugin_path: Path | None = None,
 ) -> dict:
     config = _with_writable_paths(_read_opencode_config(workspace), writable_paths)
     if not config:
         return {}
     config["skills"] = {"paths": [str(skills_dir.resolve())]}
-    return config
+    return _with_opencode_session_plugin(config, plugin_path)
 
 
 def _opencode_config_for_env(
@@ -1666,13 +1744,29 @@ def _prepare_opencode_runtime_workspace(
     merged later into ``OPENCODE_CONFIG_CONTENT`` and are not written here.
     """
     if runtime_cwd == workspace:
+        plugin_path = _write_opencode_session_plugin(runtime_cwd)
+        runtime_skills = runtime_cwd / ".opencode" / "skills"
+        runtime_config = _opencode_config_for_runtime(
+            workspace,
+            runtime_skills,
+            writable_paths,
+            plugin_path=plugin_path,
+        )
+        if runtime_config:
+            _write_json_file(runtime_cwd / "opencode.json", runtime_config)
         return workspace
 
     source_skills = workspace / ".opencode" / "skills"
     runtime_skills = runtime_cwd / ".opencode" / "skills"
     _copy_skill_tree(source_skills, runtime_skills)
+    plugin_path = _write_opencode_session_plugin(runtime_cwd)
 
-    runtime_config = _opencode_config_for_runtime(workspace, runtime_skills, writable_paths)
+    runtime_config = _opencode_config_for_runtime(
+        workspace,
+        runtime_skills,
+        writable_paths,
+        plugin_path=plugin_path,
+    )
     if runtime_config:
         _write_json_file(runtime_cwd / "opencode.json", runtime_config)
         return runtime_cwd

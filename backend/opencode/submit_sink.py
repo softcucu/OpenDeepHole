@@ -1,9 +1,9 @@
 """SQLite-backed sink for MCP submit tool payloads.
 
-Serve-mode OpenCode calls identify the task by the OpenCode session. MCP tools
-receive that same session through the x-opencode-session request header, so the
-submitted payload can be persisted without asking the model to pass an internal
-result id.
+Serve-mode OpenCode calls identify the task by the OpenCode session. A runtime
+OpenCode plugin injects that session into OpenDeepHole submit tool arguments,
+so submitted payloads can be persisted without asking the model to pass an
+internal result id.
 """
 
 from __future__ import annotations
