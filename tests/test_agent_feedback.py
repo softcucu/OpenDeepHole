@@ -1,3 +1,4 @@
+import json
 import tempfile
 import unittest
 import re
@@ -42,6 +43,26 @@ def _write_stage_artifact_from_prompt(prompt: str, content: str = "# Stage\n\nan
     matches = re.findall(r"`([^`]+\.md)`", prompt)
     if matches:
         Path(matches[-1]).write_text(content, encoding="utf-8")
+
+
+def _stage_json_result(
+    *,
+    confirmed: bool,
+    severity: str,
+    description: str,
+    ai_analysis: str,
+    report: str = "",
+) -> str:
+    return json.dumps({
+        "confirmed": confirmed,
+        "severity": severity,
+        "description": description,
+        "ai_analysis": ai_analysis,
+        "vulnerability_report": report,
+        "file": "a.c",
+        "line": 10,
+        "function": "parse",
+    })
 
 
 class AgentFeedbackTests(unittest.TestCase):
@@ -218,7 +239,7 @@ class AgentFeedbackTests(unittest.TestCase):
         self.assertEqual(reporter.results, [])
         self.assertEqual(len(reporter.stage_outputs), 1)
         self.assertEqual(reporter.stage_outputs[0][0], "prove_bug")
-        self.assertIn("Missing submit_result", reporter.stage_outputs[0][1])
+        self.assertIn("Missing json_result", reporter.stage_outputs[0][1])
         self.assertEqual(reporter.progress, [(3, 0), (3, 1)])
         self.assertEqual(reporter.finished, ("complete", None))
 
@@ -261,20 +282,26 @@ class AgentFeedbackTests(unittest.TestCase):
         async def _run() -> tuple[FakeReporter, AsyncMock]:
             reporter = FakeReporter()
             config = AgentConfig(opencode=OpenCodeConfig(timeout=1, max_retries=0))
-            prove_bug_result = Vulnerability(
-                file="a.c",
-                line=10,
-                function="parse",
-                vuln_type="npd",
-                severity="high",
-                description="prove-bug tp",
-                ai_analysis="prove-bug exploit chain",
-                confirmed=True,
-            )
             invoke = AsyncMock()
+            outputs = [
+                _stage_json_result(
+                    confirmed=True,
+                    severity="high",
+                    description="prove-bug tp",
+                    ai_analysis="prove-bug exploit chain",
+                ),
+                _stage_json_result(
+                    confirmed=True,
+                    severity="low",
+                    description="prove-fp did not disprove",
+                    ai_analysis="prove-fp kept issue",
+                ),
+                "{}",
+            ]
 
             async def invoke_side_effect(workspace, prompt, timeout, **kwargs):
                 _write_stage_artifact_from_prompt(prompt)
+                return outputs.pop(0)
 
             invoke.side_effect = invoke_side_effect
             with tempfile.TemporaryDirectory() as tmp:
@@ -286,10 +313,6 @@ class AgentFeedbackTests(unittest.TestCase):
                     patch.object(fp_reviewer, "_cleanup_fp_workspace"),
                     patch("backend.config.get_config", return_value=SimpleNamespace()),
                     patch("backend.opencode.runner._invoke_opencode", new=invoke),
-                    patch(
-                        "backend.opencode.runner._read_result_from_source",
-                        side_effect=[prove_bug_result, prove_bug_result, None],
-                    ),
                 ):
                     await fp_reviewer.run_fp_review(
                         config=config,
@@ -358,20 +381,16 @@ class AgentFeedbackTests(unittest.TestCase):
         async def _run() -> tuple[FakeReporter, AsyncMock]:
             reporter = FakeReporter()
             config = AgentConfig(opencode=OpenCodeConfig(timeout=1, max_retries=0))
-            prove_bug_result = Vulnerability(
-                file="a.c",
-                line=10,
-                function="parse",
-                vuln_type="npd",
-                severity="low",
-                description="prove-bug fp",
-                ai_analysis="NOT_PROVEN",
-                confirmed=False,
-            )
             invoke = AsyncMock()
 
             async def invoke_side_effect(workspace, prompt, timeout, **kwargs):
                 _write_stage_artifact_from_prompt(prompt)
+                return _stage_json_result(
+                    confirmed=False,
+                    severity="low",
+                    description="prove-bug fp",
+                    ai_analysis="NOT_PROVEN",
+                )
 
             invoke.side_effect = invoke_side_effect
             with tempfile.TemporaryDirectory() as tmp:
@@ -383,7 +402,6 @@ class AgentFeedbackTests(unittest.TestCase):
                     patch.object(fp_reviewer, "_cleanup_fp_workspace"),
                     patch("backend.config.get_config", return_value=SimpleNamespace()),
                     patch("backend.opencode.runner._invoke_opencode", new=invoke),
-                    patch("backend.opencode.runner._read_result_from_source", return_value=prove_bug_result),
                 ):
                     await fp_reviewer.run_fp_review(
                         config=config,

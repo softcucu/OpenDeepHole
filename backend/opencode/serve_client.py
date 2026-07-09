@@ -753,6 +753,15 @@ def _extract_text(value: Any) -> list[str]:
     return lines
 
 
+def _is_submit_result_tool_id(tool_id: str) -> bool:
+    value = str(tool_id or "")
+    return (
+        value == "submit_result"
+        or value.endswith("__submit_result")
+        or value.endswith("_submit_result")
+    )
+
+
 def _one_line_preview(value: object, limit: int = _SERVE_EVENT_PREVIEW_LIMIT) -> str:
     text = "" if value is None else str(value)
     text = " ".join(text.split())
@@ -1084,7 +1093,11 @@ class OpenCodeServeManager:
             if on_line:
                 on_line(f"[{tool} serve] tool discovery unavailable: {_one_line_preview(exc)}")
             return []
-        tool_ids = _tool_ids_from_response(response.json())
+        tool_ids = [
+            tool_id
+            for tool_id in _tool_ids_from_response(response.json())
+            if not _is_submit_result_tool_id(tool_id)
+        ]
         if on_line:
             on_line(f"[{tool} serve] tools={len(tool_ids)}")
         return tool_ids

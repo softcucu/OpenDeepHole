@@ -141,3 +141,11 @@ ctx ─owns─► session ─owns─► buf
   4. caller 端的销毁责任（来自调用方分析的结论）
   5. 是否存在通过宏 / wrapper 完成的隐式释放
   6. 最终判定理由
+
+## OpenDeepHole 当前运行时结果规则
+
+当前运行时不再通过 `submit_result` 返回漏洞审计结论。若上文仍要求调用 `submit_result`、或要求不要输出 JSON，以本节和本次任务初始提示词为准：
+
+- 不要调用 `submit_result`。
+- 最终回复必须输出符合本次任务初始提示词中“最终结果返回规则”的 JSON。
+- `ai_analysis` 字段仍可包含人类可读 Markdown 分析。

@@ -178,9 +178,9 @@ for (...; byteNum != 0; byteNum -= contentLen, loop++) {
 - 它声称校验不足，是否忽略了某个前置校验？
 - 它声称 sink 危险，是否误判了真实对象大小？
 
-## 提交结果
+## 返回结果
 
-调用 `submit_result`，提供：
+最终回复输出 JSON，提供：
 
 - `confirmed`：
   - `false`：已证明非问题

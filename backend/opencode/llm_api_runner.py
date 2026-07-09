@@ -1,7 +1,7 @@
-"""LLM API 直调模式 — 通过 OpenAI 兼容 API + function calling 进行漏洞审计。
+"""LLM API 直调模式 — 通过 OpenAI 兼容 API 进行漏洞审计。
 
-作为 opencode CLI 模式的替代方案，直接调用 LLM API 并通过 function calling
-让模型查询代码、提交分析结果。结果文件格式与 MCP submit_result 完全一致。
+作为 opencode CLI 模式的替代方案，直接调用 LLM API，让模型查询代码，
+并从最终文本中解析 JSON 分析结果。
 """
 
 from __future__ import annotations
@@ -13,11 +13,16 @@ import os
 import threading
 import time
 from pathlib import Path
-from uuid import uuid4
 
 from backend.config import get_config
 from backend.logger import get_logger
 from backend.models import Candidate, OutputSource, Vulnerability
+from backend.opencode.result_json import (
+    VULNERABILITY_RESULT_JSON_INSTRUCTION,
+    VULNERABILITY_RESULTS_JSON_INSTRUCTION,
+    parse_vulnerability_result,
+    parse_vulnerability_results,
+)
 
 logger = get_logger(__name__)
 
@@ -374,63 +379,16 @@ SYSTEM_PROMPT = """\
 ## 工作流程
 1. 阅读提供的函数源码和候选信息
 2. 如需查看其他函数或结构体定义，调用相应工具
-3. 分析完毕后，**必须**调用 submit_result 工具提交结论
+3. 分析完毕后，最终回复必须输出符合要求的 JSON 结论
 
-注意：分析完成后你 **必须** 调用 submit_result 提交结论，否则结果将丢失。
+注意：分析完成后不要调用 submit_result；最终回复只输出 JSON。
 """
 
 # ---------------------------------------------------------------------------
 # Function calling tools 定义
 # ---------------------------------------------------------------------------
 
-SUBMIT_RESULT_TOOL = {
-    "type": "function",
-    "function": {
-        "name": "submit_result",
-        "description": "提交漏洞分析的最终结论。分析完成后必须调用此工具。",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "confirmed": {
-                    "type": "boolean",
-                    "description": "是否存在真实漏洞。true=确认漏洞，false=误报",
-                },
-                "severity": {
-                    "type": "string",
-                    "enum": ["high", "medium", "low"],
-                    "description": "严重程度（仅 confirmed=true 时有意义）",
-                },
-                "description": {
-                    "type": "string",
-                    "description": "漏洞的一句话摘要",
-                },
-                "ai_analysis": {
-                    "type": "string",
-                    "description": "详细的分析推理过程，需包含具体的代码路径",
-                },
-                "vulnerability_report": {
-                    "type": "string",
-                    "description": "可选 Markdown 漏洞报告，外部可触发高风险漏洞时填写",
-                },
-                "file": {
-                    "type": "string",
-                    "description": "可选，真实问题所在文件路径；项目级审计发现问题时必须填写",
-                },
-                "line": {
-                    "type": "integer",
-                    "description": "可选，真实问题所在行号；项目级审计发现问题时必须填写",
-                },
-                "function": {
-                    "type": "string",
-                    "description": "可选，真实问题所在函数；项目级审计发现问题时必须填写",
-                },
-            },
-            "required": ["confirmed", "severity", "description", "ai_analysis"],
-        },
-    },
-}
-
-TOOLS = [
+CODE_QUERY_TOOLS = [
     {
         "type": "function",
         "function": {
@@ -469,59 +427,14 @@ TOOLS = [
             },
         },
     },
-    SUBMIT_RESULT_TOOL,
 ]
 
-# single_pass 模式：仅提供 submit_result，不提供查询工具
-TOOLS_SINGLE_PASS = [SUBMIT_RESULT_TOOL]
+TOOLS = CODE_QUERY_TOOLS
 
-# 批量提交工具 — 一次性提交同函数内多个候选的分析结果
-SUBMIT_BATCH_RESULT_TOOL = {
-    "type": "function",
-    "function": {
-        "name": "submit_batch_result",
-        "description": "批量提交同一函数内多个漏洞候选的分析结论。每个候选用行号标识。",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "results": {
-                    "type": "array",
-                    "description": "每个候选的分析结果",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "line": {
-                                "type": "integer",
-                                "description": "候选所在行号",
-                            },
-                            "confirmed": {
-                                "type": "boolean",
-                                "description": "是否存在真实漏洞",
-                            },
-                            "severity": {
-                                "type": "string",
-                                "enum": ["high", "medium", "low"],
-                                "description": "严重程度",
-                            },
-                            "description": {
-                                "type": "string",
-                                "description": "漏洞的一句话摘要",
-                            },
-                            "ai_analysis": {
-                                "type": "string",
-                                "description": "详细的分析推理过程",
-                            },
-                        },
-                        "required": ["line", "confirmed", "severity", "description", "ai_analysis"],
-                    },
-                },
-            },
-            "required": ["results"],
-        },
-    },
-}
+# single_pass 模式：不提供查询工具，直接从最终文本解析 JSON
+TOOLS_SINGLE_PASS: list[dict] = []
 
-# 批量模式工具集
+# 批量模式工具集：仅源码查询，最终结果从 JSON 文本解析
 TOOLS_BATCH = [
     {
         "type": "function",
@@ -561,7 +474,6 @@ TOOLS_BATCH = [
             },
         },
     },
-    SUBMIT_BATCH_RESULT_TOOL,
 ]
 
 
@@ -573,20 +485,14 @@ def _execute_tool(
     tool_name: str,
     args: dict,
     project_id: str,
-    result_id: str,
     project_dir: Path | str | None = None,
 ) -> tuple[str, bool]:
-    """执行 function call tool，返回 (结果文本, 是否为 submit_result)。"""
-    config = get_config()
-
+    """执行 function call tool，返回 (结果文本, 是否为终止型提交工具)。"""
     if tool_name == "view_function_code":
         return _tool_view_function(args, project_id, project_dir=project_dir), False
 
     if tool_name == "view_struct_code":
         return _tool_view_struct(args, project_id, project_dir=project_dir), False
-
-    if tool_name == "submit_result":
-        return _tool_submit_result(args, result_id, config.storage.scans_dir), True
 
     return f"未知工具: {tool_name}", False
 
@@ -673,38 +579,66 @@ def _tool_view_struct(
     return "\n\n".join(parts)
 
 
-def _tool_submit_result(args: dict, result_id: str, scans_dir: str) -> str:
-    result_path = Path(scans_dir) / f"{result_id}.json"
-    result_path.parent.mkdir(parents=True, exist_ok=True)
-    payload = {
-        "confirmed": args.get("confirmed", False),
-        "severity": args.get("severity", "unknown"),
-        "description": args.get("description", ""),
-        "ai_analysis": args.get("ai_analysis", ""),
-        "vulnerability_report": args.get("vulnerability_report", ""),
-        "file": args.get("file", ""),
-        "line": args.get("line", 0),
-        "function": args.get("function", ""),
-    }
-    if result_path.exists():
+def _vulnerability_from_payload(data: dict, candidate: Candidate) -> Vulnerability:
+    confirmed = bool(data.get("confirmed", False))
+    file_value = str(data.get("file") or candidate.file)
+    function_value = str(data.get("function") or candidate.function)
+    try:
+        line_value = int(data.get("line") or candidate.line)
+    except (TypeError, ValueError):
+        line_value = candidate.line
+    if line_value < 1:
+        line_value = candidate.line
+    return Vulnerability(
+        file=file_value,
+        line=line_value,
+        function=function_value,
+        vuln_type=candidate.vuln_type,
+        severity=str(data.get("severity", "unknown") or "unknown"),
+        description=str(data.get("description", candidate.description) or candidate.description),
+        ai_analysis=str(data.get("ai_analysis", "") or ""),
+        confirmed=confirmed,
+        ai_verdict="confirmed" if confirmed else "not_confirmed",
+    )
+
+
+def _parse_api_result(content: str, candidate: Candidate) -> Vulnerability | None:
+    try:
+        payload = parse_vulnerability_result(content)
+    except Exception as exc:
+        logger.warning(
+            "Failed to parse LLM API JSON result for %s:%d: %s",
+            candidate.file, candidate.line, exc,
+        )
+        return None
+    return _vulnerability_from_payload(payload, candidate)
+
+
+def _parse_api_batch_results(
+    content: str,
+    candidates: list[Candidate],
+) -> list[Vulnerability | None] | None:
+    try:
+        payloads = parse_vulnerability_results(content)
+    except Exception as exc:
+        logger.warning("Failed to parse LLM API batch JSON results: %s", exc)
+        return None
+
+    by_line: dict[int, Vulnerability] = {}
+    candidate_by_line = {candidate.line: candidate for candidate in candidates}
+    fallback_candidate = candidates[0] if candidates else None
+    for payload in payloads:
+        line = payload.get("line")
         try:
-            current = json.loads(result_path.read_text(encoding="utf-8"))
-        except Exception:
-            current = None
-        if isinstance(current, dict) and isinstance(current.get("results"), list):
-            results = [item for item in current["results"] if isinstance(item, dict)]
-        elif isinstance(current, list):
-            results = [item for item in current if isinstance(item, dict)]
-        elif isinstance(current, dict):
-            results = [current]
-        else:
-            results = []
-        results.append(payload)
-        data = {"results": results}
-    else:
-        data = payload
-    result_path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
-    return f"结果已提交（result_id={result_id}）"
+            line_key = int(line)
+        except (TypeError, ValueError):
+            line_key = 0
+        candidate = candidate_by_line.get(line_key) or fallback_candidate
+        if candidate is None:
+            continue
+        by_line[line_key or candidate.line] = _vulnerability_from_payload(payload, candidate)
+
+    return [by_line.get(candidate.line) for candidate in candidates]
 
 
 # ---------------------------------------------------------------------------
@@ -809,14 +743,17 @@ def _build_user_prompt(
     if checker_entry and checker_entry.single_pass:
         lines.append(
             f"请根据上面提供的函数源码，分析第 {candidate.line} 行的代码是否存在真实漏洞。"
-            f"分析完毕后，**必须**调用 submit_result 提交结论。"
+            f"分析完毕后，按最终结果返回规则输出 JSON 结论。"
         )
     else:
         lines.append(
             f"请分析第 {candidate.line} 行的代码是否存在真实漏洞。"
             f"如果需要查看其他函数或结构体的定义，请使用相应工具。"
-            f"分析完毕后，**必须**调用 submit_result 提交结论。"
+            f"分析完毕后，按最终结果返回规则输出 JSON 结论。"
         )
+
+    lines.append("")
+    lines.append(VULNERABILITY_RESULT_JSON_INSTRUCTION)
 
     return "\n".join(lines)
 
@@ -837,17 +774,16 @@ async def run_audit_via_api(
     config = get_config()
     llm_cfg = config.llm_api
     model_label = _api_model_label(llm_cfg)
-    result_id = uuid4().hex
 
-    # 检查该 checker 是否为 single_pass 模式（单次 API 调用，仅 submit_result）
+    # 检查该 checker 是否为 single_pass 模式（单次 API 调用，不提供查询工具）
     from backend.registry import get_registry
     registry = get_registry()
     checker_entry = registry.get(candidate.vuln_type)
     single_pass = checker_entry.single_pass if checker_entry else False
 
     logger.info(
-        "LLM API audit: %s:%d (%s) result_id=%s single_pass=%s",
-        candidate.file, candidate.line, candidate.vuln_type, result_id, single_pass,
+        "LLM API audit: %s:%d (%s) single_pass=%s",
+        candidate.file, candidate.line, candidate.vuln_type, single_pass,
     )
 
     # 构建 OpenAI 客户端
@@ -875,7 +811,6 @@ async def run_audit_via_api(
         (
             f"source={prompt_source}\n"
             f"checker={candidate.vuln_type}\n"
-            f"result_id={result_id}\n"
             f"single_pass={single_pass}\n"
             f"project_id={project_id}\n"
             f"project_dir={project_dir or ''}"
@@ -883,16 +818,15 @@ async def run_audit_via_api(
     )
     _emit_initial_api_prompt(on_output, messages, model_label)
 
-    # 选择工具集：single_pass 模式仅提供 submit_result
+    # 选择工具集：single_pass 模式不提供查询工具
     tools = TOOLS_SINGLE_PASS if single_pass else TOOLS
-    # single_pass 模式只需 1 轮（LLM 直接返回 submit_result）
+    # single_pass 模式只需 1 轮（LLM 直接返回 JSON）
     max_rounds = 1 if single_pass else 10
     _emit_api_output(
         on_output,
         model_label,
         f"[API] 工具集: {_tool_names_for_log(tools)}",
     )
-    submitted = False
 
     for round_idx in range(max_rounds):
         if cancel_event and cancel_event.is_set():
@@ -959,13 +893,18 @@ async def run_audit_via_api(
 
         # 如果没有 tool_calls，说明 LLM 直接返回了文本
         if not message.tool_calls:
-            # 尝试从文本内容中解析 JSON 结果
-            if not submitted and message.content:
-                submitted = _try_parse_text_result(
-                    message.content, result_id, config.storage.scans_dir
-                )
-                if submitted:
-                    _emit_api_output(on_output, model_label, "[API] 已从文本回复解析并提交结果")
+            if message.content:
+                result = _parse_api_result(message.content, candidate)
+                if result is not None:
+                    result.output_source = _api_output_source(llm_cfg)
+                    _emit_api_output(on_output, model_label, "[API] 已从文本回复解析 JSON 结果")
+                    return result
+            if round_idx < max_rounds - 1:
+                messages.append({
+                    "role": "user",
+                    "content": "上一次回复没有输出符合 schema 的 JSON。请只输出最终 JSON 结果。",
+                })
+                continue
             break
 
         # 处理 tool_calls
@@ -987,12 +926,11 @@ async def run_audit_via_api(
             )
 
             result_text, is_submit = _execute_tool(
-                func_name, func_args, project_id, result_id, project_dir=project_dir,
+                func_name, func_args, project_id, project_dir=project_dir,
             )
 
             if is_submit:
-                submitted = True
-                _emit_api_output(on_output, model_label, f"[API] 结果已提交 result_id={result_id}")
+                _emit_api_output(on_output, model_label, "[API] 忽略旧提交工具调用；最终结果必须输出 JSON")
                 break
 
             # 追加 tool 结果到消息历史
@@ -1002,22 +940,9 @@ async def run_audit_via_api(
                 "content": result_text[:4000],  # 限制长度
             })
 
-        if submitted:
-            break
-
-    if not submitted:
-        logger.warning(
-            "LLM 未调用 submit_result: %s:%d (result_id=%s)",
-            candidate.file, candidate.line, result_id,
-        )
-        _emit_api_output(on_output, model_label, "[API] 警告: LLM 未提交结果")
-
-    # 读取结果文件（与 opencode 模式共用 _read_result）
-    from backend.opencode.runner import _read_result
-    result = _read_result(result_id, candidate)
-    if result is not None:
-        result.output_source = _api_output_source(llm_cfg)
-    return result
+    logger.warning("LLM API 未返回有效 JSON 结果: %s:%d", candidate.file, candidate.line)
+    _emit_api_output(on_output, model_label, "[API] 警告: LLM 未返回有效 JSON 结果")
+    return None
 
 
 def _accumulate_stream(stream_iter, model: str, cancel_check=None, on_content_delta=None):
@@ -1117,22 +1042,21 @@ def _call_llm(
         if cancel_check and cancel_check():
             raise RuntimeError("Cancelled")
         try:
+            request_kwargs = {
+                "model": model,
+                "messages": messages,
+                "temperature": temperature,
+            }
+            if tools:
+                request_kwargs["tools"] = tools
             if stream:
                 stream_iter = client.chat.completions.create(
-                    model=model,
-                    messages=messages,
-                    tools=tools,
-                    temperature=temperature,
+                    **request_kwargs,
                     stream=True,
                 )
                 return _accumulate_stream(stream_iter, model, cancel_check, on_content_delta)
             else:
-                return client.chat.completions.create(
-                    model=model,
-                    messages=messages,
-                    tools=tools,
-                    temperature=temperature,
-                )
+                return client.chat.completions.create(**request_kwargs)
         except Exception as e:
             last_err = e
             if attempt < max_retries - 1:
@@ -1140,33 +1064,6 @@ def _call_llm(
                     raise RuntimeError("Cancelled")
                 time.sleep(2 ** attempt)
     raise RuntimeError(f"LLM API 调用失败（重试 {max_retries} 次）: {last_err}")
-
-
-def _try_parse_text_result(content: str, result_id: str, scans_dir: str) -> bool:
-    """尝试从 LLM 的文本回复中解析 JSON 结果（兜底）。"""
-    import re
-
-    # 尝试提取 JSON 块
-    json_match = re.search(r'\{[^{}]*"confirmed"\s*:', content)
-    if not json_match:
-        return False
-
-    # 找到匹配的右括号
-    start = json_match.start()
-    depth = 0
-    for i in range(start, len(content)):
-        if content[i] == '{':
-            depth += 1
-        elif content[i] == '}':
-            depth -= 1
-            if depth == 0:
-                try:
-                    data = json.loads(content[start:i + 1])
-                    _tool_submit_result(data, result_id, scans_dir)
-                    return True
-                except (json.JSONDecodeError, Exception):
-                    return False
-    return False
 
 
 # ---------------------------------------------------------------------------
@@ -1214,9 +1111,11 @@ def _build_batch_user_prompt(
     lines.append(
         f"请逐一分析上述 {len(candidates)} 个候选漏洞点是否为真实 bug。"
         f"如果需要查看其他函数或结构体的定义，请使用相应工具。"
-        f"分析完毕后，**必须**调用 submit_batch_result 一次性提交所有候选的结论，"
+        f"分析完毕后，最终输出 JSON 一次性提交所有候选的结论，"
         f"results 数组中每个元素的 line 字段对应候选的行号。"
     )
+    lines.append("")
+    lines.append(VULNERABILITY_RESULTS_JSON_INSTRUCTION)
 
     return "\n".join(lines)
 
@@ -1225,8 +1124,6 @@ def _execute_batch_tool(
     tool_name: str,
     args: dict,
     project_id: str,
-    result_id_map: dict[int, str],
-    scans_dir: str,
     project_dir: Path | str | None = None,
 ) -> tuple[str, bool]:
     """执行批量模式下的 function call tool。"""
@@ -1235,19 +1132,6 @@ def _execute_batch_tool(
 
     if tool_name == "view_struct_code":
         return _tool_view_struct(args, project_id, project_dir=project_dir), False
-
-    if tool_name == "submit_batch_result":
-        results = args.get("results", [])
-        submitted_lines = []
-        for item in results:
-            line = item.get("line")
-            rid = result_id_map.get(line)
-            if rid is None:
-                # 行号不匹配任何候选，跳过
-                continue
-            _tool_submit_result(item, rid, scans_dir)
-            submitted_lines.append(line)
-        return f"已提交 {len(submitted_lines)} 个结果（行号: {submitted_lines}）", True
 
     return f"未知工具: {tool_name}", False
 
@@ -1264,16 +1148,6 @@ async def run_batch_audit_via_api(
     config = get_config()
     llm_cfg = config.llm_api
     model_label = _api_model_label(llm_cfg)
-
-    # 为每个候选生成 result_id，建立 line -> result_id 映射
-    result_id_map: dict[int, str] = {}
-    candidate_by_line: dict[int, Candidate] = {}
-    result_ids: dict[int, str] = {}
-    for c in candidates:
-        rid = uuid4().hex
-        result_id_map[c.line] = rid
-        candidate_by_line[c.line] = c
-        result_ids[c.line] = rid
 
     func_name = candidates[0].function
     file_path = candidates[0].file
@@ -1308,8 +1182,7 @@ async def run_batch_audit_via_api(
             f"source={prompt_source}\n"
             f"checker={candidates[0].vuln_type if candidates else ''}\n"
             f"project_id={project_id}\n"
-            f"project_dir={project_dir or ''}\n"
-            f"result_ids={_json_for_log(result_id_map)}"
+            f"project_dir={project_dir or ''}"
         ),
     )
     _emit_initial_api_prompt(on_output, messages, model_label)
@@ -1319,7 +1192,6 @@ async def run_batch_audit_via_api(
         f"[API] 工具集: {_tool_names_for_log(TOOLS_BATCH)}",
     )
 
-    submitted = False
     max_rounds = 10
 
     for round_idx in range(max_rounds):
@@ -1383,6 +1255,21 @@ async def run_batch_audit_via_api(
             _emit_api_section(on_output, model_label, "[API] LLM 回复", message.content)
 
         if not message.tool_calls:
+            if message.content:
+                results = _parse_api_batch_results(message.content, candidates)
+                if results is not None:
+                    source = _api_output_source(llm_cfg)
+                    for vuln in results:
+                        if vuln is not None:
+                            vuln.output_source = source
+                    _emit_api_output(on_output, model_label, "[API] 已从文本回复解析批量 JSON 结果")
+                    return results
+            if round_idx < max_rounds - 1:
+                messages.append({
+                    "role": "user",
+                    "content": "上一次回复没有输出符合 schema 的 results JSON。请只输出最终 JSON 结果。",
+                })
+                continue
             break
 
         for tool_call in message.tool_calls:
@@ -1404,13 +1291,11 @@ async def run_batch_audit_via_api(
 
             result_text, is_submit = _execute_batch_tool(
                 func_name_tc, func_args, project_id,
-                result_id_map, config.storage.scans_dir,
                 project_dir=project_dir,
             )
 
             if is_submit:
-                submitted = True
-                _emit_api_output(on_output, model_label, f"[API] 批量结果已提交 result_ids={_json_for_log(result_id_map)}")
+                _emit_api_output(on_output, model_label, "[API] 忽略旧提交工具调用；最终结果必须输出 JSON")
                 break
 
             messages.append({
@@ -1419,25 +1304,6 @@ async def run_batch_audit_via_api(
                 "content": result_text[:4000],
             })
 
-        if submitted:
-            break
-
-    if not submitted:
-        logger.warning(
-            "LLM 未调用 submit_batch_result: %s:%s",
-            file_path, func_name,
-        )
-        _emit_api_output(on_output, model_label, "[API] 警告: LLM 未提交批量结果")
-
-    # 读取各候选的结果文件
-    from backend.opencode.runner import _read_result
-    results = []
-    source = _api_output_source(llm_cfg)
-    for c in candidates:
-        rid = result_id_map[c.line]
-        vuln = _read_result(rid, c)
-        if vuln is not None:
-            vuln.output_source = source
-        results.append(vuln)
-
-    return results
+    logger.warning("LLM API 未返回有效批量 JSON 结果: %s:%s", file_path, func_name)
+    _emit_api_output(on_output, model_label, "[API] 警告: LLM 未返回有效批量 JSON 结果")
+    return [None] * len(candidates)

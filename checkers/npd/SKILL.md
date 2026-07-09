@@ -58,3 +58,11 @@ When you have completed your analysis, you **MUST** call the `submit_result` too
   3. **【调用链/调用过程】** 从赋值点到解引用点的调用链或执行路径（跨函数时给出 `caller → callee`），并标注关键行号。
 
 Do not output any JSON block — call `submit_result` as your final action.
+
+## OpenDeepHole 当前运行时结果规则
+
+当前运行时不再通过 `submit_result` 返回漏洞审计结论。若上文仍要求调用 `submit_result`、或要求不要输出 JSON，以本节和本次任务初始提示词为准：
+
+- 不要调用 `submit_result`。
+- 最终回复必须输出符合本次任务初始提示词中“最终结果返回规则”的 JSON。
+- `ai_analysis` 字段仍可包含人类可读 Markdown 分析。

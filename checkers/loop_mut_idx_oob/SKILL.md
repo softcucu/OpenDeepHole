@@ -126,3 +126,11 @@ description: 验证循环中变化索引、循环累加指针或 copy_from_user 
 - `severity`：`high` / `medium` / `low`
 - `description`：一句话说明真实问题或误报原因
 - `ai_analysis`：写清 `$IDX`/`$DST`/`$LEN` 的变化、循环条件、目标对象边界、已有校验、可达性、漏洞触发方式和最终判断
+
+## OpenDeepHole 当前运行时结果规则
+
+当前运行时不再通过 `submit_result` 返回漏洞审计结论。若上文仍要求调用 `submit_result`、或要求不要输出 JSON，以本节和本次任务初始提示词为准：
+
+- 不要调用 `submit_result`。
+- 最终回复必须输出符合本次任务初始提示词中“最终结果返回规则”的 JSON。
+- `ai_analysis` 字段仍可包含人类可读 Markdown 分析。

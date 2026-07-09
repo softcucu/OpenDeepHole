@@ -66,3 +66,11 @@ void handle(Context *ctx) {
 ```
 <结构体定义、初始化路径、是否保证非空的关键代码片段及说明>
 ```
+
+## OpenDeepHole 当前运行时结果规则
+
+当前运行时不再通过 `submit_result` 返回漏洞审计结论。若上文仍要求调用 `submit_result`、或要求不要输出 JSON，以本节和本次任务初始提示词为准：
+
+- 不要调用 `submit_result`。
+- 最终回复必须输出符合本次任务初始提示词中“最终结果返回规则”的 JSON。
+- `ai_analysis` 字段仍可包含人类可读 Markdown 分析。

@@ -28,6 +28,12 @@ from backend.opencode.model_pool import (
     update_model_lease_context,
 )
 from backend.opencode.serve_client import get_serve_manager
+from backend.opencode.result_json import (
+    VULNERABILITY_RESULT_JSON_INSTRUCTION,
+    VULNERABILITY_RESULTS_JSON_INSTRUCTION,
+    parse_vulnerability_result,
+    parse_vulnerability_results,
+)
 from backend.threat_analysis import (
     apply_threat_analysis_scan_scope,
     build_threat_analysis_scan_scope,
@@ -220,9 +226,13 @@ async def _run_audit_via_opencode(
             f"潜在的 {candidate.vuln_type.upper()} 漏洞。"
             f"project_id 为 `{project_id}`。"
             f"详情：{candidate.description} "
-            f"分析完成后，你**必须**调用 submit_result MCP 工具提交你的结论。"
+            f"分析完成后按最终结果返回规则输出 JSON 结论。"
         )
-        prompt = _with_source_reading_priority_instruction(prompt.replace('\n', ' '))
+        if attempt > 1:
+            prompt += _json_result_retry_message()
+        prompt = _with_json_result_instruction(
+            _with_source_reading_priority_instruction(prompt.replace('\n', ' '))
+        )
 
         log_path = workspace / f"opencode_attempt_{attempt_id}.log"
 
@@ -237,7 +247,7 @@ async def _run_audit_via_opencode(
         )
 
         try:
-            await _invoke_opencode(
+            output_text = await _invoke_opencode(
                 workspace, prompt, effective_timeout,
                 log_path=log_path, on_line=on_output, cancel_event=cancel_event,
                 project_dir=project_dir,
@@ -250,10 +260,6 @@ async def _run_audit_via_opencode(
         except asyncio.TimeoutError:
             # Timeout — no retry; check if result was submitted before kill
             logger.error("%s timed out for %s:%d (timeout=%ds)", tool, candidate.file, candidate.line, effective_timeout)
-            result = _read_result_from_source(attempt_source, candidate)
-            if result is not None:
-                logger.info("Submitted result found despite timeout — using it")
-                return _apply_output_source(result, attempt_source)
             return Vulnerability(
                 file=candidate.file,
                 line=candidate.line,
@@ -282,26 +288,26 @@ async def _run_audit_via_opencode(
                 _failure_reason(log_path, f"{tool} error: {exc}"),
             ), attempt_source)
 
-        # Process completed — check result
-        result = _read_result_from_source(attempt_source, candidate)
+        # Process completed — parse final JSON result
+        result = _parse_result_from_text(output_text, candidate)
         if result is not None:
             return _apply_output_source(result, attempt_source)
 
-        # submit_result was not called — retry if attempts remain
+        # JSON result was not returned — retry if attempts remain
         if attempt <= max_retries:
             logger.warning(
-                "%s did not call submit_result for %s:%d (attempt %d), retrying...",
+                "%s did not return valid JSON result for %s:%d (attempt %d), retrying...",
                 tool, candidate.file, candidate.line, attempt,
             )
             if on_output:
-                on_output(f"[retry {attempt}/{max_retries}] No result submitted, retrying...")
+                on_output(f"[retry {attempt}/{max_retries}] No valid JSON result returned, retrying...")
             continue
 
-        logger.warning("%s did not call submit_result for %s:%d after %d attempts", tool, candidate.file, candidate.line, attempt)
+        logger.warning("%s did not return valid JSON result for %s:%d after %d attempts", tool, candidate.file, candidate.line, attempt)
         return _apply_output_source(_failed_result(
             candidate,
-            _failure_reason(log_path, f"{tool} completed but did not call submit_result"),
-            analysis="OpenCode completed without submitting a result",
+            _failure_reason(log_path, f"{tool} completed but did not return a valid JSON result"),
+            analysis="OpenCode completed without returning a valid JSON result",
         ), attempt_source)
 
     return _apply_output_source(_failed_result(candidate, "OpenCode did not return a result"), last_source)
@@ -347,12 +353,17 @@ async def run_project_audit(
             f"使用 `{skill_name}` 技能，审计代码扫描路径 `{candidate.file}` 对应的目标代码。"
             f"project_id 为 `{project_id}`。"
             f"这是项目级审计任务，不是单个候选点复核。"
-            f"每发现一个真实问题，都必须调用一次 submit_result MCP 工具，"
-            f"并在 submit_result 参数中填写真实的 file、line、function。"
-            f"如果没有发现真实问题，也必须调用一次 submit_result，confirmed=false，"
+            f"每发现一个真实问题，都必须在最终 JSON 的 results 数组中添加一个元素，"
+            f"并填写真实的 file、line、function。"
+            f"如果没有发现真实问题，也必须输出一个 results 元素，confirmed=false，"
             f"file=`{candidate.file}`，line={candidate.line}，function=`{candidate.function}`。"
         ).replace("\n", " ")
-        prompt = _with_source_reading_priority_instruction(prompt)
+        if attempt > 1:
+            prompt += _json_result_retry_message(multiple=True)
+        prompt = _with_json_result_instruction(
+            _with_source_reading_priority_instruction(prompt),
+            multiple=True,
+        )
         log_path = workspace / f"opencode_attempt_{attempt_id}.log"
 
         if on_output:
@@ -365,7 +376,7 @@ async def run_project_audit(
         )
 
         try:
-            await _invoke_opencode(
+            output_text = await _invoke_opencode(
                 workspace, prompt, effective_timeout,
                 log_path=log_path, on_line=on_output, cancel_event=cancel_event,
                 project_dir=project_dir,
@@ -377,9 +388,6 @@ async def run_project_audit(
             )
         except asyncio.TimeoutError:
             logger.error("%s project audit timed out for %s (timeout=%ds)", tool, candidate.vuln_type, effective_timeout)
-            results = _read_results_from_source(attempt_source, candidate)
-            if results:
-                return _apply_output_source_to_list(results, attempt_source)
             return [
                 Vulnerability(
                     file=candidate.file,
@@ -408,23 +416,23 @@ async def run_project_audit(
                 attempt_source,
             )
 
-        results = _read_results_from_source(attempt_source, candidate)
+        results = _parse_results_from_text(output_text, candidate)
         if results:
             return _apply_output_source_to_list(results, attempt_source)
         if attempt <= max_retries:
             logger.warning(
-                "%s project audit did not call submit_result for %s (attempt %d), retrying...",
+                "%s project audit did not return valid JSON results for %s (attempt %d), retrying...",
                 tool, candidate.vuln_type, attempt,
             )
             if on_output:
-                on_output(f"[retry {attempt}/{max_retries}] No result submitted, retrying...")
+                on_output(f"[retry {attempt}/{max_retries}] No valid JSON results returned, retrying...")
             continue
-        logger.warning("%s project audit did not call submit_result for %s after %d attempts", tool, candidate.vuln_type, attempt)
+        logger.warning("%s project audit did not return valid JSON results for %s after %d attempts", tool, candidate.vuln_type, attempt)
         return _apply_output_source_to_list([
             _failed_result(
                 candidate,
-                _failure_reason(log_path, f"{tool} completed but did not call submit_result"),
-                analysis="OpenCode completed without submitting a result",
+                _failure_reason(log_path, f"{tool} completed but did not return valid JSON results"),
+                analysis="OpenCode completed without returning valid JSON results",
             )
         ], attempt_source)
 
@@ -484,25 +492,16 @@ def _safe_int(value, default: int) -> int:
     return parsed if parsed > 0 else default
 
 
-def _read_sensitive_clear_audit_result(session_id: str, candidate: Candidate) -> SensitiveClearAuditResult | None:
+def _sensitive_clear_audit_result_from_payload(
+    payload: dict,
+    candidate: Candidate,
+) -> SensitiveClearAuditResult | None:
     metadata = _sensitive_clear_function(candidate)
     if not metadata:
         return None
-    payload_data = _read_session_result_file(session_id, candidate, tool_name="submit_result")
-    if payload_data is None:
-        return None
-    payloads = _result_payloads(payload_data)
-    if len(payloads) != 1:
-        logger.warning(
-            "Expected exactly one sensitive_clear result for session_id=%s, got %d",
-            session_id, len(payloads),
-        )
-        return None
-
-    payload = payloads[0]
     markdown = str(payload.get("ai_analysis") or "").strip()
     if not markdown:
-        logger.warning("Empty sensitive_clear Markdown ai_analysis for session_id=%s", session_id)
+        logger.warning("Empty sensitive_clear Markdown ai_analysis for %s:%d", candidate.file, candidate.line)
         return None
 
     function_name = str(payload.get("function") or metadata.get("function_name") or candidate.function or "")
@@ -530,6 +529,33 @@ def _read_sensitive_clear_audit_result(session_id: str, candidate: Candidate) ->
     ]
 
     return SensitiveClearAuditResult(vulnerabilities=vulnerabilities, reports=[], complete=True)
+
+
+def _parse_sensitive_clear_audit_result(text: str, candidate: Candidate) -> SensitiveClearAuditResult | None:
+    try:
+        payload = parse_vulnerability_result(text)
+    except Exception as exc:
+        logger.warning(
+            "Failed to parse sensitive_clear JSON result for %s:%d: %s",
+            candidate.file, candidate.line, exc,
+        )
+        return None
+    return _sensitive_clear_audit_result_from_payload(payload, candidate)
+
+
+def _read_sensitive_clear_audit_result(session_id: str, candidate: Candidate) -> SensitiveClearAuditResult | None:
+    """Legacy reader for tests/tools that still inspect submit_result sink data."""
+    payload_data = _read_session_result_file(session_id, candidate, tool_name="submit_result")
+    if payload_data is None:
+        return None
+    payloads = _result_payloads(payload_data)
+    if len(payloads) != 1:
+        logger.warning(
+            "Expected exactly one sensitive_clear result for session_id=%s, got %d",
+            session_id, len(payloads),
+        )
+        return None
+    return _sensitive_clear_audit_result_from_payload(payloads[0], candidate)
 
 
 async def run_sensitive_clear_audit(
@@ -572,9 +598,11 @@ async def run_sensitive_clear_audit(
             attempt_source = source
             last_source = source
 
-        prompt = _with_source_reading_priority_instruction(
-            _sensitive_clear_prompt(skill_name, candidate, project_id)
+        prompt = _with_json_result_instruction(
+            _with_source_reading_priority_instruction(_sensitive_clear_prompt(skill_name, candidate, project_id))
         )
+        if attempt > 1:
+            prompt += _json_result_retry_message()
         log_path = workspace / f"opencode_attempt_{attempt_id}.log"
         if on_output:
             on_output(f"[{tool}] 初始提示词:\n{prompt}")
@@ -584,7 +612,7 @@ async def run_sensitive_clear_audit(
         )
 
         try:
-            await _invoke_opencode(
+            output_text = await _invoke_opencode(
                 workspace,
                 prompt,
                 effective_timeout,
@@ -600,10 +628,6 @@ async def run_sensitive_clear_audit(
             )
         except asyncio.TimeoutError:
             logger.error("%s sensitive_clear audit timed out for %s", tool, candidate.file)
-            parsed = _read_sensitive_clear_audit_result(_session_id_from_output_source(attempt_source), candidate)
-            if parsed is not None:
-                _apply_output_source_to_list(parsed.vulnerabilities, attempt_source)
-                return parsed
             return SensitiveClearAuditResult(
                 vulnerabilities=[
                     Vulnerability(
@@ -640,14 +664,14 @@ async def run_sensitive_clear_audit(
                 complete=False,
             )
 
-        parsed = _read_sensitive_clear_audit_result(_session_id_from_output_source(attempt_source), candidate)
+        parsed = _parse_sensitive_clear_audit_result(output_text, candidate)
         if parsed is not None:
             _apply_output_source_to_list(parsed.vulnerabilities, attempt_source)
             return parsed
         if attempt <= max_retries:
-            logger.warning("%s sensitive_clear audit produced invalid/incomplete results; retrying", tool)
+            logger.warning("%s sensitive_clear audit produced invalid/incomplete JSON result; retrying", tool)
             if on_output:
-                on_output(f"[retry {attempt}/{max_retries}] Incomplete sensitive_clear Markdown result, retrying...")
+                on_output(f"[retry {attempt}/{max_retries}] Incomplete sensitive_clear JSON result, retrying...")
             continue
         return SensitiveClearAuditResult(
             vulnerabilities=[
@@ -658,10 +682,10 @@ async def run_sensitive_clear_audit(
                     vuln_type=candidate.vuln_type,
                     severity="unknown",
                     description=candidate.description,
-                    ai_analysis="No complete function-level Markdown result returned",
+                    ai_analysis="No complete function-level JSON result returned",
                     confirmed=False,
                     ai_verdict="failed",
-                    failure_reason=_failure_reason(log_path, "No complete function-level Markdown result returned"),
+                    failure_reason=_failure_reason(log_path, "No complete function-level JSON result returned"),
                     output_source=attempt_source or OutputSource(),
                 )
             ],
@@ -908,10 +932,15 @@ async def run_threat_audit(
             scan_path_label = "当前扫描目录"
         prompt = (
             f"审计代码仓{scan_path_label}中{surface_label}的实现是否存在漏洞，导致{method_label}。"
-            "每发现一个真实问题，都必须调用一次 submit_result MCP 工具，并填写真实 file、line、function。"
-            "如果未发现真实漏洞，也必须调用一次 submit_result，confirmed=false。"
+            "每发现一个真实问题，都必须在最终 JSON 的 results 数组中添加一个元素，并填写真实 file、line、function。"
+            "如果未发现真实漏洞，也必须输出一个 results 元素，confirmed=false。"
         ).replace("\n", " ")
-        prompt = _with_source_reading_priority_instruction(prompt)
+        if attempt > 1:
+            prompt += _json_result_retry_message(multiple=True)
+        prompt = _with_json_result_instruction(
+            _with_source_reading_priority_instruction(prompt),
+            multiple=True,
+        )
         log_path = workspace / f"opencode_threat_audit_{attempt_id}.log"
 
         if on_output:
@@ -934,7 +963,7 @@ async def run_threat_audit(
             task_context["planned_task_id"] = planned_task_id
 
         try:
-            await _invoke_opencode(
+            output_text = await _invoke_opencode(
                 workspace,
                 prompt,
                 effective_timeout,
@@ -951,12 +980,6 @@ async def run_threat_audit(
             )
         except asyncio.TimeoutError:
             logger.error("%s threat audit timed out for %s", tool, task.task_id)
-            results = _read_results_from_source(attempt_source, candidate)
-            if results:
-                return _annotate_threat_audit_results(
-                    _apply_output_source_to_list(results, attempt_source),
-                    task,
-                )
             return _annotate_threat_audit_results([
                 Vulnerability(
                     file=candidate.file,
@@ -987,23 +1010,23 @@ async def run_threat_audit(
                 task,
             )
 
-        results = _read_results_from_source(attempt_source, candidate)
+        results = _parse_results_from_text(output_text, candidate)
         if results:
             return _annotate_threat_audit_results(
                 _apply_output_source_to_list(results, attempt_source),
                 task,
             )
         if attempt <= max_retries:
-            logger.warning("%s threat audit did not call submit_result for %s (attempt %d)", tool, task.task_id, attempt)
+            logger.warning("%s threat audit did not return valid JSON results for %s (attempt %d)", tool, task.task_id, attempt)
             if on_output:
-                on_output(f"[retry {attempt}/{max_retries}] No result submitted, retrying...")
+                on_output(f"[retry {attempt}/{max_retries}] No valid JSON results returned, retrying...")
             continue
         return _annotate_threat_audit_results(
             _apply_output_source_to_list([
                 _failed_result(
                     candidate,
-                    _failure_reason(log_path, f"{tool} completed but did not call submit_result"),
-                    analysis="OpenCode completed without submitting a threat audit result",
+                    _failure_reason(log_path, f"{tool} completed but did not return valid JSON threat audit results"),
+                    analysis="OpenCode completed without returning valid JSON threat audit results",
                 )
             ], attempt_source),
             task,
@@ -1060,7 +1083,7 @@ async def run_threat_analysis_audit(
             f"JSON 顶层必须包含 scan_scope，值必须是 {scan_scope_json}。"
             "JSON 结构必须符合技能文档的 `schema_version/sources/assets/attack_trees/code_path_mappings` 要求。"
             "如果某类信息无法识别，使用空数组或空字符串，不要编造不存在的代码路径。"
-            "不得修改 `res.json` 之外的任何文件；不需要调用 submit_result。"
+            "不得修改 `res.json` 之外的任何文件；不需要输出漏洞结论 JSON。"
         ).replace("\n", " ")
         log_path = workspace / f"opencode_{result_id}.log"
 
@@ -1788,6 +1811,38 @@ def _copy_skill_tree(src_root: Path, dst_root: Path) -> None:
         elif dst.is_dir():
             shutil.rmtree(dst)
         shutil.copytree(src, dst, symlinks=True)
+        _append_submit_result_runtime_override(dst / "SKILL.md")
+
+
+_SUBMIT_RESULT_RUNTIME_OVERRIDE_MARKER = "<!-- opendeephole-json-result-override -->"
+_SUBMIT_RESULT_RUNTIME_OVERRIDE = f"""
+
+{_SUBMIT_RESULT_RUNTIME_OVERRIDE_MARKER}
+
+## OpenDeepHole Runtime Result Rule
+
+当前运行时不再通过 `submit_result` 返回漏洞审计结论。若上文仍要求调用
+`submit_result`、或要求不要输出 JSON，以本节和本次任务初始提示词为准：
+
+- 不要调用 `submit_result`。
+- 最终回复必须输出符合本次任务初始提示词中“最终结果返回规则”的 JSON。
+- `ai_analysis` 字段仍可包含人类可读 Markdown 分析。
+"""
+
+
+def _append_submit_result_runtime_override(skill_path: Path) -> None:
+    if not skill_path.is_file():
+        return
+    try:
+        text = skill_path.read_text(encoding="utf-8")
+    except Exception:
+        return
+    if "submit_result" not in text or _SUBMIT_RESULT_RUNTIME_OVERRIDE_MARKER in text:
+        return
+    try:
+        skill_path.write_text(text.rstrip() + _SUBMIT_RESULT_RUNTIME_OVERRIDE + "\n", encoding="utf-8")
+    except Exception as exc:
+        logger.warning("Failed to append JSON result override to %s: %s", skill_path, exc)
 
 
 _OPENCODE_SESSION_PLUGIN = """\
@@ -2051,7 +2106,7 @@ def _write_prompt_file(runtime_dir: Path, prompt: str) -> Path:
 def _prompt_file_message(prompt_path: Path) -> str:
     return (
         "请读取并严格执行以下提示文件中的完整任务说明；不要只回复文件内容，"
-        f"必须按文件内要求完成分析、写入指定 artifact 并调用 MCP 工具：`{prompt_path.resolve()}`。"
+        f"必须按文件内要求完成分析并输出指定结果：`{prompt_path.resolve()}`。"
     )
 
 
@@ -2071,6 +2126,25 @@ def _with_source_reading_priority_instruction(prompt: str) -> str:
     if _SOURCE_READING_PRIORITY_INSTRUCTION in prompt:
         return prompt
     return prompt.rstrip() + "\n\n" + _SOURCE_READING_PRIORITY_INSTRUCTION
+
+
+def _with_json_result_instruction(prompt: str, *, multiple: bool = False) -> str:
+    instruction = (
+        VULNERABILITY_RESULTS_JSON_INSTRUCTION
+        if multiple
+        else VULNERABILITY_RESULT_JSON_INSTRUCTION
+    )
+    if instruction in prompt:
+        return prompt
+    return prompt.rstrip() + "\n\n" + instruction
+
+
+def _json_result_retry_message(*, multiple: bool = False) -> str:
+    shape = "`{\"results\": [...]}` JSON 对象" if multiple else "单个 JSON 对象"
+    return (
+        f"上一次尝试没有输出符合 schema 的{shape}。"
+        "请重新完成分析，最终只输出符合要求的 JSON，不要调用 submit_result。"
+    )
 
 
 def _with_project_root_instruction(prompt: str, project_dir: Path | None) -> str:
@@ -2262,8 +2336,8 @@ async def _invoke_opencode(
     task_context: dict | None = None,
     attempt: int = 0,
     on_invocation_metadata=None,
-) -> None:
-    """Invoke the configured AI CLI, stream output line-by-line, write to log file.
+) -> str:
+    """Invoke the configured AI CLI, stream output line-by-line, and return captured text.
 
     Uses subprocess.Popen in a thread executor instead of
     asyncio.create_subprocess_exec to avoid the asyncio child-watcher
@@ -2293,7 +2367,7 @@ async def _invoke_opencode(
         task_context=lease_task_context,
     )
     if lease is None:
-        return
+        return ""
     outcome = "failure"
     duration_seconds: float | None = None
     try:
@@ -2367,7 +2441,7 @@ async def _invoke_opencode(
             except asyncio.CancelledError:
                 if cancel_event and cancel_event.is_set():
                     outcome = "cancelled"
-                    return
+                    return ""
                 raise
             except asyncio.TimeoutError:
                 outcome = "timeout"
@@ -2378,7 +2452,7 @@ async def _invoke_opencode(
                 except Exception:
                     pass
             outcome = "success"
-            return
+            return "\n".join(log_lines)
         prompt_file: Path | None = None
         # When the prompt is very long, pass a short file-reference message instead
         # of the full command-line argument to avoid hitting the Windows
@@ -2527,7 +2601,7 @@ async def _invoke_opencode(
                 outcome = "timeout"
                 raise asyncio.TimeoutError()
             outcome = "cancelled"
-            return
+            return ""
 
         try:
             await stream_future  # wait for thread to exit cleanly
@@ -2539,6 +2613,7 @@ async def _invoke_opencode(
             logger.error("%s exited with code %d", tool, proc.returncode)
             raise RuntimeError(f"{tool} exited with code {proc.returncode}")
         outcome = "success"
+        return "\n".join(log_lines)
     except asyncio.CancelledError:
         outcome = "cancelled"
         raise
@@ -2546,6 +2621,33 @@ async def _invoke_opencode(
         if 'invoke_started' in locals():
             duration_seconds = time.monotonic() - invoke_started
         await release_model_lease(lease, outcome=outcome, duration_seconds=duration_seconds)
+
+
+def _parse_result_from_text(text: str, candidate: Candidate) -> Vulnerability | None:
+    try:
+        payload = parse_vulnerability_result(text)
+    except Exception as exc:
+        logger.warning(
+            "Failed to parse JSON result for %s:%d: %s",
+            candidate.file, candidate.line, exc,
+        )
+        return None
+    return _vulnerability_from_payload(payload, candidate)
+
+
+def _parse_results_from_text(text: str, candidate: Candidate) -> list[Vulnerability]:
+    try:
+        payloads = parse_vulnerability_results(text)
+    except Exception as multi_exc:
+        try:
+            payloads = [parse_vulnerability_result(text)]
+        except Exception as single_exc:
+            logger.warning(
+                "Failed to parse JSON results for %s:%d: multi=%s single=%s",
+                candidate.file, candidate.line, multi_exc, single_exc,
+            )
+            return []
+    return [_vulnerability_from_payload(item, candidate) for item in payloads]
 
 
 def _result_payloads(data) -> list[dict]:

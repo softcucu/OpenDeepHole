@@ -2,10 +2,11 @@
 
 ## 2026-07-09
 
+- **变更** 漏洞审计类 LLM 结果回传从 `submit_result` MCP 工具切换为最终 JSON 输出解析；普通候选、项目级审计、威胁审计、`sensitive_clear` 和去误报 `prove-bug`/`prove-fp`/`final-judge` 阶段均按统一 schema 解析，运行时会覆盖旧 SKILL 中的 `submit_result` 要求
 - **新增** 扫描详情页「首页」任务队列支持点击展开任务详情；排队中和运行中的 OpenCode/nga 任务会显示本次实际发送给模型的 prompt，计划中任务进入排队或运行后自动展示完整 prompt
 - **新增** 威胁分析完成后会基于攻击树结果创建独立的威胁审计任务：按「攻击面节点 + 攻击方式 + 代码路径」生成任务，不阻塞静态分析和候选点审计；任务通过现有 OpenCode/nga 模型池排队，受总并发和模型并发约束，扫描详情首页任务队列可看到 `threat_audit`，同一扫描续跑会跳过已完成的威胁审计任务
 - **新增** Agent 增加 `agent/threat_audit_skills/` 目录用于存放威胁分析结果审计相关 SKILL；扫描启动时该目录下的 SKILL 会全部载入 OpenCode workspace，但威胁审计 prompt 不指定具体 SKILL，由模型自行选择
-- **变更** 威胁审计任务的模型提示词简化为仅描述「审计代码仓实际扫描目录中某攻击面的实现是否存在漏洞并导致某攻击方式」，扫描目录取自威胁分析 `scan_scope.code_scan_path`，不再把 `project_id`、任务 ID、攻击目标、资产/风险、单条代码路径和任务描述等威胁分析字段写入提示词；结果回传仍保留最小 `submit_result` 要求
+- **变更** 威胁审计任务的模型提示词简化为仅描述「审计代码仓实际扫描目录中某攻击面的实现是否存在漏洞并导致某攻击方式」，扫描目录取自威胁分析 `scan_scope.code_scan_path`，不再把 `project_id`、任务 ID、攻击目标、资产/风险、单条代码路径和任务描述等威胁分析字段写入提示词；结果回传使用最终 JSON `results` 数组
 - **优化** OpenCode/nga serve 启动健康检查在 `/global/health` 未就绪时改为每秒重试一次，避免启动阶段过于频繁地轮询本地 health 接口
 
 ## 2026-07-08

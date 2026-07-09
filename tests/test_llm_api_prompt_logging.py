@@ -146,11 +146,11 @@ def test_api_log_section_keeps_key_content_and_marks_truncation() -> None:
 def test_api_tool_log_helpers_render_tool_names_and_capped_arguments() -> None:
     tools = [
         {"type": "function", "function": {"name": "view_function_code"}},
-        {"type": "function", "function": {"name": "submit_result"}},
+        {"type": "function", "function": {"name": "view_struct_code"}},
     ]
     args = {"content": "B" * (llm_api_runner._API_LOG_ARGS_LIMIT + 3)}
 
-    assert llm_api_runner._tool_names_for_log(tools) == "view_function_code, submit_result"
+    assert llm_api_runner._tool_names_for_log(tools) == "view_function_code, view_struct_code"
     logged = llm_api_runner._json_for_log(args)
     assert '"content"' in logged
     assert "\n" not in logged
@@ -191,6 +191,8 @@ def test_user_prompt_uses_agent_project_dir_code_index(tmp_path, monkeypatch) ->
     assert "  10 | void leaky(int mode) {" in prompt
     assert "## 相关函数源码" in prompt
     assert "  20 | void cleanup(char *p) {" in prompt
+    assert "最终结果返回规则" in prompt
+    assert "\"confirmed\"" in prompt
 
 
 def test_user_prompt_project_dir_overrides_agent_project_env(tmp_path, monkeypatch) -> None:
@@ -310,6 +312,7 @@ def test_batch_user_prompt_uses_agent_project_dir_code_index(tmp_path, monkeypat
     assert "候选漏洞点（共 2 个）" in prompt
     assert "first leak candidate" in prompt
     assert "second leak candidate" in prompt
+    assert "\"results\"" in prompt
 
 
 def test_batch_user_prompt_uses_cpp_qualified_function_name(tmp_path, monkeypatch) -> None:

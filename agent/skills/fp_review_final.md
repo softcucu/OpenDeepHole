@@ -49,9 +49,9 @@ Markdown 至少包含：
 - `## Final Analysis`
 - `## Residual Risk`
 
-## 提交结果
+## 返回结果
 
-分析完成后，必须调用 `submit_result`，提供：
+分析完成后，最终回复必须输出 JSON，提供：
 
 - `confirmed`：真实问题为 `true`，误报为 `false`
 - `severity`：`high` / `medium` / `low`

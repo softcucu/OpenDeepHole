@@ -80,3 +80,11 @@ description: 分析 C/C++ 代码中函数返回值或参数赋值后未判空导
      `当前函数 → 被调函数` 的调用过程，并标注关键行号。
 
 不要输出任何 JSON 块 — 调用 `submit_result` 作为最终操作。
+
+## OpenDeepHole 当前运行时结果规则
+
+当前运行时不再通过 `submit_result` 返回漏洞审计结论。若上文仍要求调用 `submit_result`、或要求不要输出 JSON，以本节和本次任务初始提示词为准：
+
+- 不要调用 `submit_result`。
+- 最终回复必须输出符合本次任务初始提示词中“最终结果返回规则”的 JSON。
+- `ai_analysis` 字段仍可包含人类可读 Markdown 分析。

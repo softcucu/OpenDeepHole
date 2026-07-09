@@ -104,3 +104,11 @@ description: 验证死循环候选漏洞（CWE-835），判断是否为真实可
 - `severity`：`"high"` / `"medium"` / `"low"`
 - `description`：一句话摘要
 - `ai_analysis`：详细推理，需包含：触发路径的具体代码、循环控制变量更新情况、调用链分析结论、判定理由
+
+## OpenDeepHole 当前运行时结果规则
+
+当前运行时不再通过 `submit_result` 返回漏洞审计结论。若上文仍要求调用 `submit_result`、或要求不要输出 JSON，以本节和本次任务初始提示词为准：
+
+- 不要调用 `submit_result`。
+- 最终回复必须输出符合本次任务初始提示词中“最终结果返回规则”的 JSON。
+- `ai_analysis` 字段仍可包含人类可读 Markdown 分析。

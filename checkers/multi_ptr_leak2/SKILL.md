@@ -66,3 +66,11 @@ receiver（`obj->destroy()` 中的 `obj`），而**不是**显式参数；如果
 - `severity`: `"high"`、`"medium"` 或 `"low"`
 - `description`: 一句话说明结论
 - `ai_analysis`: 写清楚释放调用、结构体指针成员、释放函数实现、所有权判断、是否存在级联 cleanup，以及最终判定理由
+
+## OpenDeepHole 当前运行时结果规则
+
+当前运行时不再通过 `submit_result` 返回漏洞审计结论。若上文仍要求调用 `submit_result`、或要求不要输出 JSON，以本节和本次任务初始提示词为准：
+
+- 不要调用 `submit_result`。
+- 最终回复必须输出符合本次任务初始提示词中“最终结果返回规则”的 JSON。
+- `ai_analysis` 字段仍可包含人类可读 Markdown 分析。

@@ -384,7 +384,8 @@ def test_threat_audit_prompt_uses_only_surface_and_method(tmp_path: Path) -> Non
             f"审计代码仓{scan_root.resolve().as_posix()}中管理接口的实现是否存在漏洞，导致认证绕过。"
             in prompt
         )
-        assert "submit_result MCP 工具" in prompt
+        assert "最终 JSON 的 results 数组" in prompt
+        assert "submit_result MCP 工具" not in prompt
         for removed in (
             "project_id",
             "任务 ID",

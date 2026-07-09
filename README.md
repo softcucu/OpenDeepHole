@@ -269,9 +269,9 @@ Agent 通过 WebSocket 保持长连接，等待服务器推送任务。
 5. “待分析”只保存为漏洞人工状态，不生成经验库反馈、不注入 SKILL，也不会阻止该问题继续进入 AI 去误报或续扫候选
 6. 已人工标记的问题可单条或批量取消标记；取消后会删除该标记生成的反馈、从本次扫描的 `feedback_ids` 中移除，并在下次 AI 去误报时重新复核
 7. AI 去误报复核在**扫描完成且存在已确认漏洞时自动触发**（无需手动点击，受 `fp_review.auto_on_complete` 控制），也可在扫描详情页手动重跑；复核会依次运行 `prove-bug`、`prove-fp`、`final-judge` 三个阶段；各阶段将 Markdown 写入本次复核的 artifact 目录，后续阶段按文件路径读取，避免把完整论证塞进 prompt
-8. **正方早退**：`prove-bug` 提交 `confirmed=false`（非问题）时正式早退，直接以正方理由记录"可能误报"最终结果并推送前端，跳过 `prove-fp` 和 `final-judge`；只有正方判定为真实问题时才进入后两个阶段，此时最终结论采用 `final-judge` 的 `submit_result`
+8. **正方早退**：`prove-bug` 最终 JSON 返回 `confirmed=false`（非问题）时正式早退，直接以正方理由记录"可能误报"最终结果并推送前端，跳过 `prove-fp` 和 `final-judge`；只有正方判定为真实问题时才进入后两个阶段，此时最终结论采用 `final-judge` 的最终 JSON
 9. 每个阶段结束后，扫描详情页会实时展示对应 Markdown；复核按模型池容量并发执行，所有正在复核的项同时高亮。详情页为**左右主从布局**：左侧为精简问题列表（文件:行 / 函数 / 类型 / 严重级别 + AI、去误报状态徽章及变体/命中标记，顶部带严重级别与类型筛选），右侧为选中问题详情，描述、AI 分析与去误报各阶段输出均以 Markdown 渲染。页面**默认只显示「问题」**——AI 审计未确认或去误报判为误报的候选默认隐藏，顶部「显示全部」开关可查看
-10. 阶段产物必须同时包含非空 Markdown artifact 和 `submit_result`；缺失时会按 `fp_review_cli.max_retries` 重试（重试 prompt 会强调即使非问题也必须写工件并提交），仍失败则停止该候选的后续 FP 复核阶段并保留已有有效结论，前端在复核结束后显示"复核失败"而非一直"复核中"；阶段输出会持久化，页面刷新后仍可查看
+10. 阶段产物必须同时包含非空 Markdown artifact 和符合 schema 的最终 JSON；缺失时会按 `fp_review_cli.max_retries` 重试（重试 prompt 会强调即使非问题也必须写工件并输出 JSON），仍失败则停止该候选的后续 FP 复核阶段并保留已有有效结论，前端在复核结束后显示"复核失败"而非一直"复核中"；阶段输出会持久化，页面刷新后仍可查看
 11. **断线续挂**：Agent WebSocket 重连时会在 hello 中上报仍在运行的 FP 复核任务，后端重新挂接并恢复 running 状态；progress/result/stage-output 上报也会自动把因断连误标为 error 的复核任务恢复为 running
 
 ## 插件式 Checker 架构
@@ -735,7 +735,7 @@ Agent 运行时会在以下位置产生数据：
 
 | 位置 | 内容 |
 |------|------|
-| `../OpenDeepHoleData/scans/` | 扫描结果 JSON（submit_result 输出）和 `scans.db` |
+| `../OpenDeepHoleData/scans/` | 扫描结果、兼容 submit sink 数据和 `scans.db` |
 | `../OpenDeepHoleData/projects/` | 服务端上传扫描的项目缓存 |
 | `logs/opendeephole.log` | 服务端日志（滚动，默认 10MB × 5 份） |
 
