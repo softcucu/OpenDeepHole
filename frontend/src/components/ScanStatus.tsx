@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { getScanStatus, stopScan, downloadScanReport, downloadScanReportZip, getCheckers, updateScanFeedback, getSkillContent, triggerFpReview, stopFpReview, getFpReview, getFpReviewSkill, getScanGitHistory, getSkillReports, getScanThreatAnalysis, getAgentIndexStatus, retryIncompleteScan, triggerVulnerabilityValidation, stopVulnerabilityValidation } from "../api/client";
@@ -1855,6 +1855,7 @@ function ScanOverview({
 
 function ScanTaskQueuePanel({ pool }: { pool: OpenCodePoolStatus | null }) {
   const [page, setPage] = useState(1);
+  const [expandedTaskId, setExpandedTaskId] = useState<string | null>(null);
   const tasks = useMemo(() => collectScanQueueTasks(pool), [pool]);
   const runningCount = tasks.filter((task) => task.status === "running").length;
   const queuedCount = tasks.filter((task) => task.status === "queued").length;
@@ -1862,10 +1863,19 @@ function ScanTaskQueuePanel({ pool }: { pool: OpenCodePoolStatus | null }) {
   const totalPages = Math.max(1, Math.ceil(tasks.length / SCAN_QUEUE_PAGE_SIZE));
   const safePage = Math.min(page, totalPages);
   const pagedTasks = tasks.slice((safePage - 1) * SCAN_QUEUE_PAGE_SIZE, safePage * SCAN_QUEUE_PAGE_SIZE);
+  const toggleTask = (taskId: string) => {
+    setExpandedTaskId((current) => (current === taskId ? null : taskId));
+  };
 
   useEffect(() => {
     if (page > totalPages) setPage(totalPages);
   }, [page, totalPages]);
+
+  useEffect(() => {
+    if (expandedTaskId && !tasks.some((task) => scanQueueTaskKey(task) === expandedTaskId)) {
+      setExpandedTaskId(null);
+    }
+  }, [expandedTaskId, tasks]);
 
   return (
     <section className="rounded-lg border border-slate-700 bg-slate-900/50 p-4">
@@ -1901,30 +1911,86 @@ function ScanTaskQueuePanel({ pool }: { pool: OpenCodePoolStatus | null }) {
                 </tr>
               </thead>
               <tbody>
-                {pagedTasks.map((task) => (
-                  <tr key={`${task.status}-${task.id}`} className="border-t border-slate-800/70">
-                    <td className="px-3 py-3 align-top">
-                      <StatusPill label={scanQueueStatusLabel(task.status)} tone={scanQueueStatusTone(task.status)} />
-                    </td>
-                    <td className="px-3 py-3 align-top">
-                      <div className="font-medium text-slate-200">{scanQueueTaskTitle(task.task)}</div>
-                      {task.scopeId && (
-                        <div className="mt-1 font-mono text-[11px] text-slate-600">{task.scopeId}</div>
+                {pagedTasks.map((task) => {
+                  const taskKey = scanQueueTaskKey(task);
+                  const isExpanded = expandedTaskId === taskKey;
+                  const prompt = scanQueueTaskPrompt(task.task);
+                  const promptLength = scanQueueTaskPromptLength(task.task, prompt);
+                  return (
+                    <Fragment key={taskKey}>
+                      <tr
+                        className="cursor-pointer border-t border-slate-800/70 transition-colors hover:bg-slate-800/40 focus-within:bg-slate-800/40"
+                        onClick={() => toggleTask(taskKey)}
+                        onKeyDown={(event) => {
+                          if (event.key === "Enter" || event.key === " ") {
+                            event.preventDefault();
+                            toggleTask(taskKey);
+                          }
+                        }}
+                        tabIndex={0}
+                        aria-expanded={isExpanded}
+                      >
+                        <td className="px-3 py-3 align-top">
+                          <StatusPill label={scanQueueStatusLabel(task.status)} tone={scanQueueStatusTone(task.status)} />
+                        </td>
+                        <td className="px-3 py-3 align-top">
+                          <div className="flex items-start gap-2">
+                            <span
+                              className={`mt-0.5 inline-flex h-5 w-5 shrink-0 items-center justify-center rounded border border-slate-700 text-slate-400 transition-transform ${isExpanded ? "rotate-90" : ""}`}
+                              aria-hidden="true"
+                            >
+                              <svg className="h-3.5 w-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="m9 5 7 7-7 7" />
+                              </svg>
+                            </span>
+                            <div className="min-w-0">
+                              <div className="font-medium text-slate-200">{scanQueueTaskTitle(task.task)}</div>
+                              {task.scopeId && (
+                                <div className="mt-1 font-mono text-[11px] text-slate-600">{task.scopeId}</div>
+                              )}
+                            </div>
+                          </div>
+                        </td>
+                        <td className="max-w-[28rem] px-3 py-3 align-top">
+                          <div className="truncate font-mono text-xs text-slate-400" title={scanQueueTaskTarget(task.task)}>
+                            {scanQueueTaskTarget(task.task) || "-"}
+                          </div>
+                        </td>
+                        <td className="px-3 py-3 align-top text-xs text-slate-400">
+                          {task.modelId || "-"}
+                        </td>
+                        <td className="px-3 py-3 align-top text-xs text-slate-500">
+                          {formatDateTime(task.timestamp)}
+                        </td>
+                      </tr>
+                      {isExpanded && (
+                        <tr className="border-t border-slate-800/70 bg-slate-950/60">
+                          <td colSpan={5} className="px-3 pb-4 pt-0">
+                            <div className="rounded-lg border border-slate-800 bg-slate-950 p-3">
+                              <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+                                <span className="text-xs font-semibold text-slate-300">Prompt</span>
+                                {prompt && (
+                                  <span className="font-mono text-[11px] text-slate-600">
+                                    {promptLength} chars
+                                  </span>
+                                )}
+                              </div>
+                              {prompt ? (
+                                <pre className="max-h-80 overflow-auto whitespace-pre-wrap break-words rounded-md border border-slate-800 bg-slate-900/80 p-3 font-mono text-xs leading-relaxed text-slate-300">
+                                  {prompt}
+                                </pre>
+                              ) : (
+                                <div className="rounded-md border border-slate-800 bg-slate-900/60 px-3 py-2 text-xs text-slate-500">
+                                  完整 prompt 尚未生成，进入排队或运行后显示。
+                                </div>
+                              )}
+                            </div>
+                          </td>
+                        </tr>
                       )}
-                    </td>
-                    <td className="max-w-[28rem] px-3 py-3 align-top">
-                      <div className="truncate font-mono text-xs text-slate-400" title={scanQueueTaskTarget(task.task)}>
-                        {scanQueueTaskTarget(task.task) || "-"}
-                      </div>
-                    </td>
-                    <td className="px-3 py-3 align-top text-xs text-slate-400">
-                      {task.modelId || "-"}
-                    </td>
-                    <td className="px-3 py-3 align-top text-xs text-slate-500">
-                      {formatDateTime(task.timestamp)}
-                    </td>
-                  </tr>
-                ))}
+                    </Fragment>
+                  );
+                })}
               </tbody>
             </table>
           </div>
@@ -1995,6 +2061,10 @@ function collectScanQueueTasks(pool: OpenCodePoolStatus | null): ScanQueueTask[]
   return out.sort((a, b) => scanQueueStatusRank(a.status) - scanQueueStatusRank(b.status) || compareScanQueueTime(a.timestamp, b.timestamp));
 }
 
+function scanQueueTaskKey(task: ScanQueueTask): string {
+  return `${task.status}-${task.id}`;
+}
+
 function scanQueueStatusRank(status: ScanQueueTaskStatus): number {
   if (status === "running") return 0;
   if (status === "queued") return 1;
@@ -2035,6 +2105,18 @@ function scanQueueTaskTarget(task: Record<string, unknown>): string {
   const auditIndex = task.audit_index != null ? `#${String(task.audit_index)}` : "";
   const vulnIndex = task.vuln_index != null ? `漏洞 #${String(task.vuln_index)}` : "";
   return [auditIndex || vulnIndex, file ? `${file}${line}` : "", fn].filter(Boolean).join(" ");
+}
+
+function scanQueueTaskPrompt(task: Record<string, unknown>): string {
+  return typeof task.prompt === "string" ? task.prompt : "";
+}
+
+function scanQueueTaskPromptLength(task: Record<string, unknown>, prompt: string): number {
+  if (typeof task.prompt_length === "number" && Number.isFinite(task.prompt_length)) {
+    return task.prompt_length;
+  }
+  const parsed = Number(task.prompt_length);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : prompt.length;
 }
 
 function scanQueueStatusLabel(status: ScanQueueTaskStatus): string {

@@ -2273,6 +2273,10 @@ async def _invoke_opencode(
     config = get_config()
     explicit_cli_config = cli_config is not None
     cli_config = cli_config or config.opencode
+    prompt = _with_project_root_instruction(prompt, project_dir)
+    lease_task_context = dict(task_context or {})
+    lease_task_context["prompt"] = prompt
+    lease_task_context["prompt_length"] = len(prompt)
     lease_cli_config = cli_config if explicit_cli_config else (lambda: get_config().opencode)
     lease_global_concurrency = (
         (lambda: configured_global_concurrency(get_config()))
@@ -2286,7 +2290,7 @@ async def _invoke_opencode(
         prefer_high=prefer_high_model,
         cancel_event=cancel_event,
         stats_scope_id=stats_scope_id,
-        task_context=task_context,
+        task_context=lease_task_context,
     )
     if lease is None:
         return
@@ -2302,7 +2306,6 @@ async def _invoke_opencode(
         executable = _resolve_cli_executable(effective_cli_config)
         model = str(_cfg_value(effective_cli_config, "model", "") or "")
         model_label = _invocation_model_label(lease.option, model)
-        prompt = _with_project_root_instruction(prompt, project_dir)
         emit_line = _model_line_emitter(on_line, model_label)
         invocation_source = _output_source_from_invocation(
             lease=lease,

@@ -208,8 +208,9 @@ def test_invoke_opencode_uses_serve_manager_when_configured(tmp_path: Path) -> N
         )
         fake_manager = SimpleNamespace(run_prompt=AsyncMock(return_value=["done"]))
         output_lines: list[str] = []
+        acquire = AsyncMock(return_value=lease)
 
-        with patch("backend.opencode.runner.acquire_model_lease", AsyncMock(return_value=lease)), \
+        with patch("backend.opencode.runner.acquire_model_lease", acquire), \
             patch("backend.opencode.runner.release_model_lease", AsyncMock()) as release, \
             patch("backend.opencode.runner._resolve_cli_executable", return_value="opencode"), \
             patch("backend.opencode.runner.get_serve_manager", return_value=fake_manager), \
@@ -221,10 +222,16 @@ def test_invoke_opencode_uses_serve_manager_when_configured(tmp_path: Path) -> N
                 cli_config=cfg,
                 project_dir=project,
                 on_line=output_lines.append,
+                task_context={"task_type": "audit"},
             )
 
         fake_manager.run_prompt.assert_awaited_once()
         kwargs = fake_manager.run_prompt.await_args.kwargs
+        acquire.assert_awaited_once()
+        lease_context = acquire.await_args.kwargs["task_context"]
+        assert lease_context["task_type"] == "audit"
+        assert lease_context["prompt"] == kwargs["prompt"]
+        assert lease_context["prompt_length"] == len(kwargs["prompt"])
         assert kwargs["tool"] == "opencode"
         assert kwargs["model"] == "anthropic/claude-sonnet"
         assert kwargs["directory"] == project

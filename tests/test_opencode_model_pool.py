@@ -245,6 +245,11 @@ def test_model_pool_snapshot_tracks_scope_queue_and_outcomes() -> None:
                 global_concurrency=1,
                 required_capability="high",
                 stats_scope_id=scope,
+                task_context={
+                    "task_type": "audit",
+                    "prompt": "queued audit prompt",
+                    "prompt_length": len("queued audit prompt"),
+                },
             )
         )
         try:
@@ -253,6 +258,8 @@ def test_model_pool_snapshot_tracks_scope_queue_and_outcomes() -> None:
             assert queued_snapshot["global_running"] == 1
             assert queued_snapshot["global_queued"] == 1
             assert len(queued_snapshot["queued_tasks"]) == 1
+            assert queued_snapshot["queued_tasks"][0]["prompt"] == "queued audit prompt"
+            assert queued_snapshot["queued_tasks"][0]["prompt_length"] == len("queued audit prompt")
             assert all(item["queued"] == 0 for item in queued_snapshot["models"])
 
             assert first is not None
@@ -747,6 +754,8 @@ def test_model_pool_snapshot_includes_active_task_context() -> None:
                 "checker": "npd",
                 "file": "src/a.c",
                 "line": 42,
+                "prompt": "active audit prompt",
+                "prompt_length": len("active audit prompt"),
             },
         )
         try:
@@ -757,6 +766,8 @@ def test_model_pool_snapshot_includes_active_task_context() -> None:
             assert model["active_tasks"][0]["checker"] == "npd"
             assert model["active_tasks"][0]["file"] == "src/a.c"
             assert model["active_tasks"][0]["line"] == 42
+            assert model["active_tasks"][0]["prompt"] == "active audit prompt"
+            assert model["active_tasks"][0]["prompt_length"] == len("active audit prompt")
             await update_model_lease_context(lease, {"serve_session_id": "ses_test"})
             snapshot = model_pool_snapshot("scan-active")
             model = snapshot["models"][0]
