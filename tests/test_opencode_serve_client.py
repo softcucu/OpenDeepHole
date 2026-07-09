@@ -377,6 +377,169 @@ def test_run_prompt_compacts_final_text_when_sse_has_no_text(monkeypatch, tmp_pa
     asyncio.run(run())
 
 
+def test_run_prompt_streams_sync_session_events(monkeypatch, tmp_path: Path) -> None:
+    async def run() -> None:
+        _FakeAsyncClient.instances = []
+        _FakeAsyncClient.event_lines = [
+            'data: {"type":"sync","name":"session.next.text.delta.1","data":{"sessionID":"session-1","delta":"sync text\\n"}}',
+            "",
+            'data: {"type":"sync","name":"session.next.reasoning.delta.1","data":{"sessionID":"session-1","delta":"sync reasoning\\n"}}',
+            "",
+            'data: {"type":"sync","name":"session.next.tool.called.1","data":{"sessionID":"session-1","callID":"call-2","tool":"read","input":{"filePath":"src/win.c"}}}',
+            "",
+            'data: {"type":"sync","name":"session.next.tool.success.1","data":{"sessionID":"session-1","callID":"call-2","content":[{"type":"text","text":"hidden sync tool body"}]}}',
+            "",
+        ]
+        monkeypatch.setattr(
+            "backend.opencode.serve_client.httpx.AsyncClient",
+            _FakeAsyncClient,
+        )
+
+        manager = OpenCodeServeManager()
+        manager._port = 12345
+        manager._acquire_session = AsyncMock()
+        project = tmp_path / "project"
+        project.mkdir()
+        output: list[str] = []
+
+        lines = await manager.run_prompt(
+            tool="opencode",
+            executable="opencode",
+            directory=project,
+            prompt="hello",
+            model="",
+            timeout=30,
+            on_line=output.append,
+        )
+
+        assert lines == ["done"]
+        logged = "\n".join(output)
+        assert "[opencode serve llm text] sync text" in logged
+        assert "[opencode serve llm reasoning] sync reasoning" in logged
+        assert "tool_call" in logged
+        assert "tool_result" in logged
+        assert "src/win.c" in logged
+        assert "text_chars=21" in logged
+        assert "hidden sync tool body" not in logged
+        assert "done" not in logged
+
+    asyncio.run(run())
+
+
+def test_run_prompt_uses_ended_text_when_no_delta(monkeypatch, tmp_path: Path) -> None:
+    async def run() -> None:
+        _FakeAsyncClient.instances = []
+        _FakeAsyncClient.event_lines = [
+            'data: {"type":"session.next.text.ended","properties":{"sessionID":"session-1","text":"ended only\\ntext"}}',
+            "",
+            'data: {"type":"sync","name":"session.next.reasoning.ended.1","data":{"sessionID":"session-1","text":"ended reasoning\\ntext"}}',
+            "",
+        ]
+        monkeypatch.setattr(
+            "backend.opencode.serve_client.httpx.AsyncClient",
+            _FakeAsyncClient,
+        )
+
+        manager = OpenCodeServeManager()
+        manager._port = 12345
+        manager._acquire_session = AsyncMock()
+        project = tmp_path / "project"
+        project.mkdir()
+        output: list[str] = []
+
+        await manager.run_prompt(
+            tool="opencode",
+            executable="opencode",
+            directory=project,
+            prompt="hello",
+            model="",
+            timeout=30,
+            on_line=output.append,
+        )
+
+        assert "[opencode serve llm text] ended only text" in output
+        assert "[opencode serve llm reasoning] ended reasoning text" in output
+        assert all("\n" not in line for line in output)
+
+    asyncio.run(run())
+
+
+def test_message_part_delta_survives_non_text_session_next_event(monkeypatch, tmp_path: Path) -> None:
+    async def run() -> None:
+        _FakeAsyncClient.instances = []
+        _FakeAsyncClient.event_lines = [
+            'data: {"type":"session.next.step.started","properties":{"sessionID":"session-1"}}',
+            "",
+            'data: {"type":"message.part.delta","properties":{"sessionID":"session-1","field":"content","delta":"fallback text\\n"}}',
+            "",
+            'data: {"type":"message.part.delta","properties":{"sessionID":"session-1","field":"reasoning","delta":"fallback reasoning\\n"}}',
+            "",
+        ]
+        monkeypatch.setattr(
+            "backend.opencode.serve_client.httpx.AsyncClient",
+            _FakeAsyncClient,
+        )
+
+        manager = OpenCodeServeManager()
+        manager._port = 12345
+        manager._acquire_session = AsyncMock()
+        project = tmp_path / "project"
+        project.mkdir()
+        output: list[str] = []
+
+        await manager.run_prompt(
+            tool="opencode",
+            executable="opencode",
+            directory=project,
+            prompt="hello",
+            model="",
+            timeout=30,
+            on_line=output.append,
+        )
+
+        assert "[opencode serve llm text] fallback text" in output
+        assert "[opencode serve llm reasoning] fallback reasoning" in output
+        assert all("\n" not in line for line in output)
+
+    asyncio.run(run())
+
+
+def test_final_text_prints_when_event_stream_only_has_reasoning(monkeypatch, tmp_path: Path) -> None:
+    async def run() -> None:
+        _FakeAsyncClient.instances = []
+        _FakeAsyncClient.event_lines = [
+            'data: {"type":"session.next.reasoning.delta","properties":{"sessionID":"session-1","delta":"only reasoning\\n"}}',
+            "",
+        ]
+        monkeypatch.setattr(
+            "backend.opencode.serve_client.httpx.AsyncClient",
+            _FakeAsyncClient,
+        )
+
+        manager = OpenCodeServeManager()
+        manager._port = 12345
+        manager._acquire_session = AsyncMock()
+        project = tmp_path / "project"
+        project.mkdir()
+        output: list[str] = []
+
+        lines = await manager.run_prompt(
+            tool="opencode",
+            executable="opencode",
+            directory=project,
+            prompt="hello",
+            model="",
+            timeout=30,
+            on_line=output.append,
+        )
+
+        assert lines == ["done"]
+        assert "[opencode serve llm reasoning] only reasoning" in output
+        assert "[opencode serve llm text] done" in output
+
+    asyncio.run(run())
+
+
 def test_serve_port_defaults_to_fixed_port(monkeypatch) -> None:
     monkeypatch.delenv("OPENCODE_SERVE_PORT", raising=False)
 

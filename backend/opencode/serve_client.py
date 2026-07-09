@@ -811,6 +811,9 @@ class _BufferedEventEmitter:
         self._on_line(f"{self._prefix} {preview}")
         return True
 
+    def emit(self, text: object) -> bool:
+        return self._emit(text)
+
     def append(self, text: str) -> bool:
         if not text:
             return False
@@ -833,20 +836,29 @@ class _ServeEventState:
         self.session_id = session_id
         self.on_line = on_line
         self.emitted_text = False
-        self.seen_next_event = False
+        self.emitted_response_text = False
+        self.seen_next_text_event = False
+        self.seen_next_reasoning_event = False
         self.text = _BufferedEventEmitter(on_line, f"[{tool} serve llm text]")
         self.reasoning = _BufferedEventEmitter(on_line, f"[{tool} serve llm reasoning]")
 
     def flush(self) -> None:
-        self.emitted_text = self.text.flush() or self.emitted_text
+        text_flushed = self.text.flush()
+        self.emitted_response_text = text_flushed or self.emitted_response_text
+        self.emitted_text = text_flushed or self.emitted_text
         self.emitted_text = self.reasoning.flush() or self.emitted_text
 
 
 def _event_properties(event: object) -> tuple[str, dict[str, Any]]:
     if not isinstance(event, dict):
         return "", {}
-    event_type = str(event.get("type") or "")
-    properties = event.get("properties")
+    if event.get("type") == "sync":
+        event_type = str(event.get("name") or "")
+        properties = event.get("data")
+    else:
+        event_type = str(event.get("type") or "")
+        properties = event.get("properties")
+    event_type = re.sub(r"\.\d+$", "", event_type)
     if isinstance(properties, dict):
         return event_type, properties
     return event_type, {}
@@ -857,17 +869,27 @@ def _handle_serve_event(event: object, state: _ServeEventState) -> None:
     if props.get("sessionID") != state.session_id:
         return
 
-    if event_type.startswith("session.next."):
-        state.seen_next_event = True
-
     if event_type == "session.next.text.delta":
-        state.emitted_text = state.text.append(str(props.get("delta") or "")) or state.emitted_text
+        state.seen_next_text_event = True
+        emitted = state.text.append(str(props.get("delta") or ""))
+        state.emitted_response_text = emitted or state.emitted_response_text
+        state.emitted_text = emitted or state.emitted_text
     elif event_type == "session.next.text.ended":
-        state.emitted_text = state.text.flush() or state.emitted_text
+        state.seen_next_text_event = True
+        flushed = state.text.flush()
+        if not flushed:
+            flushed = state.text.emit(props.get("text") or "")
+        state.emitted_response_text = flushed or state.emitted_response_text
+        state.emitted_text = flushed or state.emitted_text
     elif event_type == "session.next.reasoning.delta":
+        state.seen_next_reasoning_event = True
         state.emitted_text = state.reasoning.append(str(props.get("delta") or "")) or state.emitted_text
     elif event_type == "session.next.reasoning.ended":
-        state.emitted_text = state.reasoning.flush() or state.emitted_text
+        state.seen_next_reasoning_event = True
+        flushed = state.reasoning.flush()
+        if not flushed:
+            flushed = state.reasoning.emit(props.get("text") or "")
+        state.emitted_text = flushed or state.emitted_text
     elif event_type == "session.next.tool.called":
         state.on_line(
             f"[{state.tool} serve tool_call] session={state.session_id} name={props.get('tool') or ''} "
@@ -883,10 +905,14 @@ def _handle_serve_event(event: object, state: _ServeEventState) -> None:
             f"[{state.tool} serve tool_result] session={state.session_id} status=failed id={props.get('callID') or ''} "
             f"error={_one_line_preview(props.get('error') or '')}"
         )
-    elif event_type == "message.part.delta" and not state.seen_next_event:
+    elif event_type == "message.part.delta":
         field = str(props.get("field") or "")
-        if field in {"text", "content"}:
-            state.emitted_text = state.text.append(str(props.get("delta") or "")) or state.emitted_text
+        if field in {"text", "content"} and not state.seen_next_text_event:
+            emitted = state.text.append(str(props.get("delta") or ""))
+            state.emitted_response_text = emitted or state.emitted_response_text
+            state.emitted_text = emitted or state.emitted_text
+        elif field == "reasoning" and not state.seen_next_reasoning_event:
+            state.emitted_text = state.reasoning.append(str(props.get("delta") or "")) or state.emitted_text
 
 
 async def _stream_sse_events(response: httpx.Response):
@@ -1055,7 +1081,7 @@ class OpenCodeServeManager:
                     event_state.flush()
                 lines = _extract_text(response.json())
                 for line in lines:
-                    if on_line and not (event_state and event_state.emitted_text):
+                    if on_line and not (event_state and event_state.emitted_response_text):
                         preview = _one_line_preview(line)
                         if preview:
                             on_line(f"[{tool} serve llm text] {preview}")
