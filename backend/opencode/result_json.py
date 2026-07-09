@@ -23,8 +23,6 @@ VULNERABILITY_RESULTS_SCHEMA: dict[str, Any] = {
 }
 
 VULNERABILITY_RESULT_JSON_INSTRUCTION = """\
-最终结果返回规则：
-不要调用 `submit_result` MCP 工具；如果 SKILL 中仍提到 `submit_result`，以本规则为准。
 分析完成后，最终回复必须包含且只包含一个符合以下 schema 的 JSON 对象：
 {
   "confirmed": true,
@@ -40,8 +38,6 @@ VULNERABILITY_RESULT_JSON_INSTRUCTION = """\
 """
 
 VULNERABILITY_RESULTS_JSON_INSTRUCTION = """\
-最终结果返回规则：
-不要调用 `submit_result` MCP 工具；如果 SKILL 中仍提到 `submit_result`，以本规则为准。
 分析完成后，最终回复必须包含且只包含一个符合以下 schema 的 JSON 对象：
 {
   "results": [
