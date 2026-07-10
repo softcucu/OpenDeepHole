@@ -329,7 +329,7 @@ def test_model_pool_snapshot_tracks_scope_queue_and_outcomes() -> None:
     asyncio.run(run())
 
 
-def test_model_pool_snapshot_persists_completed_task_summary_without_prompt() -> None:
+def test_model_pool_snapshot_persists_completed_task_prompt_for_all_outcomes() -> None:
     async def run() -> None:
         cfg = SimpleNamespace(
             models=[
@@ -337,29 +337,33 @@ def test_model_pool_snapshot_persists_completed_task_summary_without_prompt() ->
             ],
         )
         scope = "scan-completed-history"
-        lease = await acquire_model_lease(
-            cfg,
-            global_concurrency=1,
-            required_capability="high",
-            stats_scope_id=scope,
-            task_context={
-                "task_type": "threat_audit",
-                "file": "src/a.c",
-                "prompt": "sensitive full prompt",
-            },
-        )
-        await release_model_lease(lease, outcome="success", duration_seconds=1.5)
+        outcomes = ("success", "failure", "timeout", "cancelled")
+        for index, outcome in enumerate(outcomes):
+            prompt = f"full {outcome} prompt"
+            lease = await acquire_model_lease(
+                cfg,
+                global_concurrency=1,
+                required_capability="high",
+                stats_scope_id=scope,
+                task_context={
+                    "task_type": "threat_audit",
+                    "file": f"src/{index}.c",
+                    "prompt": prompt,
+                },
+            )
+            await release_model_lease(lease, outcome=outcome, duration_seconds=1.5)
 
         snapshot = model_pool_snapshot(scope)
-        assert snapshot["total_tasks"] == 1
-        assert snapshot["completed_task_count"] == 1
-        assert len(snapshot["completed_tasks"]) == 1
-        completed = snapshot["completed_tasks"][0]
-        assert completed["task_type"] == "threat_audit"
-        assert completed["outcome"] == "success"
-        assert completed["duration_seconds"] == 1.5
-        assert completed["prompt_length"] == len("sensitive full prompt")
-        assert "prompt" not in completed
+        assert snapshot["total_tasks"] == len(outcomes)
+        assert snapshot["completed_task_count"] == len(outcomes)
+        assert len(snapshot["completed_tasks"]) == len(outcomes)
+        for completed, outcome in zip(snapshot["completed_tasks"], outcomes, strict=True):
+            prompt = f"full {outcome} prompt"
+            assert completed["task_type"] == "threat_audit"
+            assert completed["outcome"] == outcome
+            assert completed["duration_seconds"] == 1.5
+            assert completed["prompt"] == prompt
+            assert completed["prompt_length"] == len(prompt)
 
     asyncio.run(run())
 

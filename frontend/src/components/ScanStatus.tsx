@@ -2004,7 +2004,7 @@ function ScanTaskQueuePanel({ pool }: { pool: OpenCodePoolStatus | null }) {
                                 </pre>
                               ) : !["planned", "queued", "running"].includes(task.status) ? (
                                 <div className="rounded-md border border-slate-800 bg-slate-900/60 px-3 py-2 text-xs text-slate-500">
-                                  完成任务仅保留摘要{promptLength > 0 ? `，Prompt 长度 ${promptLength} chars` : ""}。
+                                  该历史任务未保存完整 Prompt{promptLength > 0 ? `，仅记录长度 ${promptLength} chars` : ""}。
                                 </div>
                               ) : (
                                 <div className="rounded-md border border-slate-800 bg-slate-900/60 px-3 py-2 text-xs text-slate-500">

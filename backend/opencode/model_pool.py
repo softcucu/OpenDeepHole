@@ -827,9 +827,11 @@ async def release_model_lease(
         global_item.last_finished_at = finished_at
         if active_task is not None and lease.stats_scope_id:
             context = dict(active_task.get("context") or {})
-            prompt = context.pop("prompt", None)
-            if "prompt_length" not in context and isinstance(prompt, str):
+            prompt = context.get("prompt")
+            if isinstance(prompt, str) and "prompt_length" not in context:
                 context["prompt_length"] = len(prompt)
+            elif not isinstance(prompt, str):
+                context.pop("prompt", None)
             completed = {
                 **context,
                 "task_id": lease.task_id,

@@ -644,6 +644,7 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
                         "task_id": "task-done",
                         "task_type": "threat_analysis",
                         "outcome": "success",
+                        "prompt": "completed threat prompt",
                         "finished_at": "2026-01-01T00:02:00+00:00",
                     }
                 ],
@@ -676,6 +677,7 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
             self.assertEqual(pool.total_tasks, 3)
             self.assertEqual(pool.completed_task_count, 1)
             self.assertEqual(pool.completed_tasks[0]["task_id"], "task-done")
+            self.assertEqual(pool.completed_tasks[0]["prompt"], "completed threat prompt")
             summary = store.list_scans()[0]
             self.assertEqual(summary.total_task_count, 3)
             self.assertEqual(summary.completed_task_count, 1)
@@ -688,7 +690,9 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
                 scope_id="scan-1",
                 total_tasks=1,
                 completed_task_count=1,
-                completed_tasks=[{"task_id": "old", "outcome": "success"}],
+                completed_tasks=[
+                    {"task_id": "old", "outcome": "success", "prompt": "old prompt"}
+                ],
             )
             store.save_scan(scan, _meta())
             current = OpenCodePoolStatus(
@@ -696,7 +700,9 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
                 global_queued=1,
                 total_tasks=2,
                 completed_task_count=1,
-                completed_tasks=[{"task_id": "new", "outcome": "timeout"}],
+                completed_tasks=[
+                    {"task_id": "new", "outcome": "timeout", "prompt": "new prompt"}
+                ],
                 queued_tasks=[{"request_id": "queued", "task_type": "fp_review"}],
             )
 
@@ -706,6 +712,10 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
             pool = store.load_scan("scan-1")[0].opencode_pool
             self.assertIsNotNone(pool)
             self.assertEqual([task["task_id"] for task in pool.completed_tasks], ["old", "new"])
+            self.assertEqual(
+                [task["prompt"] for task in pool.completed_tasks],
+                ["old prompt", "new prompt"],
+            )
             self.assertEqual(pool.completed_task_count, 2)
             self.assertEqual(pool.total_tasks, 3)
 
