@@ -1,5 +1,6 @@
-"""Product-specific vulnerability validators.
+"""Directory-based product-specific vulnerability validators.
 
-Files in this package are shipped in the initial Agent download and can be
-manually synced later, but automatic runtime updates do not overwrite them.
+Method packages in this directory ship in the initial Agent download and can be
+manually synced later. Automatic runtime updates do not overwrite them, and a
+manual sync only replaces method directories that also exist on the server.
 """

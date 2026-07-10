@@ -1767,6 +1767,15 @@ _AGENT_DOWNLOAD_SKIP_DIRS = {
 _AGENT_RUNTIME_SKIP_DIRS = {*_AGENT_DOWNLOAD_SKIP_DIRS, "product_validators"}
 _AGENT_SKIP_SUFFIXES = {".pyc", ".pyo"}
 _PRODUCT_VALIDATORS_DIR = _PROJECT_ROOT / "agent" / "product_validators"
+_PRODUCT_VALIDATORS_PACKAGE_NAME = "product_validators_v2"
+_PRODUCT_VALIDATORS_PACKAGE_VERSION = 2
+_PRODUCT_VALIDATORS_SYNC_SKIP_DIRS = {
+    "__pycache__",
+    ".git",
+    ".mypy_cache",
+    ".pytest_cache",
+    ".ruff_cache",
+}
 
 
 def _agent_runtime_hash_scope() -> dict:
@@ -1869,34 +1878,62 @@ def _build_agent_runtime_download() -> _RuntimeDownload:
     )
 
 
-def _iter_product_validator_files() -> list[tuple[str, Path]]:
+def _iter_product_validator_directories() -> list[tuple[str, Path]]:
     if not _PRODUCT_VALIDATORS_DIR.is_dir():
         return []
+    directories: list[tuple[str, Path]] = []
+    for method_dir in _PRODUCT_VALIDATORS_DIR.iterdir():
+        entry_path = method_dir / "__init__.py"
+        if (
+            not method_dir.is_dir()
+            or method_dir.is_symlink()
+            or method_dir.name.startswith((".", "_"))
+            or not entry_path.is_file()
+            or entry_path.is_symlink()
+        ):
+            continue
+        directories.append((method_dir.name, method_dir))
+    directories.sort(key=lambda item: item[0])
+    return directories
+
+
+def _iter_product_validator_files(
+    directories: list[tuple[str, Path]] | None = None,
+) -> list[tuple[str, Path]]:
     entries: list[tuple[str, Path]] = []
-    for file_path in _PRODUCT_VALIDATORS_DIR.rglob("*.py"):
-        if not file_path.is_file() or file_path.suffix in _AGENT_SKIP_SUFFIXES:
-            continue
-        if any(part in _AGENT_DOWNLOAD_SKIP_DIRS for part in file_path.parts):
-            continue
-        arcname = file_path.relative_to(_PRODUCT_VALIDATORS_DIR).as_posix()
-        if arcname.startswith("../") or arcname.startswith("/") or "/../" in arcname:
-            continue
-        entries.append((arcname, file_path))
+    for _method_name, method_dir in (
+        directories if directories is not None else _iter_product_validator_directories()
+    ):
+        for file_path in method_dir.rglob("*"):
+            if not file_path.is_file() or file_path.is_symlink():
+                continue
+            relative_path = file_path.relative_to(method_dir)
+            if (
+                file_path.suffix in _AGENT_SKIP_SUFFIXES
+                or any(part in _PRODUCT_VALIDATORS_SYNC_SKIP_DIRS for part in relative_path.parts)
+            ):
+                continue
+            arcname = file_path.relative_to(_PRODUCT_VALIDATORS_DIR).as_posix()
+            entries.append((arcname, file_path))
     entries.sort(key=lambda item: item[0])
     return entries
 
 
 def _build_product_validators_package() -> dict:
     buf = io.BytesIO()
-    files = _iter_product_validator_files()
+    directory_entries = _iter_product_validator_directories()
+    directories = [name for name, _method_dir in directory_entries]
+    files = _iter_product_validator_files(directory_entries)
     with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as zf:
         for arcname, file_path in files:
             zf.write(file_path, arcname)
     archive = buf.getvalue()
     return {
-        "name": "product_validators",
+        "name": _PRODUCT_VALIDATORS_PACKAGE_NAME,
+        "version": _PRODUCT_VALIDATORS_PACKAGE_VERSION,
         "archive_b64": base64.b64encode(archive).decode("ascii"),
         "sha256": hashlib.sha256(archive).hexdigest(),
+        "directories": directories,
         "files": [arcname for arcname, _file_path in files],
     }
 

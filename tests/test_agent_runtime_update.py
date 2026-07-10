@@ -51,10 +51,44 @@ class AgentRuntimePackageTests(unittest.TestCase):
         self.assertIn("attack-method-reference-catalog.md", names)
         self.assertTrue(any(name.startswith("checkers/") for name in names))
         self.assertIn("ctags-p6.2.20260517.0-x64/ctags.exe", names)
-        self.assertIn("agent/product_validators/demo.py", names)
+        self.assertIn("agent/product_validators/demo/__init__.py", names)
         self.assertIn('server_url: "http://server.example"', agent_yaml)
         self.assertIn('owner_token: "owner-token"', agent_yaml)
         self.assertFalse(yaml.safe_load(agent_yaml)["git_history"]["enabled"])
+
+    def test_product_validator_sync_package_contains_method_resources_only(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            demo = root / "demo"
+            (demo / "prompts").mkdir(parents=True)
+            (demo / "__pycache__").mkdir()
+            (demo / "__init__.py").write_text("def register(registry):\n    pass\n", encoding="utf-8")
+            (demo / "helper.py").write_text("VALUE = 1\n", encoding="utf-8")
+            (demo / "prompts" / "reproduce.md").write_text("prompt\n", encoding="utf-8")
+            (demo / "settings.json").write_text("{}\n", encoding="utf-8")
+            (demo / "__pycache__" / "helper.pyc").write_bytes(b"cache")
+            (root / "legacy.py").write_text("# ignored\n", encoding="utf-8")
+            (root / "missing_entry").mkdir()
+            (root / "missing_entry" / "helper.py").write_text("# ignored\n", encoding="utf-8")
+
+            with patch.object(agent_api, "_PRODUCT_VALIDATORS_DIR", root):
+                package = agent_api._build_product_validators_package()
+
+            self.assertEqual(package["name"], "product_validators_v2")
+            self.assertEqual(package["version"], 2)
+            self.assertEqual(package["directories"], ["demo"])
+            self.assertEqual(
+                package["files"],
+                [
+                    "demo/__init__.py",
+                    "demo/helper.py",
+                    "demo/prompts/reproduce.md",
+                    "demo/settings.json",
+                ],
+            )
+            archive = base64.b64decode(package["archive_b64"])
+            with zipfile.ZipFile(_bytes_path(archive)) as zf:
+                self.assertEqual(sorted(zf.namelist()), package["files"])
 
     def test_launchers_do_not_auto_install_ctags_system_packages(self) -> None:
         root = Path(__file__).resolve().parent.parent
@@ -148,7 +182,8 @@ class AgentRuntimePackageTests(unittest.TestCase):
             root = Path(tmp)
             (root / "agent" / "product_validators").mkdir(parents=True)
             (root / "agent" / "main.py").write_text("print('agent')\n", encoding="utf-8")
-            validator = root / "agent" / "product_validators" / "demo.py"
+            validator = root / "agent" / "product_validators" / "demo" / "__init__.py"
+            validator.parent.mkdir()
             validator.write_text("print('v1')\n", encoding="utf-8")
 
             before = compute_runtime_hash(root)
@@ -206,8 +241,8 @@ class AgentRuntimePackageTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            (root / "agent" / "product_validators").mkdir(parents=True)
-            (root / "agent" / "product_validators" / "custom.py").write_text(
+            (root / "agent" / "product_validators" / "custom").mkdir(parents=True)
+            (root / "agent" / "product_validators" / "custom" / "__init__.py").write_text(
                 "def register(registry):\n    pass\n",
                 encoding="utf-8",
             )
@@ -226,7 +261,7 @@ class AgentRuntimePackageTests(unittest.TestCase):
                 updater._install_update_archive(archive, expected_hash, manifest)
 
             self.assertEqual(
-                (root / "agent" / "product_validators" / "custom.py").read_text(encoding="utf-8"),
+                (root / "agent" / "product_validators" / "custom" / "__init__.py").read_text(encoding="utf-8"),
                 "def register(registry):\n    pass\n",
             )
             self.assertEqual(
@@ -371,35 +406,108 @@ class AgentRuntimePackageTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "package hash mismatch"):
                 agent_server._write_skill_creator_package(package, Path(tmp))
 
-    def test_product_validator_package_writer_uses_dispatched_files(self) -> None:
+    def test_product_validator_package_writer_replaces_dispatched_directories_only(self) -> None:
         package = _product_validators_package({
-            "__init__.py": "",
-            "demo.py": "def register(registry):\n    pass\n",
+            "demo/__init__.py": "def register(registry):\n    pass\n",
+            "demo/helper.py": "VALUE = 'server'\n",
+            "demo/prompts/reproduce.md": "server prompt\n",
         })
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "product_validators"
+            (root / "demo").mkdir(parents=True)
+            (root / "demo" / "stale.py").write_text("stale\n", encoding="utf-8")
+            (root / "local").mkdir()
+            (root / "local" / "__init__.py").write_text("# local\n", encoding="utf-8")
+            (root / "legacy.py").write_text("# legacy\n", encoding="utf-8")
+
             installed = agent_server._write_product_validators_package(package, root)
 
-            self.assertEqual(installed, ["__init__.py", "demo.py"])
+            self.assertEqual(installed, ["demo"])
             self.assertEqual(
-                (root / "demo.py").read_text(encoding="utf-8"),
+                (root / "demo" / "__init__.py").read_text(encoding="utf-8"),
                 "def register(registry):\n    pass\n",
+            )
+            self.assertEqual(
+                (root / "demo" / "prompts" / "reproduce.md").read_text(encoding="utf-8"),
+                "server prompt\n",
+            )
+            self.assertFalse((root / "demo" / "stale.py").exists())
+            self.assertTrue((root / "local" / "__init__.py").exists())
+            self.assertTrue((root / "legacy.py").exists())
+
+    def test_product_validator_empty_package_preserves_agent_directories(self) -> None:
+        package = _product_validators_package({})
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "product_validators"
+            (root / "local").mkdir(parents=True)
+            (root / "local" / "__init__.py").write_text("# local\n", encoding="utf-8")
+
+            installed = agent_server._write_product_validators_package(package, root)
+
+            self.assertEqual(installed, [])
+            self.assertTrue((root / "local" / "__init__.py").exists())
+
+    def test_product_validator_package_writer_rolls_back_all_directories(self) -> None:
+        package = _product_validators_package({
+            "alpha/__init__.py": "# server alpha\n",
+            "beta/__init__.py": "# server beta\n",
+        })
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "product_validators"
+            for name in ("alpha", "beta"):
+                (root / name).mkdir(parents=True)
+                (root / name / "__init__.py").write_text(f"# local {name}\n", encoding="utf-8")
+
+            original_rename = Path.rename
+
+            def fail_second_staged_rename(path: Path, target: Path) -> Path:
+                if path.name == "beta" and path.parent.name.startswith(".product_validators-sync-"):
+                    raise OSError("simulated install failure")
+                return original_rename(path, target)
+
+            with patch.object(Path, "rename", new=fail_second_staged_rename):
+                with self.assertRaisesRegex(OSError, "simulated install failure"):
+                    agent_server._write_product_validators_package(package, root)
+
+            self.assertEqual(
+                (root / "alpha" / "__init__.py").read_text(encoding="utf-8"),
+                "# local alpha\n",
+            )
+            self.assertEqual(
+                (root / "beta" / "__init__.py").read_text(encoding="utf-8"),
+                "# local beta\n",
             )
 
     def test_product_validator_package_writer_rejects_path_traversal(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             with self.assertRaisesRegex(RuntimeError, "Unsafe product validators package path"):
                 agent_server._write_product_validators_package(
-                    _product_validators_package({"../bad.py": "bad"}),
+                    _product_validators_package(
+                        {"demo/../bad.py": "bad"},
+                        directories=["demo"],
+                    ),
                     Path(tmp) / "product_validators",
                 )
 
     def test_product_validator_package_writer_rejects_hash_mismatch(self) -> None:
-        package = _product_validators_package({"demo.py": ""})
+        package = _product_validators_package({"demo/__init__.py": ""})
         package["sha256"] = "0" * 64
         with tempfile.TemporaryDirectory() as tmp:
             with self.assertRaisesRegex(RuntimeError, "hash mismatch"):
                 agent_server._write_product_validators_package(package, Path(tmp) / "product_validators")
+
+    def test_product_validator_package_writer_rejects_legacy_package_name(self) -> None:
+        package = _product_validators_package({"demo/__init__.py": ""})
+        package["name"] = "product_validators"
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "product_validators"
+            (root / "local").mkdir(parents=True)
+            (root / "local" / "__init__.py").write_text("# local\n", encoding="utf-8")
+
+            with self.assertRaisesRegex(RuntimeError, "package name"):
+                agent_server._write_product_validators_package(package, root)
+
+            self.assertTrue((root / "local" / "__init__.py").exists())
 
     def test_runtime_update_only_task_runs_post_update_skill_create(self) -> None:
         update = AsyncMock(return_value=False)
@@ -591,16 +699,25 @@ def _skill_creator_package(files: dict[str, str]) -> dict[str, str]:
     }
 
 
-def _product_validators_package(files: dict[str, str]) -> dict[str, str]:
+def _product_validators_package(
+    files: dict[str, str],
+    *,
+    directories: list[str] | None = None,
+) -> dict:
     archive = io.BytesIO()
     with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_DEFLATED) as zf:
         for name, content in files.items():
             zf.writestr(name, content)
     data = archive.getvalue()
+    if directories is None:
+        directories = sorted({name.split("/", 1)[0] for name in files if "/" in name})
     return {
-        "name": "product_validators",
+        "name": "product_validators_v2",
+        "version": 2,
         "sha256": hashlib.sha256(data).hexdigest(),
         "archive_b64": base64.b64encode(data).decode("ascii"),
+        "directories": directories,
+        "files": sorted(files),
     }
 
 

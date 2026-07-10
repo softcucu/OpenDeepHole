@@ -8,12 +8,13 @@ import io
 import json
 import re
 import shutil
+import tempfile
 import threading
 import zipfile
 from collections import deque
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Optional
 
 # Module-level globals injected by agent/main.py before connection starts
@@ -30,6 +31,8 @@ _validation_tasks: dict[tuple[str, int], asyncio.Task] = {}
 _validation_cancel_events: dict[tuple[str, int], threading.Event] = {}
 _validation_queues: dict[str, deque["_ValidationQueueItem"]] = {}
 _validation_workers: dict[str, asyncio.Task] = {}
+_PRODUCT_VALIDATORS_PACKAGE_NAME = "product_validators_v2"
+_PRODUCT_VALIDATORS_PACKAGE_VERSION = 2
 
 
 @dataclass
@@ -892,13 +895,63 @@ def _write_skill_creator_package(package: dict, skills_root: Path) -> None:
 
 def _write_product_validators_package(package: dict, validators_root: Path) -> list[str]:
     name = str(package.get("name") or "").strip()
-    if name != "product_validators":
+    if name != _PRODUCT_VALIDATORS_PACKAGE_NAME:
         raise RuntimeError("Invalid product validators package name")
+    if package.get("version") != _PRODUCT_VALIDATORS_PACKAGE_VERSION:
+        raise RuntimeError("Invalid product validators package version")
 
     expected_hash = str(package.get("sha256") or "").strip()
     encoded = str(package.get("archive_b64") or "")
-    if not expected_hash or not encoded:
+    raw_directories = package.get("directories")
+    raw_files = package.get("files")
+    if (
+        not expected_hash
+        or not encoded
+        or not isinstance(raw_directories, list)
+        or not isinstance(raw_files, list)
+    ):
         raise RuntimeError("Invalid product validators package metadata")
+
+    directories: list[str] = []
+    for value in raw_directories:
+        if not isinstance(value, str):
+            raise RuntimeError("Invalid product validators directory name")
+        directory = value.strip()
+        if (
+            not directory
+            or directory != value
+            or directory in {".", ".."}
+            or directory.startswith((".", "_"))
+            or "/" in directory
+            or "\\" in directory
+            or "\x00" in directory
+        ):
+            raise RuntimeError(f"Unsafe product validators directory name: {value}")
+        directories.append(directory)
+    if len(set(directories)) != len(directories):
+        raise RuntimeError("Duplicate product validators directory name")
+    directories.sort()
+    directory_set = set(directories)
+
+    expected_files: list[str] = []
+    for value in raw_files:
+        if not isinstance(value, str) or not value or "\\" in value or "\x00" in value:
+            raise RuntimeError("Invalid product validators file path")
+        member = PurePosixPath(value)
+        if member.is_absolute() or ".." in member.parts or len(member.parts) < 2:
+            raise RuntimeError(f"Unsafe product validators package path: {value}")
+        if member.parts[0] not in directory_set:
+            raise RuntimeError(f"Unlisted product validators directory: {value}")
+        normalized = member.as_posix()
+        if normalized != value:
+            raise RuntimeError(f"Invalid product validators file path: {value}")
+        expected_files.append(normalized)
+    if len(set(expected_files)) != len(expected_files):
+        raise RuntimeError("Duplicate product validators file path")
+    expected_files.sort()
+    for directory in directories:
+        if f"{directory}/__init__.py" not in expected_files:
+            raise RuntimeError(f"Product validator directory missing __init__.py: {directory}")
 
     try:
         data = base64.b64decode(encoded.encode("ascii"), validate=True)
@@ -909,45 +962,90 @@ def _write_product_validators_package(package: dict, validators_root: Path) -> l
         raise RuntimeError("product validators package hash mismatch")
 
     validators_root = validators_root.resolve()
-    tmp_root = validators_root.parent / ".product_validators.tmp"
-    if tmp_root.exists():
-        shutil.rmtree(tmp_root)
-    tmp_root.mkdir(parents=True, exist_ok=True)
-    installed: list[str] = []
+    validators_root.parent.mkdir(parents=True, exist_ok=True)
+    tmp_root = Path(tempfile.mkdtemp(prefix=".product_validators-sync-", dir=validators_root.parent))
+    backup_root = Path(tempfile.mkdtemp(prefix=".product_validators-backup-", dir=validators_root.parent))
+    cleanup_backup = True
 
     try:
+        archive_files: list[str] = []
         try:
             with zipfile.ZipFile(io.BytesIO(data)) as zf:
                 for info in zf.infolist():
                     if info.is_dir():
                         continue
-                    member = Path(info.filename)
-                    if member.is_absolute() or ".." in member.parts:
+                    if not info.filename or "\\" in info.filename or "\x00" in info.filename:
                         raise RuntimeError(f"Unsafe product validators package path: {info.filename}")
-                    if member.suffix != ".py":
-                        continue
-                    dest = (tmp_root / member).resolve()
+                    member = PurePosixPath(info.filename)
+                    if (
+                        member.is_absolute()
+                        or ".." in member.parts
+                        or len(member.parts) < 2
+                        or member.parts[0] not in directory_set
+                        or member.as_posix() != info.filename
+                    ):
+                        raise RuntimeError(f"Unsafe product validators package path: {info.filename}")
+                    archive_path = member.as_posix()
+                    if archive_path in archive_files:
+                        raise RuntimeError(f"Duplicate product validators package path: {info.filename}")
+                    dest = (tmp_root.joinpath(*member.parts)).resolve()
                     try:
                         dest.relative_to(tmp_root.resolve())
                     except ValueError as exc:
                         raise RuntimeError(f"Unsafe product validators package path: {info.filename}") from exc
                     dest.parent.mkdir(parents=True, exist_ok=True)
                     dest.write_bytes(zf.read(info))
-                    installed.append(member.as_posix())
+                    archive_files.append(archive_path)
         except zipfile.BadZipFile as exc:
             raise RuntimeError("Invalid product validators package archive") from exc
 
-        if validators_root.exists():
-            backup = validators_root.parent / ".product_validators.bak"
-            if backup.exists():
-                shutil.rmtree(backup)
-            validators_root.rename(backup)
-        validators_root.parent.mkdir(parents=True, exist_ok=True)
-        tmp_root.rename(validators_root)
-        return sorted(installed)
+        if sorted(archive_files) != expected_files:
+            raise RuntimeError("Product validators package file manifest mismatch")
+        if not directories:
+            return []
+
+        validators_root.mkdir(parents=True, exist_ok=True)
+        operations: list[tuple[Path, Path, bool]] = []
+        try:
+            for directory in directories:
+                staged_dir = tmp_root / directory
+                target_dir = validators_root / directory
+                backup_dir = backup_root / directory
+                had_existing = target_dir.exists() or target_dir.is_symlink()
+                if had_existing:
+                    target_dir.rename(backup_dir)
+                operations.append((target_dir, backup_dir, had_existing))
+                staged_dir.rename(target_dir)
+        except Exception as install_exc:
+            rollback_errors: list[str] = []
+            for target_dir, backup_dir, had_existing in reversed(operations):
+                try:
+                    _remove_installed_validator_path(target_dir)
+                    if had_existing and (backup_dir.exists() or backup_dir.is_symlink()):
+                        backup_dir.rename(target_dir)
+                except Exception as rollback_exc:
+                    rollback_errors.append(f"{target_dir.name}: {rollback_exc}")
+            if rollback_errors:
+                cleanup_backup = False
+                raise RuntimeError(
+                    "Product validators sync failed and rollback was incomplete; "
+                    f"backups remain at {backup_root}: {'; '.join(rollback_errors)}"
+                ) from install_exc
+            raise
+
+        return directories
     finally:
         if tmp_root.exists():
             shutil.rmtree(tmp_root, ignore_errors=True)
+        if cleanup_backup and backup_root.exists():
+            shutil.rmtree(backup_root, ignore_errors=True)
+
+
+def _remove_installed_validator_path(path: Path) -> None:
+    if path.is_symlink() or path.is_file():
+        path.unlink()
+    elif path.exists():
+        shutil.rmtree(path)
 
 
 def _skill_creator_prompt(name: str, description: str, user_input: str) -> str:

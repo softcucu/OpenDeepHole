@@ -1,4 +1,4 @@
-"""Example product validator that drives nga-based validation skills."""
+"""Example directory-based product validator that drives nga-based validation skills."""
 
 from __future__ import annotations
 
@@ -35,7 +35,7 @@ def register(registry) -> None:
 
 def _emit(ctx, message: str) -> None:
     print(message, flush=True)
-    ctx.emit_stdout("Step1", "验证过程", message)
+    ctx.emit_stdout("验证过程", message)
 
 
 def validate_demo(ctx) -> ValidationResult:

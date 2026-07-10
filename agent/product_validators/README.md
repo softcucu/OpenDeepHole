@@ -1,17 +1,28 @@
 # 产品漏洞验证脚本编写指南
 
-`agent/product_validators/` 用于放置 Agent 本地执行的产品漏洞验证脚本。Agent 会导入本目录下的 `*.py` 文件，跳过以下划线开头的文件，并调用每个模块里的 `register(registry)` 函数注册产品验证方法。
+`agent/product_validators/` 用于放置 Agent 本地执行的产品漏洞验证方法。每个验证方法必须使用一个独立的一级目录，Agent 会把该目录作为 Python 包导入，并调用目录入口 `__init__.py` 里的 `register(registry)` 注册产品和验证环境。根目录下的单个 `*.py` 文件不会作为验证方法加载。
 
-修改本目录后，需要在客户端页面点击“同步验证方法”推送到在线 Agent。重新点击漏洞验证只会执行 Agent 当前已安装的验证器，不会自动下载或覆盖本目录。
+修改本目录后，需要在客户端页面点击“同步验证方法”并确认，才能推送到在线 Agent。同步会完整替换 Agent 上与服务端同名的方法目录，因此同名目录中的 Agent 本地修改或额外文件会被覆盖或删除；仅存在于 Agent、服务端没有的其它方法目录会保留。重新点击漏洞验证只会执行 Agent 当前已安装的验证器，不会自动下载或覆盖本目录。
 
 ## 基本结构
 
-每个验证脚本需要提供 `register(registry)`，并注册一个同步函数。验证函数只接收一个参数 `ctx`，返回 `ValidationResult`。
+推荐目录结构如下。目录中可以包含任意数量的 Python 模块、子包、JSON、Markdown、提示词和其它运行资源：
+
+```text
+agent/product_validators/
+├── README.md
+└── lte_lab/
+    ├── __init__.py
+    ├── validator.py
+    ├── helpers.py
+    └── prompts/
+        └── reproduce.md
+```
+
+每个方法目录的 `__init__.py` 需要提供 `register(registry)`，并注册一个同步验证函数。验证函数只接收一个参数 `ctx`，返回 `ValidationResult`。包内代码使用相对导入，避免不同方法目录中的同名模块互相冲突：
 
 ```python
-from pathlib import Path
-
-from agent.vulnerability_validation import ValidationResult
+from .validator import validate_lte
 
 
 def register(registry) -> None:
@@ -21,6 +32,15 @@ def register(registry) -> None:
         validation_environment="仿真UBBPi板环境",
         timeout_seconds=7200,
     )
+```
+
+`validator.py` 示例：
+
+```python
+from pathlib import Path
+
+from agent.vulnerability_validation import ValidationResult
+from .helpers import describe_vulnerability
 
 
 def validate_lte(ctx) -> ValidationResult:
@@ -30,7 +50,7 @@ def validate_lte(ctx) -> ValidationResult:
 
     ctx.emit_stdout(
         "验证过程",
-        f"validating {vuln.get('vuln_type')} at {vuln.get('file')}:{vuln.get('line')}"
+        describe_vulnerability(vuln),
     )
 
     artifact_path = Path(ctx.work_dir) / "validation-notes.md"
@@ -43,6 +63,16 @@ def validate_lte(ctx) -> ValidationResult:
         requires_human_intervention=False,
         status="verified",
         summary="验证完成，问题可复现。",
+    )
+```
+
+`helpers.py` 示例：
+
+```python
+def describe_vulnerability(vuln: dict) -> str:
+    return (
+        f"validating {vuln.get('vuln_type')} at "
+        f"{vuln.get('file')}:{vuln.get('line')}"
     )
 ```
 
@@ -64,7 +94,7 @@ def validate_lte(ctx) -> ValidationResult:
 - `ctx.vulnerability`：当前漏洞对象。需要字典时优先使用 `ctx.get_validation_info()["vulnerability"]`。
 - `ctx.report_markdown`：后端下发的单漏洞 Markdown 报告原文，推荐通过 `ctx.get_report_markdown()` 读取。
 - `ctx.work_dir`：该漏洞验证任务的工作目录，通常位于扫描目录下的 `validation/vuln-{idx}`。
-- `ctx.validator_dir`：当前验证脚本所在目录。验证函数运行时的当前目录默认就是这个目录。
+- `ctx.validator_dir`：当前验证方法包的一级目录。即使验证函数定义在嵌套子模块中，运行时当前目录也固定为这个方法根目录。
 - `ctx.report_path`：Agent 已写入的单漏洞 Markdown 报告路径。
 - `ctx.project_path`：项目根目录。可能为空，使用前需要判断。
 - `ctx.code_scan_path`：本次代码扫描范围。可能为空，使用前需要判断。
@@ -225,7 +255,7 @@ ValidationResult(
 ## 路径和产物建议
 
 - 验证函数运行时当前目录是 `ctx.validator_dir`。脚本目录下的 `input/input.json` 可直接用 `open("input/input.json", encoding="utf-8")` 读取。
-- 同目录辅助文件可以直接 `import helper as h`；Agent 加载和执行验证器时都会临时把验证器目录放入 `sys.path`。
+- 方法目录是独立 Python 包；同目录辅助文件使用 `from . import helper`，子模块使用 `from .helpers import name`，嵌套子包继续使用包内相对导入。
 - 普通中间文件优先写入 `ctx.work_dir`，它是当前漏洞验证任务的隔离工作目录。
 - 需要 nga 在项目根目录内发现 skill 或读写文件时，可以使用 `ctx.project_path`，但必须先判断它是否为空。
 - 如果验证只针对本次扫描范围，优先参考 `ctx.code_scan_path`。
@@ -235,7 +265,7 @@ ValidationResult(
 
 ## nga 多阶段验证建议
 
-`demo.py` 展示了一个四阶段 nga 验证模板：读取漏洞 Markdown，写入项目目录下的 `.opendeephole/vulnerability_validation/{scan_id}/vuln-{idx}/`，再按 STEP 1 到 STEP 4 串行调用固定 skill。接入真实验证流程时，优先替换每个 STEP 的 skill 名称、产物文件名、重试次数和提示词。
+`demo/__init__.py` 展示了一个四阶段 nga 验证模板：读取漏洞 Markdown，写入项目目录下的 `.opendeephole/vulnerability_validation/{scan_id}/vuln-{idx}/`，再按 STEP 1 到 STEP 4 串行调用固定 skill。接入真实验证流程时，优先替换每个 STEP 的 skill 名称、产物文件名、重试次数和提示词。
 
 多阶段流程建议遵守以下规则：
 

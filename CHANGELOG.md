@@ -2,6 +2,7 @@
 
 ## 2026-07-10
 
+- **变更** 产品漏洞验证方法改为每个方法一个独立 Python 包目录，通过目录内 `__init__.py` 注册产品和验证环境并支持相对导入辅助模块；手工同步只完整替换服务端存在的同名方法目录，保留 Agent 独有目录及其内容，“同步验证方法”按钮新增覆盖风险悬浮警告和二次确认
 - **修复** 续扫只会把 `analysis_source=static_candidate` 的失败结果重新放入候选点审计；威胁审计失败任务仅通过独立的 `threat_audit_tasks` 链路续跑，候选点列表、失败候选计数和候选审计模型池计数不再出现或重复统计 `THREAT_AUDIT`
 - **变更** 移除 Agent 专用 `threat-path-audit` SKILL 及其工作区自动注入，并在工作区刷新时清理中断扫描遗留的副本；独立威胁审计继续使用直接 Prompt，普通静态 checker SKILL 和攻击树威胁分析能力保持不变
 - **变更** deephole-code 源码查询优先级规则不再重复注入各类审计 Prompt 或 MCP tool description，改由 MCP Server 初始化 instructions 统一说明：优先使用源码查询工具，索引不可用、查询未命中或需要目录枚举/全文搜索时再回退内置 `read`/`grep`/`glob`
