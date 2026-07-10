@@ -844,7 +844,10 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
                 patch("backend.api.scan.get_scan_store", return_value=store),
                 patch.dict("backend.api.agent._registered_agents", {"agent-old": agent}, clear=True),
                 patch("backend.api.agent.send_agent_command", new=AsyncMock(side_effect=fake_send)),
-                patch("backend.api.agent.create_agent_runtime_update_payload", return_value=None),
+                patch(
+                    "backend.api.agent.create_agent_runtime_update_payload",
+                    return_value={"hash": "remote-runtime", "archive_sha256": "archive-hash"},
+                ),
             ):
                 asyncio.run(
                     scan_api.resume_scan(
@@ -861,6 +864,10 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
             self.assertEqual(sent["retry_processed_offset"], 1)
             self.assertTrue(sent["resume_threat_analysis"])
             self.assertEqual(sent["retry_threat_audit_task_ids"], ["threat-timeout"])
+            self.assertEqual(
+                sent["agent_runtime_update"],
+                {"hash": "remote-runtime", "archive_sha256": "archive-hash"},
+            )
             self.assertEqual(store.get_processed_keys("scan-1"), {("done.c", 1, "done", "npd")})
 
     def test_upsert_incomplete_vulnerability_replaces_existing_result(self) -> None:

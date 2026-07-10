@@ -459,6 +459,90 @@ class AgentRuntimePackageTests(unittest.TestCase):
         self.assertEqual(update.await_args.args[0], {"hash": "new-runtime"})
         handler.assert_awaited_once()
 
+    def test_resume_command_checks_runtime_update_before_resume(self) -> None:
+        calls: list[str] = []
+
+        async def check_update(update: dict, command: dict) -> bool:
+            calls.append("update")
+            self.assertEqual(update, {"hash": "new-runtime"})
+            self.assertEqual(command["retry_threat_audit_task_ids"], ["threat-timeout"])
+            return False
+
+        async def handle_resume(**kwargs) -> None:
+            calls.append("resume")
+            self.assertEqual(kwargs["retry_candidates"][0]["file"], "src/a.c")
+            self.assertEqual(kwargs["retry_threat_audit_task_ids"], ["threat-timeout"])
+            self.assertTrue(kwargs["resume_threat_analysis"])
+
+        command = {
+            "type": "resume",
+            "scan_id": "scan-1",
+            "project_path": "/repo/project",
+            "code_scan_path": "/repo/project/src",
+            "checkers": ["npd"],
+            "retry_candidates": [{"file": "src/a.c"}],
+            "retry_total_candidates": 2,
+            "retry_processed_offset": 1,
+            "resume_threat_analysis": True,
+            "retry_threat_audit_task_ids": ["threat-timeout"],
+            "agent_runtime_update": {"hash": "new-runtime"},
+        }
+        with (
+            patch("agent.updater.ensure_runtime_updated", new=check_update),
+            patch("agent.server.handle_resume", new=handle_resume),
+        ):
+            asyncio.run(agent_main._handle_command(command, None, None, None))
+
+        self.assertEqual(calls, ["update", "resume"])
+
+    def test_runtime_update_preserves_resume_command_before_install_and_restart(self) -> None:
+        calls: list[str] = []
+        command = {
+            "type": "resume",
+            "scan_id": "scan-1",
+            "retry_candidates": [{"file": "src/a.c"}],
+            "retry_total_candidates": 2,
+            "retry_processed_offset": 1,
+            "resume_threat_analysis": True,
+            "retry_threat_audit_task_ids": ["threat-timeout"],
+            "agent_runtime_update": {"hash": "new-runtime"},
+        }
+
+        async def download(_update: dict) -> bytes:
+            calls.append("download")
+            return b"archive"
+
+        original_save_pending_command = updater.save_pending_command
+
+        def save_pending(saved: dict) -> None:
+            calls.append("save")
+            original_save_pending_command(saved)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            pending_file = Path(tmp) / "pending_commands.json"
+            with (
+                patch.object(updater, "PENDING_COMMANDS_FILE", pending_file),
+                patch("agent.updater.compute_runtime_hash", return_value="old-runtime"),
+                patch("agent.updater._download_update", new=download),
+                patch("agent.updater.save_pending_command", side_effect=save_pending),
+                patch("agent.updater._install_update_archive", side_effect=lambda *_args: calls.append("install")),
+                patch("agent.updater._install_requirements_if_needed", side_effect=lambda: calls.append("requirements")),
+                patch("agent.updater._restart_process", side_effect=lambda: calls.append("restart")),
+            ):
+                updated = asyncio.run(
+                    updater.ensure_runtime_updated(
+                        {"hash": "new-runtime", "manifest": {"runtime_hash": "new-runtime"}},
+                        command,
+                    )
+                )
+                pending_commands = updater.load_pending_commands(clear=True)
+
+        self.assertTrue(updated)
+        self.assertEqual(calls, ["download", "save", "install", "requirements", "restart"])
+        expected_command = dict(command)
+        expected_command.pop("agent_runtime_update")
+        self.assertEqual(pending_commands, [expected_command])
+
     def test_vulnerability_validation_command_skips_runtime_update(self) -> None:
         update = AsyncMock(return_value=False)
         handler = AsyncMock()
