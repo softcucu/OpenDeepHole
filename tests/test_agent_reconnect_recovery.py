@@ -554,7 +554,15 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
                     description="desc",
                     vuln_type="npd",
                     metadata={"subject": "ptr"},
-                )
+                ),
+                Candidate(
+                    file=".",
+                    line=1,
+                    function="__threat_path__",
+                    description="threat audit placeholder",
+                    vuln_type="threat_audit",
+                    metadata={"source": "threat_analysis"},
+                ),
             ])
 
             with (
@@ -569,6 +577,56 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
             self.assertEqual(stored.candidates[0].metadata["subject"], "ptr")
             self.assertEqual(agent_api._running_scans["scan-1"].candidates[0].file, "src/a.c")
             self.assertTrue(any(event_type == "scan_candidates" for _sid, event_type, _data in published))
+
+    def test_retry_counts_keep_static_candidates_and_threat_tasks_separate(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = SqliteScanStore(Path(tmp) / "scans.db")
+            scan = _scan("scan-1", ScanItemStatus.COMPLETE, total=1, processed=1)
+            store.save_scan(scan, _meta())
+            store.add_vulnerability(
+                "scan-1",
+                Vulnerability(
+                    file="static.c",
+                    line=7,
+                    function="retry_static",
+                    vuln_type="npd",
+                    severity="unknown",
+                    description="static timeout",
+                    ai_analysis="timeout",
+                    confirmed=False,
+                    ai_verdict="timeout",
+                ),
+            )
+            store.add_vulnerability(
+                "scan-1",
+                Vulnerability(
+                    file=".",
+                    line=1,
+                    function="__threat_path__",
+                    vuln_type="threat_audit",
+                    severity="unknown",
+                    description="threat timeout",
+                    ai_analysis="timeout",
+                    confirmed=False,
+                    ai_verdict="timeout",
+                    analysis_source="threat_audit",
+                    source_task_id="threat-timeout",
+                ),
+            )
+            store.upsert_threat_audit_task(
+                "scan-1",
+                ThreatAuditTask(task_id="threat-timeout", status="timeout"),
+            )
+            user = User(user_id="user-1", username="alice", role="user")
+
+            with (
+                patch("backend.api.scan.get_scan_store", return_value=store),
+                patch("backend.api.agent.get_scan_store", return_value=store),
+            ):
+                status = asyncio.run(scan_api.get_scan_status("scan-1", current_user=user))
+
+            self.assertEqual(status.retryable_candidates_count, 1)
+            self.assertEqual(status.continuable_task_count, 2)
 
     def test_late_opencode_pool_snapshot_is_cleared_for_completed_scan(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -823,6 +881,22 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
                     status="timeout",
                     surface_node_id="surface-1",
                     method_node_id="method-timeout",
+                ),
+            )
+            store.add_vulnerability(
+                "scan-1",
+                Vulnerability(
+                    file=".",
+                    line=1,
+                    function="__threat_path__",
+                    vuln_type="threat_audit",
+                    severity="unknown",
+                    description="timed out threat audit",
+                    ai_analysis="timeout",
+                    confirmed=False,
+                    ai_verdict="timeout",
+                    analysis_source="threat_audit",
+                    source_task_id="threat-timeout",
                 ),
             )
             self.assertEqual(store.get_incomplete_threat_audit_counts(["scan-1"]), {"scan-1": 1})

@@ -1183,8 +1183,25 @@ async def agent_report_vulnerability(scan_id: str, vuln: Vulnerability) -> dict:
 @router.post("/scan/{scan_id}/candidates")
 async def agent_report_scan_candidates(scan_id: str, body: AgentScanCandidates) -> dict:
     """Agent pushes the final static-analysis candidate list for a scan."""
+    static_candidates = []
+    for candidate in body.candidates:
+        metadata = candidate.metadata if isinstance(candidate.metadata, dict) else {}
+        is_threat_placeholder = (
+            str(candidate.vuln_type or "").strip().lower() == "threat_audit"
+            or str(metadata.get("source") or "").strip().lower() == "threat_analysis"
+        )
+        if not is_threat_placeholder:
+            static_candidates.append(candidate)
+    dropped = len(body.candidates) - len(static_candidates)
+    if dropped:
+        logger.warning(
+            "Dropped %d threat-audit placeholder(s) from static candidates for scan %s",
+            dropped,
+            scan_id,
+        )
+
     store = get_scan_store()
-    candidates = store.replace_scan_candidates(scan_id, body.candidates)
+    candidates = store.replace_scan_candidates(scan_id, static_candidates)
     total = len(candidates)
     store.update_scan_progress(scan_id, total_candidates=total)
 

@@ -9,6 +9,7 @@ from backend.models import (
     ScanMeta,
     ScanStatus,
     ScanSummary,
+    ThreatAuditTask,
     User,
     Vulnerability,
 )
@@ -60,8 +61,11 @@ class FakeScanStore:
     def list_fp_review_verdicts_by_scans(self, scan_ids: list[str]) -> dict[str, list[FpReviewResult]]:
         return {sid: self.list_fp_review_results_by_scan(sid) for sid in scan_ids}
 
-    def get_incomplete_threat_audit_counts(self, _scan_ids: list[str]) -> dict[str, int]:
-        return {}
+    def get_incomplete_threat_audit_counts(self, scan_ids: list[str]) -> dict[str, int]:
+        if self.scan.scan_id not in scan_ids:
+            return {}
+        count = sum(task.status != "completed" for task in self.scan.threat_audit_tasks)
+        return {self.scan.scan_id: count} if count else {}
 
     def _summary(self) -> ScanSummary:
         return ScanSummary(
@@ -169,6 +173,65 @@ class ScanHistorySummaryTests(unittest.TestCase):
         self.assertEqual(response[0].product, "LTE")
         self.assertEqual(response[0].vulnerability_count, 2)
         self.assertEqual(response[0].human_confirmed_count, 2)
+
+    def test_list_scans_does_not_count_threat_failures_as_retryable_candidates(self) -> None:
+        scan = ScanStatus(
+            scan_id="scan-1",
+            project_id="project-1",
+            scan_items=["npd"],
+            created_at="2026-01-01T00:00:00+00:00",
+            status=ScanItemStatus.COMPLETE,
+            progress=1.0,
+            total_candidates=1,
+            processed_candidates=1,
+            vulnerabilities=[
+                Vulnerability(
+                    file="static.c",
+                    line=7,
+                    function="retry_static",
+                    vuln_type="npd",
+                    severity="unknown",
+                    description="static timeout",
+                    ai_analysis="timeout",
+                    confirmed=False,
+                    ai_verdict="timeout",
+                ),
+                Vulnerability(
+                    file=".",
+                    line=1,
+                    function="__threat_path__",
+                    vuln_type="threat_audit",
+                    severity="unknown",
+                    description="threat timeout",
+                    ai_analysis="timeout",
+                    confirmed=False,
+                    ai_verdict="timeout",
+                    analysis_source="threat_audit",
+                ),
+            ],
+            threat_audit_tasks=[
+                ThreatAuditTask(task_id="threat-timeout", status="timeout"),
+            ],
+        )
+        meta = ScanMeta(
+            scan_items=["npd"],
+            created_at=scan.created_at,
+            scan_name="Project One",
+            agent_name="agent-1",
+        )
+
+        with (
+            patch("backend.api.scan.get_scan_store", return_value=FakeScanStore(scan, meta)),
+            patch("backend.api.agent.is_agent_name_online", return_value=True),
+        ):
+            response = asyncio.run(
+                list_scans(
+                    current_user=User(user_id="admin", username="admin", role="admin")
+                )
+            )
+
+        self.assertEqual(response[0].retryable_candidates_count, 1)
+        self.assertEqual(response[0].continuable_task_count, 2)
 
 
 if __name__ == "__main__":

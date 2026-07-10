@@ -238,7 +238,7 @@ class OpencodeWorkspaceTests(unittest.TestCase):
             self.assertEqual(config["skills"]["paths"], [str((workspace / ".opencode" / "skills").resolve())])
             assert_opencode_read_permissions(self, config)
 
-    def test_scan_workspace_loads_threat_audit_skills(self) -> None:
+    def test_scan_workspace_removes_obsolete_threat_audit_skill(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             project = root / "project"
@@ -248,6 +248,16 @@ class OpencodeWorkspaceTests(unittest.TestCase):
                 storage=SimpleNamespace(scans_dir=str(scans_dir)),
                 mcp_server=SimpleNamespace(port=8100),
             )
+            stale_skill = (
+                scans_dir
+                / "scan-1"
+                / "opencode_workspace"
+                / ".opencode"
+                / "skills"
+                / "threat-path-audit"
+            )
+            stale_skill.mkdir(parents=True)
+            (stale_skill / "SKILL.md").write_text("obsolete", encoding="utf-8")
 
             with (
                 patch("backend.opencode.config.get_config", return_value=fake_config),
@@ -255,9 +265,7 @@ class OpencodeWorkspaceTests(unittest.TestCase):
             ):
                 workspace = create_scan_workspace("scan-1", project_dir=project, mcp_port=9123)
 
-            self.assertTrue(
-                (workspace / ".opencode" / "skills" / "threat-path-audit" / "SKILL.md").is_file()
-            )
+            self.assertFalse((workspace / ".opencode" / "skills" / "threat-path-audit").exists())
 
     def test_scan_workspaces_are_isolated_per_scan_for_same_project(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

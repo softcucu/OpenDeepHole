@@ -86,6 +86,16 @@ function isAiConfirmed(vuln: { ai_verdict?: string; confirmed?: boolean }): bool
   return vuln.ai_verdict === "confirmed" || (!vuln.ai_verdict && !!vuln.confirmed);
 }
 
+function isStaticCandidateVulnerability(vuln: Vulnerability): boolean {
+  return (vuln.analysis_source || "static_candidate") === "static_candidate"
+    && vuln.vuln_type.toLowerCase() !== "threat_audit";
+}
+
+function isStaticCandidate(item: Candidate): boolean {
+  return item.vuln_type.toLowerCase() !== "threat_audit"
+    && String(item.metadata?.source || "").toLowerCase() !== "threat_analysis";
+}
+
 function effectiveIssueCount(scan: ScanStatusType, fpReview: FpReviewJob | null): number {
   const fpMap = new Map((fpReview?.results ?? []).map((result) => [result.vuln_index, result]));
   return scan.vulnerabilities.filter((vuln, index) => {
@@ -2855,17 +2865,19 @@ function StaticTaskPanel({
   const scannedFiles = seen ? (scan.static_scanned_files || indexProgress.current) : 0;
   const totalFiles = seen ? (scan.static_total_files || indexProgress.total) : 0;
   const displayedCandidates = useMemo<ScanCandidate[]>(() => {
-    if (candidates.length > 0) return candidates;
-    return vulnerabilities.map((vuln, index) => ({
-      idx: index,
-      file: vuln.file,
-      line: vuln.line,
-      function: vuln.function,
-      description: vuln.description,
-      vuln_type: vuln.vuln_type,
-      related_functions: [],
-      metadata: {},
-    }));
+    if (candidates.length > 0) return candidates.filter(isStaticCandidate);
+    return vulnerabilities
+      .filter(isStaticCandidateVulnerability)
+      .map((vuln, index) => ({
+        idx: index,
+        file: vuln.file,
+        line: vuln.line,
+        function: vuln.function,
+        description: vuln.description,
+        vuln_type: vuln.vuln_type,
+        related_functions: [],
+        metadata: {},
+      }));
   }, [candidates, vulnerabilities]);
   const vulnerabilityByKey = useMemo(() => {
     const out = new Map<string, { vuln: Vulnerability; index: number }>();
@@ -3317,6 +3329,15 @@ function AuditTaskPanel({
   events: ScanEvent[];
   pool: OpenCodePoolStatus | null;
 }) {
+  const runningAudits = (pool?.models ?? []).reduce(
+    (count, model) => count + model.active_tasks.filter(
+      (task) => String(task.task_type || "audit") === "audit",
+    ).length,
+    0,
+  );
+  const queuedAudits = (pool?.queued_tasks ?? []).filter(
+    (task) => String(task.task_type || "audit") === "audit",
+  ).length;
   return (
     <TaskPanel
       title="候选点 AI 审计"
@@ -3327,8 +3348,8 @@ function AuditTaskPanel({
       <div className="grid grid-cols-1 gap-3 md:grid-cols-4">
         <MiniMetric label="已审计" value={scan.processed_candidates} tone="blue" />
         <MiniMetric label="总候选" value={scan.total_candidates} />
-        <MiniMetric label="运行中" value={pool?.global_running ?? 0} tone="cyan" />
-        <MiniMetric label="排队中" value={pool?.global_queued ?? 0} tone="amber" />
+        <MiniMetric label="运行中" value={runningAudits} tone="cyan" />
+        <MiniMetric label="排队中" value={queuedAudits} tone="amber" />
       </div>
       <ProgressBlock label="AI 审计" current={scan.processed_candidates} total={scan.total_candidates} percentOverride={scan.static_analysis_done ? pct : undefined} fallback="等待审计候选点" />
       {currentCandidate && (

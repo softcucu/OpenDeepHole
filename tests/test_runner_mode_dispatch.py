@@ -359,7 +359,7 @@ def test_threat_audit_prompt_uses_only_surface_and_method(tmp_path: Path) -> Non
             patch("backend.opencode.runner.get_config", return_value=cfg),
             patch("backend.opencode.runner._invoke_opencode", new=AsyncMock(side_effect=fake_invoke)),
         ):
-            await run_threat_audit(
+            results = await run_threat_audit(
                 tmp_path,
                 task,
                 "scan-1",
@@ -367,6 +367,9 @@ def test_threat_audit_prompt_uses_only_surface_and_method(tmp_path: Path) -> Non
                 scan_path=scan_root,
             )
 
+        assert len(results) == 1
+        assert results[0].analysis_source == "threat_audit"
+        assert results[0].source_task_id == task.task_id
         prompt = captured["prompt"]
         assert (
             f"审计代码仓{scan_root.resolve().as_posix()}中管理接口的实现是否存在漏洞，导致认证绕过。"

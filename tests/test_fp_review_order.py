@@ -141,6 +141,18 @@ class FpReviewOrderTests(unittest.TestCase):
                     ai_verdict="timeout",
                     user_verdict="false_positive",
                 ),
+                Vulnerability(
+                    file=".",
+                    line=1,
+                    function="__threat_path__",
+                    vuln_type="threat_audit",
+                    severity="unknown",
+                    description="timeout threat audit",
+                    ai_analysis="analysis",
+                    confirmed=False,
+                    ai_verdict="timeout",
+                    analysis_source="threat_audit",
+                ),
             ],
         )
 

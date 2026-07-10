@@ -83,6 +83,17 @@ class SensitiveClearAuditResult:
     reports: list[dict]
     complete: bool
 
+
+@dataclass(frozen=True)
+class _VulnerabilityResultDefaults:
+    """Fallback identity used while parsing one audit's final JSON results."""
+
+    file: str
+    line: int
+    function: str
+    vuln_type: str
+    description: str
+
 # Regex to strip ANSI escape sequences from CLI output
 _ANSI_RE = re.compile(
     r'\x1b\[[0-9;]*[a-zA-Z]'    # CSI sequences: ESC[...X
@@ -844,8 +855,8 @@ async def run_project_report_audit(
     return []
 
 
-def _threat_audit_candidate(task: ThreatAuditTask) -> Candidate:
-    return Candidate(
+def _threat_audit_result_defaults(task: ThreatAuditTask) -> _VulnerabilityResultDefaults:
+    return _VulnerabilityResultDefaults(
         file=task.code_path or ".",
         line=1,
         function="__threat_path__",
@@ -854,13 +865,6 @@ def _threat_audit_candidate(task: ThreatAuditTask) -> Candidate:
             f"on code path `{task.code_path}`"
         ),
         vuln_type="threat_audit",
-        metadata={
-            "source": "threat_analysis",
-            "task_id": task.task_id,
-            "surface_node_id": task.surface_node_id,
-            "method_node_id": task.method_node_id,
-            "code_path": task.code_path,
-        },
     )
 
 
@@ -890,10 +894,10 @@ async def run_threat_audit(
 ) -> list[Vulnerability]:
     """Run one attack-tree-derived audit task and collect submitted results."""
     config = get_config()
-    candidate = _threat_audit_candidate(task)
+    defaults = _threat_audit_result_defaults(task)
     if config.opencode.mock:
         await _clear_planned_task_id(planned_task_id)
-        return _annotate_threat_audit_results([_mock_result(candidate)], task)
+        return _annotate_threat_audit_results([_mock_result_from_defaults(defaults)], task)
 
     effective_timeout = timeout if timeout is not None else config.opencode.timeout
     tool = _normalize_tool(config.opencode)
@@ -941,7 +945,7 @@ async def run_threat_audit(
             "task_type": "threat_audit",
             "checker": "threat_audit",
             "file": task.code_path,
-            "function": candidate.function,
+            "function": defaults.function,
             "threat_surface_node_id": task.surface_node_id,
             "threat_method_node_id": task.method_node_id,
         }
@@ -968,12 +972,12 @@ async def run_threat_audit(
             logger.error("%s threat audit timed out for %s", tool, task.task_id)
             return _annotate_threat_audit_results([
                 Vulnerability(
-                    file=candidate.file,
-                    line=candidate.line,
-                    function=candidate.function,
-                    vuln_type=candidate.vuln_type,
+                    file=defaults.file,
+                    line=defaults.line,
+                    function=defaults.function,
+                    vuln_type=defaults.vuln_type,
                     severity="unknown",
-                    description=candidate.description,
+                    description=defaults.description,
                     ai_analysis="Threat audit timed out",
                     confirmed=False,
                     ai_verdict="timeout",
@@ -991,12 +995,12 @@ async def run_threat_audit(
                 continue
             return _annotate_threat_audit_results(
                 _apply_output_source_to_list([
-                    _failed_result(candidate, _failure_reason(log_path, f"{tool} error: {exc}"))
+                    _failed_result_from_defaults(defaults, _failure_reason(log_path, f"{tool} error: {exc}"))
                 ], attempt_source),
                 task,
             )
 
-        results = _parse_results_from_text(output_text, candidate)
+        results = _parse_results_from_text_with_defaults(output_text, defaults)
         if results:
             return _annotate_threat_audit_results(
                 _apply_output_source_to_list(results, attempt_source),
@@ -1009,8 +1013,8 @@ async def run_threat_audit(
             continue
         return _annotate_threat_audit_results(
             _apply_output_source_to_list([
-                _failed_result(
-                    candidate,
+                _failed_result_from_defaults(
+                    defaults,
                     _failure_reason(log_path, f"{tool} completed but did not return valid JSON threat audit results"),
                     analysis="OpenCode completed without returning valid JSON threat audit results",
                 )
@@ -1019,7 +1023,7 @@ async def run_threat_audit(
         )
 
     return _annotate_threat_audit_results([
-        _apply_output_source(_failed_result(candidate, "OpenCode did not return a result"), last_source)
+        _apply_output_source(_failed_result_from_defaults(defaults, "OpenCode did not return a result"), last_source)
     ], task)
 
 
@@ -1229,13 +1233,36 @@ def _failed_result(
     *,
     analysis: str | None = None,
 ) -> Vulnerability:
-    return Vulnerability(
+    return _failed_result_from_defaults(
+        _candidate_result_defaults(candidate),
+        reason,
+        analysis=analysis,
+    )
+
+
+def _candidate_result_defaults(candidate: Candidate) -> _VulnerabilityResultDefaults:
+    return _VulnerabilityResultDefaults(
         file=candidate.file,
         line=candidate.line,
         function=candidate.function,
         vuln_type=candidate.vuln_type,
-        severity="unknown",
         description=candidate.description,
+    )
+
+
+def _failed_result_from_defaults(
+    defaults: _VulnerabilityResultDefaults,
+    reason: str,
+    *,
+    analysis: str | None = None,
+) -> Vulnerability:
+    return Vulnerability(
+        file=defaults.file,
+        line=defaults.line,
+        function=defaults.function,
+        vuln_type=defaults.vuln_type,
+        severity="unknown",
+        description=defaults.description,
         ai_analysis=analysis or reason,
         confirmed=False,
         ai_verdict="failed",
@@ -2602,6 +2629,7 @@ async def _invoke_opencode(
 
 
 def _parse_result_from_text(text: str, candidate: Candidate) -> Vulnerability | None:
+    defaults = _candidate_result_defaults(candidate)
     try:
         payload = parse_vulnerability_result(text)
     except Exception as exc:
@@ -2610,10 +2638,17 @@ def _parse_result_from_text(text: str, candidate: Candidate) -> Vulnerability | 
             candidate.file, candidate.line, exc,
         )
         return None
-    return _vulnerability_from_payload(payload, candidate)
+    return _vulnerability_from_payload_with_defaults(payload, defaults)
 
 
 def _parse_results_from_text(text: str, candidate: Candidate) -> list[Vulnerability]:
+    return _parse_results_from_text_with_defaults(text, _candidate_result_defaults(candidate))
+
+
+def _parse_results_from_text_with_defaults(
+    text: str,
+    defaults: _VulnerabilityResultDefaults,
+) -> list[Vulnerability]:
     try:
         payloads = parse_vulnerability_results(text)
     except Exception as multi_exc:
@@ -2622,10 +2657,10 @@ def _parse_results_from_text(text: str, candidate: Candidate) -> list[Vulnerabil
         except Exception as single_exc:
             logger.warning(
                 "Failed to parse JSON results for %s:%d: multi=%s single=%s",
-                candidate.file, candidate.line, multi_exc, single_exc,
+                defaults.file, defaults.line, multi_exc, single_exc,
             )
             return []
-    return [_vulnerability_from_payload(item, candidate) for item in payloads]
+    return [_vulnerability_from_payload_with_defaults(item, defaults) for item in payloads]
 
 
 def _result_payloads(data) -> list[dict]:
@@ -2639,22 +2674,29 @@ def _result_payloads(data) -> list[dict]:
 
 
 def _vulnerability_from_payload(data: dict, candidate: Candidate) -> Vulnerability:
+    return _vulnerability_from_payload_with_defaults(data, _candidate_result_defaults(candidate))
+
+
+def _vulnerability_from_payload_with_defaults(
+    data: dict,
+    defaults: _VulnerabilityResultDefaults,
+) -> Vulnerability:
     confirmed = data.get("confirmed", False)
-    file_value = str(data.get("file") or candidate.file)
-    function_value = str(data.get("function") or candidate.function)
+    file_value = str(data.get("file") or defaults.file)
+    function_value = str(data.get("function") or defaults.function)
     try:
-        line_value = int(data.get("line") or candidate.line)
+        line_value = int(data.get("line") or defaults.line)
     except (TypeError, ValueError):
-        line_value = candidate.line
+        line_value = defaults.line
     if line_value < 1:
-        line_value = candidate.line
+        line_value = defaults.line
     return Vulnerability(
         file=file_value,
         line=line_value,
         function=function_value,
-        vuln_type=candidate.vuln_type,
+        vuln_type=defaults.vuln_type,
         severity=data.get("severity", "unknown"),
-        description=data.get("description", candidate.description),
+        description=data.get("description", defaults.description),
         ai_analysis=data.get("ai_analysis", ""),
         confirmed=confirmed,
         ai_verdict="confirmed" if confirmed else "not_confirmed",
@@ -2860,17 +2902,21 @@ async def run_audit_batch(
 
 def _mock_result(candidate: Candidate) -> Vulnerability:
     """Return a fake analysis result for testing without opencode."""
-    logger.debug("Mock opencode result for %s:%d", candidate.file, candidate.line)
+    return _mock_result_from_defaults(_candidate_result_defaults(candidate))
+
+
+def _mock_result_from_defaults(defaults: _VulnerabilityResultDefaults) -> Vulnerability:
+    logger.debug("Mock opencode result for %s:%d", defaults.file, defaults.line)
     return Vulnerability(
-        file=candidate.file,
-        line=candidate.line,
-        function=candidate.function,
-        vuln_type=candidate.vuln_type,
+        file=defaults.file,
+        line=defaults.line,
+        function=defaults.function,
+        vuln_type=defaults.vuln_type,
         severity="high",
-        description=candidate.description,
+        description=defaults.description,
         ai_analysis=(
-            f"[MOCK] Potential {candidate.vuln_type.upper()} detected: "
-            f"{candidate.description}. "
+            f"[MOCK] Potential {defaults.vuln_type.upper()} detected: "
+            f"{defaults.description}. "
             f"This is a mock result — configure opencode for real analysis."
         ),
         confirmed=True,

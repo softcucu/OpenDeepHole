@@ -434,9 +434,26 @@ def _candidate_key(candidate: Candidate) -> tuple[str, int, str, str]:
 
 def _is_retryable_vuln(vuln) -> bool:
     return (
-        not _has_final_user_verdict(vuln)
+        _is_static_candidate_vulnerability(vuln)
+        and not _has_final_user_verdict(vuln)
         and (vuln.ai_verdict or "") in _RETRYABLE_AI_VERDICTS
     )
+
+
+def _is_static_candidate_vulnerability(vuln) -> bool:
+    """Return whether a result belongs to the static-candidate audit pipeline."""
+    if str(getattr(vuln, "vuln_type", "") or "").strip().lower() == "threat_audit":
+        return False
+    source = str(getattr(vuln, "analysis_source", "") or "static_candidate").strip()
+    return source == "static_candidate"
+
+
+def _is_static_scan_candidate(candidate: Candidate) -> bool:
+    """Reject threat-analysis placeholders from the persisted static candidate set."""
+    if str(candidate.vuln_type or "").strip().lower() == "threat_audit":
+        return False
+    metadata = candidate.metadata if isinstance(candidate.metadata, dict) else {}
+    return str(metadata.get("source") or "").strip().lower() != "threat_analysis"
 
 
 def _retry_incomplete_candidates(scan: ScanStatus) -> list[Candidate]:
@@ -474,6 +491,8 @@ def _continuable_candidates(
 
     for stored in scan.candidates:
         candidate = Candidate(**stored.model_dump(exclude={"idx"}))
+        if not _is_static_scan_candidate(candidate):
+            continue
         key = _candidate_key(candidate)
         if key in processed_keys or key in seen:
             continue
@@ -483,6 +502,7 @@ def _continuable_candidates(
     stored_by_key = {
         _candidate_key(Candidate(**stored.model_dump(exclude={"idx"}))): stored
         for stored in scan.candidates
+        if _is_static_scan_candidate(stored)
     }
     for retry in _retry_incomplete_candidates(scan):
         key = _candidate_key(retry)
