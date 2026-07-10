@@ -596,6 +596,11 @@ async def run_fp_review(
             await pool_status_task
         except Exception:
             pass
+        try:
+            from backend.opencode.model_pool import clear_completed_tasks
+            await clear_completed_tasks(scan_id)
+        except Exception:
+            pass
         if workspace is not None:
             _cleanup_fp_workspace(workspace)
         if own_mcp_server is not None:

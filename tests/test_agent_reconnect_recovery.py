@@ -16,10 +16,12 @@ from backend.models import (
     Candidate,
     FpReviewStatus,
     OpenCodePoolStatus,
+    ScanCandidate,
     ScanEvent,
     ScanItemStatus,
     ScanMeta,
     ScanStatus,
+    ThreatAuditTask,
     User,
     Vulnerability,
 )
@@ -577,6 +579,16 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
                 scope_id="scan-1",
                 global_running=1,
                 global_queued=2,
+                total_tasks=3,
+                completed_task_count=1,
+                completed_tasks=[
+                    {
+                        "task_id": "task-done",
+                        "task_type": "threat_analysis",
+                        "outcome": "success",
+                        "finished_at": "2026-01-01T00:02:00+00:00",
+                    }
+                ],
                 models=[
                     {
                         "id": "deep",
@@ -603,6 +615,41 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
             self.assertEqual(pool.models[0].running, 0)
             self.assertEqual(pool.models[0].queued, 0)
             self.assertEqual(pool.models[0].active_tasks, [])
+            self.assertEqual(pool.total_tasks, 3)
+            self.assertEqual(pool.completed_task_count, 1)
+            self.assertEqual(pool.completed_tasks[0]["task_id"], "task-done")
+            summary = store.list_scans()[0]
+            self.assertEqual(summary.total_task_count, 3)
+            self.assertEqual(summary.completed_task_count, 1)
+
+    def test_opencode_pool_snapshot_merges_history_across_continue_attempts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = SqliteScanStore(Path(tmp) / "scans.db")
+            scan = _scan("scan-1", ScanItemStatus.AUDITING, total=1)
+            scan.opencode_pool = OpenCodePoolStatus(
+                scope_id="scan-1",
+                total_tasks=1,
+                completed_task_count=1,
+                completed_tasks=[{"task_id": "old", "outcome": "success"}],
+            )
+            store.save_scan(scan, _meta())
+            current = OpenCodePoolStatus(
+                scope_id="scan-1",
+                global_queued=1,
+                total_tasks=2,
+                completed_task_count=1,
+                completed_tasks=[{"task_id": "new", "outcome": "timeout"}],
+                queued_tasks=[{"request_id": "queued", "task_type": "fp_review"}],
+            )
+
+            with patch("backend.api.agent.get_scan_store", return_value=store):
+                asyncio.run(agent_api.agent_push_opencode_pool("scan-1", current))
+
+            pool = store.load_scan("scan-1")[0].opencode_pool
+            self.assertIsNotNone(pool)
+            self.assertEqual([task["task_id"] for task in pool.completed_tasks], ["old", "new"])
+            self.assertEqual(pool.completed_task_count, 2)
+            self.assertEqual(pool.total_tasks, 3)
 
     def test_resume_preserves_total_candidate_count(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -732,6 +779,89 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
                 [(c["file"], c["line"], c["function"]) for c in sent["retry_candidates"]],
                 [("timeout.c", 2, "slow"), ("none.c", 3, "missing"), ("failed.c", 4, "broken")],
             )
+
+    def test_resume_dispatches_unprocessed_failed_and_threat_audit_work_together(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = SqliteScanStore(Path(tmp) / "scans.db")
+            scan = _scan("scan-1", ScanItemStatus.CANCELLED, total=3, processed=2)
+            scan.static_analysis_done = True
+            scan.candidates = [
+                ScanCandidate(idx=0, file="done.c", line=1, function="done", description="done", vuln_type="npd"),
+                ScanCandidate(idx=1, file="failed.c", line=2, function="failed", description="failed", vuln_type="npd"),
+                ScanCandidate(idx=2, file="pending.c", line=3, function="pending", description="pending", vuln_type="npd"),
+            ]
+            store.save_scan(scan, _meta())
+            store.add_processed_key("scan-1", ("done.c", 1, "done", "npd"))
+            store.add_processed_key("scan-1", ("failed.c", 2, "failed", "npd"))
+            store.add_vulnerability(
+                "scan-1",
+                Vulnerability(
+                    file="failed.c",
+                    line=2,
+                    function="failed",
+                    vuln_type="npd",
+                    severity="unknown",
+                    description="failed",
+                    ai_analysis="failed",
+                    confirmed=False,
+                    ai_verdict="failed",
+                ),
+            )
+            store.upsert_threat_audit_task(
+                "scan-1",
+                ThreatAuditTask(
+                    task_id="threat-complete",
+                    status="completed",
+                    surface_node_id="surface-1",
+                    method_node_id="method-complete",
+                ),
+            )
+            store.upsert_threat_audit_task(
+                "scan-1",
+                ThreatAuditTask(
+                    task_id="threat-timeout",
+                    status="timeout",
+                    surface_node_id="surface-1",
+                    method_node_id="method-timeout",
+                ),
+            )
+            self.assertEqual(store.get_incomplete_threat_audit_counts(["scan-1"]), {"scan-1": 1})
+            agent = AgentInfo(
+                agent_id="agent-old",
+                name="agent-1",
+                ip="127.0.0.1",
+                last_seen="2026-01-01T00:01:00+00:00",
+                user_id="user-1",
+            )
+            user = User(user_id="user-1", username="alice", role="user")
+            sent: dict = {}
+
+            async def fake_send(_agent_id: str, payload: dict) -> bool:
+                sent.update(payload)
+                return True
+
+            with (
+                patch("backend.api.scan.get_scan_store", return_value=store),
+                patch.dict("backend.api.agent._registered_agents", {"agent-old": agent}, clear=True),
+                patch("backend.api.agent.send_agent_command", new=AsyncMock(side_effect=fake_send)),
+                patch("backend.api.agent.create_agent_runtime_update_payload", return_value=None),
+            ):
+                asyncio.run(
+                    scan_api.resume_scan(
+                        "scan-1",
+                        request=SimpleNamespace(base_url="http://testserver/"),
+                        current_user=user,
+                    )
+                )
+
+            self.assertEqual(
+                [(item["file"], item["line"]) for item in sent["retry_candidates"]],
+                [("pending.c", 3), ("failed.c", 2)],
+            )
+            self.assertEqual(sent["retry_processed_offset"], 1)
+            self.assertTrue(sent["resume_threat_analysis"])
+            self.assertEqual(sent["retry_threat_audit_task_ids"], ["threat-timeout"])
+            self.assertEqual(store.get_processed_keys("scan-1"), {("done.c", 1, "done", "npd")})
 
     def test_upsert_incomplete_vulnerability_replaces_existing_result(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

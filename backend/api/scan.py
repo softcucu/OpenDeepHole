@@ -460,6 +460,73 @@ def _retry_incomplete_count(scan: ScanStatus) -> int:
     return len(_retry_incomplete_candidates(scan))
 
 
+def _incomplete_threat_audit_tasks(scan: ScanStatus) -> list[ThreatAuditTask]:
+    return [task for task in scan.threat_audit_tasks if task.status != "completed"]
+
+
+def _continuable_candidates(
+    scan: ScanStatus,
+    processed_keys: set[tuple[str, int, str, str]],
+) -> list[Candidate]:
+    """Return the deduplicated union of unprocessed and retryable candidates."""
+    candidates: list[Candidate] = []
+    seen: set[tuple[str, int, str, str]] = set()
+
+    for stored in scan.candidates:
+        candidate = Candidate(**stored.model_dump(exclude={"idx"}))
+        key = _candidate_key(candidate)
+        if key in processed_keys or key in seen:
+            continue
+        candidates.append(candidate)
+        seen.add(key)
+
+    stored_by_key = {
+        _candidate_key(Candidate(**stored.model_dump(exclude={"idx"}))): stored
+        for stored in scan.candidates
+    }
+    for retry in _retry_incomplete_candidates(scan):
+        key = _candidate_key(retry)
+        if key in seen:
+            continue
+        stored = stored_by_key.get(key)
+        candidate = Candidate(**stored.model_dump(exclude={"idx"})) if stored is not None else retry
+        candidates.append(candidate)
+        seen.add(key)
+    return candidates
+
+
+def _continuable_task_count(
+    scan: ScanStatus,
+    processed_keys: set[tuple[str, int, str, str]],
+) -> int:
+    return len(_continuable_candidates(scan, processed_keys)) + len(
+        _incomplete_threat_audit_tasks(scan)
+    )
+
+
+def _apply_continue_capability(
+    scan: ScanStatus | ScanSummary,
+    *,
+    continuable_count: int,
+) -> None:
+    running = scan.status in {
+        ScanItemStatus.PENDING,
+        ScanItemStatus.ANALYZING,
+        ScanItemStatus.AUDITING,
+    }
+    scan.continuable_task_count = continuable_count
+    scan.can_continue = not running and (
+        scan.status in {ScanItemStatus.CANCELLED, ScanItemStatus.ERROR}
+        or continuable_count > 0
+    )
+
+
+def _apply_task_progress(scan: ScanStatus | ScanSummary, pool=None) -> None:
+    pool = pool if pool is not None else getattr(scan, "opencode_pool", None)
+    scan.total_task_count = pool.total_tasks if pool is not None else 0
+    scan.completed_task_count = pool.completed_task_count if pool is not None else 0
+
+
 async def _push_feedback_selection_update(scan_id: str, feedback_ids: list[str]) -> None:
     """Best-effort update of the selected feedback entries on the owning agent."""
     meta = get_scan_store().get_scan_meta(scan_id)
@@ -613,9 +680,11 @@ async def list_scans(current_user: User = Depends(get_current_user)) -> list[Sca
     stored_ids = [s.scan_id for s in summaries if s.scan_id not in _running_scans]
     vuln_stats = store.get_vuln_stats_by_scans(stored_ids)
     fp_verdicts = store.list_fp_review_verdicts_by_scans([s.scan_id for s in summaries])
+    incomplete_threat_counts = store.get_incomplete_threat_audit_counts(stored_ids)
 
     for s in summaries:
         if s.scan_id in _running_scans:
+            processed_keys = store.get_processed_keys(s.scan_id)
             live = _running_scans[s.scan_id]
             live.agent_name = s.agent_name or live.agent_name
             vulnerabilities = live.vulnerabilities
@@ -625,13 +694,21 @@ async def list_scans(current_user: User = Depends(get_current_user)) -> list[Sca
             s.total_candidates = live.total_candidates
             s.processed_candidates = live.processed_candidates
             s.agent_online = live.agent_online
+            _apply_task_progress(s, live.opencode_pool)
+            continuable_count = _continuable_task_count(live, processed_keys)
         else:
             # status/progress 等字段与 load_scan 同源于 scans 表同一行，直接用 summary 值
             s = reconcile_offline_agent_summary_state(s)
             vulnerabilities = vuln_stats.get(s.scan_id, [])
+            continuable_count = (
+                max(s.total_candidates - s.processed_candidates, 0)
+                + sum(1 for v in vulnerabilities if _is_retryable_vuln(v))
+                + incomplete_threat_counts.get(s.scan_id, 0)
+            )
         s.retryable_candidates_count = sum(
             1 for v in vulnerabilities if _is_retryable_vuln(v)
         )
+        _apply_continue_capability(s, continuable_count=continuable_count)
 
         metrics = calculate_issue_metrics(
             vulnerabilities,
@@ -680,6 +757,14 @@ async def get_scan_status(
         scan.agent_name = result[1].agent_name
     scan = reconcile_offline_agent_scan_state(scan_id, scan)
     scan.retryable_candidates_count = _retry_incomplete_count(scan)
+    _apply_task_progress(scan)
+    _apply_continue_capability(
+        scan,
+        continuable_count=_continuable_task_count(
+            scan,
+            get_scan_store().get_processed_keys(scan_id),
+        ),
+    )
     return scan
 
 
@@ -741,13 +826,12 @@ async def stop_scan(
     return {"ok": True}
 
 
-@router.post("/api/scan/{scan_id}/resume", response_model=ScanStartResponse)
-async def resume_scan(
+async def _continue_scan(
     scan_id: str,
     request: Request,
-    current_user: User = Depends(get_current_user),
+    current_user: User,
 ) -> ScanStartResponse:
-    """Reset a cancelled/error scan to PENDING and tell the agent to resume."""
+    """Continue all unfinished and retryable work for one scan."""
     _check_scan_owner(scan_id, current_user)
     from backend.api.agent import _registered_agents
 
@@ -760,11 +844,31 @@ async def resume_scan(
         raise HTTPException(status_code=404, detail="Scan not found")
 
     scan, meta = result
-    if scan.status not in (ScanItemStatus.CANCELLED, ScanItemStatus.ERROR):
-        raise HTTPException(
-            status_code=400,
-            detail=f"Cannot resume scan with status '{scan.status.value}'",
-        )
+    if scan.status in {ScanItemStatus.PENDING, ScanItemStatus.ANALYZING, ScanItemStatus.AUDITING}:
+        raise HTTPException(status_code=400, detail="Scan is already running")
+
+    processed_keys = store.get_processed_keys(scan_id)
+    continue_candidates = _continuable_candidates(scan, processed_keys)
+    incomplete_threat_tasks = _incomplete_threat_audit_tasks(scan)
+    continue_count = len(continue_candidates) + len(incomplete_threat_tasks)
+    resume_interrupted = scan.status in {ScanItemStatus.CANCELLED, ScanItemStatus.ERROR}
+    if not resume_interrupted and continue_count == 0:
+        raise HTTPException(status_code=400, detail="当前扫描没有可续扫的任务")
+
+    # An interrupted scan without a persisted candidate set may have stopped
+    # during indexing/static analysis, so let the Agent resume the full pipeline.
+    full_pipeline_resume = resume_interrupted and not (
+        scan.candidates or scan.static_analysis_done
+    )
+    candidate_payload = None if full_pipeline_resume else continue_candidates
+    resume_threat_analysis = bool(incomplete_threat_tasks) or (
+        resume_interrupted
+        and (scan.threat_analysis is None or not scan.threat_audit_tasks)
+    )
+    if resume_threat_analysis and not scan.threat_audit_tasks:
+        threat_task_ids: list[str] | None = None
+    else:
+        threat_task_ids = [task.task_id for task in incomplete_threat_tasks]
 
     # Only allow resume when the original agent (by name) is online
     agent_id = meta.agent_id
@@ -792,100 +896,16 @@ async def resume_scan(
         meta.agent_name = agent.name
         store.update_scan_agent(scan_id, agent_id, agent.name)
 
-    # Reset status to PENDING
-    scan.status = ScanItemStatus.PENDING
-    scan.error_message = None
-    scan.current_candidate = None
-    scan.agent_name = agent.name
-    scan.agent_online = True
-    store.update_scan_progress(
-        scan_id,
-        status=ScanItemStatus.PENDING,
-        error_message="",
-    )
+    total_candidates = scan.total_candidates or len(scan.candidates) or len(scan.vulnerabilities)
+    if candidate_payload is None:
+        processed_offset = scan.processed_candidates
+        progress = scan.progress
+    else:
+        processed_offset = max(total_candidates - len(candidate_payload), 0)
+        progress = processed_offset / total_candidates if total_candidates > 0 else 0.0
 
-    _running_scans[scan_id] = scan
-    _scan_owners[scan_id] = current_user.user_id
-
-    # Send resume command to agent via WebSocket
-    from backend.api.agent import create_agent_runtime_update_payload, send_agent_command
-    feedback_entries = [entry.model_dump() for entry in _selected_feedback_entries(scan_id, meta.feedback_ids)]
-    ok = await send_agent_command(agent_id, {
-        "type": "resume",
-        "scan_id": scan_id,
-        "project_path": meta.project_path,
-        "code_scan_path": meta.code_scan_path or meta.project_path,
-        "checkers": meta.scan_items,
-        "scan_name": meta.scan_name,
-        "product": meta.product,
-        "validation_environment": meta.validation_environment or _default_validation_environment(),
-        "feedback_entries": feedback_entries,
-        "checker_packages": _checker_packages_for(meta.scan_items),
-        "agent_runtime_update": create_agent_runtime_update_payload(_server_url_from_request(request)),
-    })
-    if not ok:
-        store.update_scan_progress(scan_id, status=ScanItemStatus.ERROR, error_message="Agent not connected")
-        scan.status = ScanItemStatus.ERROR
-        _running_scans.pop(scan_id, None)
-        logger.error("Failed to resume scan %s: agent %s not connected", scan_id, agent_id)
-        raise HTTPException(status_code=502, detail="Agent not connected")
-
-    logger.info("Resumed scan %s via agent %s", scan_id, agent_id)
-    return ScanStartResponse(scan_id=scan_id)
-
-
-@router.post("/api/scan/{scan_id}/retry-incomplete", response_model=ScanStartResponse)
-async def retry_incomplete_scan(
-    scan_id: str,
-    request: Request,
-    current_user: User = Depends(get_current_user),
-) -> ScanStartResponse:
-    """Retry completed timeout/no-result candidates in the original scan."""
-    _check_scan_owner(scan_id, current_user)
-    from backend.api.agent import _registered_agents
-
-    if scan_id in _running_scans:
-        raise HTTPException(status_code=400, detail="Scan is already running")
-
-    store = get_scan_store()
-    result = store.load_scan(scan_id)
-    if result is None:
-        raise HTTPException(status_code=404, detail="Scan not found")
-
-    scan, meta = result
-    if scan.status in (ScanItemStatus.PENDING, ScanItemStatus.ANALYZING, ScanItemStatus.AUDITING):
-        raise HTTPException(status_code=400, detail="Scan is already running")
-
-    retry_candidates = _retry_incomplete_candidates(scan)
-    if not retry_candidates:
-        raise HTTPException(status_code=400, detail="没有可续扫的超时或无结果候选")
-
-    agent_id = meta.agent_id
-    agent = _registered_agents.get(agent_id) if agent_id else None
-    if agent is None and meta.agent_name:
-        from backend.api.agent import _agent_ws
-        for aid, ainfo in _registered_agents.items():
-            if ainfo.name == meta.agent_name and aid in _agent_ws:
-                if current_user.role == "admin" or ainfo.user_id == current_user.user_id:
-                    agent = ainfo
-                    agent_id = aid
-                    break
-
-    if agent is None:
-        raise HTTPException(
-            status_code=400,
-            detail=f"扫描关联的 Agent「{meta.agent_name or '未知'}」不在线，请先启动该 Agent",
-        )
-
-    if agent_id != meta.agent_id:
-        meta.agent_id = agent_id
-        meta.agent_name = agent.name
-        store.update_scan_agent(scan_id, agent_id, agent.name)
-
-    total_candidates = scan.total_candidates or len(scan.vulnerabilities)
-    processed_offset = max(total_candidates - len(retry_candidates), 0)
-    progress = processed_offset / total_candidates if total_candidates > 0 else 0.0
-    retry_keys = [_candidate_key(candidate) for candidate in retry_candidates]
+    retry_keys = [_candidate_key(candidate) for candidate in continue_candidates]
+    removed_processed_keys = [key for key in retry_keys if key in processed_keys]
 
     scan.status = ScanItemStatus.PENDING
     scan.error_message = None
@@ -920,27 +940,53 @@ async def retry_incomplete_scan(
         "validation_environment": meta.validation_environment or _default_validation_environment(),
         "feedback_entries": feedback_entries,
         "checker_packages": _checker_packages_for(meta.scan_items),
-        "retry_candidates": [candidate.model_dump() for candidate in retry_candidates],
+        "retry_candidates": (
+            [candidate.model_dump() for candidate in candidate_payload]
+            if candidate_payload is not None
+            else None
+        ),
         "retry_total_candidates": total_candidates,
         "retry_processed_offset": processed_offset,
+        "resume_threat_analysis": resume_threat_analysis,
+        "retry_threat_audit_task_ids": threat_task_ids,
         "agent_runtime_update": create_agent_runtime_update_payload(_server_url_from_request(request)),
     })
     if not ok:
-        for key in retry_keys:
+        for key in removed_processed_keys:
             store.add_processed_key(scan_id, key)
         store.update_scan_progress(scan_id, status=ScanItemStatus.ERROR, error_message="Agent not connected")
         scan.status = ScanItemStatus.ERROR
         _running_scans.pop(scan_id, None)
-        logger.error("Failed to retry incomplete scan %s: agent %s not connected", scan_id, agent_id)
+        logger.error("Failed to resume scan %s: agent %s not connected", scan_id, agent_id)
         raise HTTPException(status_code=502, detail="Agent not connected")
 
     logger.info(
-        "Retrying %d incomplete candidate(s) for scan %s via agent %s",
-        len(retry_candidates),
+        "Continuing scan %s via agent %s: candidates=%s threat_tasks=%d",
         scan_id,
         agent_id,
+        "full-pipeline" if candidate_payload is None else len(candidate_payload),
+        len(incomplete_threat_tasks),
     )
     return ScanStartResponse(scan_id=scan_id)
+
+
+@router.post("/api/scan/{scan_id}/resume", response_model=ScanStartResponse)
+async def resume_scan(
+    scan_id: str,
+    request: Request,
+    current_user: User = Depends(get_current_user),
+) -> ScanStartResponse:
+    return await _continue_scan(scan_id, request, current_user)
+
+
+@router.post("/api/scan/{scan_id}/retry-incomplete", response_model=ScanStartResponse)
+async def retry_incomplete_scan(
+    scan_id: str,
+    request: Request,
+    current_user: User = Depends(get_current_user),
+) -> ScanStartResponse:
+    """Compatibility alias for the unified continue action."""
+    return await _continue_scan(scan_id, request, current_user)
 
 
 @router.delete("/api/scan/{scan_id}")

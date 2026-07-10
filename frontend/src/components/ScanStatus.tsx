@@ -1,7 +1,7 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { getScanStatus, stopScan, downloadScanReport, downloadScanReportZip, getCheckers, updateScanFeedback, getSkillContent, triggerFpReview, stopFpReview, getFpReview, getFpReviewSkill, getScanGitHistory, getSkillReports, getScanThreatAnalysis, getAgentIndexStatus, retryIncompleteScan, triggerVulnerabilityValidation, stopVulnerabilityValidation } from "../api/client";
+import { getScanStatus, stopScan, resumeScan, downloadScanReport, downloadScanReportZip, getCheckers, updateScanFeedback, getSkillContent, triggerFpReview, stopFpReview, getFpReview, getFpReviewSkill, getScanGitHistory, getSkillReports, getScanThreatAnalysis, getAgentIndexStatus, triggerVulnerabilityValidation, stopVulnerabilityValidation } from "../api/client";
 import type { Candidate, CodeIndexStats, FpReviewJob, HistoryPattern, IndexStatus, ScanItemStatus, ScanStatus as ScanStatusType, ScanEvent, CheckerInfo, SkillReport, OpenCodePoolStatus, ScanCandidate, Vulnerability, OutputSource, VulnerabilityValidation, ThreatAnalysis, ThreatAsset, ThreatAttackTree, ThreatAttackTreeNode, ThreatCodePathMapping, ThreatRisk, ThreatAuditTask } from "../types";
 import { useScanSSE } from "../hooks/useScanSSE";
 import type { ScanSSEHandlers, SSEStateSetters } from "../hooks/useScanSSE";
@@ -18,7 +18,7 @@ type MainTab = "overview" | "threat" | "mining" | "validation" | "issues";
 type MiningTab = "static_analysis" | "candidate_audit" | "fp_review";
 type StaticTab = "call_graph" | "candidate_generation";
 type TaskTone = "slate" | "cyan" | "amber" | "green" | "red" | "purple" | "blue";
-type ScanQueueTaskStatus = "planned" | "queued" | "running";
+type ScanQueueTaskStatus = "planned" | "queued" | "running" | "success" | "failure" | "timeout" | "cancelled" | "unknown";
 type FlowNodeId = "threat" | "static_analysis" | "call_graph" | "candidate_generation" | "candidate_audit" | "fp_review" | "validation";
 type FlowNodeStatus = "pending" | "running" | "done";
 
@@ -186,7 +186,7 @@ export default function ScanStatus({ scanId, onBack }: Props) {
   const [activeMiningTab, setActiveMiningTab] = useState<MiningTab>("static_analysis");
   const [activeStaticTab, setActiveStaticTab] = useState<StaticTab>("call_graph");
   const [stopping, setStopping] = useState(false);
-  const [retryingIncomplete, setRetryingIncomplete] = useState(false);
+  const [continuing, setContinuing] = useState(false);
   const [downloadingReport, setDownloadingReport] = useState(false);
   const [exportingZip, setExportingZip] = useState(false);
   const [logOpen, setLogOpen] = useState(false);
@@ -543,24 +543,28 @@ export default function ScanStatus({ scanId, onBack }: Props) {
     setStopping(true);
     try {
       await stopScan(scanId);
+      const next = await getScanStatus(scanId);
+      setScan(next);
     } catch {
+      // The next poll can still reconcile an Agent-side stop.
+    } finally {
       setStopping(false);
     }
   };
 
-  const handleRetryIncomplete = async () => {
-    setRetryingIncomplete(true);
+  const handleContinue = async () => {
+    setContinuing(true);
     try {
-      await retryIncompleteScan(scanId);
+      await resumeScan(scanId);
       const next = await getScanStatus(scanId);
       setScan(next);
     } catch (err: unknown) {
       const msg = err && typeof err === "object" && "response" in err
         ? (err as { response: { data: { detail: string } } }).response?.data?.detail
         : "续扫失败";
-      alert(`续扫未完成候选失败：${msg || "未知错误"}`);
+      alert(`续扫失败：${msg || "未知错误"}`);
     } finally {
-      setRetryingIncomplete(false);
+      setContinuing(false);
     }
   };
 
@@ -756,9 +760,7 @@ export default function ScanStatus({ scanId, onBack }: Props) {
   const hasReportModeSkill = reportCheckers.length > 0 || (scan.skill_reports?.length ?? 0) > 0;
   const displayedReports = reports.length > 0 ? reports : (scan.skill_reports ?? []);
   const activeReport = displayedReports[activeReportIndex] ?? displayedReports[0];
-  const retryableCount = scan.vulnerabilities.filter(
-    (v) => !hasFinalUserVerdict(v) && (v.ai_verdict === "timeout" || v.ai_verdict === "no_result" || v.ai_verdict === "failed"),
-  ).length || scan.retryable_candidates_count || 0;
+  const continuableCount = scan.continuable_task_count || 0;
   const issueCount = effectiveIssueCount(scan, fpReview);
   const verifiedIssueCount = validatedIssueCount(scan, fpReview);
   const variantIssueCount = scan.vulnerabilities.filter((v) => v.variant_of).length;
@@ -952,14 +954,14 @@ export default function ScanStatus({ scanId, onBack }: Props) {
             })()}
             {isDone && (
               <>
-                {retryableCount > 0 && (
+                {scan.can_continue && (
                   <button
-                    onClick={handleRetryIncomplete}
-                    disabled={retryingIncomplete || !scan.agent_online}
-                    title={!scan.agent_online ? "Agent 离线，无法续扫" : `续扫 ${retryableCount} 个未完成候选`}
+                    onClick={handleContinue}
+                    disabled={continuing || !scan.agent_online}
+                    title={!scan.agent_online ? "Agent 离线，无法续扫" : `续扫 ${continuableCount} 个任务`}
                     className="px-3 py-1.5 text-sm font-medium text-amber-300 border border-amber-500/50 rounded-lg hover:bg-amber-500/10 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
                   >
-                    {retryingIncomplete ? "启动中..." : `续扫未完成 ${retryableCount}`}
+                    {continuing ? "启动中..." : "续扫"}
                   </button>
                 )}
               </>
@@ -1025,7 +1027,7 @@ export default function ScanStatus({ scanId, onBack }: Props) {
           <ScanOverview
             scan={scan}
             issueCount={issueCount}
-            retryableCount={retryableCount}
+            continuableCount={continuableCount}
             variantIssueCount={variantIssueCount}
             gitHistoryCount={gitHistory.length}
             showGitHistoryStages={showGitHistoryStages}
@@ -1686,7 +1688,7 @@ function flowStatusTone(status: FlowNodeStatus, doneTone: TaskTone): TaskTone {
 function ScanOverview({
   scan,
   issueCount,
-  retryableCount,
+  continuableCount,
   variantIssueCount,
   gitHistoryCount,
   showGitHistoryStages,
@@ -1704,7 +1706,7 @@ function ScanOverview({
 }: {
   scan: ScanStatusType;
   issueCount: number;
-  retryableCount: number;
+  continuableCount: number;
   variantIssueCount: number;
   gitHistoryCount: number;
   showGitHistoryStages: boolean;
@@ -1761,7 +1763,14 @@ function ScanOverview({
         {showGitHistoryStages && (
           <OverviewMetric icon="history" label="历史模式" value={gitHistoryCount} detail={`${variantIssueCount} 个变体候选`} tone="purple" onClick={() => onNavigate("threat")} />
         )}
-        <OverviewMetric icon="queue" label="未完成候选" value={retryableCount} detail={retryableCount > 0 ? "可续扫" : "无待处理项"} tone="amber" />
+        <OverviewMetric
+          icon="queue"
+          label="任务总数"
+          value={scan.opencode_pool?.total_tasks ?? scan.total_task_count}
+          detail={`${scan.opencode_pool?.completed_task_count ?? scan.completed_task_count} 已执行`}
+          tone="blue"
+        />
+        <OverviewMetric icon="queue" label="可续扫任务" value={continuableCount} detail={continuableCount > 0 ? "可续扫" : "无待处理项"} tone="amber" />
       </div>
 
       <ScanTaskQueuePanel pool={scan.opencode_pool ?? null} />
@@ -1860,6 +1869,8 @@ function ScanTaskQueuePanel({ pool }: { pool: OpenCodePoolStatus | null }) {
   const runningCount = tasks.filter((task) => task.status === "running").length;
   const queuedCount = tasks.filter((task) => task.status === "queued").length;
   const plannedCount = tasks.filter((task) => task.status === "planned").length;
+  const completedCount = tasks.filter((task) => !["planned", "queued", "running"].includes(task.status)).length;
+  const unsuccessfulCount = tasks.filter((task) => ["failure", "timeout", "cancelled", "unknown"].includes(task.status)).length;
   const totalPages = Math.max(1, Math.ceil(tasks.length / SCAN_QUEUE_PAGE_SIZE));
   const safePage = Math.min(page, totalPages);
   const pagedTasks = tasks.slice((safePage - 1) * SCAN_QUEUE_PAGE_SIZE, safePage * SCAN_QUEUE_PAGE_SIZE);
@@ -1883,19 +1894,21 @@ function ScanTaskQueuePanel({ pool }: { pool: OpenCodePoolStatus | null }) {
         <div>
           <h3 className="text-sm font-semibold text-slate-200">任务队列</h3>
           <p className="mt-1 text-xs text-slate-500">
-            当前扫描的 OpenCode Session 计划、排队和运行任务
+            当前扫描的 OpenCode Session 计划、排队、运行和历史任务
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
           <StatusPill label={`计划中 ${plannedCount}`} tone="slate" />
           <StatusPill label={`排队中 ${queuedCount}`} tone="amber" />
           <StatusPill label={`运行中 ${runningCount}`} tone="cyan" />
+          <StatusPill label={`已执行 ${completedCount}`} tone="green" />
+          {unsuccessfulCount > 0 && <StatusPill label={`未成功 ${unsuccessfulCount}`} tone="red" />}
         </div>
       </div>
 
       {tasks.length === 0 ? (
         <div className="mt-4 rounded-lg border border-slate-800 bg-slate-950/50 px-4 py-6 text-center text-sm text-slate-500">
-          当前扫描没有等待或运行中的 OpenCode 任务
+          当前扫描还没有 OpenCode 任务记录
         </div>
       ) : (
         <div className="mt-4 overflow-hidden rounded-lg border border-slate-800">
@@ -1979,6 +1992,10 @@ function ScanTaskQueuePanel({ pool }: { pool: OpenCodePoolStatus | null }) {
                                 <pre className="max-h-80 overflow-auto whitespace-pre-wrap break-words rounded-md border border-slate-800 bg-slate-900/80 p-3 font-mono text-xs leading-relaxed text-slate-300">
                                   {prompt}
                                 </pre>
+                              ) : !["planned", "queued", "running"].includes(task.status) ? (
+                                <div className="rounded-md border border-slate-800 bg-slate-900/60 px-3 py-2 text-xs text-slate-500">
+                                  完成任务仅保留摘要{promptLength > 0 ? `，Prompt 长度 ${promptLength} chars` : ""}。
+                                </div>
                               ) : (
                                 <div className="rounded-md border border-slate-800 bg-slate-900/60 px-3 py-2 text-xs text-slate-500">
                                   完整 prompt 尚未生成，进入排队或运行后显示。
@@ -2058,7 +2075,31 @@ function collectScanQueueTasks(pool: OpenCodePoolStatus | null): ScanQueueTask[]
       });
     }
   }
-  return out.sort((a, b) => scanQueueStatusRank(a.status) - scanQueueStatusRank(b.status) || compareScanQueueTime(a.timestamp, b.timestamp));
+  for (const [index, task] of (pool.completed_tasks ?? []).entries()) {
+    const outcome = normalizeCompletedTaskOutcome(task.outcome);
+    out.push({
+      id: String(task.task_id || `completed-${index}`),
+      status: outcome,
+      modelId: String(task.model_id || task.model || ""),
+      scopeId: String(task.scope_id || pool.scope_id || ""),
+      task,
+      timestamp: String(task.finished_at || task.started_at || ""),
+    });
+  }
+  return out.sort((a, b) => {
+    const rank = scanQueueStatusRank(a.status) - scanQueueStatusRank(b.status);
+    if (rank !== 0) return rank;
+    if (scanQueueStatusRank(a.status) >= 3) return compareScanQueueTime(b.timestamp, a.timestamp);
+    return compareScanQueueTime(a.timestamp, b.timestamp);
+  });
+}
+
+function normalizeCompletedTaskOutcome(value: unknown): ScanQueueTaskStatus {
+  const outcome = String(value || "unknown");
+  if (["success", "failure", "timeout", "cancelled"].includes(outcome)) {
+    return outcome as ScanQueueTaskStatus;
+  }
+  return "unknown";
 }
 
 function scanQueueTaskKey(task: ScanQueueTask): string {
@@ -2068,7 +2109,8 @@ function scanQueueTaskKey(task: ScanQueueTask): string {
 function scanQueueStatusRank(status: ScanQueueTaskStatus): number {
   if (status === "running") return 0;
   if (status === "queued") return 1;
-  return 2;
+  if (status === "planned") return 2;
+  return 3;
 }
 
 function compareScanQueueTime(a: string, b: string): number {
@@ -2122,13 +2164,21 @@ function scanQueueTaskPromptLength(task: Record<string, unknown>, prompt: string
 function scanQueueStatusLabel(status: ScanQueueTaskStatus): string {
   if (status === "running") return "运行中";
   if (status === "queued") return "排队中";
-  return "计划中";
+  if (status === "planned") return "计划中";
+  if (status === "success") return "成功";
+  if (status === "failure") return "失败";
+  if (status === "timeout") return "超时";
+  if (status === "cancelled") return "已停止";
+  return "未知";
 }
 
 function scanQueueStatusTone(status: ScanQueueTaskStatus): TaskTone {
   if (status === "running") return "cyan";
   if (status === "queued") return "amber";
-  return "slate";
+  if (status === "planned") return "slate";
+  if (status === "success") return "green";
+  if (status === "cancelled" || status === "timeout") return "amber";
+  return "red";
 }
 
 function OverviewMetric({

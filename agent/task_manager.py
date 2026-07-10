@@ -21,6 +21,8 @@ class ScanTask:
     retry_candidates: list[dict] | None = None
     retry_total_candidates: int | None = None
     retry_processed_offset: int = 0
+    resume_threat_analysis: bool = False
+    retry_threat_audit_task_ids: list[str] | None = None
     cancel_event: threading.Event = field(default_factory=threading.Event)
     asyncio_task: Optional[asyncio.Task] = None
 
@@ -43,6 +45,8 @@ class TaskManager:
         retry_candidates: list[dict] | None = None,
         retry_total_candidates: int | None = None,
         retry_processed_offset: int = 0,
+        resume_threat_analysis: bool = False,
+        retry_threat_audit_task_ids: list[str] | None = None,
     ) -> ScanTask:
         task = ScanTask(
             scan_id=scan_id,
@@ -57,6 +61,8 @@ class TaskManager:
             retry_candidates=retry_candidates,
             retry_total_candidates=retry_total_candidates,
             retry_processed_offset=retry_processed_offset,
+            resume_threat_analysis=resume_threat_analysis,
+            retry_threat_audit_task_ids=retry_threat_audit_task_ids,
         )
         self._tasks[scan_id] = task
         return task

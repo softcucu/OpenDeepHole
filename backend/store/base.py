@@ -181,6 +181,10 @@ class ScanStoreBase(ABC):
     def list_threat_audit_tasks(self, scan_id: str) -> list[ThreatAuditTask]:
         """Return threat-analysis-derived audit tasks for a scan."""
 
+    @abstractmethod
+    def get_incomplete_threat_audit_counts(self, scan_ids: list[str]) -> dict[str, int]:
+        """Return non-completed threat-audit task counts grouped by scan."""
+
     # -- Events --
 
     @abstractmethod

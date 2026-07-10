@@ -493,6 +493,7 @@ def _terminal_opencode_pool_status(status: OpenCodePoolStatus | None) -> OpenCod
     cleared.global_running = 0
     cleared.global_queued = 0
     cleared.queued_tasks = []
+    cleared.planned_tasks = []
     for model in cleared.models:
         model.running = 0
         model.queued = 0
@@ -500,6 +501,47 @@ def _terminal_opencode_pool_status(status: OpenCodePoolStatus | None) -> OpenCod
         if model.last_status in {"running", "queued"}:
             model.last_status = ""
     return cleared
+
+
+def _merge_completed_opencode_tasks(
+    previous: OpenCodePoolStatus | None,
+    current: OpenCodePoolStatus,
+) -> OpenCodePoolStatus:
+    """Merge scan task history so a later Agent snapshot cannot erase prior attempts."""
+    merged = current.model_copy(deep=True)
+    ordered: list[dict] = []
+    index_by_key: dict[tuple[object, ...], int] = {}
+
+    def task_key(task: dict) -> tuple[object, ...]:
+        task_id = str(task.get("task_id") or "")
+        if task_id:
+            return ("task_id", task_id)
+        return (
+            "fallback",
+            task.get("scope_id"),
+            task.get("model_id"),
+            task.get("started_at"),
+            task.get("finished_at"),
+            task.get("task_type"),
+        )
+
+    previous_tasks = previous.completed_tasks if previous is not None else []
+    for task in [*previous_tasks, *merged.completed_tasks]:
+        key = task_key(task)
+        item = dict(task)
+        if key in index_by_key:
+            ordered[index_by_key[key]] = item
+        else:
+            index_by_key[key] = len(ordered)
+            ordered.append(item)
+    merged.completed_tasks = ordered
+    merged.completed_task_count = len(ordered)
+    current_outstanding = max(current.total_tasks - current.completed_task_count, 0)
+    merged.total_tasks = max(
+        previous.total_tasks if previous is not None else 0,
+        len(ordered) + current_outstanding,
+    )
+    return merged
 
 
 # ---------------------------------------------------------------------------
@@ -1625,6 +1667,8 @@ async def agent_push_opencode_pool(scan_id: str, body: OpenCodePoolStatus) -> di
     """Agent pushes the latest OpenCode model-pool status for one scan."""
     store = get_scan_store()
     loaded = store.load_scan(scan_id)
+    previous_pool = loaded[0].opencode_pool if loaded is not None else None
+    body = _merge_completed_opencode_tasks(previous_pool, body)
     terminal = loaded is not None and loaded[0].status not in _RUNNING_SCAN_STATUSES
     status = _terminal_opencode_pool_status(body) if terminal else body
     store.update_opencode_pool_status(scan_id, status)

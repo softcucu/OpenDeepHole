@@ -362,6 +362,50 @@ class AgentScanPathTests(unittest.TestCase):
         self.assertTrue(any("复用本次任务已完成的威胁分析结果" in message for _phase, message in events))
         self.assertFalse(any("开始基于攻击树的威胁分析" in message for _phase, message in events))
 
+    def test_resume_reuses_analysis_and_continues_selected_threat_audits(self) -> None:
+        class FakeReporter:
+            def __init__(self, analysis: ThreatAnalysis) -> None:
+                self.analysis = analysis
+
+            async def get_threat_analysis(self, _scan_id: str) -> ThreatAnalysis:
+                return self.analysis
+
+        async def run() -> AsyncMock:
+            with tempfile.TemporaryDirectory() as tmp:
+                project = Path(tmp) / "project"
+                workspace = Path(tmp) / "workspace"
+                project.mkdir()
+                workspace.mkdir()
+                analysis = apply_threat_analysis_scan_scope(
+                    ThreatAnalysis(schema_version="1.0", analysis_id="stored-threat"),
+                    project.resolve(),
+                    project.resolve(),
+                )
+                auditor = AsyncMock()
+                with (
+                    patch("backend.opencode.runner.run_threat_analysis_audit", AsyncMock()) as runner,
+                    patch("agent.threat_auditor.run_threat_audit_tasks", auditor),
+                ):
+                    await _run_threat_analysis_phase(
+                        config=AgentConfig(),
+                        project_path=project.resolve(),
+                        code_scan_path=project.resolve(),
+                        reporter=FakeReporter(analysis),  # type: ignore[arg-type]
+                        scan_id="scan-1",
+                        product="demo",
+                        workspace=workspace,
+                        cancel_event=threading.Event(),
+                        emit=lambda _phase, _message: None,
+                        is_resume=True,
+                        retry_threat_audit_task_ids=["threat-audit-1"],
+                    )
+                runner.assert_not_awaited()
+                return auditor
+
+        auditor = asyncio.run(run())
+        auditor.assert_awaited_once()
+        self.assertEqual(auditor.await_args.kwargs["only_task_ids"], {"threat-audit-1"})
+
     def test_resume_reruns_threat_analysis_when_stored_scope_differs(self) -> None:
         class FakeReporter:
             def __init__(self, analysis: ThreatAnalysis) -> None:

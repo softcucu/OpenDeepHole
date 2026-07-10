@@ -33,6 +33,8 @@ def _reset_model_pool():
     model_pool_module._scope_updated_at.clear()
     model_pool_module._global_updated_at = ""
     model_pool_module._active_tasks.clear()
+    model_pool_module._completed_tasks_by_scope.clear()
+    model_pool_module._peak_total_tasks_by_scope.clear()
     model_pool_module._pending_requests.clear()
     model_pool_module._planned_tasks.clear()
     model_pool_module._planned_task_ids_by_key.clear()
@@ -323,6 +325,41 @@ def test_model_pool_snapshot_tracks_scope_queue_and_outcomes() -> None:
                 second_task.cancel()
             await release_model_lease(first)
             await release_model_lease(second)
+
+    asyncio.run(run())
+
+
+def test_model_pool_snapshot_persists_completed_task_summary_without_prompt() -> None:
+    async def run() -> None:
+        cfg = SimpleNamespace(
+            models=[
+                {"id": "deep", "model": "deep-model", "capability": "high", "max_concurrency": 1},
+            ],
+        )
+        scope = "scan-completed-history"
+        lease = await acquire_model_lease(
+            cfg,
+            global_concurrency=1,
+            required_capability="high",
+            stats_scope_id=scope,
+            task_context={
+                "task_type": "threat_audit",
+                "file": "src/a.c",
+                "prompt": "sensitive full prompt",
+            },
+        )
+        await release_model_lease(lease, outcome="success", duration_seconds=1.5)
+
+        snapshot = model_pool_snapshot(scope)
+        assert snapshot["total_tasks"] == 1
+        assert snapshot["completed_task_count"] == 1
+        assert len(snapshot["completed_tasks"]) == 1
+        completed = snapshot["completed_tasks"][0]
+        assert completed["task_type"] == "threat_audit"
+        assert completed["outcome"] == "success"
+        assert completed["duration_seconds"] == 1.5
+        assert completed["prompt_length"] == len("sensitive full prompt")
+        assert "prompt" not in completed
 
     asyncio.run(run())
 

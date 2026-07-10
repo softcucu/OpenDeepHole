@@ -481,8 +481,11 @@ class OpenCodePoolStatus(BaseModel):
     agent_session_id: str = ""
     global_running: int = 0
     global_queued: int = 0
+    total_tasks: int = 0
+    completed_task_count: int = 0
     queued_tasks: list[dict] = []
     planned_tasks: list[dict] = []
+    completed_tasks: list[dict] = []
     models: list[OpenCodePoolModelStats] = []
     updated_at: str = ""
 
@@ -514,6 +517,10 @@ class ScanStatus(BaseModel):
     error_message: str | None = None
     feedback_ids: list[str] = []
     retryable_candidates_count: int = 0
+    continuable_task_count: int = 0
+    can_continue: bool = False
+    total_task_count: int = 0
+    completed_task_count: int = 0
     opencode_pool: OpenCodePoolStatus | None = None
 
     # 静态分析进度（按文件计）
@@ -717,6 +724,10 @@ class ScanSummary(BaseModel):
     vulnerability_count: int
     human_confirmed_count: int = 0
     retryable_candidates_count: int = 0
+    continuable_task_count: int = 0
+    can_continue: bool = False
+    total_task_count: int = 0
+    completed_task_count: int = 0
     scan_items: list[str]
     user_id: str = ""
     username: str = ""

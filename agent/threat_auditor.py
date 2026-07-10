@@ -198,6 +198,7 @@ async def run_threat_audit_tasks(
     workspace: Path,
     cancel_event: threading.Event,
     emit: Callable[[str, str], object],
+    only_task_ids: set[str] | None = None,
 ) -> None:
     """Run threat-analysis-derived audits through the shared OpenCode queue."""
     tasks = build_threat_audit_tasks(scan_id, analysis)
@@ -209,13 +210,17 @@ async def run_threat_audit_tasks(
     pending = [
         task
         for task in tasks
+        if only_task_ids is None or task.task_id in only_task_ids
         if existing.get(task.task_id) is None
         or existing[task.task_id].status != COMPLETED_THREAT_AUDIT_STATUS
     ]
-    skipped = len(tasks) - len(pending)
+    selected_count = len(tasks) if only_task_ids is None else sum(
+        1 for task in tasks if task.task_id in only_task_ids
+    )
+    skipped = selected_count - len(pending)
     await _maybe_emit(
         emit,
-        f"威胁分析生成 {len(tasks)} 个独立审计任务"
+        f"威胁分析生成 {len(tasks)} 个独立审计任务，本次执行 {selected_count} 个"
         + (f"，跳过 {skipped} 个已完成任务" if skipped else ""),
     )
     if not pending:

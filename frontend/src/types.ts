@@ -342,8 +342,11 @@ export interface OpenCodePoolStatus {
   agent_session_id?: string;
   global_running: number;
   global_queued: number;
+  total_tasks: number;
+  completed_task_count: number;
   queued_tasks: Record<string, unknown>[];
   planned_tasks?: Record<string, unknown>[];
+  completed_tasks?: Record<string, unknown>[];
   models: OpenCodePoolModelStats[];
   updated_at: string;
 }
@@ -375,6 +378,10 @@ export interface ScanStatus {
   error_message: string | null;
   feedback_ids: string[];
   retryable_candidates_count: number;
+  continuable_task_count: number;
+  can_continue: boolean;
+  total_task_count: number;
+  completed_task_count: number;
   opencode_pool?: OpenCodePoolStatus | null;
 
   // 静态分析进度
@@ -440,6 +447,10 @@ export interface ScanSummary {
   vulnerability_count: number;
   human_confirmed_count: number;
   retryable_candidates_count: number;
+  continuable_task_count: number;
+  can_continue: boolean;
+  total_task_count: number;
+  completed_task_count: number;
   scan_items: string[];
   user_id?: string;
   username?: string;

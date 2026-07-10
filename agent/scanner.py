@@ -456,12 +456,15 @@ async def _run_threat_analysis_phase(
     emit: Callable[[str, str], object],
     is_resume: bool = False,
     planned_task_id: str = "",
+    retry_threat_audit_task_ids: list[str] | None = None,
 ) -> None:
     """Run attack-tree threat analysis without owning the scan terminal state."""
     if cancel_event.is_set():
         return
     try:
         root_dir = Path(__file__).resolve().parent.parent
+        analysis = None
+        reused_scan_analysis = False
         if is_resume:
             from backend.threat_analysis import threat_analysis_scope_matches
 
@@ -474,21 +477,24 @@ async def _run_threat_analysis_phase(
                     )
                     if asyncio.iscoroutine(maybe):
                         await maybe
-                    return
-                maybe = emit(
-                    "threat_analysis",
-                    "本次任务已有威胁分析结果，但扫描范围与当前续扫路径不一致，重新分析...",
-                )
+                    analysis = existing_analysis
+                    reused_scan_analysis = True
+                else:
+                    maybe = emit(
+                        "threat_analysis",
+                        "本次任务已有威胁分析结果，但扫描范围与当前续扫路径不一致，重新分析...",
+                    )
+                    if asyncio.iscoroutine(maybe):
+                        await maybe
+
+        if analysis is None:
+            analysis, cache_message = _load_existing_threat_analysis_for_scope(
+                project_path, code_scan_path,
+            )
+            if cache_message:
+                maybe = emit("threat_analysis", cache_message)
                 if asyncio.iscoroutine(maybe):
                     await maybe
-
-        analysis, cache_message = _load_existing_threat_analysis_for_scope(
-            project_path, code_scan_path,
-        )
-        if cache_message:
-            maybe = emit("threat_analysis", cache_message)
-            if asyncio.iscoroutine(maybe):
-                await maybe
         if analysis is None:
             from backend.opencode.runner import run_threat_analysis_audit
 
@@ -509,13 +515,14 @@ async def _run_threat_analysis_phase(
                 planned_task_id=planned_task_id,
             )
         if analysis is not None:
-            await reporter.push_threat_analysis(scan_id, analysis.model_dump())
-            maybe = emit(
-                "threat_analysis",
-                f"威胁分析完成：识别 {len(analysis.assets)} 个关键资产，{len(analysis.attack_trees)} 棵攻击树",
-            )
-            if asyncio.iscoroutine(maybe):
-                await maybe
+            if not reused_scan_analysis:
+                await reporter.push_threat_analysis(scan_id, analysis.model_dump())
+                maybe = emit(
+                    "threat_analysis",
+                    f"威胁分析完成：识别 {len(analysis.assets)} 个关键资产，{len(analysis.attack_trees)} 棵攻击树",
+                )
+                if asyncio.iscoroutine(maybe):
+                    await maybe
             if not cancel_event.is_set():
                 from agent.threat_auditor import run_threat_audit_tasks
 
@@ -528,6 +535,11 @@ async def _run_threat_analysis_phase(
                     workspace=workspace,
                     cancel_event=cancel_event,
                     emit=emit,
+                    only_task_ids=(
+                        set(retry_threat_audit_task_ids)
+                        if retry_threat_audit_task_ids is not None
+                        else None
+                    ),
                 )
         elif cancel_event.is_set():
             maybe = emit("threat_analysis", "威胁分析已停止")
@@ -856,6 +868,8 @@ async def run_scan(
     retry_candidates: list[dict] | None = None,
     retry_total_candidates: int | None = None,
     retry_processed_offset: int = 0,
+    resume_threat_analysis: bool = False,
+    retry_threat_audit_task_ids: list[str] | None = None,
 ) -> None:
     """Orchestrate the full local pipeline: index → static analysis → AI audit → report.
 
@@ -931,8 +945,8 @@ async def run_scan(
         db = None
         db_path = index_store.db_path(project_path)
         # Only need the DB open if static analysis will run (no cached candidates yet)
-        retry_mode = retry_candidates is not None
-        need_db_open = not candidates_cache_path.exists() and not retry_mode
+        candidate_retry_mode = retry_candidates is not None
+        need_db_open = not candidates_cache_path.exists() and not candidate_retry_mode
 
         def _db_is_complete(path: Path) -> bool:
             """Return True only if the DB was fully built."""
@@ -1077,7 +1091,8 @@ async def run_scan(
         # --- Phase 3: Start local MCP (needed by opencode and API fallback) ---
         mcp_port = None
         needs_opencode = (
-            not retry_mode
+            not candidate_retry_mode
+            or resume_threat_analysis
             or any(entry.mode in {"opencode", "api"} for entry in registry.values())
         )
         if needs_opencode:
@@ -1100,7 +1115,11 @@ async def run_scan(
         await emit("init", "Analysis workspace ready")
 
         # --- Phase 5: Attack-tree threat analysis (fresh scans only, background) ---
-        if not retry_mode and workspace is not None and not cancel_event.is_set():
+        if (
+            (not candidate_retry_mode or resume_threat_analysis)
+            and workspace is not None
+            and not cancel_event.is_set()
+        ):
             from backend.opencode.model_pool import register_planned_task
             threat_planned_task_id = await register_planned_task(
                 scan_id,
@@ -1122,6 +1141,7 @@ async def run_scan(
                 emit=lambda phase, message: emit(phase, message),
                 is_resume=is_resume,
                 planned_task_id=threat_planned_task_id,
+                retry_threat_audit_task_ids=retry_threat_audit_task_ids,
             ))
 
         # --- Phase 6: Memory allocation/free API preprocessing ---
@@ -1135,7 +1155,7 @@ async def run_scan(
         # NOT skip this phase.
         candidates: list[Candidate] = []
         ran_fresh_static = False
-        if retry_mode:
+        if candidate_retry_mode:
             candidates = [
                 _normalize_candidate_for_project(Candidate(**d), project_path, code_scan_path)
                 for d in (retry_candidates or [])
@@ -1269,7 +1289,7 @@ async def run_scan(
         if _should_run_git_history_phase(
             config,
             ran_fresh_static=ran_fresh_static,
-            retry_mode=retry_mode,
+            retry_mode=candidate_retry_mode,
             workspace=workspace,
             cancel_event=cancel_event,
         ):
@@ -1336,7 +1356,7 @@ async def run_scan(
             except Exception as exc:
                 await emit("git_history", f"历史挖掘/变体排查异常（已跳过）: {exc}")
 
-        if not retry_mode and getattr(config, "static_dedup", True):
+        if not candidate_retry_mode and getattr(config, "static_dedup", True):
             candidates, removed_count = _dedup_candidates(
                 candidates,
                 family_of,
@@ -1365,7 +1385,7 @@ async def run_scan(
             pattern_filter_enabled=pattern_filter_enabled,
             pattern_filter_scope=pattern_filter_scope,
         )
-        if not retry_mode:
+        if not candidate_retry_mode:
             await reporter.report_candidates(scan_id, reported_candidates)
 
         function_source_cache = await asyncio.to_thread(
@@ -1391,7 +1411,7 @@ async def run_scan(
 
         # --- Phase 6: Load already-processed keys (resume support) ---
         processed_keys: set[tuple[str, int, str, str]] = set()
-        if is_resume and not retry_mode:
+        if is_resume and not candidate_retry_mode:
             processed_keys = await reporter.get_processed_keys(scan_id)
             if processed_keys:
                 await emit("init", f"Resume: skipping {len(processed_keys)} already-processed candidates")
@@ -1408,7 +1428,7 @@ async def run_scan(
             pattern_filter_enabled=pattern_filter_enabled,
             pattern_filter_scope=pattern_filter_scope,
         )
-        already_done = retry_processed_offset if retry_mode else total - len(remaining)
+        already_done = retry_processed_offset if candidate_retry_mode else total - len(remaining)
 
         # --- Phase 7: AI audit ---
         vulnerabilities: list[Vulnerability] = []
@@ -1895,7 +1915,7 @@ async def run_scan(
     finally:
         try:
             from backend.opencode.model_pool import clear_planned_tasks
-            await clear_planned_tasks(scan_id, {"audit", "threat_analysis"})
+            await clear_planned_tasks(scan_id, {"audit", "threat_analysis", "threat_audit"})
         except Exception:
             pass
         pool_status_stop.set()
@@ -1904,6 +1924,11 @@ async def run_scan(
                 await pool_status_task
             except Exception:
                 pass
+        try:
+            from backend.opencode.model_pool import clear_completed_tasks
+            await clear_completed_tasks(scan_id)
+        except Exception:
+            pass
         try:
             if mcp_server:
                 from agent import mcp_registry

@@ -753,6 +753,7 @@ class SqliteScanStore(ScanStoreBase):
         current = None
         if row["current_candidate"]:
             current = Candidate.model_validate_json(row["current_candidate"])
+        pool = _opencode_pool_status(row["opencode_pool"])
         return ScanStatus(
             scan_id=row["scan_id"],
             project_id=row["project_id"],
@@ -776,7 +777,9 @@ class SqliteScanStore(ScanStoreBase):
             current_candidate=current,
             error_message=row["error_message"],
             feedback_ids=json.loads(row["feedback_ids"] or "[]"),
-            opencode_pool=_opencode_pool_status(row["opencode_pool"]),
+            opencode_pool=pool,
+            total_task_count=pool.total_tasks if pool is not None else 0,
+            completed_task_count=pool.completed_task_count if pool is not None else 0,
             static_total_files=row["static_total_files"] or 0,
             static_scanned_files=row["static_scanned_files"] or 0,
             static_analysis_done=bool(row["static_analysis_done"]),
@@ -867,6 +870,7 @@ class SqliteScanStore(ScanStoreBase):
         return None if row is None else self._row_to_meta(row)
 
     def _row_to_scan_summary(self, row: sqlite3.Row) -> ScanSummary:
+        pool = _opencode_pool_status(row["opencode_pool"])
         return ScanSummary(
             scan_id=row["scan_id"],
             project_id=row["project_id"],
@@ -881,6 +885,8 @@ class SqliteScanStore(ScanStoreBase):
             total_candidates=row["total_candidates"],
             processed_candidates=row["processed_candidates"],
             vulnerability_count=row["vuln_count"],
+            total_task_count=pool.total_tasks if pool is not None else 0,
+            completed_task_count=pool.completed_task_count if pool is not None else 0,
             scan_items=json.loads(row["scan_items"]),
             user_id=row["user_id"] if row["user_id"] is not None else "",
             username=row["username"] if "username" in row.keys() and row["username"] is not None else "",
@@ -1965,6 +1971,21 @@ class SqliteScanStore(ScanStoreBase):
             )
             for r in cur.fetchall()
         ]
+
+    def get_incomplete_threat_audit_counts(self, scan_ids: list[str]) -> dict[str, int]:
+        if not scan_ids:
+            return {}
+        placeholders = ",".join("?" for _ in scan_ids)
+        cur = self._conn.execute(
+            f"""\
+            SELECT scan_id, COUNT(*) AS task_count
+            FROM threat_audit_tasks
+            WHERE scan_id IN ({placeholders}) AND status != 'completed'
+            GROUP BY scan_id
+            """,
+            scan_ids,
+        )
+        return {str(row["scan_id"]): int(row["task_count"]) for row in cur.fetchall()}
 
     # -- Events --
 

@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { getScanProducts, getScans, resumeScan, deleteScan, updateScanProduct, retryIncompleteScan } from "../api/client";
+import { getScanProducts, getScans, resumeScan, stopScan, deleteScan, updateScanProduct } from "../api/client";
 import type { ScanSummary, ScanItemStatus, User } from "../types";
 
 interface Props {
@@ -254,7 +254,7 @@ export default function ScanHistory({ onViewScan, onDownloadAgent, onNewScan, us
     };
   }, []);
 
-  const handleResume = async (scanId: string) => {
+  const handleContinue = async (scanId: string) => {
     setActionLoading(scanId);
     try {
       await resumeScan(scanId);
@@ -266,11 +266,11 @@ export default function ScanHistory({ onViewScan, onDownloadAgent, onNewScan, us
     }
   };
 
-  const handleRetryIncomplete = async (scanId: string) => {
+  const handleStop = async (scanId: string) => {
     setActionLoading(scanId);
     try {
-      await retryIncompleteScan(scanId);
-      onViewScan(scanId);
+      await stopScan(scanId);
+      await fetchScans();
     } catch {
       // silently fail
     } finally {
@@ -482,7 +482,7 @@ export default function ScanHistory({ onViewScan, onDownloadAgent, onNewScan, us
                     />
                   </th>
                   <th className="text-left px-4 py-3 text-xs font-semibold text-slate-400 uppercase tracking-wider">状态</th>
-                  <th className="text-left px-4 py-3 text-xs font-semibold text-slate-400 uppercase tracking-wider">进度</th>
+                  <th className="text-left px-4 py-3 text-xs font-semibold text-slate-400 uppercase tracking-wider">任务进度</th>
                   <th className="text-left px-4 py-3 text-xs font-semibold text-slate-400 uppercase tracking-wider">漏洞数</th>
                   <th className="text-left px-4 py-3 text-xs font-semibold text-slate-400 uppercase tracking-wider">人工确认</th>
                   <th className="text-left px-4 py-3 text-xs font-semibold text-slate-400 uppercase tracking-wider">检查项</th>
@@ -506,10 +506,11 @@ export default function ScanHistory({ onViewScan, onDownloadAgent, onNewScan, us
               <tbody>
                 {filteredScans.map((scan) => {
                   const st = STATUS_STYLES[scan.status];
-                  const pct = Math.round(scan.progress * 100);
                   const running = isRunning(scan.status);
-                  const canResume = scan.status === "cancelled" || scan.status === "error";
-                  const canRetryIncomplete = !running && (scan.retryable_candidates_count ?? 0) > 0;
+                  const canContinue = !running && !!scan.can_continue;
+                  const totalTasks = scan.total_task_count ?? 0;
+                  const completedTasks = scan.completed_task_count ?? 0;
+                  const taskPct = totalTasks > 0 ? Math.min(100, Math.round((completedTasks / totalTasks) * 100)) : 0;
                   const canDelete = !running;
                   const isLoading = actionLoading === scan.scan_id;
                   const isProductSaving = productSavingId === scan.scan_id;
@@ -551,11 +552,11 @@ export default function ScanHistory({ onViewScan, onDownloadAgent, onNewScan, us
                           <div className="w-16 h-1.5 bg-slate-700 rounded-full overflow-hidden">
                             <div
                               className={`h-full rounded-full transition-all ${running ? "bg-blue-500" : "bg-green-500"}`}
-                              style={{ width: `${pct}%` }}
+                              style={{ width: `${taskPct}%` }}
                             />
                           </div>
                           <span className="text-xs text-slate-400">
-                            {scan.processed_candidates}/{scan.total_candidates}
+                            {completedTasks}/{totalTasks}
                           </span>
                         </div>
                       </td>
@@ -593,21 +594,20 @@ export default function ScanHistory({ onViewScan, onDownloadAgent, onNewScan, us
                           >
                             查看
                           </button>
-                          {canResume && (
+                          {running && (
                             <button
-                              onClick={() => handleResume(scan.scan_id)}
-                              disabled={isLoading || !scan.agent_online}
-                              title={!scan.agent_online ? "Agent 离线，无法恢复" : undefined}
-                              className="text-xs px-2 py-1 rounded text-amber-400 hover:bg-amber-500/10 disabled:opacity-50 transition-colors"
+                              onClick={() => handleStop(scan.scan_id)}
+                              disabled={isLoading}
+                              className="text-xs px-2 py-1 rounded text-red-400 hover:bg-red-500/10 disabled:opacity-50 transition-colors"
                             >
-                              {isLoading ? "..." : "恢复"}
+                              {isLoading ? "..." : "停止"}
                             </button>
                           )}
-                          {canRetryIncomplete && (
+                          {canContinue && (
                             <button
-                              onClick={() => handleRetryIncomplete(scan.scan_id)}
+                              onClick={() => handleContinue(scan.scan_id)}
                               disabled={isLoading || !scan.agent_online}
-                              title={!scan.agent_online ? "Agent 离线，无法续扫" : `续扫 ${scan.retryable_candidates_count} 个未完成候选`}
+                              title={!scan.agent_online ? "Agent 离线，无法续扫" : `续扫 ${scan.continuable_task_count ?? 0} 个任务`}
                               className="text-xs px-2 py-1 rounded text-amber-300 hover:bg-amber-500/10 disabled:opacity-50 transition-colors"
                             >
                               {isLoading ? "..." : "续扫"}

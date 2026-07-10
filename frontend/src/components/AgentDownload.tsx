@@ -1398,17 +1398,17 @@ Connecting to ws://.../api/agent/ws ...
           </ol>
         </div>
 
-        {/* 停止与恢复 */}
+        {/* 停止与续扫 */}
         <div className="bg-slate-800/60 border border-slate-700 rounded-xl p-5 mb-5">
-          <h2 className="text-base font-semibold text-white mb-3">停止与恢复</h2>
+          <h2 className="text-base font-semibold text-white mb-3">停止与续扫</h2>
           <div className="space-y-3 text-sm">
             <div className="flex gap-3">
               <span className="text-red-400 font-medium shrink-0">停止</span>
-              <span className="text-slate-300">扫描详情页点击「停止扫描」，Server 直接通知 Agent 停止。当前候选处理完成后立即停止，已处理的结果保留。</span>
+              <span className="text-slate-300">扫描列表页或详情页点击「停止」，Server 直接通知 Agent 停止，已处理的结果和任务记录会保留。</span>
             </div>
             <div className="flex gap-3">
-              <span className="text-amber-400 font-medium shrink-0">恢复</span>
-              <span className="text-slate-300">扫描列表页点击「恢复」，Server 通知 Agent 继续同一个扫描任务，自动跳过已处理的候选，从断点继续。无需重新启动 Agent 或重新索引代码。</span>
+              <span className="text-amber-400 font-medium shrink-0">续扫</span>
+              <span className="text-slate-300">扫描列表页或详情页点击「续扫」，会同时继续未扫描任务并重试静态候选、威胁审计中的失败任务。</span>
             </div>
           </div>
         </div>

@@ -525,11 +525,6 @@ export async function resumeScan(scanId: string): Promise<ScanStartResponse> {
   return data;
 }
 
-export async function retryIncompleteScan(scanId: string): Promise<ScanStartResponse> {
-  const { data } = await api.post<ScanStartResponse>(`/api/scan/${scanId}/retry-incomplete`);
-  return data;
-}
-
 export async function deleteScan(scanId: string): Promise<void> {
   await api.delete(`/api/scan/${scanId}`);
 }

@@ -60,6 +60,9 @@ class FakeScanStore:
     def list_fp_review_verdicts_by_scans(self, scan_ids: list[str]) -> dict[str, list[FpReviewResult]]:
         return {sid: self.list_fp_review_results_by_scan(sid) for sid in scan_ids}
 
+    def get_incomplete_threat_audit_counts(self, _scan_ids: list[str]) -> dict[str, int]:
+        return {}
+
     def _summary(self) -> ScanSummary:
         return ScanSummary(
             scan_id=self.scan.scan_id,

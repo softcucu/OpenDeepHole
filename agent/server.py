@@ -111,6 +111,8 @@ async def _run(task, is_resume: bool) -> None:
             retry_candidates=task.retry_candidates,
             retry_total_candidates=task.retry_total_candidates,
             retry_processed_offset=task.retry_processed_offset,
+            resume_threat_analysis=task.resume_threat_analysis,
+            retry_threat_audit_task_ids=task.retry_threat_audit_task_ids,
         )
     finally:
         _task_manager.remove(task.scan_id)
@@ -176,6 +178,8 @@ async def handle_resume(
     retry_candidates: Optional[list[dict]] = None,
     retry_total_candidates: Optional[int] = None,
     retry_processed_offset: int = 0,
+    resume_threat_analysis: bool = False,
+    retry_threat_audit_task_ids: Optional[list[str]] = None,
 ) -> None:
     """Handle a 'resume' command — resume a stopped scan."""
     if _task_manager is None:
@@ -199,6 +203,8 @@ async def handle_resume(
             retry_candidates=retry_candidates,
             retry_total_candidates=retry_total_candidates,
             retry_processed_offset=retry_processed_offset,
+            resume_threat_analysis=resume_threat_analysis,
+            retry_threat_audit_task_ids=retry_threat_audit_task_ids,
         )
     else:
         if project_path:
@@ -222,6 +228,8 @@ async def handle_resume(
         task.retry_candidates = retry_candidates
         task.retry_total_candidates = retry_total_candidates
         task.retry_processed_offset = retry_processed_offset
+        task.resume_threat_analysis = resume_threat_analysis
+        task.retry_threat_audit_task_ids = retry_threat_audit_task_ids
 
     if task.asyncio_task and not task.asyncio_task.done():
         task.asyncio_task.cancel()

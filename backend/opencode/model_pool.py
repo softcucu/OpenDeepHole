@@ -94,6 +94,8 @@ _options_by_id: dict[str, ModelOption] = {}
 _scope_updated_at: dict[str, str] = {}
 _global_updated_at: str = ""
 _active_tasks: dict[str, dict[str, Any]] = {}
+_completed_tasks_by_scope: dict[str, list[dict[str, Any]]] = {}
+_peak_total_tasks_by_scope: dict[str, int] = {}
 _pending_requests: list[_PendingLeaseRequest] = []
 _planned_tasks: dict[str, _PlannedTask] = {}
 _planned_task_ids_by_key: dict[tuple[str, str], str] = {}
@@ -798,6 +800,7 @@ async def release_model_lease(
     global _global_running
     async with _condition:
         finished_at = _now_iso()
+        active_task = _active_tasks.get(lease.task_id)
         _global_running = max(0, _global_running - 1)
         current = _running_by_model.get(lease.option.id, 0)
         if current <= 1:
@@ -822,6 +825,23 @@ async def release_model_lease(
         if duration_seconds is not None and duration_seconds >= 0:
             global_item.total_duration_seconds += duration_seconds
         global_item.last_finished_at = finished_at
+        if active_task is not None and lease.stats_scope_id:
+            context = dict(active_task.get("context") or {})
+            prompt = context.pop("prompt", None)
+            if "prompt_length" not in context and isinstance(prompt, str):
+                context["prompt_length"] = len(prompt)
+            completed = {
+                **context,
+                "task_id": lease.task_id,
+                "scope_id": lease.stats_scope_id,
+                "model_id": lease.option.id,
+                "model": lease.option.model,
+                "started_at": active_task.get("started_at", lease.started_at_iso),
+                "finished_at": finished_at,
+                "duration_seconds": duration_seconds,
+                "outcome": normalized_outcome or "unknown",
+            }
+            _completed_tasks_by_scope.setdefault(lease.stats_scope_id, []).append(completed)
         _active_tasks.pop(lease.task_id, None)
         if lease.stats_scope_id:
             stats = _ensure_scope_models_locked(lease.stats_scope_id, [lease.option])
@@ -837,6 +857,15 @@ async def release_model_lease(
         global _global_updated_at
         _global_updated_at = finished_at
         _condition.notify_all()
+
+
+async def clear_completed_tasks(scope_id: str) -> None:
+    """Release scan-local completion history after its final snapshot is persisted."""
+    if not scope_id:
+        return
+    async with _condition:
+        _completed_tasks_by_scope.pop(scope_id, None)
+        _peak_total_tasks_by_scope.pop(scope_id, None)
 
 
 async def update_model_lease_context(lease: ModelLease | None, updates: dict[str, Any]) -> None:
@@ -978,12 +1007,25 @@ def model_pool_snapshot(scope_id: str = "") -> dict[str, Any]:
         ]
         queued_tasks = _pending_requests_snapshot(scope_id)
         planned_tasks = _planned_tasks_snapshot(scope_id)
+        completed_tasks = list(_completed_tasks_by_scope.get(scope_id, []))
+        active_task_count = sum(len(model.get("active_tasks", [])) for model in models)
+        observed_total = (
+            len(completed_tasks)
+            + active_task_count
+            + len(queued_tasks)
+            + len(planned_tasks)
+        )
+        total_tasks = max(_peak_total_tasks_by_scope.get(scope_id, 0), observed_total)
+        _peak_total_tasks_by_scope[scope_id] = total_tasks
         return {
             "scope_id": scope_id,
             "global_running": sum(item.running for item in stats.values()),
             "global_queued": len(queued_tasks),
+            "total_tasks": total_tasks,
+            "completed_task_count": len(completed_tasks),
             "queued_tasks": queued_tasks,
             "planned_tasks": planned_tasks,
+            "completed_tasks": completed_tasks,
             "models": sorted(models, key=lambda item: item["id"]),
             "updated_at": _scope_updated_at.get(scope_id, ""),
         }
@@ -994,8 +1036,11 @@ def model_pool_snapshot(scope_id: str = "") -> dict[str, Any]:
     return {
         "global_running": _global_running,
         "global_queued": len(queued_tasks),
+        "total_tasks": 0,
+        "completed_task_count": 0,
         "queued_tasks": queued_tasks,
         "planned_tasks": planned_tasks,
+        "completed_tasks": [],
         "models": sorted(models, key=lambda item: item["id"]),
         "updated_at": _global_updated_at,
     }

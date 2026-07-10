@@ -94,6 +94,8 @@ async def _handle_command(msg: dict, config, task_manager, reporter) -> dict | N
             retry_candidates=msg.get("retry_candidates"),
             retry_total_candidates=msg.get("retry_total_candidates"),
             retry_processed_offset=int(msg.get("retry_processed_offset") or 0),
+            resume_threat_analysis=bool(msg.get("resume_threat_analysis")),
+            retry_threat_audit_task_ids=msg.get("retry_threat_audit_task_ids"),
         )
     elif cmd_type == "fp_review":
         from agent.updater import ensure_runtime_updated
