@@ -259,6 +259,7 @@ function AgentConfigPanel({ agent }: AgentConfigPanelProps) {
     title: string;
     loading: boolean;
     error: string | null;
+    message: string | null;
     models: AgentOpenCodeModelListItem[];
     selected: string[];
   } | null>(null);
@@ -435,6 +436,7 @@ function AgentConfigPanel({ agent }: AgentConfigPanelProps) {
       title,
       loading: true,
       error: null,
+      message: null,
       models: [],
       selected: [],
     });
@@ -448,6 +450,7 @@ function AgentConfigPanel({ agent }: AgentConfigPanelProps) {
         title,
         loading: false,
         error: null,
+        message: result.message.trim() || null,
         models: result.models,
         selected: [],
       });
@@ -902,6 +905,11 @@ function AgentConfigPanel({ agent }: AgentConfigPanelProps) {
                 关闭
               </button>
             </div>
+            {modelPicker.message && (
+              <div className="mb-3 rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-200">
+                {modelPicker.message}
+              </div>
+            )}
             <div className="max-h-[24rem] overflow-y-auto rounded-md border border-slate-700">
               {modelPicker.loading ? (
                 <div className="px-3 py-6 text-center text-sm text-slate-400">读取中…</div>

@@ -30,6 +30,7 @@ logger = get_logger(__name__)
 _SERVE_START_TIMEOUT_SECONDS = 30.0
 _SERVE_STOP_TIMEOUT_SECONDS = 5.0
 _SERVE_REQUEST_TIMEOUT_SECONDS = 20.0
+_SERVE_MODEL_FALLBACK_TIMEOUT_SECONDS = 5.0
 _SERVE_HEALTH_POLL_INTERVAL_SECONDS = 1.0
 _SERVE_EVENT_PREVIEW_LIMIT = 500
 _SERVE_STARTUP_LOG_TAIL_LIMIT = 4000
@@ -74,6 +75,12 @@ class OpenCodeModelInfo:
     provider_id: str
     model_id: str
     name: str = ""
+
+
+@dataclass(frozen=True)
+class OpenCodeModelListResult:
+    models: list[OpenCodeModelInfo]
+    message: str = ""
 
 
 def split_model_id(model: str) -> tuple[str, str]:
@@ -977,7 +984,19 @@ class OpenCodeServeManager:
         self._startup_cwd: Path | None = None
         self._marker_path = _serve_marker_path()
         self._active_sessions = 0
+        self._active_model_listings = 0
         self._dirty = False
+        self._serve_config_generation = 0
+        self._model_cache: dict[
+            tuple[OpenCodeServeKey, str],
+            tuple[OpenCodeModelInfo, ...],
+        ] = {}
+        self._model_cache_generation = 0
+        self._model_fetch_lock = asyncio.Lock()
+        self._model_inflight: dict[
+            tuple[tuple[OpenCodeServeKey, str], bool],
+            asyncio.Task[OpenCodeModelListResult],
+        ] = {}
 
     @property
     def base_url(self) -> str:
@@ -986,10 +1005,17 @@ class OpenCodeServeManager:
         return f"http://127.0.0.1:{self._port}"
 
     def mark_dirty(self) -> None:
-        # Serve reads per-request workspace context; config refreshes should not
-        # tear down active sessions. The process is restarted only when the
-        # executable/tool boundary changes or the process exits.
-        self._dirty = False
+        # Keep active sessions stable, but make the next idle acquisition reload
+        # the serve process and never return a model list cached before the
+        # configuration update.
+        self._dirty = True
+        self._serve_config_generation += 1
+        self._invalidate_model_cache()
+        # Do not let a request created before the config update become the
+        # single-flight result for callers that arrive afterwards. The old task
+        # is allowed to finish for its existing waiters, but its generation can
+        # no longer populate the cache.
+        self._model_inflight.clear()
 
     async def run_prompt(
         self,
@@ -1093,10 +1119,7 @@ class OpenCodeServeManager:
                     await event_task
             if event_state:
                 event_state.flush()
-            async with self._idle:
-                self._active_sessions = max(0, self._active_sessions - 1)
-                if self._active_sessions == 0:
-                    self._idle.notify_all()
+            await self._release_active_session()
 
     async def _list_tool_ids(
         self,
@@ -1129,7 +1152,7 @@ class OpenCodeServeManager:
         config_content: str | None = None,
         env_overrides: dict[str, str] | None = None,
         refresh: bool = False,
-    ) -> list[OpenCodeModelInfo]:
+    ) -> OpenCodeModelListResult:
         normalized_env_overrides = _normalized_env_overrides(env_overrides)
         key = OpenCodeServeKey(
             tool=tool,
@@ -1139,44 +1162,295 @@ class OpenCodeServeManager:
             config_content=config_content or "",
             env_overrides=normalized_env_overrides,
         )
-        await self._ensure_started(key, startup_cwd=config_workspace)
+        directory_key = str(directory.resolve()) if directory is not None else ""
+        cache_key = (key, directory_key)
+        if not refresh:
+            cached = self._model_cache.get(cache_key)
+            if cached is not None:
+                logger.info(
+                    "OpenCode serve model list source=cache models=%s config_hash=%s",
+                    len(cached),
+                    key.config_hash[:12],
+                )
+                return OpenCodeModelListResult(models=list(cached))
+
+        inflight_key = (cache_key, bool(refresh))
+        task = self._model_inflight.get(inflight_key)
+        if task is None:
+            if refresh:
+                self._invalidate_model_cache()
+            generation = self._model_cache_generation
+            task = asyncio.create_task(self._load_models(
+                key=key,
+                cache_key=cache_key,
+                cache_generation=generation,
+                directory=directory,
+                config_workspace=config_workspace,
+                refresh=refresh,
+            ))
+            self._model_inflight[inflight_key] = task
+
+            def clear_inflight(done: asyncio.Task[OpenCodeModelListResult]) -> None:
+                if self._model_inflight.get(inflight_key) is done:
+                    self._model_inflight.pop(inflight_key, None)
+
+            task.add_done_callback(clear_inflight)
+        return await asyncio.shield(task)
+
+    def _invalidate_model_cache(self) -> None:
+        self._model_cache.clear()
+        self._model_cache_generation += 1
+
+    async def _load_models(
+        self,
+        *,
+        key: OpenCodeServeKey,
+        cache_key: tuple[OpenCodeServeKey, str],
+        cache_generation: int,
+        directory: Path | None,
+        config_workspace: Path | None,
+        refresh: bool,
+    ) -> OpenCodeModelListResult:
+        async with self._model_fetch_lock:
+            if not refresh:
+                cached = self._model_cache.get(cache_key)
+                if cached is not None:
+                    return OpenCodeModelListResult(models=list(cached))
+
+            ensure_started_at = time.monotonic()
+            refresh_deferred = await self._acquire_model_listing(
+                key,
+                startup_cwd=config_workspace,
+            )
+            ensure_elapsed = time.monotonic() - ensure_started_at
+            request_started_at = time.monotonic()
+            try:
+                models = await self._fetch_models(directory)
+            finally:
+                await self._release_model_listing()
+            request_elapsed = time.monotonic() - request_started_at
+            message = ""
+            if refresh_deferred:
+                message = (
+                    "当前有 OpenCode serve 会话运行，已返回当前模型列表；"
+                    "配置重载将在会话结束后的下一次请求生效。"
+                )
+            if (
+                not refresh_deferred
+                and cache_generation == self._model_cache_generation
+            ):
+                self._model_cache[cache_key] = tuple(models)
+            logger.info(
+                "OpenCode serve model list source=serve models=%s ensure_ms=%s request_ms=%s "
+                "refresh=%s refresh_deferred=%s config_hash=%s",
+                len(models),
+                round(ensure_elapsed * 1000),
+                round(request_elapsed * 1000),
+                refresh,
+                refresh_deferred,
+                key.config_hash[:12],
+            )
+            return OpenCodeModelListResult(models=models, message=message)
+
+    async def _fetch_models(self, directory: Path | None) -> list[OpenCodeModelInfo]:
         params = _serve_context_params(directory)
         headers = _serve_context_headers(directory)
-        async with httpx.AsyncClient(base_url=self.base_url, timeout=_SERVE_REQUEST_TIMEOUT_SECONDS) as client:
-            response = await client.get("/provider", params=params, headers=headers)
-            response.raise_for_status()
-            data = response.json()
+        provider_data: Any = None
+        provider_error: Exception | None = None
+        provider_elapsed = 0.0
+        config_elapsed = 0.0
+        used_config_fallback = False
+
+        async with httpx.AsyncClient(
+            base_url=self.base_url,
+            timeout=_SERVE_REQUEST_TIMEOUT_SECONDS,
+        ) as client:
+            started_at = time.monotonic()
             try:
-                config_response = await client.get("/config/providers", params=params, headers=headers)
-                config_response.raise_for_status()
-                config_data = config_response.json()
-            except Exception:
-                config_data = {}
-        providers = []
-        if isinstance(data, dict):
-            raw = data.get("all") or data.get("providers") or []
-            providers = raw if isinstance(raw, list) else []
-        config_providers = []
-        if isinstance(config_data, dict):
-            raw = config_data.get("providers") or []
-            config_providers = raw if isinstance(raw, list) else []
+                response = await client.get("/provider", params=params, headers=headers)
+                response.raise_for_status()
+                provider_data = response.json()
+            except Exception as exc:
+                provider_error = exc
+            finally:
+                provider_elapsed = time.monotonic() - started_at
+
+            providers, provider_payload_valid = self._provider_entries(
+                provider_data,
+                "all",
+                "providers",
+            )
+            connected = self._connected_provider_ids(provider_data)
+            returned_provider_ids = {
+                self._provider_id(provider)
+                for provider in providers
+                if self._provider_id(provider)
+            }
+            missing_connected = connected - returned_provider_ids
+            needs_config_fallback = (
+                not provider_payload_valid
+                or not providers
+                or bool(missing_connected)
+            )
+            config_providers: list[dict[str, Any]] = []
+            config_payload_valid = False
+            config_error: Exception | None = None
+            if needs_config_fallback:
+                used_config_fallback = True
+                started_at = time.monotonic()
+                try:
+                    config_response = await client.get(
+                        "/config/providers",
+                        params=params,
+                        headers=headers,
+                        timeout=_SERVE_MODEL_FALLBACK_TIMEOUT_SECONDS,
+                    )
+                    config_response.raise_for_status()
+                    config_data = config_response.json()
+                    config_providers, config_payload_valid = self._provider_entries(
+                        config_data,
+                        "providers",
+                    )
+                except Exception as exc:
+                    config_error = exc
+                finally:
+                    config_elapsed = time.monotonic() - started_at
+
+        if not provider_payload_valid and not config_payload_valid:
+            details = []
+            if provider_error is not None:
+                details.append(f"/provider: {_one_line_preview(provider_error)}")
+            elif provider_data is not None:
+                details.append("/provider: invalid response")
+            if config_error is not None:
+                details.append(f"/config/providers: {_one_line_preview(config_error)}")
+            else:
+                details.append("/config/providers: invalid response")
+            raise RuntimeError("OpenCode model listing failed (" + "; ".join(details) + ")")
+        if config_error is not None and provider_payload_valid:
+            logger.warning(
+                "OpenCode config provider fallback unavailable: %s",
+                _one_line_preview(config_error),
+            )
+
         models: dict[str, OpenCodeModelInfo] = {}
         for provider in providers + config_providers:
-            if not isinstance(provider, dict):
-                continue
             for item in _provider_models(provider):
                 models[item.id] = item
-        return sorted(models.values(), key=lambda item: item.id)
+        result = sorted(models.values(), key=lambda item: item.id)
+        logger.info(
+            "OpenCode serve provider lookup provider_ms=%s config_ms=%s fallback=%s models=%s",
+            round(provider_elapsed * 1000),
+            round(config_elapsed * 1000),
+            used_config_fallback,
+            len(result),
+        )
+        return result
+
+    @staticmethod
+    def _provider_entries(data: Any, *keys: str) -> tuple[list[dict[str, Any]], bool]:
+        if not isinstance(data, dict):
+            return [], False
+        for key in keys:
+            raw = data.get(key)
+            if isinstance(raw, list):
+                return [item for item in raw if isinstance(item, dict)], True
+        return [], False
+
+    @staticmethod
+    def _provider_id(provider: dict[str, Any]) -> str:
+        return str(
+            provider.get("id")
+            or provider.get("providerID")
+            or provider.get("name")
+            or ""
+        ).strip()
+
+    @staticmethod
+    def _connected_provider_ids(data: Any) -> set[str]:
+        if not isinstance(data, dict) or not isinstance(data.get("connected"), list):
+            return set()
+        return {
+            str(item).strip()
+            for item in data["connected"]
+            if str(item).strip()
+        }
 
     async def shutdown(self) -> None:
         async with self._lock:
             await self._stop_locked()
+        self._dirty = False
+        self._invalidate_model_cache()
 
     async def _acquire_session(self, key: OpenCodeServeKey, startup_cwd: Path | None = None) -> None:
         async with self._lock:
             await self._ensure_started_locked(key, startup_cwd=startup_cwd)
             async with self._idle:
                 self._active_sessions += 1
+
+    async def _acquire_model_listing(
+        self,
+        key: OpenCodeServeKey,
+        *,
+        startup_cwd: Path | None = None,
+    ) -> bool:
+        """Acquire a short-lived serve operation and report a deferred reload."""
+        async with self._lock:
+            if self._proc is not None and self._proc.poll() is not None:
+                self._proc = None
+                self._key = None
+                self._port = None
+                self._startup_cwd = None
+
+            refresh_deferred = False
+            compatible_process = (
+                self._proc is not None
+                and self._same_process_key(self._key, key)
+            )
+            if (
+                self._proc is not None
+                and self._active_sessions > 0
+                and (self._dirty or not compatible_process)
+            ):
+                # Never make a model picker wait for a scan to finish. Query the
+                # current live serve now and keep the reload pending for the next
+                # idle acquisition, even when proxy/tool/executable changes make
+                # the requested process key incompatible.
+                if not self._dirty:
+                    self._dirty = True
+                    self._serve_config_generation += 1
+                    self._invalidate_model_cache()
+                refresh_deferred = True
+                logger.info(
+                    "Deferring %s serve model config reload while %s session(s) are active",
+                    key.tool,
+                    self._active_sessions,
+                )
+            elif compatible_process and not self._dirty:
+                # Model enumeration reflects the current serve process. Task-local
+                # MCP/SKILL config hash churn must not restart an otherwise
+                # compatible process just to show the picker.
+                pass
+            else:
+                await self._ensure_started_locked(key, startup_cwd=startup_cwd)
+                if self._dirty:
+                    refresh_deferred = True
+
+            async with self._idle:
+                self._active_model_listings += 1
+            return refresh_deferred
+
+    async def _release_active_session(self) -> None:
+        async with self._idle:
+            self._active_sessions = max(0, self._active_sessions - 1)
+            if self._active_sessions == 0 and self._active_model_listings == 0:
+                self._idle.notify_all()
+
+    async def _release_model_listing(self) -> None:
+        async with self._idle:
+            self._active_model_listings = max(0, self._active_model_listings - 1)
+            if self._active_sessions == 0 and self._active_model_listings == 0:
+                self._idle.notify_all()
 
     async def _wait_for_response(
         self,
@@ -1208,23 +1482,24 @@ class OpenCodeServeManager:
     async def _ensure_started_locked(self, key: OpenCodeServeKey, startup_cwd: Path | None = None) -> None:
         if self._proc is not None and self._proc.poll() is not None:
             self._proc = None
+            self._key = None
             self._port = None
             self._startup_cwd = None
-        if self._proc is not None and self._key == key:
-            self._dirty = False
+        if self._proc is not None and self._key == key and not self._dirty:
             return
         if self._proc is not None and self._same_process_key(self._key, key) and self._active_sessions > 0:
-            self._dirty = False
             logger.info(
-                "Reusing active %s serve on 127.0.0.1:%s despite config hash change",
+                "Reusing active %s serve on 127.0.0.1:%s despite pending config change",
                 key.tool,
                 self._port,
             )
             return
+        reload_generation = self._serve_config_generation
         await self._wait_until_idle_locked()
         await self._stop_locked()
         await self._start_locked(key, startup_cwd=startup_cwd)
-        self._dirty = False
+        if self._serve_config_generation == reload_generation:
+            self._dirty = False
 
     @staticmethod
     def _same_process_key(current: OpenCodeServeKey | None, requested: OpenCodeServeKey) -> bool:
@@ -1236,7 +1511,7 @@ class OpenCodeServeManager:
         )
 
     async def _wait_until_idle_locked(self) -> None:
-        while self._active_sessions > 0:
+        while self._active_sessions > 0 or self._active_model_listings > 0:
             async with self._idle:
                 await self._idle.wait()
 

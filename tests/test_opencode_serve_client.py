@@ -9,9 +9,12 @@ import httpx
 import pytest
 
 from backend.opencode.serve_client import (
+    OpenCodeModelInfo,
+    OpenCodeModelListResult,
     OpenCodeServeKey,
     OpenCodeServeManager,
     _SERVE_HEALTH_POLL_INTERVAL_SECONDS,
+    _SERVE_MODEL_FALLBACK_TIMEOUT_SECONDS,
     _serve_context_headers,
     _serve_port,
     _serve_startup_env_debug,
@@ -91,6 +94,28 @@ class _FakeAsyncClient:
     def stream(self, method: str, path: str, **kwargs):
         self.streams.append({"method": method, "path": path, **kwargs})
         return _FakeStreamContext(self.event_lines)
+
+
+class _FakeModelAsyncClient:
+    instances: list["_FakeModelAsyncClient"] = []
+    responses: dict[str, object] = {}
+
+    def __init__(self, *args, **kwargs) -> None:
+        self.gets: list[dict] = []
+
+    async def __aenter__(self):
+        self.instances.append(self)
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb) -> None:
+        return None
+
+    async def get(self, path: str, **kwargs):
+        self.gets.append({"path": path, **kwargs})
+        response = self.responses[path]
+        if isinstance(response, Exception):
+            raise response
+        return _FakeResponse(response)
 
 
 def test_run_prompt_uses_project_directory_and_default_tools(monkeypatch, tmp_path: Path) -> None:
@@ -243,30 +268,34 @@ def test_run_prompt_omits_tools_field_when_tool_discovery_fails(monkeypatch, tmp
 
 def test_list_models_uses_project_directory_context(monkeypatch, tmp_path: Path) -> None:
     async def run() -> None:
-        _FakeAsyncClient.instances = []
-        _FakeAsyncClient.event_lines = []
-        _FakeAsyncClient.tool_ids = ["read", "mcp__deephole-code__view_function_code"]
+        _FakeModelAsyncClient.instances = []
+        _FakeModelAsyncClient.responses = {
+            "/provider": {"all": [], "connected": []},
+            "/config/providers": {"providers": []},
+        }
         monkeypatch.setattr(
             "backend.opencode.serve_client.httpx.AsyncClient",
-            _FakeAsyncClient,
+            _FakeModelAsyncClient,
         )
 
         manager = OpenCodeServeManager()
         manager._port = 12345
-        manager._ensure_started = AsyncMock()
+        manager._acquire_model_listing = AsyncMock(return_value=False)
+        manager._release_model_listing = AsyncMock()
         project = tmp_path / "project"
         config_workspace = tmp_path / "runtime"
         project.mkdir()
         config_workspace.mkdir()
 
-        assert await manager.list_models(
+        result = await manager.list_models(
             tool="opencode",
             executable="opencode",
             directory=project,
             config_workspace=config_workspace,
-        ) == []
+        )
+        assert result == OpenCodeModelListResult(models=[])
 
-        client = _FakeAsyncClient.instances[0]
+        client = _FakeModelAsyncClient.instances[0]
         expected_params = {"directory": str(project)}
         expected_headers = {"x-opencode-directory": str(project)}
         assert client.gets[0] == {
@@ -278,8 +307,229 @@ def test_list_models_uses_project_directory_context(monkeypatch, tmp_path: Path)
             "path": "/config/providers",
             "params": expected_params,
             "headers": expected_headers,
+            "timeout": _SERVE_MODEL_FALLBACK_TIMEOUT_SECONDS,
         }
-        assert manager._ensure_started.await_args.kwargs["startup_cwd"] == config_workspace
+        assert manager._acquire_model_listing.await_args.kwargs["startup_cwd"] == config_workspace
+
+    asyncio.run(run())
+
+
+def test_fetch_models_uses_complete_provider_response_without_config_fallback(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    async def run() -> None:
+        _FakeModelAsyncClient.instances = []
+        _FakeModelAsyncClient.responses = {
+            "/provider": {
+                "all": [
+                    {
+                        "id": "anthropic",
+                        "models": {
+                            "claude-sonnet": {"name": "Claude Sonnet"},
+                        },
+                    },
+                    {
+                        "id": "openai",
+                        "models": {
+                            "gpt-5": {"name": "GPT-5"},
+                        },
+                    },
+                ],
+                "connected": ["anthropic", "openai"],
+            },
+        }
+        monkeypatch.setattr(
+            "backend.opencode.serve_client.httpx.AsyncClient",
+            _FakeModelAsyncClient,
+        )
+
+        manager = OpenCodeServeManager()
+        manager._port = 12345
+
+        models = await manager._fetch_models(tmp_path)
+
+        assert models == [
+            OpenCodeModelInfo(
+                id="anthropic/claude-sonnet",
+                provider_id="anthropic",
+                model_id="claude-sonnet",
+                name="Claude Sonnet",
+            ),
+            OpenCodeModelInfo(
+                id="openai/gpt-5",
+                provider_id="openai",
+                model_id="gpt-5",
+                name="GPT-5",
+            ),
+        ]
+        assert [request["path"] for request in _FakeModelAsyncClient.instances[0].gets] == [
+            "/provider",
+        ]
+
+    asyncio.run(run())
+
+
+def test_fetch_models_falls_back_when_provider_request_fails(monkeypatch) -> None:
+    async def run() -> None:
+        _FakeModelAsyncClient.instances = []
+        _FakeModelAsyncClient.responses = {
+            "/provider": RuntimeError("provider unavailable"),
+            "/config/providers": {
+                "providers": [
+                    {
+                        "id": "openai",
+                        "models": {"gpt-5": {"name": "GPT-5"}},
+                    },
+                ],
+            },
+        }
+        monkeypatch.setattr(
+            "backend.opencode.serve_client.httpx.AsyncClient",
+            _FakeModelAsyncClient,
+        )
+
+        manager = OpenCodeServeManager()
+        manager._port = 12345
+
+        models = await manager._fetch_models(None)
+
+        assert [model.id for model in models] == ["openai/gpt-5"]
+        assert [request["path"] for request in _FakeModelAsyncClient.instances[0].gets] == [
+            "/provider",
+            "/config/providers",
+        ]
+
+    asyncio.run(run())
+
+
+def test_fetch_models_falls_back_for_missing_connected_provider(monkeypatch) -> None:
+    async def run() -> None:
+        _FakeModelAsyncClient.instances = []
+        _FakeModelAsyncClient.responses = {
+            "/provider": {
+                "all": [
+                    {
+                        "id": "anthropic",
+                        "models": {"claude-sonnet": {"name": "Claude Sonnet"}},
+                    },
+                ],
+                "connected": ["anthropic", "openai"],
+            },
+            "/config/providers": {
+                "providers": [
+                    {
+                        "id": "openai",
+                        "models": {"gpt-5": {"name": "GPT-5"}},
+                    },
+                ],
+            },
+        }
+        monkeypatch.setattr(
+            "backend.opencode.serve_client.httpx.AsyncClient",
+            _FakeModelAsyncClient,
+        )
+
+        manager = OpenCodeServeManager()
+        manager._port = 12345
+
+        models = await manager._fetch_models(None)
+
+        assert [model.id for model in models] == [
+            "anthropic/claude-sonnet",
+            "openai/gpt-5",
+        ]
+        assert [request["path"] for request in _FakeModelAsyncClient.instances[0].gets] == [
+            "/provider",
+            "/config/providers",
+        ]
+
+    asyncio.run(run())
+
+
+def test_list_models_caches_success_and_refresh_bypasses_cache() -> None:
+    async def run() -> None:
+        first_models = [
+            OpenCodeModelInfo(
+                id="anthropic/claude-sonnet",
+                provider_id="anthropic",
+                model_id="claude-sonnet",
+            ),
+        ]
+        refreshed_models = [
+            OpenCodeModelInfo(
+                id="openai/gpt-5",
+                provider_id="openai",
+                model_id="gpt-5",
+            ),
+        ]
+        manager = OpenCodeServeManager()
+        manager._acquire_model_listing = AsyncMock(return_value=False)
+        manager._release_model_listing = AsyncMock()
+        manager._fetch_models = AsyncMock(side_effect=[first_models, refreshed_models])
+
+        first = await manager.list_models(tool="opencode", executable="opencode")
+        cached = await manager.list_models(tool="opencode", executable="opencode")
+        refreshed = await manager.list_models(
+            tool="opencode",
+            executable="opencode",
+            refresh=True,
+        )
+
+        assert first == OpenCodeModelListResult(models=first_models)
+        assert cached == OpenCodeModelListResult(models=first_models)
+        assert refreshed == OpenCodeModelListResult(models=refreshed_models)
+        assert manager._fetch_models.await_count == 2
+        assert manager._acquire_model_listing.await_count == 2
+        assert all(
+            "force_reload" not in acquisition.kwargs
+            for acquisition in manager._acquire_model_listing.await_args_list
+        )
+
+    asyncio.run(run())
+
+
+def test_list_models_coalesces_same_key_concurrent_requests() -> None:
+    async def run() -> None:
+        fetch_started = asyncio.Event()
+        allow_fetch = asyncio.Event()
+        fetch_count = 0
+        models = [
+            OpenCodeModelInfo(
+                id="openai/gpt-5",
+                provider_id="openai",
+                model_id="gpt-5",
+            ),
+        ]
+
+        async def fetch_models(directory: Path | None):
+            nonlocal fetch_count
+            fetch_count += 1
+            fetch_started.set()
+            await allow_fetch.wait()
+            return models
+
+        manager = OpenCodeServeManager()
+        manager._acquire_model_listing = AsyncMock(return_value=False)
+        manager._release_model_listing = AsyncMock()
+        manager._fetch_models = fetch_models
+
+        first_task = asyncio.create_task(
+            manager.list_models(tool="opencode", executable="opencode")
+        )
+        await fetch_started.wait()
+        second_task = asyncio.create_task(
+            manager.list_models(tool="opencode", executable="opencode")
+        )
+        await asyncio.sleep(0)
+        allow_fetch.set()
+        first, second = await asyncio.gather(first_task, second_task)
+
+        assert first == OpenCodeModelListResult(models=models)
+        assert second == OpenCodeModelListResult(models=models)
+        assert fetch_count == 1
+        assert manager._acquire_model_listing.await_count == 1
+        assert manager._release_model_listing.await_count == 1
 
     asyncio.run(run())
 
@@ -1158,7 +1408,7 @@ def test_start_locked_reports_listener_pid_when_reclaim_fails(monkeypatch, tmp_p
     asyncio.run(run())
 
 
-def test_dirty_config_does_not_restart_same_serve_process() -> None:
+def test_model_listing_reuses_compatible_idle_serve_despite_config_hash_change() -> None:
     async def run() -> None:
         class FakeProc:
             def poll(self):
@@ -1167,17 +1417,309 @@ def test_dirty_config_does_not_restart_same_serve_process() -> None:
         manager = OpenCodeServeManager()
         manager._proc = FakeProc()
         manager._port = 12345
-        manager._key = OpenCodeServeKey(tool="opencode", executable="opencode")
-        manager._dirty = True
+        manager._key = OpenCodeServeKey(
+            tool="opencode",
+            executable="opencode",
+            config_hash="old",
+        )
+        manager._wait_until_idle_locked = AsyncMock()
         manager._stop_locked = AsyncMock()
         manager._start_locked = AsyncMock()
 
-        await manager._ensure_started_locked(OpenCodeServeKey(tool="opencode", executable="opencode"))
+        deferred = await manager._acquire_model_listing(OpenCodeServeKey(
+            tool="opencode",
+            executable="opencode",
+            config_hash="new",
+        ))
 
+        assert deferred is False
+        manager._wait_until_idle_locked.assert_not_awaited()
         manager._stop_locked.assert_not_awaited()
         manager._start_locked.assert_not_awaited()
         assert manager._port == 12345
+        assert manager._active_model_listings == 1
+
+    asyncio.run(run())
+
+
+def test_dirty_idle_serve_restarts_before_model_listing() -> None:
+    async def run() -> None:
+        class FakeProc:
+            def poll(self):
+                return None
+
+        key = OpenCodeServeKey(tool="opencode", executable="opencode")
+        manager = OpenCodeServeManager()
+        manager._proc = FakeProc()
+        manager._port = 12345
+        manager._key = key
+        manager._dirty = True
+        manager._wait_until_idle_locked = AsyncMock()
+        manager._stop_locked = AsyncMock()
+        manager._start_locked = AsyncMock()
+
+        deferred = await manager._acquire_model_listing(key)
+
+        assert deferred is False
+        manager._wait_until_idle_locked.assert_awaited_once()
+        manager._stop_locked.assert_awaited_once()
+        manager._start_locked.assert_awaited_once_with(key, startup_cwd=None)
         assert manager._dirty is False
+        assert manager._active_model_listings == 1
+
+    asyncio.run(run())
+
+
+def test_mark_dirty_during_serve_start_preserves_pending_reload_generation() -> None:
+    async def run() -> None:
+        key = OpenCodeServeKey(tool="opencode", executable="opencode")
+        model = OpenCodeModelInfo(
+            id="openai/gpt-5",
+            provider_id="openai",
+            model_id="gpt-5",
+        )
+        start_entered = asyncio.Event()
+        allow_start_to_finish = asyncio.Event()
+
+        async def start_locked(
+            requested_key: OpenCodeServeKey,
+            startup_cwd: Path | None = None,
+        ) -> None:
+            assert requested_key == key
+            start_entered.set()
+            await allow_start_to_finish.wait()
+
+        manager = OpenCodeServeManager()
+        manager._model_cache[(key, "")] = (model,)
+        manager._wait_until_idle_locked = AsyncMock()
+        manager._stop_locked = AsyncMock()
+        manager._start_locked = AsyncMock(side_effect=start_locked)
+        cache_generation_before = manager._model_cache_generation
+
+        ensure_task = asyncio.create_task(manager._ensure_started_locked(key))
+        await start_entered.wait()
+        manager.mark_dirty()
+        allow_start_to_finish.set()
+        await ensure_task
+
+        assert manager._dirty is True
+        assert manager._serve_config_generation == 1
+        assert manager._model_cache_generation == cache_generation_before + 1
+        assert manager._model_cache == {}
+
+    asyncio.run(run())
+
+
+def test_dirty_active_session_defers_model_reload_without_waiting_or_restarting() -> None:
+    async def run() -> None:
+        class FakeProc:
+            def poll(self):
+                return None
+
+        models = [
+            OpenCodeModelInfo(
+                id="openai/gpt-5",
+                provider_id="openai",
+                model_id="gpt-5",
+            ),
+        ]
+        manager = OpenCodeServeManager()
+        manager._proc = FakeProc()
+        manager._port = 12345
+        manager._key = OpenCodeServeKey(
+            tool="opencode",
+            executable="opencode",
+            config_hash="old",
+        )
+        manager._active_sessions = 1
+        manager.mark_dirty()
+        manager._wait_until_idle_locked = AsyncMock()
+        manager._stop_locked = AsyncMock()
+        manager._start_locked = AsyncMock()
+        manager._fetch_models = AsyncMock(return_value=models)
+
+        result = await manager.list_models(
+            tool="opencode",
+            executable="opencode",
+            config_content='{"mcp": {}}',
+        )
+
+        assert result.models == models
+        assert "当前有 OpenCode serve 会话运行" in result.message
+        manager._wait_until_idle_locked.assert_not_awaited()
+        manager._stop_locked.assert_not_awaited()
+        manager._start_locked.assert_not_awaited()
+        assert manager._active_sessions == 1
+        assert manager._dirty is True
+
+    asyncio.run(run())
+
+
+def test_refresh_with_active_session_fetches_live_without_reload_or_deferred_message() -> None:
+    async def run() -> None:
+        class FakeProc:
+            def poll(self):
+                return None
+
+        cached_models = [
+            OpenCodeModelInfo(
+                id="anthropic/claude-sonnet",
+                provider_id="anthropic",
+                model_id="claude-sonnet",
+            ),
+        ]
+        live_models = [
+            OpenCodeModelInfo(
+                id="openai/gpt-5",
+                provider_id="openai",
+                model_id="gpt-5",
+            ),
+        ]
+        manager = OpenCodeServeManager()
+        manager._proc = FakeProc()
+        manager._port = 12345
+        manager._key = OpenCodeServeKey(tool="opencode", executable="opencode")
+        manager._active_sessions = 1
+        manager._wait_until_idle_locked = AsyncMock()
+        manager._stop_locked = AsyncMock()
+        manager._start_locked = AsyncMock()
+        manager._fetch_models = AsyncMock(side_effect=[cached_models, live_models])
+
+        initial = await manager.list_models(tool="opencode", executable="opencode")
+        refreshed = await manager.list_models(
+            tool="opencode",
+            executable="opencode",
+            refresh=True,
+        )
+
+        assert initial == OpenCodeModelListResult(models=cached_models)
+        assert refreshed == OpenCodeModelListResult(models=live_models)
+        assert manager._fetch_models.await_count == 2
+        manager._wait_until_idle_locked.assert_not_awaited()
+        manager._stop_locked.assert_not_awaited()
+        manager._start_locked.assert_not_awaited()
+        assert manager._active_sessions == 1
+        assert manager._dirty is False
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    "request_kwargs",
+    [
+        {"tool": "nga", "executable": "opencode"},
+        {"tool": "opencode", "executable": "nga"},
+        {
+            "tool": "opencode",
+            "executable": "opencode",
+            "env_overrides": {"HTTPS_PROXY": "http://127.0.0.1:3131"},
+        },
+    ],
+    ids=["tool", "executable", "environment"],
+)
+def test_incompatible_active_serve_defers_model_reload_without_waiting(
+    request_kwargs: dict,
+) -> None:
+    async def run() -> None:
+        class FakeProc:
+            def poll(self):
+                return None
+
+        models = [
+            OpenCodeModelInfo(
+                id="openai/gpt-5",
+                provider_id="openai",
+                model_id="gpt-5",
+            ),
+        ]
+        manager = OpenCodeServeManager()
+        manager._proc = FakeProc()
+        manager._port = 12345
+        manager._key = OpenCodeServeKey(tool="opencode", executable="opencode")
+        manager._active_sessions = 1
+        manager._wait_until_idle_locked = AsyncMock()
+        manager._stop_locked = AsyncMock()
+        manager._start_locked = AsyncMock()
+        manager._fetch_models = AsyncMock(return_value=models)
+
+        result = await manager.list_models(**request_kwargs)
+
+        assert result.models == models
+        assert "当前有 OpenCode serve 会话运行" in result.message
+        manager._wait_until_idle_locked.assert_not_awaited()
+        manager._stop_locked.assert_not_awaited()
+        manager._start_locked.assert_not_awaited()
+        assert manager._active_sessions == 1
+        assert manager._dirty is True
+
+    asyncio.run(run())
+
+
+def test_prompt_config_change_waits_for_model_listing_then_restarts_serve() -> None:
+    async def run() -> None:
+        class FakeProc:
+            def poll(self):
+                return None
+
+        picker_config = '{"mcp": {"picker": {}}}'
+        prompt_config = '{"mcp": {"prompt": {}}}'
+        picker_key = OpenCodeServeKey(
+            tool="opencode",
+            executable="opencode",
+            config_hash=hashlib.sha256(picker_config.encode("utf-8")).hexdigest(),
+        )
+        prompt_key = OpenCodeServeKey(
+            tool="opencode",
+            executable="opencode",
+            config_hash=hashlib.sha256(prompt_config.encode("utf-8")).hexdigest(),
+            config_content=prompt_config,
+        )
+        fetch_started = asyncio.Event()
+        allow_fetch_to_finish = asyncio.Event()
+        models = [
+            OpenCodeModelInfo(
+                id="openai/gpt-5",
+                provider_id="openai",
+                model_id="gpt-5",
+            ),
+        ]
+
+        async def fetch_models(directory: Path | None):
+            fetch_started.set()
+            await allow_fetch_to_finish.wait()
+            return models
+
+        manager = OpenCodeServeManager()
+        manager._proc = FakeProc()
+        manager._port = 12345
+        manager._key = picker_key
+        manager._stop_locked = AsyncMock()
+        manager._start_locked = AsyncMock()
+        manager._fetch_models = fetch_models
+
+        listing_task = asyncio.create_task(manager.list_models(
+            tool="opencode",
+            executable="opencode",
+            config_content=picker_config,
+        ))
+        await fetch_started.wait()
+        assert manager._active_model_listings == 1
+
+        session_task = asyncio.create_task(manager._acquire_session(prompt_key))
+        await asyncio.sleep(0)
+
+        assert session_task.done() is False
+        manager._stop_locked.assert_not_awaited()
+        manager._start_locked.assert_not_awaited()
+
+        allow_fetch_to_finish.set()
+        listing_result, _ = await asyncio.gather(listing_task, session_task)
+
+        assert listing_result == OpenCodeModelListResult(models=models)
+        assert manager._active_model_listings == 0
+        assert manager._active_sessions == 1
+        manager._stop_locked.assert_awaited_once()
+        manager._start_locked.assert_awaited_once_with(prompt_key, startup_cwd=None)
 
     asyncio.run(run())
 

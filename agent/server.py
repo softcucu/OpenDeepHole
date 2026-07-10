@@ -729,7 +729,7 @@ async def handle_opencode_models(request_id: str, refresh: bool = False) -> dict
             executable=executable,
             cli_config=_config.opencode,
         )
-        models = await get_serve_manager().list_models(
+        model_result = await get_serve_manager().list_models(
             tool=tool,
             executable=executable,
             config_content=serve_env.get("OPENCODE_CONFIG_CONTENT"),
@@ -740,6 +740,7 @@ async def handle_opencode_models(request_id: str, refresh: bool = False) -> dict
             "type": "opencode_models_result",
             "request_id": request_id,
             "ok": True,
+            "message": model_result.message,
             "models": [
                 {
                     "id": item.id,
@@ -748,7 +749,7 @@ async def handle_opencode_models(request_id: str, refresh: bool = False) -> dict
                     "model_id": item.model_id,
                     "name": item.name,
                 }
-                for item in models
+                for item in model_result.models
             ],
         }
     except Exception as exc:
