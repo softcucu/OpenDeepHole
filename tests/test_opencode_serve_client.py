@@ -13,13 +13,24 @@ from backend.opencode.serve_client import (
     OpenCodeModelListResult,
     OpenCodeServeKey,
     OpenCodeServeManager,
+    _ServeEventState,
     _SERVE_HEALTH_POLL_INTERVAL_SECONDS,
     _SERVE_MODEL_FALLBACK_TIMEOUT_SECONDS,
+    _flush_event_state_periodically,
+    _handle_serve_event,
     _serve_context_headers,
     _serve_port,
     _serve_startup_env_debug,
     _serve_startup_shell_debug,
 )
+
+
+@pytest.fixture(autouse=True)
+def _short_event_drain_for_tests(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "backend.opencode.serve_client._SERVE_EVENT_DRAIN_TIMEOUT_SECONDS",
+        0.05,
+    )
 
 
 class _FakeResponse:
@@ -374,6 +385,51 @@ def test_run_prompt_omits_tools_field_when_tool_discovery_fails(monkeypatch, tmp
     asyncio.run(run())
 
 
+def test_run_prompt_logs_discovered_mcp_tool_names(monkeypatch, tmp_path: Path) -> None:
+    async def run() -> None:
+        _FakeAsyncClient.instances = []
+        _FakeAsyncClient.event_lines = []
+        _FakeAsyncClient.tool_ids = [
+            "read",
+            "mcp__deephole-code__view_function_code",
+            "mcp__deephole-code__view_struct_code",
+        ]
+        monkeypatch.setattr(
+            "backend.opencode.serve_client.httpx.AsyncClient",
+            _FakeAsyncClient,
+        )
+        manager = OpenCodeServeManager()
+        manager._port = 12345
+        manager._acquire_session = AsyncMock()
+        project = tmp_path / "project"
+        project.mkdir()
+        output: list[str] = []
+
+        try:
+            await manager.run_prompt(
+                tool="opencode",
+                executable="opencode",
+                directory=project,
+                prompt="hello",
+                model="",
+                timeout=30,
+                on_line=output.append,
+            )
+        finally:
+            _FakeAsyncClient.tool_ids = [
+                "read",
+                "grep",
+                "mcp__deephole-code__view_function_code",
+            ]
+
+        logged = "\n".join(output)
+        assert "tools=3 mcp_tools=2" in logged
+        assert "mcp__deephole-code__view_function_code" in logged
+        assert "mcp__deephole-code__view_struct_code" in logged
+
+    asyncio.run(run())
+
+
 def test_list_models_uses_project_directory_context(monkeypatch, tmp_path: Path) -> None:
     async def run() -> None:
         _FakeModelAsyncClient.instances = []
@@ -695,7 +751,7 @@ def test_run_prompt_streams_session_events_without_tool_result_body(monkeypatch,
         assert "text_chars=18" in logged
         assert "secret source body" not in logged
         assert "ignore" not in logged
-        assert "done" not in logged
+        assert "[opencode serve llm text final] done" in logged
 
     asyncio.run(run())
 
@@ -729,7 +785,8 @@ def test_run_prompt_compacts_final_text_when_sse_has_no_text(monkeypatch, tmp_pa
         )
 
         assert lines == ["first line\nsecond line"]
-        assert "[opencode serve llm text] first line second line" in output
+        assert "[opencode serve llm text] first line" in output
+        assert "[opencode serve llm text] second line" in output
         assert all("\n" not in line for line in output)
 
     asyncio.run(run())
@@ -779,7 +836,7 @@ def test_run_prompt_streams_sync_session_events(monkeypatch, tmp_path: Path) -> 
         assert "src/win.c" in logged
         assert "text_chars=21" in logged
         assert "hidden sync tool body" not in logged
-        assert "done" not in logged
+        assert "[opencode serve llm text final] done" in logged
 
     asyncio.run(run())
 
@@ -815,8 +872,10 @@ def test_run_prompt_uses_ended_text_when_no_delta(monkeypatch, tmp_path: Path) -
             on_line=output.append,
         )
 
-        assert "[opencode serve llm text] ended only text" in output
-        assert "[opencode serve llm reasoning] ended reasoning text" in output
+        assert "[opencode serve llm text] ended only" in output
+        assert "[opencode serve llm text] text" in output
+        assert "[opencode serve llm reasoning] ended reasoning" in output
+        assert "[opencode serve llm reasoning] text" in output
         assert all("\n" not in line for line in output)
 
     asyncio.run(run())
@@ -894,6 +953,753 @@ def test_final_text_prints_when_event_stream_only_has_reasoning(monkeypatch, tmp
         assert lines == ["done"]
         assert "[opencode serve llm reasoning] only reasoning" in output
         assert "[opencode serve llm text] done" in output
+
+    asyncio.run(run())
+
+
+def test_run_prompt_reconciles_only_missing_sse_text_tail(monkeypatch, tmp_path: Path) -> None:
+    async def run() -> None:
+        _FakeAsyncClient.instances = []
+        _FakeAsyncClient.event_lines = [
+            'data: {"type":"session.next.text.delta","properties":{"sessionID":"session-1","delta":"prefix"}}',
+            "",
+        ]
+        monkeypatch.setattr(_FakeAsyncClient, "message_text", "prefix-tail")
+        monkeypatch.setattr(
+            "backend.opencode.serve_client.httpx.AsyncClient",
+            _FakeAsyncClient,
+        )
+
+        manager = OpenCodeServeManager()
+        manager._port = 12345
+        manager._acquire_session = AsyncMock()
+        project = tmp_path / "project"
+        project.mkdir()
+        output: list[str] = []
+
+        await manager.run_prompt(
+            tool="opencode",
+            executable="opencode",
+            directory=project,
+            prompt="hello",
+            model="",
+            timeout=30,
+            on_line=output.append,
+        )
+
+        chunks = [
+            line.removeprefix("[opencode serve llm text] ")
+            for line in output
+            if line.startswith("[opencode serve llm text] ")
+        ]
+        assert "".join(chunks) == "prefix-tail"
+        assert chunks.count("prefix") == 1
+
+    asyncio.run(run())
+
+
+def test_run_prompt_final_fallback_does_not_log_tool_output_body(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    class ToolBodyClient(_FakeAsyncClient):
+        event_lines = []
+        tool_ids = []
+
+        async def post(self, path: str, **kwargs):
+            self.posts.append({"path": path, **kwargs})
+            if path == "/session":
+                return _FakeResponse({"id": "session-1"})
+            if path == "/session/session-1/message":
+                await asyncio.sleep(0)
+                return _FakeResponse({
+                    "info": {
+                        "id": "message-ai",
+                        "sessionID": "session-1",
+                        "role": "assistant",
+                    },
+                    "parts": [
+                        {
+                            "id": "part-tool",
+                            "sessionID": "session-1",
+                            "messageID": "message-ai",
+                            "type": "tool",
+                            "callID": "call-1",
+                            "tool": "mcp__deephole-code__view_function_code",
+                            "content": [
+                                {"type": "text", "text": "secret nested tool content"},
+                            ],
+                            "state": {
+                                "status": "completed",
+                                "input": {"function_name": "target"},
+                                "output": "secret final tool body",
+                                "title": "secret tool title",
+                                "time": {"start": 1, "end": 2},
+                            },
+                        },
+                        {
+                            "id": "part-text",
+                            "sessionID": "session-1",
+                            "messageID": "message-ai",
+                            "type": "text",
+                            "text": "safe final answer",
+                        },
+                    ],
+                })
+            return _FakeResponse({})
+
+    async def run() -> None:
+        monkeypatch.setattr(
+            "backend.opencode.serve_client.httpx.AsyncClient",
+            ToolBodyClient,
+        )
+        manager = OpenCodeServeManager()
+        manager._port = 12345
+        manager._acquire_session = AsyncMock()
+        project = tmp_path / "project"
+        project.mkdir()
+        output: list[str] = []
+
+        lines = await manager.run_prompt(
+            tool="opencode",
+            executable="opencode",
+            directory=project,
+            prompt="hello",
+            model="",
+            timeout=30,
+            on_line=output.append,
+        )
+
+        logged = "\n".join(output)
+        assert "safe final answer" in logged
+        assert "secret final tool body" not in logged
+        assert "secret tool title" not in logged
+        assert "secret nested tool content" not in logged
+        assert "secret final tool body" in lines
+        assert "source=mcp" in logged
+        assert "serve tool_call" in logged
+        assert "serve tool_result" in logged
+        assert "output_chars=22" in logged
+
+    asyncio.run(run())
+
+
+def test_open_source_message_parts_stream_text_reasoning_and_ignore_user_prompt() -> None:
+    output: list[str] = []
+    state = _ServeEventState("opencode", "session-1", output.append)
+
+    _handle_serve_event({
+        "type": "message.updated",
+        "properties": {
+            "sessionID": "session-1",
+            "info": {"id": "message-user", "sessionID": "session-1", "role": "user"},
+        },
+    }, state)
+    _handle_serve_event({
+        "type": "message.part.updated",
+        "properties": {
+            "part": {
+                "id": "part-user",
+                "sessionID": "session-1",
+                "messageID": "message-user",
+                "type": "text",
+                "text": "secret prompt that must not be logged",
+            },
+            "time": 1,
+        },
+    }, state)
+    _handle_serve_event({
+        "type": "message.updated",
+        "properties": {
+            "sessionID": "session-1",
+            "info": {"id": "message-ai", "sessionID": "session-1", "role": "assistant"},
+        },
+    }, state)
+    _handle_serve_event({
+        "type": "message.part.updated",
+        "properties": {
+            "sessionID": "session-1",
+            "part": {
+                "id": "part-text",
+                "sessionID": "session-1",
+                "messageID": "message-ai",
+                "type": "text",
+                "text": "",
+            },
+            "time": 2,
+        },
+    }, state)
+    _handle_serve_event({
+        "type": "message.part.delta",
+        "properties": {
+            "sessionID": "session-1",
+            "messageID": "message-ai",
+            "partID": "part-text",
+            "field": "text",
+            "delta": "open source middle ",
+        },
+    }, state)
+    _handle_serve_event({
+        "type": "message.part.delta",
+        "properties": {
+            "sessionID": "session-1",
+            "messageID": "message-ai",
+            "partID": "part-text",
+            "field": "text",
+            "delta": "output\n",
+        },
+    }, state)
+    _handle_serve_event({
+        "type": "message.part.updated",
+        "properties": {
+            "sessionID": "session-1",
+            "part": {
+                "id": "part-text",
+                "sessionID": "session-1",
+                "messageID": "message-ai",
+                "type": "text",
+                "text": "open source middle output\n",
+            },
+            "time": 3,
+        },
+    }, state)
+    _handle_serve_event({
+        "type": "message.part.updated",
+        "properties": {
+            "sessionID": "session-1",
+            "part": {
+                "id": "part-reasoning",
+                "sessionID": "session-1",
+                "messageID": "message-ai",
+                "type": "reasoning",
+                "text": "",
+                "time": {"start": 1},
+            },
+            "time": 4,
+        },
+    }, state)
+    _handle_serve_event({
+        "type": "message.part.delta",
+        "properties": {
+            "sessionID": "session-1",
+            "messageID": "message-ai",
+            "partID": "part-reasoning",
+            "field": "text",
+            "delta": "reasoning step\n",
+        },
+    }, state)
+
+    logged = "\n".join(output)
+    assert output.count("[opencode serve llm text] open source middle output") == 1
+    assert "[opencode serve llm reasoning] reasoning step" in output
+    assert "secret prompt" not in logged
+
+
+def test_sync_message_part_snapshot_uses_nested_session_and_flushes_once() -> None:
+    output: list[str] = []
+    state = _ServeEventState("opencode", "session-1", output.append)
+
+    event = {
+        "type": "sync",
+        "name": "message.part.updated.1",
+        "data": {
+            "part": {
+                "id": "part-text",
+                "sessionID": "session-1",
+                "messageID": "message-ai",
+                "type": "text",
+                "text": "snapshot without newline",
+            },
+            "time": 1,
+        },
+    }
+    _handle_serve_event(event, state)
+    _handle_serve_event(event, state)
+
+    assert output == []
+    state.flush()
+    assert output == []
+    _handle_serve_event({
+        "type": "sync",
+        "name": "message.updated.1",
+        "data": {
+            "info": {
+                "id": "message-ai",
+                "sessionID": "session-1",
+                "role": "assistant",
+            },
+        },
+    }, state)
+    state.flush()
+    assert output == ["[opencode serve llm text] snapshot without newline"]
+
+
+def test_text_part_waits_for_message_role_before_printing() -> None:
+    output: list[str] = []
+    state = _ServeEventState("opencode", "session-1", output.append)
+
+    def part_event(part_id: str, message_id: str, text: str) -> dict:
+        return {
+            "type": "message.part.updated",
+            "properties": {
+                "part": {
+                    "id": part_id,
+                    "sessionID": "session-1",
+                    "messageID": message_id,
+                    "type": "text",
+                    "text": text,
+                },
+            },
+        }
+
+    _handle_serve_event(part_event("part-user", "message-user", "TOP SECRET PROMPT"), state)
+    state.flush()
+    assert output == []
+    _handle_serve_event({
+        "type": "message.updated",
+        "properties": {
+            "info": {
+                "id": "message-user",
+                "sessionID": "session-1",
+                "role": "user",
+            },
+        },
+    }, state)
+    state.flush()
+    assert output == []
+
+    _handle_serve_event(part_event("part-ai", "message-ai", "assistant answer"), state)
+    state.flush()
+    assert output == []
+    _handle_serve_event({
+        "type": "message.updated",
+        "properties": {
+            "info": {
+                "id": "message-ai",
+                "sessionID": "session-1",
+                "role": "assistant",
+            },
+        },
+    }, state)
+    state.flush()
+
+    assert output == ["[opencode serve llm text] assistant answer"]
+    assert "TOP SECRET PROMPT" not in "\n".join(output)
+
+
+def test_assistant_message_error_is_visible_and_deduplicated() -> None:
+    output: list[str] = []
+    state = _ServeEventState("opencode", "session-1", output.append)
+    error = {
+        "name": "APIError",
+        "data": {
+            "message": "provider failed",
+            "responseBody": "secret provider response body",
+        },
+    }
+
+    _handle_serve_event({
+        "id": "message-error-1",
+        "type": "message.updated",
+        "properties": {
+            "sessionID": "session-1",
+            "info": {
+                "id": "message-ai",
+                "sessionID": "session-1",
+                "role": "assistant",
+                "error": error,
+            },
+        },
+    }, state)
+    _handle_serve_event({
+        "id": "session-error-1",
+        "type": "session.error",
+        "properties": {"sessionID": "session-1", "error": error},
+    }, state)
+
+    error_lines = [line for line in output if "status=error" in line]
+    assert error_lines == [
+        "[opencode serve session] session=session-1 status=error "
+        "error=APIError: provider failed"
+    ]
+    assert "secret provider response body" not in "\n".join(output)
+    assert state.session_terminal is True
+
+
+def test_replayed_event_id_and_mixed_protocol_text_are_deduplicated() -> None:
+    output: list[str] = []
+    state = _ServeEventState("opencode", "session-1", output.append)
+    _handle_serve_event({
+        "type": "message.updated",
+        "properties": {
+            "sessionID": "session-1",
+            "info": {
+                "id": "message-ai",
+                "sessionID": "session-1",
+                "role": "assistant",
+            },
+        },
+    }, state)
+    delta_event = {
+        "id": "event-1",
+        "type": "message.part.delta",
+        "properties": {
+            "sessionID": "session-1",
+            "messageID": "message-ai",
+            "partID": "part-text",
+            "field": "text",
+            "delta": "same text\n",
+        },
+    }
+    _handle_serve_event(delta_event, state)
+    _handle_serve_event(delta_event, state)
+    _handle_serve_event({
+        "type": "session.next.text.delta",
+        "properties": {"sessionID": "session-1", "delta": "same text\n"},
+    }, state)
+    state.flush()
+
+    assert output == ["[opencode serve llm text] same text"]
+
+
+def test_incompatible_final_text_emits_complete_final_snapshot() -> None:
+    output: list[str] = []
+    state = _ServeEventState("opencode", "session-1", output.append)
+
+    state.append_next_delta("text", "prefix-")
+    state.append_next_delta("text", "suffix")
+    state.flush()
+    state.reconcile_text("text", "prefix-MISSING-suffix")
+    state.reconcile_text("text", "prefix-MISSING-suffix")
+
+    assert "[opencode serve llm text] prefix-suffix" in output
+    assert output.count(
+        "[opencode serve llm text final] prefix-MISSING-suffix"
+    ) == 1
+
+
+def test_legacy_step_events_use_event_identity_for_multiple_steps() -> None:
+    output: list[str] = []
+    state = _ServeEventState("opencode", "session-1", output.append)
+
+    for event_id in ("step-event-1", "step-event-2"):
+        event = {
+            "id": event_id,
+            "type": "session.next.step.started",
+            "properties": {
+                "sessionID": "session-1",
+                "agent": "build",
+                "model": {"id": "model", "providerID": "provider"},
+            },
+        }
+        _handle_serve_event(event, state)
+        _handle_serve_event(event, state)
+
+    step_lines = [line for line in output if "serve step" in line]
+    assert len(step_lines) == 2
+    assert "id=step-event-1" in step_lines[0]
+    assert "id=step-event-2" in step_lines[1]
+
+
+def test_open_source_tool_parts_and_key_statuses_are_visible_without_tool_body() -> None:
+    output: list[str] = []
+    state = _ServeEventState("opencode", "session-1", output.append)
+    running_part = {
+        "id": "part-tool",
+        "sessionID": "session-1",
+        "messageID": "message-ai",
+        "type": "tool",
+        "callID": "call-1",
+        "tool": "mcp__deephole-code__view_function_code",
+        "state": {
+            "status": "running",
+            "input": {"function_name": "target", "prompt": "secret tool prompt"},
+            "time": {"start": 100},
+        },
+    }
+    completed_part = {
+        **running_part,
+        "state": {
+            "status": "completed",
+            "input": {"function_name": "target"},
+            "output": "secret source body",
+            "title": "Read target",
+            "metadata": {},
+            "time": {"start": 100, "end": 140},
+        },
+    }
+    pending_part = {
+        **running_part,
+        "state": {
+            "status": "pending",
+            "input": {"function_name": "target", "prompt": "secret tool prompt"},
+            "raw": "pending call body",
+        },
+    }
+
+    for part in (pending_part, running_part, running_part, completed_part, completed_part):
+        _handle_serve_event({
+            "type": "message.part.updated",
+            "properties": {"sessionID": "session-1", "part": part, "time": 1},
+        }, state)
+    _handle_serve_event({
+        "type": "session.next.tool.called",
+        "properties": {
+            "sessionID": "session-1",
+            "callID": "call-1",
+            "tool": "mcp__deephole-code__view_function_code",
+            "input": {"function_name": "target"},
+        },
+    }, state)
+    _handle_serve_event({
+        "type": "session.next.tool.success",
+        "properties": {
+            "sessionID": "session-1",
+            "callID": "call-1",
+            "content": [{"type": "text", "text": "legacy duplicate body"}],
+        },
+    }, state)
+    for status in ({"type": "busy"}, {"type": "busy"}, {"type": "retry", "attempt": 2, "message": "rate limited", "next": 10}, {"type": "idle"}):
+        _handle_serve_event({
+            "type": "session.status",
+            "properties": {"sessionID": "session-1", "status": status},
+        }, state)
+    _handle_serve_event({
+        "type": "message.part.updated",
+        "properties": {
+            "sessionID": "session-1",
+            "part": {
+                "id": "step-start",
+                "sessionID": "session-1",
+                "messageID": "message-ai",
+                "type": "step-start",
+            },
+            "time": 2,
+        },
+    }, state)
+    _handle_serve_event({
+        "type": "message.part.updated",
+        "properties": {
+            "sessionID": "session-1",
+            "part": {
+                "id": "step-finish",
+                "sessionID": "session-1",
+                "messageID": "message-ai",
+                "type": "step-finish",
+                "reason": "stop",
+                "cost": 0.1,
+                "tokens": {"input": 1, "output": 2, "reasoning": 0, "cache": {"read": 0, "write": 0}},
+            },
+            "time": 3,
+        },
+    }, state)
+    _handle_serve_event({
+        "type": "session.error",
+        "properties": {"sessionID": "session-1", "error": {"message": "provider failed"}},
+    }, state)
+
+    logged = "\n".join(output)
+    assert logged.count("serve tool_call") == 1
+    assert logged.count("serve tool_result") == 1
+    assert "source=mcp" in logged
+    assert "output_chars=18" in logged
+    assert "duration_ms=40" in logged
+    assert "secret source body" not in logged
+    assert "pending call body" not in logged
+    assert "secret tool prompt" not in logged
+    assert '"prompt":"<redacted>"' in logged
+    assert logged.count("status=busy") == 1
+    assert "status=retry attempt=2 next=10 message=rate limited" in logged
+    assert "status=idle" in logged
+    assert "serve step" in logged
+    assert "status=error error=provider failed" in logged
+
+
+def test_no_newline_delta_is_flushed_periodically(monkeypatch) -> None:
+    async def run() -> None:
+        monkeypatch.setattr(
+            "backend.opencode.serve_client._SERVE_EVENT_FLUSH_INTERVAL_SECONDS",
+            0.01,
+        )
+        output: list[str] = []
+        state = _ServeEventState("opencode", "session-1", output.append)
+        _handle_serve_event({
+            "type": "message.updated",
+            "properties": {
+                "sessionID": "session-1",
+                "info": {
+                    "id": "message-ai",
+                    "sessionID": "session-1",
+                    "role": "assistant",
+                },
+            },
+        }, state)
+        _handle_serve_event({
+            "type": "message.part.delta",
+            "properties": {
+                "sessionID": "session-1",
+                "messageID": "message-ai",
+                "partID": "part-text",
+                "field": "text",
+                "delta": "visible before task completion",
+            },
+        }, state)
+        task = asyncio.create_task(_flush_event_state_periodically(state))
+        try:
+            await asyncio.sleep(0.03)
+        finally:
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+        assert output == ["[opencode serve llm text] visible before task completion"]
+        assert state.emitted_response_text is True
+
+    asyncio.run(run())
+
+
+def test_event_stream_reconnects_and_reports_connection_states(monkeypatch) -> None:
+    async def run() -> None:
+        blocker = asyncio.Event()
+
+        class Response:
+            def __init__(self, *, block: bool) -> None:
+                self.block = block
+
+            def raise_for_status(self) -> None:
+                return None
+
+            async def aiter_lines(self):
+                if self.block:
+                    await blocker.wait()
+                if False:
+                    yield ""
+
+        class StreamContext:
+            def __init__(self, response: Response) -> None:
+                self.response = response
+
+            async def __aenter__(self):
+                return self.response
+
+            async def __aexit__(self, exc_type, exc, tb) -> None:
+                return None
+
+        class Client:
+            stream_calls = 0
+
+            def __init__(self, *args, **kwargs) -> None:
+                return None
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc, tb) -> None:
+                return None
+
+            def stream(self, *args, **kwargs):
+                type(self).stream_calls += 1
+                return StreamContext(Response(block=type(self).stream_calls > 1))
+
+        monkeypatch.setattr("backend.opencode.serve_client.httpx.AsyncClient", Client)
+        monkeypatch.setattr(
+            "backend.opencode.serve_client._SERVE_EVENT_RECONNECT_DELAY_SECONDS",
+            0.01,
+        )
+        manager = OpenCodeServeManager()
+        manager._port = 12345
+        output: list[str] = []
+        state = _ServeEventState("opencode", "session-1", output.append)
+        started = asyncio.Event()
+        task = asyncio.create_task(manager._stream_session_events({}, {}, state, started=started))
+        try:
+            await asyncio.wait_for(started.wait(), timeout=1)
+            for _ in range(100):
+                if Client.stream_calls >= 2:
+                    break
+                await asyncio.sleep(0.01)
+            assert Client.stream_calls >= 2
+        finally:
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+        logged = "\n".join(output)
+        assert "status=connected" in logged
+        assert "status=disconnected" in logged
+        assert "status=reconnected" in logged
+
+    asyncio.run(run())
+
+
+def test_event_stream_does_not_signal_started_until_a_connection_succeeds(
+    monkeypatch,
+) -> None:
+    async def run() -> None:
+        blocker = asyncio.Event()
+
+        class Response:
+            def raise_for_status(self) -> None:
+                return None
+
+            async def aiter_lines(self):
+                await blocker.wait()
+                if False:
+                    yield ""
+
+        class StreamContext:
+            def __init__(self, *, fail: bool) -> None:
+                self.fail = fail
+
+            async def __aenter__(self):
+                if self.fail:
+                    raise httpx.ConnectError("first connection failed")
+                return Response()
+
+            async def __aexit__(self, exc_type, exc, tb) -> None:
+                return None
+
+        class Client:
+            stream_calls = 0
+
+            def __init__(self, *args, **kwargs) -> None:
+                return None
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc, tb) -> None:
+                return None
+
+            def stream(self, *args, **kwargs):
+                type(self).stream_calls += 1
+                return StreamContext(fail=type(self).stream_calls == 1)
+
+        monkeypatch.setattr("backend.opencode.serve_client.httpx.AsyncClient", Client)
+        monkeypatch.setattr(
+            "backend.opencode.serve_client._SERVE_EVENT_RECONNECT_DELAY_SECONDS",
+            0.02,
+        )
+        manager = OpenCodeServeManager()
+        manager._port = 12345
+        state = _ServeEventState("opencode", "session-1", lambda _line: None)
+        started = asyncio.Event()
+        task = asyncio.create_task(
+            manager._stream_session_events({}, {}, state, started=started)
+        )
+        try:
+            for _ in range(100):
+                if Client.stream_calls >= 1:
+                    break
+                await asyncio.sleep(0.001)
+            assert Client.stream_calls == 1
+            assert started.is_set() is False
+            await asyncio.wait_for(started.wait(), timeout=1)
+            assert Client.stream_calls >= 2
+        finally:
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
 
     asyncio.run(run())
 

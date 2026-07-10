@@ -18,6 +18,7 @@ from backend.models import (
     ThreatAuditTask,
     Vulnerability,
 )
+from backend.opencode.output_format import with_local_timestamp
 
 
 COMPLETED_THREAT_AUDIT_STATUS = "completed"
@@ -279,7 +280,10 @@ async def run_threat_audit_tasks(
                     workspace,
                     running,
                     scan_id,
-                    on_output=lambda line: print(f"  [threat-audit] {line}", flush=True),
+                    on_output=lambda line: print(
+                        with_local_timestamp(line, prefix="[threat-audit]"),
+                        flush=True,
+                    ),
                     cancel_event=cancel_event,
                     timeout=config.opencode.timeout,
                     project_dir=project_path,

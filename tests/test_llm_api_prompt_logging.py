@@ -1,3 +1,4 @@
+import re
 from pathlib import Path
 
 from backend.models import Candidate
@@ -155,6 +156,10 @@ def test_api_text_output_compacts_multiline_llm_text() -> None:
 
     assert len(outputs) == 1
     assert "\n" not in outputs[0]
+    assert re.match(
+        r"^\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\] \[model=test-model\]",
+        outputs[0],
+    )
     assert "[model=test-model] [API] LLM 文本输出: first line second line" in outputs[0]
 
 

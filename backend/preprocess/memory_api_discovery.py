@@ -20,6 +20,7 @@ from typing import Any, Callable
 from backend.config import get_config
 from backend.logger import get_logger
 from backend.opencode.model_pool import configured_global_concurrency
+from backend.opencode.output_format import with_local_timestamp
 
 logger = get_logger(__name__)
 
@@ -189,7 +190,12 @@ async def ensure_memory_api_artifact(
     intermediate_dir = Path(scan_dir) / "memory_api_analysis"
     intermediate_dir.mkdir(parents=True, exist_ok=True)
 
-    on_line = (lambda line: print(f"  [memory_api] {line}", flush=True)) if emit else None
+    on_line = (
+        lambda line: print(
+            with_local_timestamp(line, prefix="[memory_api]"),
+            flush=True,
+        )
+    ) if emit else None
 
     batches = _chunked(candidates, opts.batch_size)
     batch_paths: list[Path] = []

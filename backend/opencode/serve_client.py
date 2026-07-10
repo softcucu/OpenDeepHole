@@ -32,6 +32,10 @@ _SERVE_STOP_TIMEOUT_SECONDS = 5.0
 _SERVE_REQUEST_TIMEOUT_SECONDS = 20.0
 _SERVE_MODEL_FALLBACK_TIMEOUT_SECONDS = 5.0
 _SERVE_HEALTH_POLL_INTERVAL_SECONDS = 1.0
+_SERVE_EVENT_FLUSH_INTERVAL_SECONDS = 1.0
+_SERVE_EVENT_CONNECT_TIMEOUT_SECONDS = 2.0
+_SERVE_EVENT_RECONNECT_DELAY_SECONDS = 1.0
+_SERVE_EVENT_DRAIN_TIMEOUT_SECONDS = 1.0
 _SERVE_EVENT_PREVIEW_LIMIT = 500
 _SERVE_STARTUP_LOG_TAIL_LIMIT = 4000
 _DEFAULT_SERVE_PORT = 4096
@@ -41,6 +45,11 @@ _SERVE_MARKER_OWNER = "opendeephole-agent-serve-v1"
 _SERVE_BOOTSTRAP_CWD_PREFIX = "opendeephole-opencode-serve-bootstrap"
 _SENSITIVE_CONFIG_KEY_RE = re.compile(
     r"(api[_-]?key|apikey|token|secret|password|authorization|cookie|credential|headers?)",
+    re.IGNORECASE,
+)
+_SENSITIVE_EVENT_KEY_RE = re.compile(
+    r"(api[_-]?key|apikey|token|secret|password|authorization|cookie|credential|"
+    r"prompt|content|body)",
     re.IGNORECASE,
 )
 _SERVE_DEBUG_ENV_NAMES = (
@@ -760,6 +769,34 @@ def _extract_text(value: Any) -> list[str]:
     return lines
 
 
+def _extract_response_text(value: Any) -> list[str]:
+    """Extract assistant text parts without exposing tool state/output bodies."""
+    lines: list[str] = []
+    if isinstance(value, str):
+        text = value.strip()
+        if text:
+            lines.append(text)
+        return lines
+    if isinstance(value, list):
+        for item in value:
+            lines.extend(_extract_response_text(item))
+        return lines
+    if not isinstance(value, dict):
+        return lines
+    part_type = value.get("type")
+    if part_type == "text" and isinstance(value.get("text"), str):
+        text = value["text"].strip()
+        if text:
+            lines.append(text)
+        return lines
+    if part_type:
+        return lines
+    for key in ("parts", "content"):
+        if key in value:
+            lines.extend(_extract_response_text(value[key]))
+    return lines
+
+
 def _response_model(value: Any) -> str:
     if not isinstance(value, dict):
         return ""
@@ -787,7 +824,28 @@ def _one_line_preview(value: object, limit: int = _SERVE_EVENT_PREVIEW_LIMIT) ->
     return f"{text[:limit]}...[truncated {len(text) - limit} chars]"
 
 
+def _summarize_event_value(value: object, *, max_string: int = 180) -> object:
+    if isinstance(value, dict):
+        return {
+            str(key): (
+                "<redacted>"
+                if _SENSITIVE_EVENT_KEY_RE.search(str(key))
+                else _summarize_event_value(item, max_string=max_string)
+            )
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [_summarize_event_value(item, max_string=max_string) for item in value]
+    if isinstance(value, str):
+        preview = _one_line_preview(value, max_string)
+        if len(value) > max_string or "\n" in value:
+            return f"<chars={len(value)} preview={preview}>"
+        return preview
+    return value
+
+
 def _json_one_line(value: object, limit: int = _SERVE_EVENT_PREVIEW_LIMIT) -> str:
+    value = _summarize_event_value(value)
     try:
         text = json.dumps(value, ensure_ascii=False, separators=(",", ":"), default=str)
     except Exception:
@@ -808,6 +866,64 @@ def _tool_content_summary(value: object) -> str:
         elif item.get("type") == "file":
             files += 1
     return f"content_items={len(value)} text_chars={text_chars} files={files}"
+
+
+def _tool_state_summary(value: object) -> str:
+    if not isinstance(value, dict):
+        return "output_chars=0 attachments=0"
+    output = str(value.get("output") or "")
+    attachments = value.get("attachments")
+    attachment_count = len(attachments) if isinstance(attachments, list) else 0
+    parts = [f"output_chars={len(output)}", f"attachments={attachment_count}"]
+    timing = value.get("time")
+    if isinstance(timing, dict):
+        start = timing.get("start")
+        end = timing.get("end")
+        if isinstance(start, (int, float)) and isinstance(end, (int, float)) and end >= start:
+            parts.append(f"duration_ms={round(end - start)}")
+    return " ".join(parts)
+
+
+def _error_summary(value: object) -> str:
+    if isinstance(value, dict):
+        message = _one_line_preview(value.get("message") or "")
+        if message:
+            return message
+        name = _one_line_preview(value.get("name") or "")
+        data = value.get("data")
+        if isinstance(data, dict):
+            nested_message = _one_line_preview(data.get("message") or "")
+            if nested_message:
+                return f"{name}: {nested_message}" if name else nested_message
+        nested_error = value.get("error")
+        if nested_error:
+            nested_summary = _error_summary(nested_error)
+            if nested_summary:
+                return nested_summary
+        if name:
+            return name
+        return _json_one_line(value)
+    return _one_line_preview(value)
+
+
+def _tool_source(tool_name: object) -> str:
+    normalized = str(tool_name or "").lower().replace("_", "-")
+    if "deephole-code" in normalized or normalized.startswith("mcp--"):
+        return "mcp"
+    return "builtin"
+
+
+def _event_session_id(props: dict[str, Any]) -> str:
+    session_id = props.get("sessionID")
+    if isinstance(session_id, str) and session_id:
+        return session_id
+    for key in ("part", "info"):
+        nested = props.get(key)
+        if isinstance(nested, dict):
+            nested_session_id = nested.get("sessionID")
+            if isinstance(nested_session_id, str) and nested_session_id:
+                return nested_session_id
+    return ""
 
 
 def _tool_ids_from_response(value: object) -> list[str]:
@@ -867,12 +983,341 @@ class _ServeEventState:
         self.seen_next_reasoning_event = False
         self.text = _BufferedEventEmitter(on_line, f"[{tool} serve llm text]")
         self.reasoning = _BufferedEventEmitter(on_line, f"[{tool} serve llm reasoning]")
+        self.final_text = _BufferedEventEmitter(on_line, f"[{tool} serve llm text final]")
+        self.final_reasoning = _BufferedEventEmitter(
+            on_line,
+            f"[{tool} serve llm reasoning final]",
+        )
+        self.message_roles: dict[str, str] = {}
+        self.part_types: dict[str, str] = {}
+        self.part_message_ids: dict[str, str] = {}
+        self.part_text: dict[str, str] = {}
+        self.part_emitted_text: dict[str, str] = {}
+        self.tool_calls_emitted: set[str] = set()
+        self.tool_results_emitted: set[tuple[str, str]] = set()
+        self.step_events_emitted: set[tuple[str, str]] = set()
+        self.session_errors_emitted: set[str] = set()
+        self.event_ids_seen: set[str] = set()
+        self.last_session_status = ""
+        self.observed_response_text = ""
+        self.observed_reasoning_text = ""
+        self.next_replay_remaining = {"text": "", "reasoning": ""}
+        self.final_snapshots_emitted: set[tuple[str, str]] = set()
+        self.session_terminal = False
 
     def flush(self) -> None:
         text_flushed = self.text.flush()
         self.emitted_response_text = text_flushed or self.emitted_response_text
         self.emitted_text = text_flushed or self.emitted_text
         self.emitted_text = self.reasoning.flush() or self.emitted_text
+
+    def record_message(self, info: object) -> None:
+        if not isinstance(info, dict):
+            return
+        message_id = str(info.get("id") or "")
+        role = str(info.get("role") or "")
+        if message_id and role:
+            self.message_roles[message_id] = role
+        if role == "assistant":
+            for part_id, part_message_id in list(self.part_message_ids.items()):
+                if part_message_id == message_id:
+                    self._emit_part_text(part_id)
+            if info.get("error") is not None:
+                self.emit_session_error(info.get("error"))
+
+    def mark_event_seen(self, event: object) -> bool:
+        if not isinstance(event, dict):
+            return False
+        event_id = str(event.get("id") or "")
+        if not event_id:
+            return False
+        if event_id in self.event_ids_seen:
+            return True
+        self.event_ids_seen.add(event_id)
+        return False
+
+    def _append_text(self, kind: str, value: object) -> None:
+        text = str(value or "")
+        if not text:
+            return
+        if kind == "reasoning":
+            self.observed_reasoning_text += text
+            emitted = self.reasoning.append(text)
+            self.emitted_text = emitted or self.emitted_text
+            return
+        self.observed_response_text += text
+        emitted = self.text.append(text)
+        self.emitted_response_text = emitted or self.emitted_response_text
+        self.emitted_text = emitted or self.emitted_text
+
+    def _emit_part_text(self, part_id: str) -> None:
+        kind = self.part_types.get(part_id, "")
+        if kind not in {"text", "reasoning"}:
+            return
+        message_id = self.part_message_ids.get(part_id, "")
+        role = self.message_roles.get(message_id, "") if message_id else "assistant"
+        if role == "user":
+            return
+        if role != "assistant" and kind != "reasoning":
+            return
+        value = self.part_text.get(part_id, "")
+        emitted_value = self.part_emitted_text.get(part_id, "")
+        if kind == "text" and self.seen_next_text_event:
+            self.part_emitted_text[part_id] = value
+            return
+        if kind == "reasoning" and self.seen_next_reasoning_event:
+            self.part_emitted_text[part_id] = value
+            return
+        if not value or value == emitted_value:
+            return
+        if value.startswith(emitted_value):
+            delta = value[len(emitted_value):]
+        elif emitted_value.startswith(value):
+            return
+        else:
+            delta = value
+        self.part_emitted_text[part_id] = value
+        self._append_text(kind, delta)
+
+    def update_part_text(self, part: dict[str, Any]) -> None:
+        kind = str(part.get("type") or "")
+        if kind not in {"text", "reasoning"}:
+            return
+        part_id = str(part.get("id") or "")
+        message_id = str(part.get("messageID") or "")
+        if part_id:
+            self.part_types[part_id] = kind
+            self.part_message_ids[part_id] = message_id
+        value = str(part.get("text") or "")
+        previous = self.part_text.get(part_id, "") if part_id else ""
+        if not value or value == previous:
+            return
+        if previous.startswith(value):
+            return
+        if part_id:
+            self.part_text[part_id] = value
+            self._emit_part_text(part_id)
+        elif not message_id or self.message_roles.get(message_id) == "assistant" or kind == "reasoning":
+            self._append_text(kind, value)
+
+    def append_part_delta(self, props: dict[str, Any]) -> None:
+        part_id = str(props.get("partID") or "")
+        field = str(props.get("field") or "")
+        kind = self.part_types.get(part_id, "")
+        if kind not in {"text", "reasoning"}:
+            if field == "reasoning":
+                kind = "reasoning"
+            elif field in {"text", "content"}:
+                kind = "text"
+            else:
+                return
+            if part_id:
+                self.part_types[part_id] = kind
+        message_id = str(props.get("messageID") or self.part_message_ids.get(part_id, ""))
+        if part_id and message_id:
+            self.part_message_ids[part_id] = message_id
+        delta = str(props.get("delta") or "")
+        if not delta:
+            return
+        if part_id:
+            self.part_text[part_id] = self.part_text.get(part_id, "") + delta
+            self._emit_part_text(part_id)
+        elif not message_id or self.message_roles.get(message_id) == "assistant" or field in {"content", "reasoning"}:
+            self._append_text(kind, delta)
+
+    def append_next_delta(self, kind: str, value: object) -> None:
+        delta = str(value or "")
+        if not delta:
+            return
+        seen_attr = "seen_next_reasoning_event" if kind == "reasoning" else "seen_next_text_event"
+        if not getattr(self, seen_attr):
+            setattr(self, seen_attr, True)
+            observed = self.observed_reasoning_text if kind == "reasoning" else self.observed_response_text
+            self.next_replay_remaining[kind] = observed
+        replay = self.next_replay_remaining[kind]
+        if replay:
+            if replay.startswith(delta):
+                self.next_replay_remaining[kind] = replay[len(delta):]
+                return
+            if delta.startswith(replay):
+                delta = delta[len(replay):]
+            self.next_replay_remaining[kind] = ""
+        self._append_text(kind, delta)
+
+    def reconcile_text(self, kind: str, value: object) -> None:
+        final_text = str(value or "")
+        if not final_text:
+            return
+        observed = self.observed_reasoning_text if kind == "reasoning" else self.observed_response_text
+        if not observed:
+            self._append_text(kind, final_text)
+            return
+        if final_text.strip() == observed.strip() or final_text in observed:
+            return
+        if final_text.startswith(observed):
+            self._append_text(kind, final_text[len(observed):])
+            return
+        snapshot_key = (kind, final_text)
+        if snapshot_key in self.final_snapshots_emitted:
+            return
+        self.final_snapshots_emitted.add(snapshot_key)
+        emitter = self.final_reasoning if kind == "reasoning" else self.final_text
+        emitted = emitter.append(final_text)
+        emitted = emitter.flush() or emitted
+        if kind == "reasoning":
+            self.observed_reasoning_text = final_text
+        else:
+            self.observed_response_text = final_text
+            self.emitted_response_text = emitted or self.emitted_response_text
+        self.emitted_text = emitted or self.emitted_text
+
+    def emit_tool_call(
+        self,
+        *,
+        call_id: object,
+        tool_name: object,
+        input_value: object,
+        part_id: object = "",
+    ) -> None:
+        call = str(call_id or part_id or tool_name or "unknown")
+        if call in self.tool_calls_emitted:
+            return
+        self.tool_calls_emitted.add(call)
+        name = str(tool_name or "")
+        self.on_line(
+            f"[{self.tool} serve tool_call] session={self.session_id} source={_tool_source(name)} "
+            f"name={name} id={call} input={_json_one_line(input_value or {})}"
+        )
+
+    def emit_tool_result(
+        self,
+        *,
+        call_id: object,
+        status: str,
+        summary: str,
+        tool_name: object = "",
+        input_value: object = None,
+        part_id: object = "",
+    ) -> None:
+        call = str(call_id or part_id or tool_name or "unknown")
+        normalized_status = "success" if status in {"success", "completed"} else "failed"
+        self.emit_tool_call(
+            call_id=call,
+            tool_name=tool_name,
+            input_value=input_value,
+            part_id=part_id,
+        )
+        key = (call, normalized_status)
+        if key in self.tool_results_emitted:
+            return
+        self.tool_results_emitted.add(key)
+        suffix = f" {summary}" if summary else ""
+        self.on_line(
+            f"[{self.tool} serve tool_result] session={self.session_id} "
+            f"status={normalized_status} id={call}{suffix}"
+        )
+
+    def handle_tool_part(self, part: dict[str, Any]) -> None:
+        state = part.get("state")
+        if not isinstance(state, dict):
+            return
+        status = str(state.get("status") or "")
+        common = {
+            "call_id": part.get("callID"),
+            "tool_name": part.get("tool"),
+            "input_value": state.get("input") or {},
+            "part_id": part.get("id"),
+        }
+        if status in {"pending", "running"}:
+            self.emit_tool_call(**common)
+        elif status == "completed":
+            self.emit_tool_result(status="success", summary=_tool_state_summary(state), **common)
+        elif status == "error":
+            error = _error_summary(state.get("error") or "")
+            self.emit_tool_result(status="failed", summary=f"error={error}", **common)
+
+    def emit_session_status(self, status: object) -> None:
+        if isinstance(status, dict):
+            status_type = str(status.get("type") or "")
+            if status_type == "retry":
+                signature = "|".join(
+                    str(status.get(key) or "")
+                    for key in ("type", "attempt", "message", "next")
+                )
+            else:
+                signature = status_type
+        else:
+            status_type = str(status or "")
+            signature = status_type
+            status = {}
+        if status_type in {"idle", "error"}:
+            self.session_terminal = True
+        if not status_type or signature == self.last_session_status:
+            return
+        self.last_session_status = signature
+        details: list[str] = []
+        if status_type == "retry" and isinstance(status, dict):
+            if status.get("attempt") is not None:
+                details.append(f"attempt={status.get('attempt')}")
+            if status.get("next") is not None:
+                details.append(f"next={status.get('next')}")
+            message = _one_line_preview(status.get("message") or "")
+            if message:
+                details.append(f"message={message}")
+        suffix = f" {' '.join(details)}" if details else ""
+        self.on_line(
+            f"[{self.tool} serve session] session={self.session_id} status={status_type}{suffix}"
+        )
+
+    def emit_session_error(self, error: object) -> None:
+        self.session_terminal = True
+        summary = _error_summary(error) or "unknown"
+        if summary in self.session_errors_emitted:
+            return
+        self.session_errors_emitted.add(summary)
+        self.on_line(
+            f"[{self.tool} serve session] session={self.session_id} status=error "
+            f"error={summary}"
+        )
+
+    def emit_step(self, status: str, props: dict[str, Any], *, part_id: object = "") -> None:
+        step_id = str(part_id or props.get("id") or props.get("stepID") or "step")
+        key = (step_id, status)
+        if key in self.step_events_emitted:
+            return
+        self.step_events_emitted.add(key)
+        details: list[str] = []
+        reason = _one_line_preview(props.get("reason") or "")
+        if reason:
+            details.append(f"reason={reason}")
+        if props.get("cost") is not None:
+            details.append(f"cost={props.get('cost')}")
+        error = _error_summary(props.get("error") or "")
+        if error:
+            details.append(f"error={error}")
+        suffix = f" {' '.join(details)}" if details else ""
+        self.on_line(
+            f"[{self.tool} serve step] session={self.session_id} status={status} id={step_id}{suffix}"
+        )
+
+    def handle_part(self, part: object) -> None:
+        if not isinstance(part, dict):
+            return
+        part_type = str(part.get("type") or "")
+        if part_type in {"text", "reasoning"}:
+            self.update_part_text(part)
+        elif part_type == "tool":
+            self.handle_tool_part(part)
+        elif part_type == "step-start":
+            self.emit_step("started", part, part_id=part.get("id"))
+        elif part_type == "step-finish":
+            self.emit_step("finished", part, part_id=part.get("id"))
+        elif part_type == "retry":
+            self.emit_session_status({
+                "type": "retry",
+                "attempt": part.get("attempt"),
+                "message": _error_summary(part.get("error") or ""),
+            })
 
 
 def _event_properties(event: object) -> tuple[str, dict[str, Any]]:
@@ -892,53 +1337,70 @@ def _event_properties(event: object) -> tuple[str, dict[str, Any]]:
 
 def _handle_serve_event(event: object, state: _ServeEventState) -> None:
     event_type, props = _event_properties(event)
-    if props.get("sessionID") != state.session_id:
+    if _event_session_id(props) != state.session_id:
+        return
+    if state.mark_event_seen(event):
         return
 
-    if event_type == "session.next.text.delta":
-        state.seen_next_text_event = True
-        emitted = state.text.append(str(props.get("delta") or ""))
-        state.emitted_response_text = emitted or state.emitted_response_text
-        state.emitted_text = emitted or state.emitted_text
+    if event_type == "message.updated":
+        state.record_message(props.get("info"))
+    elif event_type == "message.part.updated":
+        state.handle_part(props.get("part"))
+    elif event_type == "message.part.delta":
+        state.append_part_delta(props)
+    elif event_type == "session.next.text.delta":
+        state.append_next_delta("text", props.get("delta") or "")
     elif event_type == "session.next.text.ended":
         state.seen_next_text_event = True
-        flushed = state.text.flush()
-        if not flushed:
-            flushed = state.text.emit(props.get("text") or "")
-        state.emitted_response_text = flushed or state.emitted_response_text
-        state.emitted_text = flushed or state.emitted_text
+        state.flush()
+        state.reconcile_text("text", props.get("text") or "")
+        state.flush()
     elif event_type == "session.next.reasoning.delta":
-        state.seen_next_reasoning_event = True
-        state.emitted_text = state.reasoning.append(str(props.get("delta") or "")) or state.emitted_text
+        state.append_next_delta("reasoning", props.get("delta") or "")
     elif event_type == "session.next.reasoning.ended":
         state.seen_next_reasoning_event = True
-        flushed = state.reasoning.flush()
-        if not flushed:
-            flushed = state.reasoning.emit(props.get("text") or "")
-        state.emitted_text = flushed or state.emitted_text
+        state.flush()
+        state.reconcile_text("reasoning", props.get("text") or "")
+        state.flush()
     elif event_type == "session.next.tool.called":
-        state.on_line(
-            f"[{state.tool} serve tool_call] session={state.session_id} name={props.get('tool') or ''} "
-            f"id={props.get('callID') or ''} input={_json_one_line(props.get('input') or {})}"
+        state.emit_tool_call(
+            call_id=props.get("callID"),
+            tool_name=props.get("tool"),
+            input_value=props.get("input") or {},
         )
     elif event_type == "session.next.tool.success":
-        state.on_line(
-            f"[{state.tool} serve tool_result] session={state.session_id} status=success id={props.get('callID') or ''} "
-            f"{_tool_content_summary(props.get('content'))}"
+        state.emit_tool_result(
+            call_id=props.get("callID"),
+            status="success",
+            summary=_tool_content_summary(props.get("content")),
         )
     elif event_type == "session.next.tool.failed":
-        state.on_line(
-            f"[{state.tool} serve tool_result] session={state.session_id} status=failed id={props.get('callID') or ''} "
-            f"error={_one_line_preview(props.get('error') or '')}"
+        state.emit_tool_result(
+            call_id=props.get("callID"),
+            status="failed",
+            summary=f"error={_error_summary(props.get('error') or '')}",
         )
-    elif event_type == "message.part.delta":
-        field = str(props.get("field") or "")
-        if field in {"text", "content"} and not state.seen_next_text_event:
-            emitted = state.text.append(str(props.get("delta") or ""))
-            state.emitted_response_text = emitted or state.emitted_response_text
-            state.emitted_text = emitted or state.emitted_text
-        elif field == "reasoning" and not state.seen_next_reasoning_event:
-            state.emitted_text = state.reasoning.append(str(props.get("delta") or "")) or state.emitted_text
+    elif event_type == "session.status":
+        state.emit_session_status(props.get("status"))
+    elif event_type == "session.idle":
+        state.emit_session_status("idle")
+    elif event_type == "session.error":
+        state.emit_session_error(props.get("error"))
+    elif event_type == "session.next.step.started":
+        event_id = event.get("id") if isinstance(event, dict) else ""
+        state.emit_step("started", props, part_id=event_id)
+    elif event_type == "session.next.step.ended":
+        event_id = event.get("id") if isinstance(event, dict) else ""
+        state.emit_step("finished", props, part_id=event_id)
+    elif event_type == "session.next.step.failed":
+        event_id = event.get("id") if isinstance(event, dict) else ""
+        state.emit_step("failed", props, part_id=event_id)
+    elif event_type == "session.next.retried":
+        state.emit_session_status({
+            "type": "retry",
+            "attempt": props.get("attempt"),
+            "message": _error_summary(props.get("error") or ""),
+        })
 
 
 async def _stream_sse_events(response: httpx.Response):
@@ -961,6 +1423,12 @@ async def _stream_sse_events(response: httpx.Response):
             yield json.loads("\n".join(data_lines))
         except Exception:
             return
+
+
+async def _flush_event_state_periodically(state: _ServeEventState) -> None:
+    while True:
+        await asyncio.sleep(_SERVE_EVENT_FLUSH_INTERVAL_SECONDS)
+        state.flush()
 
 
 def _provider_models(provider: dict[str, Any]) -> list[OpenCodeModelInfo]:
@@ -1067,6 +1535,7 @@ class OpenCodeServeManager:
         session_id = ""
         event_task: asyncio.Task | None = None
         event_state: _ServeEventState | None = None
+        event_started: asyncio.Event | None = None
         params = _serve_context_params(directory)
         headers = _serve_context_headers(directory)
         try:
@@ -1087,7 +1556,25 @@ class OpenCodeServeManager:
                     config_note = f" config={config_workspace}" if config_workspace else ""
                     on_line(f"[{tool} serve] session={session_id} directory={directory}{config_note}")
                     event_state = _ServeEventState(tool, session_id, on_line)
-                    event_task = asyncio.create_task(self._stream_session_events(params, headers, event_state))
+                    event_started = asyncio.Event()
+                    event_task = asyncio.create_task(
+                        self._stream_session_events(
+                            params,
+                            headers,
+                            event_state,
+                            started=event_started,
+                        )
+                    )
+                    try:
+                        await asyncio.wait_for(
+                            event_started.wait(),
+                            timeout=_SERVE_EVENT_CONNECT_TIMEOUT_SECONDS,
+                        )
+                    except asyncio.TimeoutError:
+                        on_line(
+                            f"[{tool} serve event] session={session_id} status=connect_timeout "
+                            f"timeout={_SERVE_EVENT_CONNECT_TIMEOUT_SECONDS}s"
+                        )
                 payload: dict[str, Any] = {
                     "agent": agent,
                     "parts": [{"type": "text", "text": prompt}],
@@ -1123,7 +1610,21 @@ class OpenCodeServeManager:
                         request.cancel()
                     raise
                 response.raise_for_status()
-                if event_state:
+                if event_state and event_task is not None:
+                    deadline = (
+                        asyncio.get_running_loop().time()
+                        + _SERVE_EVENT_DRAIN_TIMEOUT_SECONDS
+                    )
+                    while (
+                        not event_state.session_terminal
+                        and not event_task.done()
+                        and asyncio.get_running_loop().time() < deadline
+                    ):
+                        await asyncio.sleep(0.01)
+                    event_task.cancel()
+                    with contextlib.suppress(BaseException):
+                        await event_task
+                    event_task = None
                     event_state.flush()
                 response_data = response.json()
                 response_model = _response_model(response_data)
@@ -1132,8 +1633,22 @@ class OpenCodeServeManager:
                     if hasattr(result, "__await__"):
                         await result
                 lines = _extract_text(response_data)
-                for line in lines:
-                    if on_line and not (event_state and event_state.emitted_response_text):
+                response_text = _extract_response_text(response_data)
+                if event_state:
+                    if isinstance(response_data, dict):
+                        event_state.record_message(response_data.get("info"))
+                        response_parts = response_data.get("parts")
+                        if isinstance(response_parts, list):
+                            for part in response_parts:
+                                if not isinstance(part, dict) or part.get("type") not in {
+                                    "text",
+                                    "reasoning",
+                                }:
+                                    event_state.handle_part(part)
+                    event_state.reconcile_text("text", "".join(response_text))
+                    event_state.flush()
+                elif on_line:
+                    for line in response_text:
                         preview = _one_line_preview(line)
                         if preview:
                             on_line(f"[{tool} serve llm text] {preview}")
@@ -1165,7 +1680,14 @@ class OpenCodeServeManager:
             return []
         tool_ids = _tool_ids_from_response(response.json())
         if on_line:
-            on_line(f"[{tool} serve] tools={len(tool_ids)}")
+            mcp_tool_ids = [tool_id for tool_id in tool_ids if _tool_source(tool_id) == "mcp"]
+            mcp_note = ""
+            if mcp_tool_ids:
+                mcp_note = (
+                    f" mcp_tools={len(mcp_tool_ids)} "
+                    f"mcp_names={_one_line_preview(','.join(mcp_tool_ids))}"
+                )
+            on_line(f"[{tool} serve] tools={len(tool_ids)}{mcp_note}")
         return tool_ids
 
     async def list_models(
@@ -1698,17 +2220,55 @@ class OpenCodeServeManager:
         params: dict[str, str],
         headers: dict[str, str],
         state: _ServeEventState,
+        *,
+        started: asyncio.Event | None = None,
     ) -> None:
+        connected_once = False
+        flush_task = asyncio.create_task(_flush_event_state_periodically(state))
         try:
             async with httpx.AsyncClient(base_url=self.base_url, timeout=None) as client:
-                async with client.stream("GET", "/event", params=params, headers=headers) as response:
-                    response.raise_for_status()
-                    async for event in _stream_sse_events(response):
-                        _handle_serve_event(event, state)
+                while True:
+                    try:
+                        async with client.stream("GET", "/event", params=params, headers=headers) as response:
+                            response.raise_for_status()
+                            if started is not None:
+                                started.set()
+                            status = "reconnected" if connected_once else "connected"
+                            state.on_line(
+                                f"[{state.tool} serve event] session={state.session_id} status={status}"
+                            )
+                            connected_once = True
+                            async for event in _stream_sse_events(response):
+                                _handle_serve_event(event, state)
+                            state.flush()
+                            state.on_line(
+                                f"[{state.tool} serve event] session={state.session_id} "
+                                f"status=disconnected reconnect_in={_SERVE_EVENT_RECONNECT_DELAY_SECONDS}s"
+                            )
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as exc:
+                        status = "disconnected" if connected_once else "unavailable"
+                        state.on_line(
+                            f"[{state.tool} serve event] session={state.session_id} status={status} "
+                            f"error={_one_line_preview(exc)} "
+                            f"reconnect_in={_SERVE_EVENT_RECONNECT_DELAY_SECONDS}s"
+                        )
+                    await asyncio.sleep(_SERVE_EVENT_RECONNECT_DELAY_SECONDS)
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            logger.debug("OpenCode serve event stream unavailable: %s", exc)
+            state.on_line(
+                f"[{state.tool} serve event] session={state.session_id} status=unavailable "
+                f"error={_one_line_preview(exc)}"
+            )
+        finally:
+            if started is not None:
+                started.set()
+            flush_task.cancel()
+            with contextlib.suppress(BaseException):
+                await flush_task
+            state.flush()
 
     async def _stop_locked(self) -> None:
         proc = self._proc

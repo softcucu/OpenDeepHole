@@ -17,6 +17,8 @@ from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any, Optional
 
+from backend.opencode.output_format import with_local_timestamp
+
 # Module-level globals injected by agent/main.py before connection starts
 _config = None       # AgentConfig
 _reporter = None     # Reporter
@@ -831,7 +833,7 @@ async def _run_skill_creator(
 
     def on_output(line: str) -> None:
         if line:
-            print(f"[skill_create] {line}", flush=True)
+            print(with_local_timestamp(line, prefix="[skill_create]"), flush=True)
             lines.append(line)
 
     await _invoke_opencode(

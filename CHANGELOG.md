@@ -2,6 +2,8 @@
 
 ## 2026-07-10
 
+- **修复** Agent 控制台补齐开源 OpenCode `message.part.updated`/`message.part.delta` 与 OpenCode/nga `session.next.*`、sync 事件的统一解析：LLM 文本和推理在换行或最长约 1 秒内实时显示，工具/MCP 调用、session/step 状态及 SSE 断线重连按一行摘要输出，并按 part/call 状态去重且不泄露工具返回正文
+- **优化** OpenCode/nga/API 模型输出和 MCP 工具日志统一以 Agent 本地 `[YYYY-MM-DD HH:MM:SS]` 开头；MCP 工具发现、协议层参数拒绝/执行异常及本地 MCP 服务未就绪现在都有明确控制台诊断
 - **修复** 使用 OpenCode/nga serve 默认模型时，会从最终 LLM 响应记录实际 `provider/model`，漏洞审计、对抗式去误报、SKILL 报告及 Markdown 导出的输出来源显示为“模型池 ID / 实际模型”，旧结果或无法取得响应元数据时继续回退显示默认模型
 - **优化** Agent 模型配置页从 OpenCode/nga serve 读取模型时会复用兼容的现有进程并缓存成功结果，普通打开不再因任务级配置哈希变化反复重启 serve；`刷新` 会绕过缓存，活动会话期间延后配置重载并立即返回当前列表
 - **优化** serve 模型枚举优先只请求已包含全部可用和已连接模型的 `/provider`，仅在接口失败、响应异常或缺少已连接 Provider 时回退 `/config/providers`，同时记录启动、接口和缓存命中耗时

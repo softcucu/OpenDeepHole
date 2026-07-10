@@ -1,5 +1,6 @@
 import asyncio
 import json
+import re
 import time
 import sys
 from pathlib import Path, PureWindowsPath
@@ -241,7 +242,14 @@ def test_invoke_opencode_uses_serve_manager_when_configured(tmp_path: Path) -> N
         assert "源码阅读规则" not in kwargs["prompt"]
         assert "caller_model" not in kwargs["prompt"]
         assert output_lines
-        assert all(line.startswith("[model=anthropic/claude-sonnet]") for line in output_lines)
+        assert all(
+            re.match(
+                r"^\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\] "
+                r"\[model=anthropic/claude-sonnet\]",
+                line,
+            )
+            for line in output_lines
+        )
         release.assert_awaited_once()
         assert release.await_args.kwargs["outcome"] == "success"
 
@@ -1114,7 +1122,13 @@ def test_llm_api_health_check_output_includes_model(monkeypatch) -> None:
         asyncio.run(llm_api_runner.ensure_llm_api_available(on_output=lines.append))
 
     assert lines
-    assert all(line.startswith("[model=fake-model]") for line in lines)
+    assert all(
+        re.match(
+            r"^\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\] \[model=fake-model\]",
+            line,
+        )
+        for line in lines
+    )
 
 
 def test_llm_api_health_check_failure_is_cached(monkeypatch) -> None:

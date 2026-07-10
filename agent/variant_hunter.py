@@ -17,6 +17,7 @@ from typing import Awaitable, Callable, Optional
 from uuid import uuid4
 
 from backend.models import Candidate, HistoryPattern
+from backend.opencode.output_format import with_local_timestamp
 
 EmitFn = Callable[[str, str], Awaitable[None]]
 
@@ -122,7 +123,10 @@ async def hunt_variants(
                 prompt,
                 int(getattr(cli_config, "timeout", 1200) or 1200),
                 log_path=log_path,
-                on_line=lambda line: print(f"  [variant_hunt] {line}", flush=True),
+                on_line=lambda line: print(
+                    with_local_timestamp(line, prefix="[variant_hunt]"),
+                    flush=True,
+                ),
                 cancel_event=cancel_event,
                 cli_config=cli_config,
                 project_dir=project_path,

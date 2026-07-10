@@ -20,6 +20,7 @@ from typing import Optional
 from uuid import uuid4
 
 from backend.models import OutputSource, ScanEvent
+from backend.opencode.output_format import with_local_timestamp
 from backend.opencode.result_json import (
     VULNERABILITY_RESULT_JSON_INSTRUCTION,
     parse_vulnerability_result,
@@ -708,7 +709,10 @@ async def _run_fp_review_stage(
                 prompt,
                 timeout,
                 log_path=log_path,
-                on_line=lambda line: print(f"  [fp_{stage}] {line}", flush=True),
+                on_line=lambda line: print(
+                    with_local_timestamp(line, prefix=f"[fp_{stage}]"),
+                    flush=True,
+                ),
                 cancel_event=cancel_event,
                 cli_config=cli_config,
                 project_dir=project,

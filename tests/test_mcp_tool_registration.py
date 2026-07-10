@@ -1,9 +1,12 @@
 import asyncio
 import inspect
+import re
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
 from code_parser import CodeDatabase
+from mcp.server.fastmcp.exceptions import ToolError
 from mcp.server.fastmcp.tools.base import Tool
 from mcp_server.factory import MCP_SERVER_INSTRUCTIONS, create_mcp_server
 from mcp_server.tools import clear_db_cache, register_tools
@@ -166,6 +169,10 @@ def test_mcp_tool_log_summarizes_source_lookup(tmp_path, capsys) -> None:
     assert "[MCP ◀] view_function_code" in output
     assert "1 match(es)" in output
     assert "return 1" not in output
+    assert all(
+        re.match(r"^\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\] \[MCP [▶◀]\]", line)
+        for line in output.splitlines()
+    )
     clear_db_cache()
 
 
@@ -216,6 +223,51 @@ def test_mcp_submit_log_summarizes_long_fields(tmp_path, monkeypatch, capsys) ->
     submitted = submit_sink.read_submissions("session-submit", "submit_match_result")[0]
     assert submitted["match_type"] == "history"
     assert submitted["opencode_call_id"] == "call-submit"
+    assert "结果已提交（session_id=" not in output
+
+
+def test_fastmcp_call_boundary_logs_unknown_tool_and_reraises(capsys) -> None:
+    mcp = create_mcp_server()
+
+    with pytest.raises(ToolError, match="Unknown tool: missing_tool"):
+        asyncio.run(mcp.call_tool("missing_tool", {"secret": "argument"}))
+
+    output = capsys.readouterr().out
+    assert re.search(
+        r"^\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\] "
+        r"\[MCP ✕\] missing_tool \| status=unknown_tool$",
+        output,
+        re.MULTILINE,
+    )
+
+
+def test_fastmcp_call_boundary_logs_invalid_arguments_and_reraises(capsys) -> None:
+    mcp = create_mcp_server()
+
+    with pytest.raises(ToolError) as excinfo:
+        asyncio.run(mcp.call_tool("view_function_code", {"project_id": "scan-a"}))
+
+    assert excinfo.value.__cause__ is not None
+    output = capsys.readouterr().out
+    assert "[MCP ✕] view_function_code | status=invalid_arguments" in output
+    assert "arg_names=project_id" in output
+    assert "scan-a" not in output
+
+
+def test_fastmcp_call_boundary_logs_execution_error_and_reraises(capsys) -> None:
+    mcp = create_mcp_server()
+
+    @mcp.tool()
+    def explode() -> str:
+        raise RuntimeError("deliberate failure")
+
+    with pytest.raises(ToolError) as excinfo:
+        asyncio.run(mcp.call_tool("explode", {}))
+
+    assert isinstance(excinfo.value.__cause__, RuntimeError)
+    output = capsys.readouterr().out
+    assert "[MCP ✕] explode | status=execution_error" in output
+    assert "RuntimeError: deliberate failure" in output
 
 
 def test_submit_sink_separates_submit_tools_by_session_and_tool(tmp_path, monkeypatch) -> None:

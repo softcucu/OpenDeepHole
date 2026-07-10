@@ -18,6 +18,7 @@ from agent.config import AgentConfig, apply_network_env
 from agent.reporter import Reporter
 from backend.checker_sync import unpack_checker_packages
 from backend.models import Candidate, FeedbackEntry, ScanEvent, ThreatAnalysis, Vulnerability
+from backend.opencode.output_format import with_local_timestamp
 from backend.registry import CHECKERS_DIR_ENV
 from backend.source_filter import source_path_has_ignored_dir
 
@@ -506,7 +507,10 @@ async def _run_threat_analysis_phase(
                 project_id=scan_id,
                 skill_path=root_dir / "attack-tree-threat-analysis.md",
                 reference_catalog_path=root_dir / "attack-method-reference-catalog.md",
-                on_output=lambda line: print(f"  [threat] {line}", flush=True),
+                on_output=lambda line: print(
+                    with_local_timestamp(line, prefix="[threat]"),
+                    flush=True,
+                ),
                 cancel_event=cancel_event,
                 timeout=config.opencode.timeout,
                 project_dir=project_path,
@@ -1657,7 +1661,7 @@ async def run_scan(
                         workspace,
                         candidate,
                         scan_id,
-                        on_output=lambda line: print(f"  {line}", flush=True),
+                        on_output=lambda line: print(with_local_timestamp(line), flush=True),
                         cancel_event=cancel_event,
                         timeout=candidate_timeout,
                         project_dir=project_path,
@@ -1676,7 +1680,7 @@ async def run_scan(
                             candidate,
                             scan_id,
                             report_dir,
-                            on_output=lambda line: print(f"  {line}", flush=True),
+                            on_output=lambda line: print(with_local_timestamp(line), flush=True),
                             cancel_event=cancel_event,
                             timeout=candidate_timeout,
                             project_dir=project_path,
@@ -1687,7 +1691,7 @@ async def run_scan(
                             workspace,
                             candidate,
                             scan_id,
-                            on_output=lambda line: print(f"  {line}", flush=True),
+                            on_output=lambda line: print(with_local_timestamp(line), flush=True),
                             cancel_event=cancel_event,
                             timeout=candidate_timeout,
                             project_dir=project_path,
@@ -1698,7 +1702,7 @@ async def run_scan(
                         workspace,
                         candidate,
                         scan_id,
-                        on_output=lambda line: print(f"  {line}", flush=True),
+                        on_output=lambda line: print(with_local_timestamp(line), flush=True),
                         cancel_event=cancel_event,
                         timeout=candidate_timeout,
                         project_dir=project_path,

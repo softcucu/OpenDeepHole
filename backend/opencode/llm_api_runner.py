@@ -17,6 +17,7 @@ from pathlib import Path
 from backend.config import get_config
 from backend.logger import get_logger
 from backend.models import Candidate, OutputSource, Vulnerability
+from backend.opencode.output_format import with_local_timestamp
 from backend.opencode.result_json import (
     VULNERABILITY_RESULT_JSON_INSTRUCTION,
     VULNERABILITY_RESULTS_JSON_INSTRUCTION,
@@ -149,14 +150,7 @@ def _emit_api_output(on_output, model: str, line: str) -> None:
     if not on_output:
         return
     prefix = f"[model={model}]"
-    parts = line.splitlines()
-    if not parts:
-        on_output(f"{prefix} {line}")
-        return
-    on_output("\n".join(
-        part if part.startswith(prefix) else f"{prefix} {part}"
-        for part in parts
-    ))
+    on_output(with_local_timestamp(line, prefix=prefix))
 
 
 def _cap_log_text(text: object, limit: int = _API_LOG_TEXT_LIMIT) -> str:

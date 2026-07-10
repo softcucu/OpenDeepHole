@@ -20,6 +20,7 @@ from typing import Awaitable, Callable, Optional
 from uuid import uuid4
 
 from backend.models import Candidate, HistoryPattern
+from backend.opencode.output_format import with_local_timestamp
 
 # 单条提交 diff 注入 prompt 的字符上限，避免超长提交撑爆上下文
 _DIFF_CHAR_LIMIT = 16000
@@ -219,7 +220,10 @@ async def mine_history(
                 prompt,
                 int(getattr(cli_config, "timeout", 1200) or 1200),
                 log_path=log_path,
-                on_line=lambda line: print(f"  [git_history] {line}", flush=True),
+                on_line=lambda line: print(
+                    with_local_timestamp(line, prefix="[git_history]"),
+                    flush=True,
+                ),
                 cancel_event=cancel_event,
                 cli_config=cli_config,
                 project_dir=project_path,

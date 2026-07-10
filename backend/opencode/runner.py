@@ -27,6 +27,7 @@ from backend.opencode.model_pool import (
     release_model_lease,
     update_model_lease_context,
 )
+from backend.opencode.output_format import with_local_timestamp
 from backend.opencode.serve_client import get_serve_manager
 from backend.opencode.result_json import (
     VULNERABILITY_RESULT_JSON_INSTRUCTION,
@@ -2166,7 +2167,7 @@ def _model_line_emitter(on_line, model_label: str):
         return None
 
     def emit(line: str) -> None:
-        on_line(_with_model_prefix(line, model_label))
+        on_line(with_local_timestamp(line, prefix=f"[model={model_label}]"))
 
     return emit
 

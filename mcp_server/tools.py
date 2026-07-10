@@ -9,6 +9,8 @@ from pathlib import Path
 
 from mcp.server.fastmcp import Context, FastMCP
 
+from backend.opencode.output_format import with_local_timestamp
+
 # 按 DB 路径缓存连接，MCP Server 是长驻进程，避免每次重新打开
 _db_cache: dict[str, tuple[object, tuple[int, int, int, int]]] = {}
 
@@ -129,19 +131,31 @@ _MCP_LOG_ARGS_LIMIT = 1_000
 def _mcp_log(direction: str, tool: str, detail: str) -> None:
     preview = _preview(detail)
     suffix = f" | {preview}" if preview else ""
-    print(f"  [MCP {direction}] {tool}{suffix}", flush=True)
+    print(with_local_timestamp(f"[MCP {direction}] {tool}{suffix}"), flush=True)
 
 
 def _mcp_log_call(tool: str, detail: str) -> None:
     _mcp_log("▶", tool, detail)
 
 
-def _mcp_log_return(tool: str, detail: str) -> None:
-    _mcp_log("◀", tool, detail)
+def _mcp_log_return(
+    tool: str,
+    result: object,
+    *,
+    status: str = "ok",
+    detail: str = "",
+) -> None:
+    """Log result metadata without exposing the tool's returned body."""
+    result_chars = len(str(result)) if result is not None else 0
+    fields = [f"status={status}"]
+    if detail:
+        fields.append(detail)
+    fields.append(f"{result_chars} chars")
+    _mcp_log("◀", tool, ", ".join(fields))
 
 
-def _mcp_result_summary(count_label: str, count: int, result: str) -> str:
-    return f"{count} {count_label}, {len(result)} chars"
+def _mcp_log_error(tool: str, detail: str) -> None:
+    _mcp_log("✕", tool, detail)
 
 
 def _preview(text: object, max_chars: int = _MCP_LOG_DETAIL_LIMIT) -> str:
@@ -268,19 +282,21 @@ def register_tools(mcp: FastMCP, project_dir: Path | str | None = None) -> None:
         db = _get_db(project_id, bound_project_dir)
         if db is None:
             result = f"项目 {project_id} 的代码索引不可用。"
-            _mcp_log_return("view_function_code", result)
+            _mcp_log_return("view_function_code", result, status="unavailable")
             return result
         rows = db.get_functions_by_name(function_name, file_path=file_path or None)
         if not rows:
             result = f"未找到函数 '{function_name}'。"
-            _mcp_log_return("view_function_code", result)
+            _mcp_log_return(
+                "view_function_code", result, status="not_found", detail="0 match(es)"
+            )
             return result
         parts = [
             f"// {row['file_path']}:{row['start_line']}-{row['end_line']}\n{row['body']}"
             for row in rows
         ]
         result = "\n\n".join(parts)
-        _mcp_log_return("view_function_code", _mcp_result_summary("match(es)", len(rows), result))
+        _mcp_log_return("view_function_code", result, detail=f"{len(rows)} match(es)")
         return result
 
     @mcp.tool()
@@ -299,19 +315,21 @@ def register_tools(mcp: FastMCP, project_dir: Path | str | None = None) -> None:
         db = _get_db(project_id, bound_project_dir)
         if db is None:
             result = f"项目 {project_id} 的代码索引不可用。"
-            _mcp_log_return("view_struct_code", result)
+            _mcp_log_return("view_struct_code", result, status="unavailable")
             return result
         rows = db.get_structs_by_name(struct_name)
         if not rows:
             result = f"未找到结构体 '{struct_name}'。"
-            _mcp_log_return("view_struct_code", result)
+            _mcp_log_return(
+                "view_struct_code", result, status="not_found", detail="0 match(es)"
+            )
             return result
         parts = [
             f"// {row['file_path']}:{row['start_line']}-{row['end_line']}\n{row['definition']}"
             for row in rows
         ]
         result = "\n\n".join(parts)
-        _mcp_log_return("view_struct_code", _mcp_result_summary("match(es)", len(rows), result))
+        _mcp_log_return("view_struct_code", result, detail=f"{len(rows)} match(es)")
         return result
 
     @mcp.tool()
@@ -333,12 +351,19 @@ def register_tools(mcp: FastMCP, project_dir: Path | str | None = None) -> None:
         db = _get_db(project_id, bound_project_dir)
         if db is None:
             result = f"项目 {project_id} 的代码索引不可用。"
-            _mcp_log_return("view_global_variable_definition", result)
+            _mcp_log_return(
+                "view_global_variable_definition", result, status="unavailable"
+            )
             return result
         rows = db.get_global_variables_by_name(global_variable_name)
         if not rows:
             result = f"未找到全局变量 '{global_variable_name}'。"
-            _mcp_log_return("view_global_variable_definition", result)
+            _mcp_log_return(
+                "view_global_variable_definition",
+                result,
+                status="not_found",
+                detail="0 match(es)",
+            )
             return result
         parts = [
             f"// {row['file_path']}:{row['start_line']}\n{row['definition']}"
@@ -347,7 +372,8 @@ def register_tools(mcp: FastMCP, project_dir: Path | str | None = None) -> None:
         result = "\n\n".join(parts)
         _mcp_log_return(
             "view_global_variable_definition",
-            _mcp_result_summary("match(es)", len(rows), result),
+            result,
+            detail=f"{len(rows)} match(es)",
         )
         return result
 
@@ -367,7 +393,7 @@ def register_tools(mcp: FastMCP, project_dir: Path | str | None = None) -> None:
         db = _get_db(project_id, bound_project_dir)
         if db is None:
             result = f"项目 {project_id} 的代码索引不可用。"
-            _mcp_log_return("find_function_references", result)
+            _mcp_log_return("find_function_references", result, status="unavailable")
             return result
         rows = db.get_call_sites_by_name(function_name)
         short_name_fallback = False
@@ -377,7 +403,12 @@ def register_tools(mcp: FastMCP, project_dir: Path | str | None = None) -> None:
             short_name_fallback = bool(rows)
         if not rows:
             result = f"未找到函数 '{function_name}' 的引用位置。"
-            _mcp_log_return("find_function_references", result)
+            _mcp_log_return(
+                "find_function_references",
+                result,
+                status="not_found",
+                detail="0 reference(s)",
+            )
             return result
         lines = []
         if short_name_fallback:
@@ -389,7 +420,7 @@ def register_tools(mcp: FastMCP, project_dir: Path | str | None = None) -> None:
             for row in rows
         )
         result = "\n".join(lines)
-        _mcp_log_return("find_function_references", _mcp_result_summary("reference(s)", len(rows), result))
+        _mcp_log_return("find_function_references", result, detail=f"{len(rows)} reference(s)")
         return result
 
     # Kept for future reuse, but intentionally not registered as an MCP tool.
@@ -411,12 +442,19 @@ def register_tools(mcp: FastMCP, project_dir: Path | str | None = None) -> None:
         db = _get_db(project_id, bound_project_dir)
         if db is None:
             result = f"项目 {project_id} 的代码索引不可用。"
-            _mcp_log_return("find_global_variable_references", result)
+            _mcp_log_return(
+                "find_global_variable_references", result, status="unavailable"
+            )
             return result
         rows = db.get_global_variable_reference_by_name(global_variable_name)
         if not rows:
             result = f"未找到全局变量 '{global_variable_name}' 的引用。"
-            _mcp_log_return("find_global_variable_references", result)
+            _mcp_log_return(
+                "find_global_variable_references",
+                result,
+                status="not_found",
+                detail="0 reference(s)",
+            )
             return result
         result = "\n".join(
             f"{row['function_name'] or '未知'}  {row['file_path']}:{row['line']}  [{row['access_type']}]  {row['context']}"
@@ -424,7 +462,8 @@ def register_tools(mcp: FastMCP, project_dir: Path | str | None = None) -> None:
         )
         _mcp_log_return(
             "find_global_variable_references",
-            _mcp_result_summary("reference(s)", len(rows), result),
+            result,
+            detail=f"{len(rows)} reference(s)",
         )
         return result
 
@@ -474,7 +513,7 @@ def register_tools(mcp: FastMCP, project_dir: Path | str | None = None) -> None:
             "rationale": rationale,
         }))
         ok, message = _submit_payload("submit_history_pattern", opencode_session_id, opencode_call_id, payload)
-        _mcp_log_return("submit_history_pattern", message)
+        _mcp_log_return("submit_history_pattern", message, status="ok" if ok else "error")
         return message
 
     @mcp.tool()
@@ -521,7 +560,7 @@ def register_tools(mcp: FastMCP, project_dir: Path | str | None = None) -> None:
             **payload,
         }))
         ok, message = _submit_payload("submit_variant_finding", opencode_session_id, opencode_call_id, payload)
-        _mcp_log_return("submit_variant_finding", message)
+        _mcp_log_return("submit_variant_finding", message, status="ok" if ok else "error")
         return message
 
     @mcp.tool()
@@ -578,5 +617,5 @@ def register_tools(mcp: FastMCP, project_dir: Path | str | None = None) -> None:
             "vulnerability_report": vulnerability_report,
         }))
         ok, message = _submit_payload("submit_match_result", opencode_session_id, opencode_call_id, payload)
-        _mcp_log_return("submit_match_result", message)
+        _mcp_log_return("submit_match_result", message, status="ok" if ok else "error")
         return message
