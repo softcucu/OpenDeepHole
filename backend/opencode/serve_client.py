@@ -35,6 +35,9 @@ _SERVE_HEALTH_POLL_INTERVAL_SECONDS = 1.0
 _SERVE_EVENT_FLUSH_INTERVAL_SECONDS = 1.0
 _SERVE_EVENT_CONNECT_TIMEOUT_SECONDS = 2.0
 _SERVE_EVENT_RECONNECT_DELAY_SECONDS = 1.0
+_SERVE_EVENT_RECONNECT_MAX_SECONDS = 30.0
+_SERVE_EVENT_FAILURE_SUMMARY_SECONDS = 30.0
+_SERVE_EVENT_POLL_INTERVAL_SECONDS = 1.0
 _SERVE_EVENT_DRAIN_TIMEOUT_SECONDS = 1.0
 _SERVE_EVENT_PREVIEW_LIMIT = 500
 _SERVE_STARTUP_LOG_TAIL_LIMIT = 4000
@@ -90,6 +93,19 @@ class OpenCodeModelInfo:
 class OpenCodeModelListResult:
     models: list[OpenCodeModelInfo]
     message: str = ""
+
+
+@dataclass
+class _EventChannelRuntime:
+    key: str
+    path: str
+    params: dict[str, str]
+    headers: dict[str, str]
+    ready: asyncio.Event = field(default_factory=asyncio.Event)
+    task: asyncio.Task | None = None
+    healthy: bool = False
+    connected_once: bool = False
+    attempts: int = 0
 
 
 def split_model_id(model: str) -> tuple[str, str]:
@@ -988,6 +1004,14 @@ class _ServeEventState:
             on_line,
             f"[{tool} serve llm reasoning final]",
         )
+        self.recovery_text = _BufferedEventEmitter(
+            on_line,
+            f"[{tool} serve llm text recovery]",
+        )
+        self.recovery_reasoning = _BufferedEventEmitter(
+            on_line,
+            f"[{tool} serve llm reasoning recovery]",
+        )
         self.message_roles: dict[str, str] = {}
         self.part_types: dict[str, str] = {}
         self.part_message_ids: dict[str, str] = {}
@@ -1003,6 +1027,7 @@ class _ServeEventState:
         self.observed_reasoning_text = ""
         self.next_replay_remaining = {"text": "", "reasoning": ""}
         self.final_snapshots_emitted: set[tuple[str, str]] = set()
+        self.recovery_snapshots_emitted: set[tuple[str, str]] = set()
         self.session_terminal = False
 
     def flush(self) -> None:
@@ -1024,6 +1049,9 @@ class _ServeEventState:
                     self._emit_part_text(part_id)
             if info.get("error") is not None:
                 self.emit_session_error(info.get("error"))
+            message_time = info.get("time")
+            if isinstance(message_time, dict) and message_time.get("completed") is not None:
+                self.session_terminal = True
 
     def mark_event_seen(self, event: object) -> bool:
         if not isinstance(event, dict):
@@ -1170,6 +1198,59 @@ class _ServeEventState:
             self.observed_response_text = final_text
             self.emitted_response_text = emitted or self.emitted_response_text
         self.emitted_text = emitted or self.emitted_text
+
+    def reconcile_snapshot(self, kind: str, value: object) -> None:
+        """Merge a cumulative polled snapshot without duplicating streamed output."""
+        snapshot = str(value or "")
+        if not snapshot:
+            return
+        observed = self.observed_reasoning_text if kind == "reasoning" else self.observed_response_text
+        if not observed:
+            self._append_text(kind, snapshot)
+            return
+        if snapshot.strip() == observed.strip() or snapshot in observed or observed.startswith(snapshot):
+            return
+        if snapshot.startswith(observed):
+            self._append_text(kind, snapshot[len(observed):])
+            return
+        snapshot_key = (kind, snapshot)
+        if snapshot_key in self.recovery_snapshots_emitted:
+            return
+        self.recovery_snapshots_emitted.add(snapshot_key)
+        emitter = self.recovery_reasoning if kind == "reasoning" else self.recovery_text
+        emitted = emitter.append(snapshot)
+        emitted = emitter.flush() or emitted
+        if kind == "reasoning":
+            self.observed_reasoning_text = snapshot
+        else:
+            self.observed_response_text = snapshot
+            self.emitted_response_text = emitted or self.emitted_response_text
+        self.emitted_text = emitted or self.emitted_text
+
+    def ingest_message_snapshot(self, message: object) -> None:
+        if not isinstance(message, dict):
+            return
+        info = message.get("info")
+        if not isinstance(info, dict) or str(info.get("role") or "") != "assistant":
+            return
+        self.record_message(info)
+        parts = message.get("parts")
+        if not isinstance(parts, list):
+            return
+        snapshots = {"text": [], "reasoning": []}
+        for part in parts:
+            if not isinstance(part, dict):
+                continue
+            part_type = str(part.get("type") or "")
+            if part_type in snapshots:
+                text = part.get("text")
+                if isinstance(text, str):
+                    snapshots[part_type].append(text)
+                continue
+            self.handle_part(part)
+        for kind, values in snapshots.items():
+            if values:
+                self.reconcile_snapshot(kind, "".join(values))
 
     def emit_tool_call(
         self,
@@ -1431,6 +1512,26 @@ async def _flush_event_state_periodically(state: _ServeEventState) -> None:
         state.flush()
 
 
+def _latest_assistant_message(value: object, session_id: str) -> dict[str, Any] | None:
+    if not isinstance(value, list):
+        return None
+    for item in reversed(value):
+        if not isinstance(item, dict):
+            continue
+        info = item.get("info")
+        if not isinstance(info, dict) or str(info.get("role") or "") != "assistant":
+            continue
+        item_session_id = str(info.get("sessionID") or "")
+        if item_session_id and item_session_id != session_id:
+            continue
+        return item
+    return None
+
+
+def _next_event_reconnect_delay(current: float) -> float:
+    return min(current * 2, _SERVE_EVENT_RECONNECT_MAX_SECONDS)
+
+
 def _provider_models(provider: dict[str, Any]) -> list[OpenCodeModelInfo]:
     provider_id = str(provider.get("id") or provider.get("providerID") or provider.get("name") or "").strip()
     models = provider.get("models") or {}
@@ -1472,6 +1573,17 @@ class OpenCodeServeManager:
         self._marker_path = _serve_marker_path()
         self._active_sessions = 0
         self._active_model_listings = 0
+        self._event_lock = asyncio.Lock()
+        self._event_states: dict[str, _ServeEventState] = {}
+        self._event_directories: dict[str, str] = {}
+        self._global_event_channel: _EventChannelRuntime | None = None
+        self._legacy_event_channels: dict[str, _EventChannelRuntime] = {}
+        self._global_event_unsupported = False
+        self._degraded_event_channels: set[str] = set()
+        self._event_failure_started_at = 0.0
+        self._event_failure_attempts = 0
+        self._event_last_failure_summary_at = 0.0
+        self._event_poll_failure_reported = False
         self._dirty = False
         self._serve_config_generation = 0
         self._model_cache: dict[
@@ -1533,13 +1645,18 @@ class OpenCodeServeManager:
         )
         await self._acquire_session(key, startup_cwd=config_workspace)
         session_id = ""
-        event_task: asyncio.Task | None = None
         event_state: _ServeEventState | None = None
-        event_started: asyncio.Event | None = None
+        event_registered = False
+        event_flush_task: asyncio.Task | None = None
+        snapshot_poll_task: asyncio.Task | None = None
         params = _serve_context_params(directory)
         headers = _serve_context_headers(directory)
         try:
-            async with httpx.AsyncClient(base_url=self.base_url, timeout=_SERVE_REQUEST_TIMEOUT_SECONDS) as client:
+            async with httpx.AsyncClient(
+                base_url=self.base_url,
+                timeout=_SERVE_REQUEST_TIMEOUT_SECONDS,
+                trust_env=False,
+            ) as client:
                 created = await client.post(
                     "/session",
                     params=params,
@@ -1556,25 +1673,11 @@ class OpenCodeServeManager:
                     config_note = f" config={config_workspace}" if config_workspace else ""
                     on_line(f"[{tool} serve] session={session_id} directory={directory}{config_note}")
                     event_state = _ServeEventState(tool, session_id, on_line)
-                    event_started = asyncio.Event()
-                    event_task = asyncio.create_task(
-                        self._stream_session_events(
-                            params,
-                            headers,
-                            event_state,
-                            started=event_started,
-                        )
+                    event_flush_task = asyncio.create_task(
+                        _flush_event_state_periodically(event_state)
                     )
-                    try:
-                        await asyncio.wait_for(
-                            event_started.wait(),
-                            timeout=_SERVE_EVENT_CONNECT_TIMEOUT_SECONDS,
-                        )
-                    except asyncio.TimeoutError:
-                        on_line(
-                            f"[{tool} serve event] session={session_id} status=connect_timeout "
-                            f"timeout={_SERVE_EVENT_CONNECT_TIMEOUT_SECONDS}s"
-                        )
+                    await self._register_event_state(session_id, directory, event_state)
+                    event_registered = True
                 payload: dict[str, Any] = {
                     "agent": agent,
                     "parts": [{"type": "text", "text": prompt}],
@@ -1595,6 +1698,17 @@ class OpenCodeServeManager:
                         timeout=timeout + 30,
                     )
                 )
+                if event_state is not None:
+                    snapshot_poll_task = asyncio.create_task(
+                        self._poll_session_snapshots(
+                            client=client,
+                            session_id=session_id,
+                            directory=directory,
+                            params=params,
+                            headers=headers,
+                            state=event_state,
+                        )
+                    )
                 try:
                     response = await self._wait_for_response(
                         client=client,
@@ -1610,21 +1724,24 @@ class OpenCodeServeManager:
                         request.cancel()
                     raise
                 response.raise_for_status()
-                if event_state and event_task is not None:
+                if event_state:
                     deadline = (
                         asyncio.get_running_loop().time()
                         + _SERVE_EVENT_DRAIN_TIMEOUT_SECONDS
                     )
                     while (
                         not event_state.session_terminal
-                        and not event_task.done()
                         and asyncio.get_running_loop().time() < deadline
                     ):
                         await asyncio.sleep(0.01)
-                    event_task.cancel()
-                    with contextlib.suppress(BaseException):
-                        await event_task
-                    event_task = None
+                    if snapshot_poll_task is not None:
+                        snapshot_poll_task.cancel()
+                        with contextlib.suppress(BaseException):
+                            await snapshot_poll_task
+                        snapshot_poll_task = None
+                    if event_registered:
+                        await self._unregister_event_state(session_id)
+                        event_registered = False
                     event_state.flush()
                 response_data = response.json()
                 response_model = _response_model(response_data)
@@ -1654,13 +1771,339 @@ class OpenCodeServeManager:
                             on_line(f"[{tool} serve llm text] {preview}")
                 return lines
         finally:
-            if event_task is not None:
-                event_task.cancel()
+            if snapshot_poll_task is not None:
+                snapshot_poll_task.cancel()
                 with contextlib.suppress(BaseException):
-                    await event_task
+                    await snapshot_poll_task
+            if event_registered:
+                await self._unregister_event_state(session_id)
+            if event_flush_task is not None:
+                event_flush_task.cancel()
+                with contextlib.suppress(BaseException):
+                    await event_flush_task
             if event_state:
                 event_state.flush()
             await self._release_active_session()
+
+    @staticmethod
+    def _event_directory_key(directory: Path) -> str:
+        return os.path.normcase(os.path.normpath(str(directory)))
+
+    def _ensure_event_channel_locked(self, directory: Path) -> _EventChannelRuntime:
+        if not self._global_event_unsupported:
+            runtime = self._global_event_channel
+            if runtime is None or runtime.task is None or runtime.task.done():
+                runtime = _EventChannelRuntime(
+                    key="global",
+                    path="/global/event",
+                    params={},
+                    headers={},
+                )
+                runtime.task = asyncio.create_task(
+                    self._run_event_channel(runtime, is_global=True)
+                )
+                self._global_event_channel = runtime
+            return runtime
+
+        directory_key = self._event_directory_key(directory)
+        runtime = self._legacy_event_channels.get(directory_key)
+        if runtime is None or runtime.task is None or runtime.task.done():
+            runtime = _EventChannelRuntime(
+                key=f"legacy:{directory_key}",
+                path="/event",
+                params=_serve_context_params(directory),
+                headers=_serve_context_headers(directory),
+            )
+            runtime.task = asyncio.create_task(
+                self._run_event_channel(runtime, is_global=False)
+            )
+            self._legacy_event_channels[directory_key] = runtime
+        return runtime
+
+    async def _register_event_state(
+        self,
+        session_id: str,
+        directory: Path,
+        state: _ServeEventState,
+    ) -> None:
+        directory_key = self._event_directory_key(directory)
+        async with self._event_lock:
+            self._event_states[session_id] = state
+            self._event_directories[session_id] = directory_key
+
+        deadline = asyncio.get_running_loop().time() + _SERVE_EVENT_CONNECT_TIMEOUT_SECONDS
+        while True:
+            async with self._event_lock:
+                runtime = self._ensure_event_channel_locked(directory)
+            if runtime.healthy:
+                return
+            remaining = deadline - asyncio.get_running_loop().time()
+            if remaining <= 0:
+                return
+            try:
+                await asyncio.wait_for(runtime.ready.wait(), timeout=remaining)
+            except asyncio.TimeoutError:
+                return
+            if runtime.healthy:
+                return
+            if runtime.path != "/global/event" or not self._global_event_unsupported:
+                return
+
+    async def _unregister_event_state(self, session_id: str) -> None:
+        async with self._event_lock:
+            self._event_states.pop(session_id, None)
+            self._event_directories.pop(session_id, None)
+
+    def _event_channel_healthy(self, directory: Path) -> bool:
+        if not self._global_event_unsupported:
+            return bool(self._global_event_channel and self._global_event_channel.healthy)
+        runtime = self._legacy_event_channels.get(self._event_directory_key(directory))
+        return bool(runtime and runtime.healthy)
+
+    @staticmethod
+    def _global_event_payload(event: object) -> object:
+        if isinstance(event, dict) and isinstance(event.get("payload"), dict):
+            return event["payload"]
+        return event
+
+    def _dispatch_event(self, event: object, *, directory_key: str = "") -> bool:
+        payload = self._global_event_payload(event)
+        if not isinstance(payload, dict):
+            return False
+        event_type, props = _event_properties(payload)
+        if not event_type:
+            return False
+        if event_type in {"server.connected", "server.heartbeat"}:
+            return True
+        session_id = _event_session_id(props)
+        if not session_id:
+            return True
+        state = self._event_states.get(session_id)
+        if state is None:
+            return True
+        if directory_key and self._event_directories.get(session_id) != directory_key:
+            return True
+        _handle_serve_event(payload, state)
+        return True
+
+    def _emit_event_diagnostic(self, line: str) -> None:
+        state = next(iter(self._event_states.values()), None)
+        if state is None:
+            logger.debug("OpenCode serve event: %s", line)
+            return
+        state.on_line(f"[{state.tool} serve event] {line}")
+
+    def _note_event_channel_connected(
+        self,
+        runtime: _EventChannelRuntime,
+        *,
+        confirmed_recovery: bool = True,
+    ) -> None:
+        runtime.healthy = True
+        runtime.ready.set()
+        runtime.connected_once = True
+        runtime.attempts = 0
+        if not confirmed_recovery:
+            return
+        if runtime.key not in self._degraded_event_channels:
+            return
+        self._degraded_event_channels.discard(runtime.key)
+        if self._degraded_event_channels or not self._event_failure_started_at:
+            return
+        now = time.monotonic()
+        downtime = max(0.0, now - self._event_failure_started_at)
+        self._emit_event_diagnostic(
+            f"status=reconnected downtime={downtime:.1f}s "
+            f"attempts={self._event_failure_attempts} "
+            f"active_sessions={len(self._event_states)}"
+        )
+        self._event_failure_started_at = 0.0
+        self._event_failure_attempts = 0
+        self._event_last_failure_summary_at = 0.0
+        self._event_poll_failure_reported = False
+
+    def _note_event_channel_failure(
+        self,
+        runtime: _EventChannelRuntime,
+        *,
+        error: object,
+        retry_in: float,
+    ) -> None:
+        runtime.healthy = False
+        runtime.attempts += 1
+        now = time.monotonic()
+        first_failure = not self._degraded_event_channels
+        self._degraded_event_channels.add(runtime.key)
+        self._event_failure_attempts += 1
+        if first_failure:
+            self._event_failure_started_at = now
+            self._event_last_failure_summary_at = now
+            status = "disconnected" if runtime.connected_once else "unavailable"
+            self._emit_event_diagnostic(
+                f"status={status} active_sessions={len(self._event_states)} "
+                f"retry_in={retry_in:.1f}s fallback=polling "
+                f"error={_one_line_preview(error)}"
+            )
+            return
+        if now - self._event_last_failure_summary_at < _SERVE_EVENT_FAILURE_SUMMARY_SECONDS:
+            return
+        self._event_last_failure_summary_at = now
+        self._emit_event_diagnostic(
+            f"status=unavailable attempts={self._event_failure_attempts} "
+            f"active_sessions={len(self._event_states)} retry_in={retry_in:.1f}s "
+            "fallback=polling"
+        )
+
+    async def _mark_global_event_unsupported(self, runtime: _EventChannelRuntime) -> None:
+        runtime.healthy = False
+        runtime.ready.set()
+        async with self._event_lock:
+            self._global_event_unsupported = True
+            self._degraded_event_channels.discard(runtime.key)
+            directories = {
+                directory_key
+                for directory_key in self._event_directories.values()
+            }
+            for directory_key in directories:
+                directory = Path(directory_key)
+                legacy = self._ensure_event_channel_locked(directory)
+                if self._event_failure_started_at:
+                    self._degraded_event_channels.add(legacy.key)
+
+    async def _run_event_channel(
+        self,
+        runtime: _EventChannelRuntime,
+        *,
+        is_global: bool,
+        initial_reconnect_delay: float = _SERVE_EVENT_RECONNECT_DELAY_SECONDS,
+    ) -> None:
+        reconnect_delay = initial_reconnect_delay
+        directory_key = "" if is_global else runtime.key.removeprefix("legacy:")
+        request_headers = dict(runtime.headers)
+        request_headers.update({
+            "Accept": "text/event-stream",
+            "Cache-Control": "no-cache",
+        })
+        try:
+            async with httpx.AsyncClient(
+                base_url=self.base_url,
+                timeout=None,
+                trust_env=False,
+            ) as client:
+                while True:
+                    try:
+                        async with client.stream(
+                            "GET",
+                            runtime.path,
+                            params=runtime.params,
+                            headers=request_headers,
+                        ) as response:
+                            status_code = int(getattr(response, "status_code", 200) or 200)
+                            if is_global and status_code in {404, 405, 501}:
+                                await self._mark_global_event_unsupported(runtime)
+                                return
+                            response.raise_for_status()
+                            content_type = str(
+                                getattr(response, "headers", {}).get("content-type", "")
+                            ).lower()
+                            if content_type and "text/event-stream" not in content_type:
+                                if is_global:
+                                    await self._mark_global_event_unsupported(runtime)
+                                    return
+                                raise RuntimeError(
+                                    f"unexpected content-type {content_type!r}"
+                                )
+                            received_event = False
+                            async for event in _stream_sse_events(response):
+                                if not self._dispatch_event(event, directory_key=directory_key):
+                                    continue
+                                payload = self._global_event_payload(event)
+                                event_type, _ = _event_properties(payload)
+                                confirmed_recovery = event_type != "server.connected"
+                                if not received_event:
+                                    received_event = True
+                                    self._note_event_channel_connected(
+                                        runtime,
+                                        confirmed_recovery=confirmed_recovery,
+                                    )
+                                elif confirmed_recovery:
+                                    self._note_event_channel_connected(runtime)
+                                if confirmed_recovery:
+                                    reconnect_delay = _SERVE_EVENT_RECONNECT_DELAY_SECONDS
+                            reason = (
+                                "event stream closed"
+                                if received_event
+                                else "event stream closed before server.connected"
+                            )
+                            self._note_event_channel_failure(
+                                runtime,
+                                error=reason,
+                                retry_in=reconnect_delay,
+                            )
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as exc:
+                        self._note_event_channel_failure(
+                            runtime,
+                            error=exc,
+                            retry_in=reconnect_delay,
+                        )
+                    await asyncio.sleep(reconnect_delay)
+                    reconnect_delay = _next_event_reconnect_delay(reconnect_delay)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            self._note_event_channel_failure(
+                runtime,
+                error=exc,
+                retry_in=reconnect_delay,
+            )
+            await asyncio.sleep(reconnect_delay)
+            runtime.task = asyncio.create_task(self._run_event_channel(
+                runtime,
+                is_global=is_global,
+                initial_reconnect_delay=_next_event_reconnect_delay(reconnect_delay),
+            ))
+        finally:
+            runtime.healthy = False
+            runtime.ready.set()
+
+    async def _poll_session_snapshots(
+        self,
+        *,
+        client: httpx.AsyncClient,
+        session_id: str,
+        directory: Path,
+        params: dict[str, str],
+        headers: dict[str, str],
+        state: _ServeEventState,
+    ) -> None:
+        poll_params = dict(params)
+        poll_params["limit"] = "2"
+        while True:
+            if self._event_channel_healthy(directory):
+                await asyncio.sleep(0.1)
+                continue
+            try:
+                response = await client.get(
+                    f"/session/{session_id}/message",
+                    params=poll_params,
+                    headers=headers,
+                )
+                response.raise_for_status()
+                message = _latest_assistant_message(response.json(), session_id)
+                if message is not None:
+                    state.ingest_message_snapshot(message)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                if not self._event_poll_failure_reported:
+                    self._event_poll_failure_reported = True
+                    self._emit_event_diagnostic(
+                        f"status=poll_unavailable fallback=final_response "
+                        f"error={_one_line_preview(exc)}"
+                    )
+            await asyncio.sleep(_SERVE_EVENT_POLL_INTERVAL_SECONDS)
 
     async def _list_tool_ids(
         self,
@@ -1812,6 +2255,7 @@ class OpenCodeServeManager:
         async with httpx.AsyncClient(
             base_url=self.base_url,
             timeout=_SERVE_REQUEST_TIMEOUT_SECONDS,
+            trust_env=False,
         ) as client:
             started_at = time.monotonic()
             try:
@@ -1945,6 +2389,7 @@ class OpenCodeServeManager:
         """Acquire a short-lived serve operation and report a deferred reload."""
         async with self._lock:
             if self._proc is not None and self._proc.poll() is not None:
+                await self._stop_event_hub()
                 self._proc = None
                 self._key = None
                 self._port = None
@@ -2029,6 +2474,7 @@ class OpenCodeServeManager:
 
     async def _ensure_started_locked(self, key: OpenCodeServeKey, startup_cwd: Path | None = None) -> None:
         if self._proc is not None and self._proc.poll() is not None:
+            await self._stop_event_hub()
             self._proc = None
             self._key = None
             self._port = None
@@ -2185,7 +2631,11 @@ class OpenCodeServeManager:
                     startup_log_path,
                 ))
             try:
-                async with httpx.AsyncClient(base_url=self.base_url, timeout=2.0) as client:
+                async with httpx.AsyncClient(
+                    base_url=self.base_url,
+                    timeout=2.0,
+                    trust_env=False,
+                ) as client:
                     response = await client.get("/global/health")
                     if response.status_code < 500:
                         return
@@ -2215,62 +2665,38 @@ class OpenCodeServeManager:
         except Exception as exc:
             logger.warning("Failed to abort OpenCode session %s: %s", session_id, exc)
 
-    async def _stream_session_events(
-        self,
-        params: dict[str, str],
-        headers: dict[str, str],
-        state: _ServeEventState,
-        *,
-        started: asyncio.Event | None = None,
-    ) -> None:
-        connected_once = False
-        flush_task = asyncio.create_task(_flush_event_state_periodically(state))
-        try:
-            async with httpx.AsyncClient(base_url=self.base_url, timeout=None) as client:
-                while True:
-                    try:
-                        async with client.stream("GET", "/event", params=params, headers=headers) as response:
-                            response.raise_for_status()
-                            if started is not None:
-                                started.set()
-                            status = "reconnected" if connected_once else "connected"
-                            state.on_line(
-                                f"[{state.tool} serve event] session={state.session_id} status={status}"
-                            )
-                            connected_once = True
-                            async for event in _stream_sse_events(response):
-                                _handle_serve_event(event, state)
-                            state.flush()
-                            state.on_line(
-                                f"[{state.tool} serve event] session={state.session_id} "
-                                f"status=disconnected reconnect_in={_SERVE_EVENT_RECONNECT_DELAY_SECONDS}s"
-                            )
-                    except asyncio.CancelledError:
-                        raise
-                    except Exception as exc:
-                        status = "disconnected" if connected_once else "unavailable"
-                        state.on_line(
-                            f"[{state.tool} serve event] session={state.session_id} status={status} "
-                            f"error={_one_line_preview(exc)} "
-                            f"reconnect_in={_SERVE_EVENT_RECONNECT_DELAY_SECONDS}s"
-                        )
-                    await asyncio.sleep(_SERVE_EVENT_RECONNECT_DELAY_SECONDS)
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:
-            state.on_line(
-                f"[{state.tool} serve event] session={state.session_id} status=unavailable "
-                f"error={_one_line_preview(exc)}"
-            )
-        finally:
-            if started is not None:
-                started.set()
-            flush_task.cancel()
-            with contextlib.suppress(BaseException):
-                await flush_task
-            state.flush()
+    async def _stop_event_hub(self) -> None:
+        async with self._event_lock:
+            channels = [
+                channel
+                for channel in (
+                    [self._global_event_channel]
+                    + list(self._legacy_event_channels.values())
+                )
+                if channel is not None
+            ]
+            tasks = [
+                channel.task
+                for channel in channels
+                if channel.task is not None and not channel.task.done()
+            ]
+            self._global_event_channel = None
+            self._legacy_event_channels.clear()
+            self._global_event_unsupported = False
+            self._event_states.clear()
+            self._event_directories.clear()
+            self._degraded_event_channels.clear()
+            self._event_failure_started_at = 0.0
+            self._event_failure_attempts = 0
+            self._event_last_failure_summary_at = 0.0
+            self._event_poll_failure_reported = False
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
 
     async def _stop_locked(self) -> None:
+        await self._stop_event_hub()
         proc = self._proc
         port = self._port
         startup_log_path = self._startup_log_path

@@ -1,5 +1,10 @@
 # 更新日志
 
+## 2026-07-13
+
+- **修复** OpenCode/nga serve 的中间输出订阅改为每个 serve 进程共享一条 `/global/event`，旧版本仅在全局端点不支持时按目录共享 `/event`；实例流立即关闭时不再为每个并发任务每秒打印断线/重连，而是聚合告警并按最高 30 秒退避，SSE 不健康期间每秒轮询会话消息快照补齐 LLM 文本、推理及工具状态
+- **修复** Agent 访问本机 `127.0.0.1` OpenCode/nga serve 的 HTTP 客户端不再继承系统代理环境，避免 localhost 未包含在 `NO_PROXY` 时 SSE 被代理转发或提前关闭；模型服务所需的 OpenCode/nga 子进程代理配置保持不变
+
 ## 2026-07-10
 
 - **修复** Agent 控制台补齐开源 OpenCode `message.part.updated`/`message.part.delta` 与 OpenCode/nga `session.next.*`、sync 事件的统一解析：LLM 文本和推理在换行或最长约 1 秒内实时显示，工具/MCP 调用、session/step 状态及 SSE 断线重连按一行摘要输出，并按 part/call 状态去重且不泄露工具返回正文

@@ -16,8 +16,10 @@ from backend.opencode.serve_client import (
     _ServeEventState,
     _SERVE_HEALTH_POLL_INTERVAL_SECONDS,
     _SERVE_MODEL_FALLBACK_TIMEOUT_SECONDS,
+    _EventChannelRuntime,
     _flush_event_state_periodically,
     _handle_serve_event,
+    _next_event_reconnect_delay,
     _serve_context_headers,
     _serve_port,
     _serve_startup_env_debug,
@@ -34,9 +36,18 @@ def _short_event_drain_for_tests(monkeypatch) -> None:
 
 
 class _FakeResponse:
-    def __init__(self, data, *, error: Exception | None = None) -> None:
+    def __init__(
+        self,
+        data,
+        *,
+        error: Exception | None = None,
+        status_code: int = 200,
+        content_type: str = "application/json",
+    ) -> None:
         self._data = data
         self._error = error
+        self.status_code = status_code
+        self.headers = {"content-type": content_type}
         self.json_calls = 0
 
     def json(self):
@@ -55,7 +66,7 @@ class _FakeResponse:
 
 class _FakeStreamContext:
     def __init__(self, lines: list[str]) -> None:
-        self._response = _FakeResponse(lines)
+        self._response = _FakeResponse(lines, content_type="text/event-stream")
 
     async def __aenter__(self):
         return self._response
@@ -66,12 +77,14 @@ class _FakeStreamContext:
 
 class _FakeAsyncClient:
     instances: list["_FakeAsyncClient"] = []
+    init_options: list[dict] = []
     event_lines: list[str] = []
     tool_ids: list[str] | Exception = ["read", "grep", "mcp__deephole-code__view_function_code"]
     message_text = "done"
     message_info: object | None = None
 
     def __init__(self, *args, **kwargs) -> None:
+        self.init_options.append(dict(kwargs))
         self.posts: list[dict] = []
         self.gets: list[dict] = []
         self.deletes: list[dict] = []
@@ -112,7 +125,14 @@ class _FakeAsyncClient:
 
     def stream(self, method: str, path: str, **kwargs):
         self.streams.append({"method": method, "path": path, **kwargs})
-        return _FakeStreamContext(self.event_lines)
+        lines = list(self.event_lines)
+        if path == "/global/event":
+            lines = [
+                'data: {"payload":{"type":"server.connected","properties":{}}}',
+                "",
+                *lines,
+            ]
+        return _FakeStreamContext(lines)
 
 
 class _FakeModelAsyncClient:
@@ -140,6 +160,7 @@ class _FakeModelAsyncClient:
 def test_run_prompt_uses_project_directory_and_default_tools(monkeypatch, tmp_path: Path) -> None:
     async def run() -> None:
         _FakeAsyncClient.instances = []
+        _FakeAsyncClient.init_options = []
         _FakeAsyncClient.event_lines = []
         _FakeAsyncClient.tool_ids = ["read", "grep", "mcp__deephole-code__view_function_code"]
         monkeypatch.setattr(
@@ -221,6 +242,8 @@ def test_run_prompt_uses_project_directory_and_default_tools(monkeypatch, tmp_pa
             "headers": expected_headers,
         }]
         assert all(not client.deletes for client in _FakeAsyncClient.instances)
+        assert _FakeAsyncClient.init_options
+        assert all(options.get("trust_env") is False for options in _FakeAsyncClient.init_options)
         assert message["json"]["model"] == {
             "providerID": "anthropic",
             "modelID": "claude-sonnet",
@@ -375,7 +398,11 @@ def test_run_prompt_omits_tools_field_when_tool_discovery_fails(monkeypatch, tmp
             if item["path"] == "/session/session-1/message"
         )
         assert "tools" not in message["json"]
-        assert session_client.gets == [{
+        discovery_gets = [
+            item for item in session_client.gets
+            if item["path"] == "/experimental/tool/ids"
+        ]
+        assert discovery_gets == [{
             "path": "/experimental/tool/ids",
             "params": {"directory": str(project)},
             "headers": {"x-opencode-directory": str(project)},
@@ -1558,102 +1585,84 @@ def test_no_newline_delta_is_flushed_periodically(monkeypatch) -> None:
     asyncio.run(run())
 
 
-def test_event_stream_reconnects_and_reports_connection_states(monkeypatch) -> None:
-    async def run() -> None:
-        blocker = asyncio.Event()
+def test_event_failure_logs_are_aggregated_and_recovery_is_single(monkeypatch) -> None:
+    manager = OpenCodeServeManager()
+    output: list[str] = []
+    manager._event_states["session-1"] = _ServeEventState(
+        "opencode",
+        "session-1",
+        output.append,
+    )
+    runtime = _EventChannelRuntime(
+        key="global",
+        path="/global/event",
+        params={},
+        headers={},
+        connected_once=True,
+    )
+    clock = {"now": 100.0}
+    monkeypatch.setattr(
+        "backend.opencode.serve_client.time.monotonic",
+        lambda: clock["now"],
+    )
 
-        class Response:
-            def __init__(self, *, block: bool) -> None:
-                self.block = block
-
-            def raise_for_status(self) -> None:
-                return None
-
-            async def aiter_lines(self):
-                if self.block:
-                    await blocker.wait()
-                if False:
-                    yield ""
-
-        class StreamContext:
-            def __init__(self, response: Response) -> None:
-                self.response = response
-
-            async def __aenter__(self):
-                return self.response
-
-            async def __aexit__(self, exc_type, exc, tb) -> None:
-                return None
-
-        class Client:
-            stream_calls = 0
-
-            def __init__(self, *args, **kwargs) -> None:
-                return None
-
-            async def __aenter__(self):
-                return self
-
-            async def __aexit__(self, exc_type, exc, tb) -> None:
-                return None
-
-            def stream(self, *args, **kwargs):
-                type(self).stream_calls += 1
-                return StreamContext(Response(block=type(self).stream_calls > 1))
-
-        monkeypatch.setattr("backend.opencode.serve_client.httpx.AsyncClient", Client)
-        monkeypatch.setattr(
-            "backend.opencode.serve_client._SERVE_EVENT_RECONNECT_DELAY_SECONDS",
-            0.01,
+    manager._note_event_channel_failure(
+        runtime,
+        error="closed",
+        retry_in=1.0,
+    )
+    for now in (101.0, 110.0, 129.9):
+        clock["now"] = now
+        manager._note_event_channel_failure(
+            runtime,
+            error="closed again",
+            retry_in=8.0,
         )
-        manager = OpenCodeServeManager()
-        manager._port = 12345
-        output: list[str] = []
-        state = _ServeEventState("opencode", "session-1", output.append)
-        started = asyncio.Event()
-        task = asyncio.create_task(manager._stream_session_events({}, {}, state, started=started))
-        try:
-            await asyncio.wait_for(started.wait(), timeout=1)
-            for _ in range(100):
-                if Client.stream_calls >= 2:
-                    break
-                await asyncio.sleep(0.01)
-            assert Client.stream_calls >= 2
-        finally:
-            task.cancel()
-            with pytest.raises(asyncio.CancelledError):
-                await task
+    clock["now"] = 130.0
+    manager._note_event_channel_failure(
+        runtime,
+        error="still closed",
+        retry_in=16.0,
+    )
+    clock["now"] = 132.0
+    manager._note_event_channel_connected(runtime)
 
-        logged = "\n".join(output)
-        assert "status=connected" in logged
-        assert "status=disconnected" in logged
-        assert "status=reconnected" in logged
-
-    asyncio.run(run())
+    event_lines = [line for line in output if "serve event" in line]
+    assert len(event_lines) == 3
+    assert "status=disconnected" in event_lines[0]
+    assert "fallback=polling" in event_lines[0]
+    assert "status=unavailable attempts=5" in event_lines[1]
+    assert "status=reconnected downtime=32.0s attempts=5" in event_lines[2]
+    assert all("status=connected" not in line for line in event_lines)
 
 
-def test_event_stream_does_not_signal_started_until_a_connection_succeeds(
+def test_event_reconnect_delay_is_exponential_and_capped() -> None:
+    delay = 1.0
+    values = []
+    for _ in range(7):
+        values.append(delay)
+        delay = _next_event_reconnect_delay(delay)
+
+    assert values == [1.0, 2.0, 4.0, 8.0, 16.0, 30.0, 30.0]
+
+
+def test_server_connected_then_immediate_eof_does_not_log_false_recovery(
     monkeypatch,
 ) -> None:
     async def run() -> None:
-        blocker = asyncio.Event()
-
         class Response:
+            status_code = 200
+            headers = {"content-type": "text/event-stream"}
+
             def raise_for_status(self) -> None:
                 return None
 
             async def aiter_lines(self):
-                await blocker.wait()
-                if False:
-                    yield ""
+                yield 'data: {"payload":{"type":"server.connected","properties":{}}}'
+                yield ""
 
         class StreamContext:
-            def __init__(self, *, fail: bool) -> None:
-                self.fail = fail
-
             async def __aenter__(self):
-                if self.fail:
-                    raise httpx.ConnectError("first connection failed")
                 return Response()
 
             async def __aexit__(self, exc_type, exc, tb) -> None:
@@ -1673,33 +1682,312 @@ def test_event_stream_does_not_signal_started_until_a_connection_succeeds(
 
             def stream(self, *args, **kwargs):
                 type(self).stream_calls += 1
-                return StreamContext(fail=type(self).stream_calls == 1)
+                return StreamContext()
+
+        delays: list[float] = []
+
+        async def fake_sleep(delay: float) -> None:
+            delays.append(delay)
+            if len(delays) >= 3:
+                raise asyncio.CancelledError()
 
         monkeypatch.setattr("backend.opencode.serve_client.httpx.AsyncClient", Client)
+        monkeypatch.setattr("backend.opencode.serve_client.asyncio.sleep", fake_sleep)
+        manager = OpenCodeServeManager()
+        manager._port = 12345
+        output: list[str] = []
+        manager._event_states["session-1"] = _ServeEventState(
+            "opencode",
+            "session-1",
+            output.append,
+        )
+        runtime = _EventChannelRuntime(
+            key="global",
+            path="/global/event",
+            params={},
+            headers={},
+        )
+
+        with pytest.raises(asyncio.CancelledError):
+            await manager._run_event_channel(runtime, is_global=True)
+
+        event_lines = [line for line in output if "serve event" in line]
+        assert len(event_lines) == 1
+        assert "status=disconnected" in event_lines[0]
+        assert "status=reconnected" not in event_lines[0]
+        assert delays == [1.0, 2.0, 4.0]
+        assert Client.stream_calls == 3
+
+    asyncio.run(run())
+
+
+def test_global_event_hub_is_shared_and_routes_wrapped_sessions(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    async def run() -> None:
+        blocker = asyncio.Event()
+
+        class Response:
+            status_code = 200
+            headers = {"content-type": "text/event-stream"}
+
+            def raise_for_status(self) -> None:
+                return None
+
+            async def aiter_lines(self):
+                yield 'data: {"payload":{"type":"server.connected","properties":{}}}'
+                yield ""
+                await blocker.wait()
+
+        class StreamContext:
+            async def __aenter__(self):
+                return Response()
+
+            async def __aexit__(self, exc_type, exc, tb) -> None:
+                return None
+
+        class Client:
+            stream_calls: list[tuple[str, dict]] = []
+            init_options: list[dict] = []
+
+            def __init__(self, *args, **kwargs) -> None:
+                self.init_options.append(dict(kwargs))
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc, tb) -> None:
+                return None
+
+            def stream(self, method: str, path: str, **kwargs):
+                self.stream_calls.append((path, kwargs))
+                return StreamContext()
+
+        monkeypatch.setattr("backend.opencode.serve_client.httpx.AsyncClient", Client)
+        manager = OpenCodeServeManager()
+        manager._port = 12345
+        directory = tmp_path / "project"
+        directory.mkdir()
+        output_a: list[str] = []
+        output_b: list[str] = []
+        state_a = _ServeEventState("opencode", "session-a", output_a.append)
+        state_b = _ServeEventState("opencode", "session-b", output_b.append)
+
+        try:
+            await manager._register_event_state("session-a", directory, state_a)
+            await manager._register_event_state("session-b", directory, state_b)
+            assert len(Client.stream_calls) == 1
+            assert Client.stream_calls[0][0] == "/global/event"
+            assert Client.init_options[0]["trust_env"] is False
+            assert Client.stream_calls[0][1]["headers"]["Accept"] == "text/event-stream"
+
+            assert manager._dispatch_event({
+                "directory": str(directory),
+                "payload": {
+                    "id": "event-a",
+                    "type": "session.next.text.delta",
+                    "properties": {"sessionID": "session-a", "delta": "alpha\n"},
+                },
+            })
+            assert manager._dispatch_event({
+                "directory": str(directory),
+                "payload": {
+                    "id": "event-b",
+                    "type": "sync",
+                    "name": "session.next.text.delta.1",
+                    "seq": 1,
+                    "data": {"sessionID": "session-b", "delta": "beta\n"},
+                },
+            })
+            assert output_a == ["[opencode serve llm text] alpha"]
+            assert output_b == ["[opencode serve llm text] beta"]
+        finally:
+            await manager._stop_event_hub()
+
+    asyncio.run(run())
+
+
+def test_global_event_unsupported_falls_back_to_one_legacy_stream_per_directory(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    async def run() -> None:
+        blocker = asyncio.Event()
+
+        class Response:
+            headers = {"content-type": "text/event-stream"}
+
+            def __init__(self, status_code: int) -> None:
+                self.status_code = status_code
+
+            def raise_for_status(self) -> None:
+                return None
+
+            async def aiter_lines(self):
+                yield 'data: {"type":"server.connected","properties":{}}'
+                yield ""
+                await blocker.wait()
+
+        class StreamContext:
+            def __init__(self, response: Response) -> None:
+                self.response = response
+
+            async def __aenter__(self):
+                return self.response
+
+            async def __aexit__(self, exc_type, exc, tb) -> None:
+                return None
+
+        class Client:
+            paths: list[str] = []
+
+            def __init__(self, *args, **kwargs) -> None:
+                return None
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc, tb) -> None:
+                return None
+
+            def stream(self, method: str, path: str, **kwargs):
+                self.paths.append(path)
+                return StreamContext(Response(404 if path == "/global/event" else 200))
+
+        monkeypatch.setattr("backend.opencode.serve_client.httpx.AsyncClient", Client)
+        manager = OpenCodeServeManager()
+        manager._port = 12345
+        directory = tmp_path / "project"
+        directory.mkdir()
+        state_a = _ServeEventState("nga", "session-a", lambda _line: None)
+        state_b = _ServeEventState("nga", "session-b", lambda _line: None)
+
+        try:
+            await manager._register_event_state("session-a", directory, state_a)
+            await manager._register_event_state("session-b", directory, state_b)
+            assert manager._global_event_unsupported is True
+            assert Client.paths.count("/global/event") == 1
+            assert Client.paths.count("/event") == 1
+            assert manager._event_channel_healthy(directory) is True
+        finally:
+            await manager._stop_event_hub()
+
+    asyncio.run(run())
+
+
+def test_snapshot_polling_fills_text_reasoning_and_tool_state_then_pauses_on_recovery(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    async def run() -> None:
         monkeypatch.setattr(
-            "backend.opencode.serve_client._SERVE_EVENT_RECONNECT_DELAY_SECONDS",
-            0.02,
+            "backend.opencode.serve_client._SERVE_EVENT_POLL_INTERVAL_SECONDS",
+            0.01,
         )
         manager = OpenCodeServeManager()
         manager._port = 12345
-        state = _ServeEventState("opencode", "session-1", lambda _line: None)
-        started = asyncio.Event()
-        task = asyncio.create_task(
-            manager._stream_session_events({}, {}, state, started=started)
+        runtime = _EventChannelRuntime(
+            key="global",
+            path="/global/event",
+            params={},
+            headers={},
+            healthy=False,
         )
+        manager._global_event_channel = runtime
+        output: list[str] = []
+        state = _ServeEventState("opencode", "session-1", output.append)
+
+        class Client:
+            def __init__(self) -> None:
+                self.get_calls = 0
+
+            async def get(self, path: str, **kwargs):
+                self.get_calls += 1
+                completed = self.get_calls >= 2
+                if completed:
+                    runtime.healthy = True
+                tool_state = (
+                    {
+                        "status": "completed",
+                        "input": {"function_name": "target"},
+                        "output": "SECRET TOOL BODY",
+                        "title": "done",
+                        "metadata": {},
+                        "time": {"start": 1, "end": 2},
+                    }
+                    if completed
+                    else {
+                        "status": "pending",
+                        "input": {"function_name": "target"},
+                        "raw": "pending",
+                    }
+                )
+                text = "hello world\n" if completed else "hello"
+                reasoning = "think\n" if completed else ""
+                return _FakeResponse([{
+                    "info": {
+                        "id": "message-ai",
+                        "sessionID": "session-1",
+                        "role": "assistant",
+                        "time": {"created": 1},
+                    },
+                    "parts": [
+                        {
+                            "id": "text-1",
+                            "sessionID": "session-1",
+                            "messageID": "message-ai",
+                            "type": "text",
+                            "text": text,
+                        },
+                        {
+                            "id": "reasoning-1",
+                            "sessionID": "session-1",
+                            "messageID": "message-ai",
+                            "type": "reasoning",
+                            "text": reasoning,
+                        },
+                        {
+                            "id": "tool-1",
+                            "sessionID": "session-1",
+                            "messageID": "message-ai",
+                            "type": "tool",
+                            "callID": "call-1",
+                            "tool": "mcp__deephole-code__view_function_code",
+                            "state": tool_state,
+                        },
+                    ],
+                }])
+
+        client = Client()
+        task = asyncio.create_task(manager._poll_session_snapshots(
+            client=client,
+            session_id="session-1",
+            directory=tmp_path,
+            params={"directory": str(tmp_path)},
+            headers={"x-opencode-directory": str(tmp_path)},
+            state=state,
+        ))
         try:
             for _ in range(100):
-                if Client.stream_calls >= 1:
+                if client.get_calls >= 2:
                     break
-                await asyncio.sleep(0.001)
-            assert Client.stream_calls == 1
-            assert started.is_set() is False
-            await asyncio.wait_for(started.wait(), timeout=1)
-            assert Client.stream_calls >= 2
+                await asyncio.sleep(0.005)
+            await asyncio.sleep(0.04)
+            state.flush()
+            assert client.get_calls == 2
         finally:
             task.cancel()
             with pytest.raises(asyncio.CancelledError):
                 await task
+
+        logged = "\n".join(output)
+        assert "[opencode serve llm text] hello world" in logged
+        assert "[opencode serve llm reasoning] think" in logged
+        assert logged.count("serve tool_call") == 1
+        assert logged.count("serve tool_result") == 1
+        assert "source=mcp" in logged
+        assert "SECRET TOOL BODY" not in logged
 
     asyncio.run(run())
 
