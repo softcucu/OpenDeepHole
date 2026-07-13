@@ -568,6 +568,7 @@ export interface AgentGitHistoryConfig {
 export interface AgentThreatAnalysisConfig {
   enabled: boolean;
   implementation: string;
+  attack_path_audit_mode?: "after_analysis" | "immediate" | string;
   product_mcp_name?: string;
   product_mcp_detection_timeout_seconds?: number;
 }

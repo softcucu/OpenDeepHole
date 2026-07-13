@@ -690,6 +690,7 @@ class AgentGitHistoryConfig(BaseModel):
 class AgentThreatAnalysisConfig(BaseModel):
     enabled: bool = True
     implementation: str = "attack_tree"
+    attack_path_audit_mode: str = "after_analysis"
     product_mcp_name: str = "product-info"
     product_mcp_detection_timeout_seconds: int = 60
 

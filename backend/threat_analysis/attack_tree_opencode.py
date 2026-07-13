@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 from uuid import uuid4
 
-from backend.models import ThreatAnalysis, ThreatAnalysisSources
+from backend.models import ThreatAnalysis, ThreatAnalysisSources, ThreatAttackPath
 
 from .attack_paths import (
     append_or_merge_attack_path,
@@ -49,6 +50,7 @@ async def run_attack_tree_threat_analysis(
     code_scan_path: Path | None = None,
     product: str = "",
     planned_task_id: str = "",
+    on_attack_paths: Callable[[list[ThreatAttackPath]], object] | None = None,
 ) -> ThreatAnalysis | None:
     """Run the layered threat-analysis harness and return normalized results."""
     from backend.opencode import runner as opencode_runner
@@ -129,7 +131,11 @@ async def run_attack_tree_threat_analysis(
         task_label="基础资产与接口建模",
     )
     base_output = read_json_object(base_output_path)
-    _append_attack_paths_from_output(stream_path, base_output)
+    await _append_attack_paths_from_output(
+        stream_path,
+        base_output,
+        on_attack_paths=on_attack_paths,
+    )
 
     attack_goals = _attack_goals_from_base_output(base_output)[:_MAX_GOALS]
     domain_tasks: list[dict[str, Any]] = []
@@ -244,7 +250,12 @@ async def run_attack_tree_threat_analysis(
             task_label=f"攻击面分析 {index}/{len(surface_tasks)}",
         )
         surface_output = read_json_object(output_path)
-        _append_attack_paths_from_output(stream_path, surface_output, defaults=task)
+        await _append_attack_paths_from_output(
+            stream_path,
+            surface_output,
+            defaults=task,
+            on_attack_paths=on_attack_paths,
+        )
         for method_task in _dict_items(surface_output.get("method_confirmation_tasks")):
             confirmation_tasks.append({**task, "method_confirmation_task": method_task})
             if len(confirmation_tasks) >= _MAX_CONFIRMATIONS:
@@ -284,7 +295,12 @@ async def run_attack_tree_threat_analysis(
             task_label=f"方法确认 {index}/{len(confirmation_tasks)}",
         )
         method_output = read_json_object(output_path)
-        _append_attack_paths_from_output(stream_path, method_output, defaults=task)
+        await _append_attack_paths_from_output(
+            stream_path,
+            method_output,
+            defaults=task,
+            on_attack_paths=on_attack_paths,
+        )
 
     paths = read_attack_paths_jsonl(stream_path)
     sources = ThreatAnalysisSources(
@@ -417,15 +433,21 @@ def _attack_goals_from_base_output(base_output: dict[str, Any]) -> list[dict[str
     return out
 
 
-def _append_attack_paths_from_output(
+async def _append_attack_paths_from_output(
     stream_path: Path,
     output: dict[str, Any],
     defaults: dict[str, Any] | None = None,
+    on_attack_paths: Callable[[list[ThreatAttackPath]], object] | None = None,
 ) -> None:
     defaults = defaults or {}
+    latest_paths: list[ThreatAttackPath] = []
     for raw_path in _dict_items(output.get("attack_paths")):
         merged = _with_attack_path_defaults(raw_path, defaults)
-        append_or_merge_attack_path(stream_path, parse_attack_path_data(merged))
+        latest_paths = append_or_merge_attack_path(stream_path, parse_attack_path_data(merged))
+    if latest_paths and on_attack_paths is not None:
+        maybe = on_attack_paths(latest_paths)
+        if inspect.isawaitable(maybe):
+            await maybe
 
 
 def _with_attack_path_defaults(path: dict[str, Any], defaults: dict[str, Any]) -> dict[str, Any]:

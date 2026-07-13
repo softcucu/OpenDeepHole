@@ -8,9 +8,15 @@
 threat_analysis:
   enabled: true
   implementation: "attack_tree"
+  attack_path_audit_mode: "after_analysis"
   product_mcp_name: "product-info"
   product_mcp_detection_timeout_seconds: 60
 ```
+
+`attack_path_audit_mode` 控制威胁分析生成攻击路径后的审计调度：
+
+- `after_analysis`：默认值。先等威胁分析所有阶段完成并归并结果，再统一启动威胁审计。
+- `immediate`：每当攻击路径写入并归并到 JSONL 后，立即派发对应威胁审计任务；最终只补跑未被即时派发的路径。
 
 `attack_tree` 是默认实现。运行时会先在 OpenCode 当前配置中检测
 `product_mcp_name` 对应的产品信息 MCP：

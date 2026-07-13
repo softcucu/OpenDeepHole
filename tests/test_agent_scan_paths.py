@@ -49,7 +49,7 @@ from backend.models import (
 )
 from backend.opencode.model_pool import NoAvailableModelError
 from backend.store.sqlite import SqliteScanStore
-from backend.threat_analysis import apply_threat_analysis_scan_scope
+from backend.threat_analysis import apply_threat_analysis_scan_scope, parse_threat_analysis_data
 
 
 def _candidate(vuln_type: str, line: int) -> Candidate:
@@ -497,6 +497,86 @@ class AgentScanPathTests(unittest.TestCase):
         auditor = asyncio.run(run())
         auditor.assert_awaited_once()
         self.assertEqual(auditor.await_args.kwargs["only_task_ids"], {"threat-audit-1"})
+
+    def test_immediate_attack_path_mode_dispatches_streamed_audits(self) -> None:
+        class FakeReporter:
+            def __init__(self) -> None:
+                self.pushed: list[tuple[str, dict]] = []
+
+            async def push_threat_analysis(self, scan_id: str, analysis: dict) -> None:
+                self.pushed.append((scan_id, analysis))
+
+        async def run() -> tuple[list[tuple[str, str]], FakeReporter, AsyncMock]:
+            with tempfile.TemporaryDirectory() as tmp:
+                project = Path(tmp) / "project"
+                workspace = Path(tmp) / "workspace"
+                project.mkdir()
+                workspace.mkdir()
+                config = AgentConfig()
+                config.threat_analysis.attack_path_audit_mode = "immediate"
+                analysis = parse_threat_analysis_data({
+                    "schema_version": "1.1",
+                    "analysis_id": "streamed-threat",
+                    "attack_paths": [
+                        {
+                            "path_id": "AP-1",
+                            "fingerprint": "fp-1",
+                            "asset_name": "管理员权限",
+                            "risk_name": "权限提升",
+                            "attack_goal_name": "绕过认证",
+                            "attack_domain_name": "管理面",
+                            "attack_surface_name": "管理 API",
+                            "attack_method_name": "认证绕过",
+                            "code_paths": [{"path": "src/api"}],
+                        }
+                    ],
+                })
+                analysis = apply_threat_analysis_scan_scope(
+                    analysis,
+                    project.resolve(),
+                    project.resolve(),
+                )
+                path = analysis.attack_paths[0]
+                reporter = FakeReporter()
+                events: list[tuple[str, str]] = []
+
+                async def emit(phase: str, message: str) -> None:
+                    events.append((phase, message))
+
+                async def fake_runner(**kwargs):
+                    await kwargs["on_attack_paths"]([path])
+                    return analysis
+
+                auditor = AsyncMock()
+                with (
+                    patch(
+                        "backend.opencode.runner.run_threat_analysis_audit",
+                        new=AsyncMock(side_effect=fake_runner),
+                    ),
+                    patch("agent.threat_auditor.run_threat_audit_tasks", auditor),
+                ):
+                    await _run_threat_analysis_phase(
+                        config=config,
+                        project_path=project.resolve(),
+                        code_scan_path=project.resolve(),
+                        reporter=reporter,  # type: ignore[arg-type]
+                        scan_id="scan-1",
+                        product="demo",
+                        workspace=workspace,
+                        cancel_event=threading.Event(),
+                        emit=emit,
+                    )
+                return events, reporter, auditor
+
+        events, reporter, auditor = asyncio.run(run())
+
+        self.assertEqual(reporter.pushed[0][1]["analysis_id"], "streamed-threat")
+        self.assertEqual(auditor.await_count, 2)
+        first_kwargs = auditor.await_args_list[0].kwargs
+        final_kwargs = auditor.await_args_list[1].kwargs
+        self.assertEqual(len(first_kwargs["only_task_ids"]), 1)
+        self.assertEqual(final_kwargs["exclude_task_ids"], first_kwargs["only_task_ids"])
+        self.assertTrue(any("攻击路径即时审计" in message for _phase, message in events))
 
     def test_resume_reruns_threat_analysis_when_stored_scope_differs(self) -> None:
         class FakeReporter:

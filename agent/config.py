@@ -82,6 +82,7 @@ class GitHistoryConfig:
 class ThreatAnalysisConfig:
     enabled: bool = True
     implementation: str = "attack_tree"
+    attack_path_audit_mode: str = "after_analysis"  # after_analysis | immediate
     product_mcp_name: str = "product-info"
     product_mcp_detection_timeout_seconds: int = 60
 
@@ -212,6 +213,19 @@ def _normalize_git_history_config(config: GitHistoryConfig) -> None:
 def _normalize_threat_analysis_config(config: ThreatAnalysisConfig) -> None:
     config.enabled = _bool_value(config.enabled, True)
     config.implementation = str(config.implementation or "attack_tree").strip() or "attack_tree"
+    mode = str(getattr(config, "attack_path_audit_mode", "") or "after_analysis").strip().lower()
+    aliases = {
+        "after_analysis": "after_analysis",
+        "after-all": "after_analysis",
+        "after_all": "after_analysis",
+        "batch": "after_analysis",
+        "deferred": "after_analysis",
+        "wait_for_analysis": "after_analysis",
+        "immediate": "immediate",
+        "streaming": "immediate",
+        "incremental": "immediate",
+    }
+    config.attack_path_audit_mode = aliases.get(mode, "after_analysis")
 
 
 @dataclass

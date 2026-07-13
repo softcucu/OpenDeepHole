@@ -104,3 +104,6 @@ git_history:
 threat_analysis:
   enabled: true
   implementation: "attack_tree"
+  attack_path_audit_mode: "after_analysis" # after_analysis | immediate
+  product_mcp_name: "product-info"
+  product_mcp_detection_timeout_seconds: 60

@@ -81,6 +81,7 @@ class GitHistoryConfig(BaseModel):
 class ThreatAnalysisConfig(BaseModel):
     enabled: bool = True
     implementation: str = "attack_tree"
+    attack_path_audit_mode: str = "after_analysis"  # after_analysis | immediate
     product_mcp_name: str = "product-info"
     product_mcp_detection_timeout_seconds: int = 60
 

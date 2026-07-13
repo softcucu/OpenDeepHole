@@ -48,6 +48,7 @@ git_history:
 threat_analysis:
   enabled: true                 # 是否运行威胁分析阶段
   implementation: "attack_tree" # 可替换实现 ID；默认攻击树实现
+  attack_path_audit_mode: "after_analysis" # after_analysis: 威胁分析全部完成后统一审计；immediate: 攻击路径生成后立即审计
   product_mcp_name: "product-info" # OpenCode 中产品信息 MCP server 名称；检测到则走 MCP 流程
   product_mcp_detection_timeout_seconds: 60 # 产品信息 MCP 检测超时
 

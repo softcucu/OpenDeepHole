@@ -1055,6 +1055,7 @@ async def run_threat_analysis_audit(
     code_scan_path: Path | None = None,
     product: str = "",
     planned_task_id: str = "",
+    on_attack_paths=None,
 ) -> ThreatAnalysis | None:
     """Compatibility wrapper for the default attack-tree threat-analysis implementation."""
     from backend.threat_analysis.attack_tree_opencode import run_attack_tree_threat_analysis
@@ -1071,6 +1072,7 @@ async def run_threat_analysis_audit(
         code_scan_path=code_scan_path,
         product=product,
         planned_task_id=planned_task_id,
+        on_attack_paths=on_attack_paths,
     )
 
 

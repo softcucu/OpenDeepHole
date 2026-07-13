@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Protocol
 
-from backend.models import ThreatAnalysis
+from backend.models import ThreatAnalysis, ThreatAttackPath
 
 
 @dataclass(frozen=True)
@@ -30,6 +30,7 @@ class ThreatAnalysisRunContext:
     timeout: int | None = None
     planned_task_id: str = ""
     on_output: Callable[[str], object] | None = None
+    on_attack_paths: Callable[[list[ThreatAttackPath]], object] | None = None
     cancel_event: object | None = None
 
 

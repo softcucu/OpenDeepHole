@@ -41,6 +41,7 @@ class AgentConfigTests(unittest.TestCase):
         self.assertTrue(cfg.git_history.variant_hunt)
         self.assertTrue(cfg.threat_analysis.enabled)
         self.assertEqual(cfg.threat_analysis.implementation, "attack_tree")
+        self.assertEqual(cfg.threat_analysis.attack_path_audit_mode, "after_analysis")
         self.assertTrue(cfg.static_dedup)
         self.assertTrue(cfg.pattern_filter.enabled)
         self.assertEqual(cfg.pattern_filter.scope, "directory")
@@ -59,6 +60,7 @@ class AgentConfigTests(unittest.TestCase):
         self.assertEqual(AgentRemoteConfig().opencode_concurrency, 4)
         self.assertTrue(AgentRemoteConfig().threat_analysis.enabled)
         self.assertEqual(AgentRemoteConfig().threat_analysis.implementation, "attack_tree")
+        self.assertEqual(AgentRemoteConfig().threat_analysis.attack_path_audit_mode, "after_analysis")
 
     def test_full_remote_defaults_do_not_switch_agent_to_opencode(self) -> None:
         cfg = AgentConfig()
@@ -114,7 +116,11 @@ class AgentConfigTests(unittest.TestCase):
                     "paths": "src tests",
                     "variant_hunt": False,
                 },
-                "threat_analysis": {"enabled": False, "implementation": "custom_impl"},
+                "threat_analysis": {
+                    "enabled": False,
+                    "implementation": "custom_impl",
+                    "attack_path_audit_mode": "immediate",
+                },
                 "static_dedup": False,
                 "pattern_filter": {"enabled": False, "scope": "repo"},
                 "vulnerability_validation": {
@@ -154,6 +160,7 @@ class AgentConfigTests(unittest.TestCase):
         self.assertFalse(cfg.git_history.variant_hunt)
         self.assertFalse(cfg.threat_analysis.enabled)
         self.assertEqual(cfg.threat_analysis.implementation, "custom_impl")
+        self.assertEqual(cfg.threat_analysis.attack_path_audit_mode, "immediate")
         self.assertFalse(cfg.static_dedup)
         self.assertFalse(cfg.pattern_filter.enabled)
         self.assertEqual(cfg.pattern_filter.scope, "repo")
@@ -190,7 +197,16 @@ class AgentConfigTests(unittest.TestCase):
             remote["git_history"],
             {"enabled": False, "max_commits": 200, "since": "", "paths": "", "variant_hunt": True},
         )
-        self.assertEqual(remote["threat_analysis"], {"enabled": True, "implementation": "attack_tree"})
+        self.assertEqual(
+            remote["threat_analysis"],
+            {
+                "enabled": True,
+                "implementation": "attack_tree",
+                "attack_path_audit_mode": "after_analysis",
+                "product_mcp_name": "product-info",
+                "product_mcp_detection_timeout_seconds": 60,
+            },
+        )
         self.assertTrue(remote["static_dedup"])
         self.assertEqual(remote["pattern_filter"], {"enabled": True, "scope": "directory"})
         self.assertEqual(
@@ -244,7 +260,11 @@ class AgentConfigTests(unittest.TestCase):
                         "paths": "src",
                         "variant_hunt": False,
                     },
-                    "threat_analysis": {"enabled": False, "implementation": "custom_impl"},
+                    "threat_analysis": {
+                        "enabled": False,
+                        "implementation": "custom_impl",
+                        "attack_path_audit_mode": "immediate",
+                    },
                     "static_dedup": False,
                     "pattern_filter": {"enabled": False, "scope": "file"},
                     "vulnerability_validation": {"enabled": True, "script_path": "/local/validator.py", "timeout_seconds": 600},
@@ -286,7 +306,16 @@ class AgentConfigTests(unittest.TestCase):
                     "variant_hunt": False,
                 },
             )
-            self.assertEqual(raw["threat_analysis"], {"enabled": False, "implementation": "custom_impl"})
+            self.assertEqual(
+                raw["threat_analysis"],
+                {
+                    "enabled": False,
+                    "implementation": "custom_impl",
+                    "attack_path_audit_mode": "immediate",
+                    "product_mcp_name": "product-info",
+                    "product_mcp_detection_timeout_seconds": 60,
+                },
+            )
             self.assertFalse(raw["static_dedup"])
             self.assertEqual(raw["pattern_filter"], {"enabled": False, "scope": "file"})
             self.assertEqual(raw["vulnerability_validation"]["script_path"], "/local/validator.py")
@@ -295,10 +324,17 @@ class AgentConfigTests(unittest.TestCase):
     def test_invalid_pattern_filter_scope_falls_back_to_directory(self) -> None:
         cfg = AgentConfig()
 
-        apply_remote_config(cfg, {"pattern_filter": {"enabled": "false", "scope": "invalid"}})
+        apply_remote_config(
+            cfg,
+            {
+                "pattern_filter": {"enabled": "false", "scope": "invalid"},
+                "threat_analysis": {"attack_path_audit_mode": "invalid"},
+            },
+        )
 
         self.assertFalse(cfg.pattern_filter.enabled)
         self.assertEqual(cfg.pattern_filter.scope, "directory")
+        self.assertEqual(cfg.threat_analysis.attack_path_audit_mode, "after_analysis")
 
     def test_legacy_executable_infers_tool_and_fp_review_inherits(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

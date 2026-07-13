@@ -95,4 +95,5 @@ class AttackTreeThreatAnalysis:
             code_scan_path=context.code_scan_path,
             product=context.product,
             planned_task_id=context.planned_task_id,
+            on_attack_paths=context.on_attack_paths,
         )

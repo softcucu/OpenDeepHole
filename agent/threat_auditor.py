@@ -258,9 +258,16 @@ async def run_threat_audit_tasks(
     cancel_event: threading.Event,
     emit: Callable[[str, str], object],
     only_task_ids: set[str] | None = None,
+    exclude_task_ids: set[str] | None = None,
 ) -> None:
     """Run threat-analysis-derived audits through the shared OpenCode queue."""
     tasks = build_threat_audit_tasks(scan_id, analysis)
+    if exclude_task_ids:
+        original_count = len(tasks)
+        tasks = [task for task in tasks if task.task_id not in exclude_task_ids]
+        if original_count and not tasks:
+            await _maybe_emit(emit, "威胁审计任务已由攻击路径即时模式调度，跳过最终补跑")
+            return
     if not tasks:
         await _maybe_emit(emit, "威胁分析未生成可审计的攻击面/攻击方式任务")
         return

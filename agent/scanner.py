@@ -17,7 +17,7 @@ import yaml
 from agent.config import AgentConfig, apply_network_env
 from agent.reporter import Reporter
 from backend.checker_sync import unpack_checker_packages
-from backend.models import Candidate, FeedbackEntry, ScanEvent, ThreatAnalysis, Vulnerability
+from backend.models import Candidate, FeedbackEntry, ScanEvent, ThreatAnalysis, ThreatAttackPath, Vulnerability
 from backend.opencode.model_pool import NoAvailableModelError
 from backend.opencode.output_format import with_local_timestamp
 from backend.registry import CHECKERS_DIR_ENV
@@ -443,6 +443,7 @@ async def _run_threat_analysis_phase(
     try:
         from backend.threat_analysis import (
             ThreatAnalysisRunContext,
+            build_threat_analysis_scan_scope,
             get_threat_analysis_implementation,
             threat_analysis_enabled,
         )
@@ -455,6 +456,76 @@ async def _run_threat_analysis_phase(
 
         root_dir = Path(__file__).resolve().parent.parent
         implementation = get_threat_analysis_implementation(config)
+        attack_path_audit_mode = getattr(
+            config.threat_analysis,
+            "attack_path_audit_mode",
+            "after_analysis",
+        )
+        immediate_attack_path_audit = attack_path_audit_mode == "immediate"
+        streamed_threat_audit_task_ids: set[str] = set()
+        streamed_threat_audit_runs: list[asyncio.Task] = []
+        streaming_audit_lock = asyncio.Lock()
+        retry_task_id_filter = (
+            set(retry_threat_audit_task_ids)
+            if retry_threat_audit_task_ids is not None
+            else None
+        )
+
+        async def _schedule_streaming_threat_audits(paths: list[ThreatAttackPath]) -> None:
+            if (
+                not immediate_attack_path_audit
+                or cancel_event.is_set()
+                or not paths
+            ):
+                return
+            from agent.threat_auditor import build_threat_audit_tasks, run_threat_audit_tasks
+
+            partial_analysis = ThreatAnalysis(
+                schema_version="1.1",
+                analysis_id=f"{scan_id}-streaming-threat-paths",
+                scan_scope=build_threat_analysis_scan_scope(project_path, code_scan_path),
+                attack_paths=paths,
+            )
+            tasks = build_threat_audit_tasks(scan_id, partial_analysis)
+            task_ids = {task.task_id for task in tasks}
+            if retry_task_id_filter is not None:
+                task_ids &= retry_task_id_filter
+            async with streaming_audit_lock:
+                new_task_ids = task_ids - streamed_threat_audit_task_ids
+                if not new_task_ids:
+                    return
+                streamed_threat_audit_task_ids.update(new_task_ids)
+                maybe = emit(
+                    "threat_audit",
+                    f"攻击路径即时审计：新增 {len(new_task_ids)} 个任务",
+                )
+                if asyncio.iscoroutine(maybe):
+                    await maybe
+                streamed_threat_audit_runs.append(
+                    asyncio.create_task(run_threat_audit_tasks(
+                        config=config,
+                        analysis=partial_analysis,
+                        reporter=reporter,
+                        scan_id=scan_id,
+                        project_path=project_path,
+                        workspace=workspace,
+                        cancel_event=cancel_event,
+                        emit=emit,
+                        only_task_ids=new_task_ids,
+                    ))
+                )
+
+        async def _wait_for_streaming_threat_audits() -> None:
+            if not streamed_threat_audit_runs:
+                return
+            maybe = emit(
+                "threat_audit",
+                f"等待 {len(streamed_threat_audit_runs)} 个攻击路径即时审计批次完成...",
+            )
+            if asyncio.iscoroutine(maybe):
+                await maybe
+            await asyncio.gather(*streamed_threat_audit_runs)
+
         analysis = None
         reused_scan_analysis = False
         if is_resume:
@@ -504,6 +575,11 @@ async def _run_threat_analysis_phase(
                         with_local_timestamp(line, prefix="[threat]"),
                         flush=True,
                     ),
+                    on_attack_paths=(
+                        _schedule_streaming_threat_audits
+                        if immediate_attack_path_audit
+                        else None
+                    ),
                     cancel_event=cancel_event,
                 )
             )
@@ -516,6 +592,7 @@ async def _run_threat_analysis_phase(
                 )
                 if asyncio.iscoroutine(maybe):
                     await maybe
+            await _wait_for_streaming_threat_audits()
             if not cancel_event.is_set():
                 from agent.threat_auditor import run_threat_audit_tasks
 
@@ -533,12 +610,15 @@ async def _run_threat_analysis_phase(
                         if retry_threat_audit_task_ids is not None
                         else None
                     ),
+                    exclude_task_ids=streamed_threat_audit_task_ids if immediate_attack_path_audit else None,
                 )
         elif cancel_event.is_set():
+            await _wait_for_streaming_threat_audits()
             maybe = emit("threat_analysis", "威胁分析已停止")
             if asyncio.iscoroutine(maybe):
                 await maybe
         else:
+            await _wait_for_streaming_threat_audits()
             maybe = emit("threat_analysis", "威胁分析未生成有效 res.json，已跳过结果展示")
             if asyncio.iscoroutine(maybe):
                 await maybe
@@ -777,6 +857,15 @@ def _backend_runtime_sections(config: AgentConfig, scan_dir: Path | None = None)
             "paths": config.git_history.paths,
             "variant_hunt": config.git_history.variant_hunt,
         },
+        "threat_analysis": {
+            "enabled": config.threat_analysis.enabled,
+            "implementation": config.threat_analysis.implementation,
+            "attack_path_audit_mode": config.threat_analysis.attack_path_audit_mode,
+            "product_mcp_name": config.threat_analysis.product_mcp_name,
+            "product_mcp_detection_timeout_seconds": (
+                config.threat_analysis.product_mcp_detection_timeout_seconds
+            ),
+        },
         "static_dedup": config.static_dedup,
         "pattern_filter": {
             "enabled": config.pattern_filter.enabled,
@@ -819,6 +908,7 @@ def refresh_backend_runtime_config(config: AgentConfig) -> None:
     current.opencode_concurrency = int(raw["opencode_concurrency"])
     current.memory_api_discovery = _cfg.MemoryApiDiscoveryConfig(**raw["memory_api_discovery"])
     current.git_history = _cfg.GitHistoryConfig(**raw["git_history"])
+    current.threat_analysis = _cfg.ThreatAnalysisConfig(**raw["threat_analysis"])
     current.static_dedup = bool(raw["static_dedup"])
     current.pattern_filter = _cfg.PatternFilterConfig(**raw["pattern_filter"])
     current.no_proxy = str(raw.get("no_proxy") or "")

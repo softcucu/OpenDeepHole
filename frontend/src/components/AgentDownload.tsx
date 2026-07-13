@@ -33,6 +33,7 @@ const DEFAULT_GIT_HISTORY: AgentGitHistoryConfig = {
 const DEFAULT_THREAT_ANALYSIS: AgentThreatAnalysisConfig = {
   enabled: true,
   implementation: "attack_tree",
+  attack_path_audit_mode: "after_analysis",
   product_mcp_name: "product-info",
   product_mcp_detection_timeout_seconds: 60,
 };
@@ -777,6 +778,17 @@ function AgentConfigPanel({ agent }: AgentConfigPanelProps) {
                       disabled={!(cfg.threat_analysis?.enabled ?? true)}
                     >
                       <option value="attack_tree">attack_tree</option>
+                    </select>
+                  </Field>
+                  <Field label="攻击路径审计策略">
+                    <select
+                      value={cfg.threat_analysis?.attack_path_audit_mode || "after_analysis"}
+                      onChange={(e) => setThreatAnalysis("attack_path_audit_mode", e.target.value)}
+                      className={inputCls}
+                      disabled={!(cfg.threat_analysis?.enabled ?? true)}
+                    >
+                      <option value="after_analysis">威胁分析完成后统一审计</option>
+                      <option value="immediate">攻击路径生成后立即审计</option>
                     </select>
                   </Field>
                   <Field label="产品信息 MCP 名称">
