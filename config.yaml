@@ -45,6 +45,10 @@ git_history:
   paths: ""            # git log 路径过滤，空格分隔（留空不限）
   variant_hunt: true   # 是否对每条历史问题模式做全仓同类变体排查
 
+threat_analysis:
+  enabled: true                 # 是否运行威胁分析阶段
+  implementation: "attack_tree" # 可替换实现 ID；默认攻击树实现
+
 storage:
   projects_dir: "../OpenDeepHoleData/projects"
   scans_dir: "../OpenDeepHoleData/scans"

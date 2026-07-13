@@ -10,6 +10,7 @@ import type {
   OpenCodePoolModelStats,
   AgentPatternFilterConfig,
   AgentRemoteConfig,
+  AgentThreatAnalysisConfig,
 } from "../types";
 
 interface Props {
@@ -27,6 +28,11 @@ const DEFAULT_GIT_HISTORY: AgentGitHistoryConfig = {
   since: "",
   paths: "",
   variant_hunt: true,
+};
+
+const DEFAULT_THREAT_ANALYSIS: AgentThreatAnalysisConfig = {
+  enabled: true,
+  implementation: "attack_tree",
 };
 
 const DEFAULT_VULNERABILITY_VALIDATION = {
@@ -68,6 +74,7 @@ const DEFAULT_CONFIG: AgentRemoteConfig = {
     max_candidates: 200,
   },
   git_history: DEFAULT_GIT_HISTORY,
+  threat_analysis: DEFAULT_THREAT_ANALYSIS,
   static_dedup: true,
   pattern_filter: DEFAULT_PATTERN_FILTER,
   vulnerability_validation: DEFAULT_VULNERABILITY_VALIDATION,
@@ -131,6 +138,7 @@ function normalizeConfig(config: AgentRemoteConfig): AgentRemoteConfig {
     fp_review_cli: fpReviewCli,
     memory_api_discovery: { ...base.memory_api_discovery, ...config.memory_api_discovery },
     git_history: { ...DEFAULT_GIT_HISTORY, ...config.git_history },
+    threat_analysis: { ...DEFAULT_THREAT_ANALYSIS, ...config.threat_analysis },
     static_dedup: config.static_dedup ?? base.static_dedup,
     pattern_filter: { ...DEFAULT_PATTERN_FILTER, ...config.pattern_filter },
     vulnerability_validation: {
@@ -383,6 +391,17 @@ function AgentConfigPanel({ agent }: AgentConfigPanelProps) {
       const base = prev.fp_review_cli ?? { ...prev.opencode };
       return { ...prev, fp_review_cli: { ...base, [key]: value } };
     });
+  };
+
+  const setThreatAnalysis = (key: keyof AgentThreatAnalysisConfig, value: string | boolean) => {
+    setCfg((prev) => ({
+      ...prev,
+      threat_analysis: {
+        ...DEFAULT_THREAT_ANALYSIS,
+        ...prev.threat_analysis,
+        [key]: value,
+      },
+    }));
   };
 
   const setConcurrency = (value: number) => {
@@ -732,6 +751,32 @@ function AgentConfigPanel({ agent }: AgentConfigPanelProps) {
                         className={inputCls} min={0} max={10} />
                     </Field>
                   </div>
+                </div>
+              </div>
+
+              {/* Threat analysis */}
+              <div>
+                <h3 className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-3">威胁分析</h3>
+                <div className="grid grid-cols-1 gap-3">
+                  <label className="flex items-center gap-2 text-sm text-slate-300">
+                    <input
+                      type="checkbox"
+                      checked={cfg.threat_analysis?.enabled ?? true}
+                      onChange={(e) => setThreatAnalysis("enabled", e.target.checked)}
+                      className="h-4 w-4 rounded border-slate-600 bg-slate-900 text-blue-600 focus:ring-blue-500"
+                    />
+                    启用威胁分析
+                  </label>
+                  <Field label="实现">
+                    <select
+                      value={cfg.threat_analysis?.implementation || "attack_tree"}
+                      onChange={(e) => setThreatAnalysis("implementation", e.target.value)}
+                      className={inputCls}
+                      disabled={!(cfg.threat_analysis?.enabled ?? true)}
+                    >
+                      <option value="attack_tree">attack_tree</option>
+                    </select>
+                  </Field>
                 </div>
               </div>
 

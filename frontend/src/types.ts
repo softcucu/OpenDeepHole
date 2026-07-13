@@ -521,6 +521,11 @@ export interface AgentGitHistoryConfig {
   variant_hunt: boolean;
 }
 
+export interface AgentThreatAnalysisConfig {
+  enabled: boolean;
+  implementation: string;
+}
+
 export interface AgentPatternFilterConfig {
   enabled: boolean;
   scope: "directory" | "file" | "repo" | string;
@@ -541,6 +546,7 @@ export interface AgentRemoteConfig {
   fp_review_cli?: AgentOpenCodeConfig | null;
   memory_api_discovery: AgentMemoryApiDiscoveryConfig;
   git_history?: AgentGitHistoryConfig;
+  threat_analysis?: AgentThreatAnalysisConfig;
   static_dedup?: boolean;
   pattern_filter?: AgentPatternFilterConfig;
   vulnerability_validation?: AgentVulnerabilityValidationConfig;

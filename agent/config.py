@@ -79,6 +79,12 @@ class GitHistoryConfig:
 
 
 @dataclass
+class ThreatAnalysisConfig:
+    enabled: bool = True
+    implementation: str = "attack_tree"
+
+
+@dataclass
 class PatternFilterConfig:
     enabled: bool = True
     scope: str = "directory"  # directory | file | repo
@@ -201,6 +207,11 @@ def _normalize_git_history_config(config: GitHistoryConfig) -> None:
     config.paths = str(config.paths or "")
 
 
+def _normalize_threat_analysis_config(config: ThreatAnalysisConfig) -> None:
+    config.enabled = _bool_value(config.enabled, True)
+    config.implementation = str(config.implementation or "attack_tree").strip() or "attack_tree"
+
+
 @dataclass
 class AgentConfig:
     server_url: str = "http://localhost:8000"
@@ -215,6 +226,7 @@ class AgentConfig:
     opencode_concurrency: int = 4
     memory_api_discovery: MemoryApiDiscoveryConfig = field(default_factory=MemoryApiDiscoveryConfig)
     git_history: GitHistoryConfig = field(default_factory=GitHistoryConfig)
+    threat_analysis: ThreatAnalysisConfig = field(default_factory=ThreatAnalysisConfig)
     static_dedup: bool = True
     pattern_filter: PatternFilterConfig = field(default_factory=PatternFilterConfig)
     vulnerability_validation: VulnerabilityValidationConfig = field(default_factory=VulnerabilityValidationConfig)
@@ -265,6 +277,12 @@ def apply_remote_config(config: AgentConfig, remote: dict) -> None:
             if f.name in section and section[f.name] is not None:
                 setattr(config.git_history, f.name, section[f.name])
         _normalize_git_history_config(config.git_history)
+    section = remote.get("threat_analysis") or {}
+    if isinstance(section, dict):
+        for f in dataclasses.fields(config.threat_analysis):
+            if f.name in section and section[f.name] is not None:
+                setattr(config.threat_analysis, f.name, section[f.name])
+        _normalize_threat_analysis_config(config.threat_analysis)
     if "static_dedup" in remote and remote["static_dedup"] is not None:
         config.static_dedup = _bool_value(remote["static_dedup"], True)
     section = remote.get("pattern_filter") or {}
@@ -323,6 +341,10 @@ def remote_config_dict(config: AgentConfig) -> dict:
             f.name: getattr(config.git_history, f.name)
             for f in dataclasses.fields(config.git_history)
         },
+        "threat_analysis": {
+            f.name: getattr(config.threat_analysis, f.name)
+            for f in dataclasses.fields(config.threat_analysis)
+        },
         "static_dedup": config.static_dedup,
         "pattern_filter": {
             f.name: getattr(config.pattern_filter, f.name)
@@ -376,6 +398,11 @@ def load_config(path: Optional[Path] = None) -> AgentConfig:
         k: v for k, v in raw.get("git_history", {}).items()
         if k in git_history_fields
     }
+    threat_analysis_fields = {f.name for f in dataclasses.fields(ThreatAnalysisConfig)}
+    threat_analysis_raw = {
+        k: v for k, v in raw.get("threat_analysis", {}).items()
+        if k in threat_analysis_fields
+    }
     pattern_filter_raw = {
         k: v for k, v in raw.get("pattern_filter", {}).items()
         if k in pattern_filter_fields
@@ -413,6 +440,7 @@ def load_config(path: Optional[Path] = None) -> AgentConfig:
         opencode_concurrency=_bounded_int(raw.get("opencode_concurrency", 4), 4, 1, 8),
         memory_api_discovery=MemoryApiDiscoveryConfig(**memory_api_raw),
         git_history=GitHistoryConfig(**git_history_raw),
+        threat_analysis=ThreatAnalysisConfig(**threat_analysis_raw),
         static_dedup=_bool_value(raw.get("static_dedup", True), True),
         pattern_filter=PatternFilterConfig(**pattern_filter_raw),
         vulnerability_validation=VulnerabilityValidationConfig(**validation_raw),
@@ -432,6 +460,7 @@ def load_config(path: Optional[Path] = None) -> AgentConfig:
         86400,
     )
     _normalize_git_history_config(cfg.git_history)
+    _normalize_threat_analysis_config(cfg.threat_analysis)
     return cfg
 
 
@@ -465,6 +494,10 @@ def save_config(config: AgentConfig) -> None:
     raw["git_history"] = {
         f.name: getattr(config.git_history, f.name)
         for f in dataclasses.fields(config.git_history)
+    }
+    raw["threat_analysis"] = {
+        f.name: getattr(config.threat_analysis, f.name)
+        for f in dataclasses.fields(config.threat_analysis)
     }
     raw["static_dedup"] = config.static_dedup
     raw["pattern_filter"] = {

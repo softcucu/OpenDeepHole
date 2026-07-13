@@ -1,7 +1,7 @@
 import axios from "axios";
-import type { AgentConfigTestResult, AgentInfo, AgentOpenCodeModelsResult, AgentOpenCodePoolStatus, AgentRemoteConfig, CheckerCatalogItem, CheckerDashboardResponse, CheckerInfo, FeedbackEntry, FpReviewJob, HistoryPattern, IndexStatus, ScanStatus, ScanStartResponse, ScanSummary, SkillCreateJob, SkillImportFile, SkillReport, ThreatAnalysis, TokenResponse, User, UserFeedbackVerdict } from "../types";
+import type { AgentConfigTestResult, AgentInfo, AgentOpenCodeModelsResult, AgentOpenCodePoolStatus, AgentRemoteConfig, CheckerCatalogItem, CheckerDashboardResponse, CheckerInfo, FeedbackEntry, FpReviewJob, HistoryPattern, IndexStatus, ScanStatus, ScanStartResponse, ScanSummary, SkillCreateJob, SkillImportFile, SkillReport, TokenResponse, User, UserFeedbackVerdict } from "../types";
 
-const api = axios.create({ baseURL: "/" });
+export const api = axios.create({ baseURL: "/" });
 
 let publicScanAccess: { scanId: string; token: string } | null = null;
 
@@ -9,15 +9,15 @@ export function setPublicScanAccess(access: { scanId: string; token: string } | 
   publicScanAccess = access;
 }
 
-function isPublicScan(scanId: string): boolean {
+export function isPublicScan(scanId: string): boolean {
   return !!publicScanAccess && publicScanAccess.scanId === scanId && !!publicScanAccess.token;
 }
 
-function publicParams(): { token: string } | undefined {
+export function publicParams(): { token: string } | undefined {
   return publicScanAccess ? { token: publicScanAccess.token } : undefined;
 }
 
-function publicScanPath(path: string): string {
+export function publicScanPath(path: string): string {
   if (!publicScanAccess) return path;
   return `/api/public/scans/${publicScanAccess.scanId}${path}`;
 }
@@ -627,18 +627,6 @@ export async function getScanGitHistory(scanId: string): Promise<HistoryPattern[
     return data;
   }
   const { data } = await api.get<HistoryPattern[]>(`/api/scan/${scanId}/git_history`);
-  return data;
-}
-
-export async function getScanThreatAnalysis(scanId: string): Promise<ThreatAnalysis> {
-  if (isPublicScan(scanId)) {
-    const { data } = await api.get<ThreatAnalysis>(
-      publicScanPath("/threat-analysis"),
-      { params: publicParams() },
-    );
-    return data;
-  }
-  const { data } = await api.get<ThreatAnalysis>(`/api/scan/${scanId}/threat-analysis`);
   return data;
 }
 

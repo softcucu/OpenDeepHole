@@ -370,19 +370,9 @@ def install_attack_tree_threat_analysis_skill(
     skill_path: Path,
     reference_catalog_path: Path,
 ) -> None:
-    """Install the built-in attack-tree threat-analysis skill into a workspace."""
-    skill_path = skill_path.resolve()
-    reference_catalog_path = reference_catalog_path.resolve()
-    if not skill_path.is_file():
-        raise FileNotFoundError(f"Threat analysis skill not found: {skill_path}")
-    if not reference_catalog_path.is_file():
-        raise FileNotFoundError(f"Attack method reference catalog not found: {reference_catalog_path}")
+    """Compatibility wrapper for the moved threat-analysis workspace helper."""
+    from backend.threat_analysis.workspace import (
+        install_attack_tree_threat_analysis_skill as install_skill,
+    )
 
-    with get_workspace_lock(workspace):
-        skill_dir = workspace / ".opencode" / "skills" / "attack-tree-threat-analysis"
-        skill_dir.mkdir(parents=True, exist_ok=True)
-        (skill_dir / "SKILL.md").write_text(skill_path.read_text(encoding="utf-8"), encoding="utf-8")
-        (skill_dir / "attack-method-reference-catalog.md").write_text(
-            reference_catalog_path.read_text(encoding="utf-8"),
-            encoding="utf-8",
-        )
+    install_skill(workspace, skill_path, reference_catalog_path)

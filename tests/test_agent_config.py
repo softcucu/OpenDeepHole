@@ -39,6 +39,8 @@ class AgentConfigTests(unittest.TestCase):
         self.assertFalse(cfg.git_history.enabled)
         self.assertEqual(cfg.git_history.max_commits, 200)
         self.assertTrue(cfg.git_history.variant_hunt)
+        self.assertTrue(cfg.threat_analysis.enabled)
+        self.assertEqual(cfg.threat_analysis.implementation, "attack_tree")
         self.assertTrue(cfg.static_dedup)
         self.assertTrue(cfg.pattern_filter.enabled)
         self.assertEqual(cfg.pattern_filter.scope, "directory")
@@ -55,6 +57,8 @@ class AgentConfigTests(unittest.TestCase):
         self.assertEqual(AgentRemoteConfig().opencode.proxy_url, "")
         self.assertEqual(AgentRemoteConfig().opencode.no_proxy, "")
         self.assertEqual(AgentRemoteConfig().opencode_concurrency, 4)
+        self.assertTrue(AgentRemoteConfig().threat_analysis.enabled)
+        self.assertEqual(AgentRemoteConfig().threat_analysis.implementation, "attack_tree")
 
     def test_full_remote_defaults_do_not_switch_agent_to_opencode(self) -> None:
         cfg = AgentConfig()
@@ -110,6 +114,7 @@ class AgentConfigTests(unittest.TestCase):
                     "paths": "src tests",
                     "variant_hunt": False,
                 },
+                "threat_analysis": {"enabled": False, "implementation": "custom_impl"},
                 "static_dedup": False,
                 "pattern_filter": {"enabled": False, "scope": "repo"},
                 "vulnerability_validation": {
@@ -147,6 +152,8 @@ class AgentConfigTests(unittest.TestCase):
         self.assertEqual(cfg.git_history.since, "6 months ago")
         self.assertEqual(cfg.git_history.paths, "src tests")
         self.assertFalse(cfg.git_history.variant_hunt)
+        self.assertFalse(cfg.threat_analysis.enabled)
+        self.assertEqual(cfg.threat_analysis.implementation, "custom_impl")
         self.assertFalse(cfg.static_dedup)
         self.assertFalse(cfg.pattern_filter.enabled)
         self.assertEqual(cfg.pattern_filter.scope, "repo")
@@ -183,6 +190,7 @@ class AgentConfigTests(unittest.TestCase):
             remote["git_history"],
             {"enabled": False, "max_commits": 200, "since": "", "paths": "", "variant_hunt": True},
         )
+        self.assertEqual(remote["threat_analysis"], {"enabled": True, "implementation": "attack_tree"})
         self.assertTrue(remote["static_dedup"])
         self.assertEqual(remote["pattern_filter"], {"enabled": True, "scope": "directory"})
         self.assertEqual(
@@ -236,6 +244,7 @@ class AgentConfigTests(unittest.TestCase):
                         "paths": "src",
                         "variant_hunt": False,
                     },
+                    "threat_analysis": {"enabled": False, "implementation": "custom_impl"},
                     "static_dedup": False,
                     "pattern_filter": {"enabled": False, "scope": "file"},
                     "vulnerability_validation": {"enabled": True, "script_path": "/local/validator.py", "timeout_seconds": 600},
@@ -277,6 +286,7 @@ class AgentConfigTests(unittest.TestCase):
                     "variant_hunt": False,
                 },
             )
+            self.assertEqual(raw["threat_analysis"], {"enabled": False, "implementation": "custom_impl"})
             self.assertFalse(raw["static_dedup"])
             self.assertEqual(raw["pattern_filter"], {"enabled": False, "scope": "file"})
             self.assertEqual(raw["vulnerability_validation"]["script_path"], "/local/validator.py")

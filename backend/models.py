@@ -643,6 +643,11 @@ class AgentGitHistoryConfig(BaseModel):
     variant_hunt: bool = True
 
 
+class AgentThreatAnalysisConfig(BaseModel):
+    enabled: bool = True
+    implementation: str = "attack_tree"
+
+
 class AgentPatternFilterConfig(BaseModel):
     enabled: bool = True
     scope: str = "directory"
@@ -664,6 +669,7 @@ class AgentRemoteConfig(BaseModel):
     fp_review_cli: AgentOpenCodeConfig | None = None
     memory_api_discovery: AgentMemoryApiDiscoveryConfig = AgentMemoryApiDiscoveryConfig()
     git_history: AgentGitHistoryConfig = AgentGitHistoryConfig()
+    threat_analysis: AgentThreatAnalysisConfig = AgentThreatAnalysisConfig()
     static_dedup: bool = True
     pattern_filter: AgentPatternFilterConfig = AgentPatternFilterConfig()
     vulnerability_validation: AgentVulnerabilityValidationConfig = AgentVulnerabilityValidationConfig()

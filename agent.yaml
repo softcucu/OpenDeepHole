@@ -99,3 +99,8 @@ git_history:
   since: ""            # git log --since 过滤，如 "6 months ago"（留空不限）
   paths: ""            # git log 路径过滤，空格分隔（留空不限）
   variant_hunt: true   # 是否对每条历史问题模式做全仓同类变体排查
+
+# 威胁分析实现配置。新增实现后只需切换 implementation。
+threat_analysis:
+  enabled: true
+  implementation: "attack_tree"
