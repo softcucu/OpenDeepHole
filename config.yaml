@@ -26,14 +26,14 @@ mcp_server:
 
 opencode:
   executable: "opencode"  # opencode 可执行文件名或完整路径，如 "myopencode" 或 "C:/tools/opencode.cmd"
-  model: ""       # 兼容字段：未配置 models 时使用；留空则使用 CLI 默认模型
+  model: ""       # 已废弃兼容字段；模型调度只读取 models
   timeout: 1200  # seconds per candidate analysis
   max_retries: 2  # retry on transient errors (not timeout)
   mock: false    # set to false when opencode is configured
   proxy_url: ""  # optional proxy for opencode/nga child processes, e.g. "http://127.0.0.1:3131"
   no_proxy: ""   # optional no_proxy for opencode/nga child processes; empty uses intranet defaults
   config_paths: [] # optional OpenCode config files to merge; OPENCODE_CONFIG_PATH is also supported
-  models: []     # optional model pool; see README for fields, time windows, and default model rows
+  models: []     # empty/all-disabled => LLM tasks fail; add use_default_model: true explicitly for CLI default
 
 fp_review:
   auto_on_complete: true  # 扫描完成且存在已确认漏洞时，自动触发去误报（无需手动点击）

@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, patch
 
 from agent import fp_reviewer
 from agent.fp_reviewer import _FpStageResult
+from backend.opencode.model_pool import NoAvailableModelError
 
 
 def _make_reporter() -> SimpleNamespace:
@@ -35,6 +36,50 @@ def _stage_result(confirmed: bool) -> _FpStageResult:
 
 
 class FpReviewerEarlyExitTests(unittest.TestCase):
+    def test_no_model_marks_fp_review_job_error_without_stage_retry(self) -> None:
+        reporter = _make_reporter()
+        config = SimpleNamespace(opencode_concurrency=1)
+        cli_config = SimpleNamespace(
+            tool="opencode", executable="", model="", timeout=60, max_retries=3
+        )
+        stage_mock = AsyncMock(side_effect=NoAvailableModelError())
+        vulnerabilities = [{
+            "index": 0,
+            "file": "a.c",
+            "line": 10,
+            "function": "f",
+            "vuln_type": "npd",
+            "description": "desc",
+            "ai_analysis": "analysis",
+        }]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            with (
+                patch("agent.fp_reviewer.Path.home", return_value=Path(tmp)),
+                patch("agent.mcp_registry.lookup", return_value=(12345, "active-scan")),
+                patch.object(fp_reviewer, "_create_fp_workspace", side_effect=lambda p, *a, **k: Path(p)),
+                patch.object(fp_reviewer, "_cleanup_fp_workspace"),
+                patch.object(fp_reviewer, "_run_fp_review_stage", stage_mock),
+                patch.object(fp_reviewer, "effective_fp_review_cli_config", return_value=cli_config),
+                patch("backend.opencode.model_pool.total_model_capacity", return_value=1),
+            ):
+                asyncio.run(fp_reviewer.run_fp_review(
+                    config=config,
+                    reporter=reporter,
+                    scan_id="scan-1",
+                    review_id="review-no-model",
+                    project_path="/tmp/does-not-matter",
+                    vulnerabilities=vulnerabilities,
+                ))
+
+        stage_mock.assert_awaited_once()
+        reporter.finish_fp_review.assert_awaited_once_with(
+            "scan-1",
+            "review-no-model",
+            "error",
+            str(NoAvailableModelError()),
+        )
+
     def test_prove_bug_not_confirmed_skips_later_stages_and_pushes_fp_result(self) -> None:
         reporter = _make_reporter()
         config = SimpleNamespace(opencode_concurrency=1)

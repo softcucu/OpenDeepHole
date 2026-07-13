@@ -177,6 +177,7 @@ function validateModelPool(title: string, models: AgentOpenCodeModelConfig[]): s
     if (!id) return `${row} 缺少 ID`;
     if (seen.has(id)) return `${title} 存在重复 ID：${id}`;
     seen.add(id);
+    if (!model.enabled) continue;
     if (!model.use_default_model && !model.model.trim()) return `${row} 缺少模型名`;
     for (const window of model.time_windows || []) {
       if (!validateTime(window.start) || !validateTime(window.end) || window.start === window.end) {
@@ -968,17 +969,23 @@ function AgentConfigPanel({ agent }: AgentConfigPanelProps) {
 function AgentModelUsage({ pool }: { pool: AgentOpenCodePoolStatus | null }) {
   const models = pool?.models ?? [];
   const queuedTasks = pool?.queued_tasks ?? [];
-  if (!pool || models.length === 0) {
+  if (!pool) {
     return (
       <div className="border-t border-slate-700/60 px-4 py-3 text-xs text-slate-500">
-        暂无模型使用数据
+        暂无模型池运行状态
       </div>
     );
   }
+  const hasEnabledModel = models.some((model) => model.enabled);
   const total = models.reduce((sum, model) => sum + model.total, 0);
   const success = models.reduce((sum, model) => sum + model.success, 0);
   return (
     <div className="border-t border-slate-700/60 px-4 py-3">
+      {!hasEnabledModel && (
+        <div className="mb-3 rounded border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs leading-5 text-amber-200">
+          当前没有启用的模型。LLM 任务会立即失败；如需使用 CLI 默认模型，请在模型池中显式添加并启用“默认模型”。
+        </div>
+      )}
       <div className="mb-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-slate-400">
         <span>运行中 <b className="text-cyan-300">{pool.global_running}</b></span>
         <span>排队 <b className="text-amber-300">{pool.global_queued}</b></span>
@@ -996,27 +1003,29 @@ function AgentModelUsage({ pool }: { pool: AgentOpenCodePoolStatus | null }) {
           ))}
         </div>
       )}
-      <div className="overflow-x-auto">
-        <table className="w-full min-w-[52rem] text-xs">
-          <thead>
-            <tr className="text-left text-slate-500">
-              <th className="px-2 py-1 font-medium">模型</th>
-              <th className="px-2 py-1 font-medium">能力</th>
-              <th className="px-2 py-1 font-medium">可用</th>
-              <th className="px-2 py-1 font-medium">运行/上限</th>
-              <th className="px-2 py-1 font-medium">成功</th>
-              <th className="px-2 py-1 font-medium">失败/超时</th>
-              <th className="px-2 py-1 font-medium">平均时间</th>
-              <th className="px-2 py-1 font-medium">当前任务</th>
-            </tr>
-          </thead>
-          <tbody>
-            {models.map((model) => (
-              <AgentModelUsageRow key={model.id} model={model} />
-            ))}
-          </tbody>
-        </table>
-      </div>
+      {models.length > 0 && (
+        <div className="overflow-x-auto">
+          <table className="w-full min-w-[52rem] text-xs">
+            <thead>
+              <tr className="text-left text-slate-500">
+                <th className="px-2 py-1 font-medium">模型</th>
+                <th className="px-2 py-1 font-medium">能力</th>
+                <th className="px-2 py-1 font-medium">可用</th>
+                <th className="px-2 py-1 font-medium">运行/上限</th>
+                <th className="px-2 py-1 font-medium">成功</th>
+                <th className="px-2 py-1 font-medium">失败/超时</th>
+                <th className="px-2 py-1 font-medium">平均时间</th>
+                <th className="px-2 py-1 font-medium">当前任务</th>
+              </tr>
+            </thead>
+            <tbody>
+              {models.map((model) => (
+                <AgentModelUsageRow key={model.id} model={model} />
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
     </div>
   );
 }
@@ -1027,7 +1036,7 @@ function AgentModelUsageRow({ model }: { model: OpenCodePoolModelStats }) {
       <td className="px-2 py-1.5">
         <div className="font-medium text-slate-100">{model.id}</div>
         <div className="max-w-40 truncate font-mono text-[11px] text-slate-500">
-          {model.model || "(默认模型)"}
+          {model.use_default_model ? "(CLI 默认模型)" : (model.model || "(模型名为空)")}
         </div>
       </td>
       <td className="px-2 py-1.5">{model.capability || "—"}</td>
@@ -1088,6 +1097,10 @@ function ModelPoolEditor({
       time_windows: (models[modelIndex].time_windows || []).filter((_, i) => i !== windowIndex),
     });
   };
+  const hasEnabledModel = models.some((model) => model.enabled);
+  const hasUsableModel = models.some(
+    (model) => model.enabled && (model.use_default_model || model.model.trim()),
+  );
 
   return (
     <div className="border border-slate-700 rounded-lg p-3 space-y-3">
@@ -1119,9 +1132,16 @@ function ModelPoolEditor({
           </button>
         </div>
       </div>
-      {models.length === 0 ? (
-        <p className="text-xs text-slate-500">未配置模型池时使用兼容的单模型配置；配置后由这里的模型、时间和总并发统一调度。</p>
-      ) : (
+      {!hasUsableModel && (
+        <p className="rounded border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs leading-5 text-amber-200">
+          {models.length === 0
+            ? "当前未配置模型。配置可以保存，但所有 LLM 任务都会立即失败；如需使用 CLI 默认模型，必须点击“添加默认模型”显式添加并启用。"
+            : !hasEnabledModel
+              ? "当前模型已全部禁用。配置可以保存，但所有 LLM 任务都会立即失败；请至少启用一个模型。"
+              : "当前没有有效的已启用模型。请为启用行填写模型名，或显式选择“使用 CLI 默认模型”。"}
+        </p>
+      )}
+      {models.length > 0 && (
         <div className="space-y-3">
           {models.map((model, index) => (
             <div key={index} className="grid grid-cols-1 md:grid-cols-12 gap-2 border border-slate-700 rounded-lg p-2">

@@ -18,6 +18,7 @@ from backend.models import (
     ThreatAuditTask,
     Vulnerability,
 )
+from backend.opencode.model_pool import NoAvailableModelError
 from backend.opencode.output_format import with_local_timestamp
 
 
@@ -324,6 +325,19 @@ async def run_threat_audit_tasks(
                 )
             except asyncio.CancelledError:
                 raise
+            except NoAvailableModelError as exc:
+                failed = task.model_copy(
+                    update={
+                        "status": "failed",
+                        "failure_reason": str(exc),
+                        "finished_at": _now(),
+                        "updated_at": _now(),
+                    }
+                )
+                await reporter.push_threat_audit_task(scan_id, failed)
+                final_task_ids.add(failed.task_id)
+                await _maybe_emit(emit, f"威胁审计异常：{_task_label(task)}，原因：{exc}")
+                raise
             except Exception as exc:
                 failed = task.model_copy(
                     update={
@@ -339,8 +353,7 @@ async def run_threat_audit_tasks(
             finally:
                 queue.task_done()
 
-    await asyncio.gather(*(worker() for _ in range(concurrency)))
-    if cancel_event.is_set():
+    async def finish_unfinished_tasks(status: str, failure_reason: str) -> None:
         from backend.opencode.model_pool import clear_planned_task
 
         for planned_id in planned_ids.values():
@@ -351,12 +364,27 @@ async def run_threat_audit_tasks(
             current = existing.get(task.task_id, task)
             if current.status == COMPLETED_THREAT_AUDIT_STATUS:
                 continue
-            cancelled = task.model_copy(
+            terminal = task.model_copy(
                 update={
-                    "status": "cancelled",
-                    "failure_reason": "Scan cancelled",
+                    "status": status,
+                    "failure_reason": failure_reason,
                     "finished_at": _now(),
                     "updated_at": _now(),
                 }
             )
-            await reporter.push_threat_audit_task(scan_id, cancelled)
+            await reporter.push_threat_audit_task(scan_id, terminal)
+            final_task_ids.add(terminal.task_id)
+
+    workers = [asyncio.create_task(worker()) for _ in range(concurrency)]
+    try:
+        await asyncio.gather(*workers)
+    except NoAvailableModelError as exc:
+        cancel_event.set()
+        for running_worker in workers:
+            if not running_worker.done():
+                running_worker.cancel()
+        await asyncio.gather(*workers, return_exceptions=True)
+        await finish_unfinished_tasks("failed", str(exc))
+        raise
+    if cancel_event.is_set():
+        await finish_unfinished_tasks("cancelled", "Scan cancelled")

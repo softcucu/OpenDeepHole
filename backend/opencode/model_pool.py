@@ -11,6 +11,17 @@ from uuid import uuid4
 
 
 CAPABILITY_ORDER = {"low": 0, "medium": 1, "high": 2}
+NO_AVAILABLE_MODEL_MESSAGE = (
+    "模型池没有已启用的模型；请先添加并启用模型。"
+    "如需使用 CLI 默认模型，请显式添加“默认模型”。"
+)
+
+
+class NoAvailableModelError(RuntimeError):
+    """Raised when no explicit, enabled model can service a lease request."""
+
+    def __init__(self) -> None:
+        super().__init__(NO_AVAILABLE_MODEL_MESSAGE)
 
 
 @dataclass(frozen=True)
@@ -256,11 +267,13 @@ def model_options(cli_config: Any, *, global_concurrency: int) -> list[ModelOpti
     for index, raw in enumerate(raw_models):
         if raw is None:
             continue
-        enabled = bool(_cfg_value(raw, "enabled", True))
+        enabled = _bool_value(_cfg_value(raw, "enabled", True), True)
         if not enabled:
             continue
         use_default_model = _bool_value(_cfg_value(raw, "use_default_model", False))
         model = "" if use_default_model else str(_cfg_value(raw, "model", "") or "").strip()
+        if not use_default_model and not model:
+            continue
         model_id = str(
             _cfg_value(raw, "id", "") or model or ("default" if use_default_model else f"model-{index + 1}")
         ).strip()
@@ -292,21 +305,7 @@ def model_options(cli_config: Any, *, global_concurrency: int) -> list[ModelOpti
                 time_windows=_parse_time_windows(_cfg_value(raw, "time_windows", [])),
             )
         )
-    if options:
-        return options
-
-    return [
-        ModelOption(
-            id="default",
-            model=str(_cfg_value(cli_config, "model", "") or ""),
-            use_default_model=not bool(str(_cfg_value(cli_config, "model", "") or "").strip()),
-            capability="high",
-            weight=1.0,
-            max_concurrency=global_concurrency,
-            tool=str(_cfg_value(cli_config, "tool", "") or ""),
-            executable=str(_cfg_value(cli_config, "executable", "") or ""),
-        )
-    ]
+    return options
 
 
 def _eligible_options(
@@ -533,6 +532,36 @@ def _consume_planned_task_locked(request: _PendingLeaseRequest) -> None:
     raw_id = _context_planned_task_id(request.task_context)
     if raw_id and _remove_planned_task_locked(raw_id):
         _touch_queue_locked(request.stats_scope_id)
+
+
+def _fail_no_available_model_locked(request: _PendingLeaseRequest) -> None:
+    """Remove a lease request and persist its terminal no-model failure."""
+    _consume_planned_task_locked(request)
+    _remove_pending_request_locked(request)
+    finished_at = _now_iso()
+    if request.stats_scope_id:
+        context = dict(request.task_context or {})
+        prompt = context.get("prompt")
+        if isinstance(prompt, str) and "prompt_length" not in context:
+            context["prompt_length"] = len(prompt)
+        elif not isinstance(prompt, str):
+            context.pop("prompt", None)
+        _completed_tasks_by_scope.setdefault(request.stats_scope_id, []).append(
+            {
+                **context,
+                "task_id": request.request_id,
+                "scope_id": request.stats_scope_id,
+                "model_id": "",
+                "model": "",
+                "started_at": request.queued_at_iso,
+                "finished_at": finished_at,
+                "duration_seconds": max(0.0, time.monotonic() - request.queued_at),
+                "outcome": "failure",
+                "failure_reason": NO_AVAILABLE_MODEL_MESSAGE,
+            }
+        )
+    _touch_queue_locked(request.stats_scope_id)
+    _condition.notify_all()
 
 
 async def register_planned_task(
@@ -771,11 +800,19 @@ async def acquire_model_lease(
                     queued_at_iso=queued_at_iso,
                 )
                 option, all_options = _choose_available_for_request_locked(request)
+                if not all_options:
+                    _fail_no_available_model_locked(request)
+                    raise NoAvailableModelError()
                 if option is not None and not _pending_requests:
                     return _grant_lease_locked(request, option, all_options)
                 _pending_requests.append(request)
                 _touch_queue_locked(stats_scope_id)
                 _condition.notify_all()
+            else:
+                _, _, all_options, _, _ = _request_options_locked(request)
+                if not all_options:
+                    _fail_no_available_model_locked(request)
+                    raise NoAvailableModelError()
 
             next_runnable = _next_runnable_pending_locked()
             if next_runnable is not None:
@@ -938,7 +975,7 @@ def _stats_item_snapshot(
         "weight": item.weight,
         "max_concurrency": item.max_concurrency,
         "enabled": option is not None,
-        "available": _option_available_now(option) if option is not None else True,
+        "available": _option_available_now(option) if option is not None else False,
         "time_windows": _format_time_windows(option.time_windows) if option is not None else [],
         "queued": item.queued,
         "running": item.running,

@@ -130,13 +130,13 @@ llm_api:
 opencode:
   tool: "nga"
   executable: "nga"
-  model: ""       # 兼容字段：未配置 models 时使用；留空则使用 CLI 默认模型
+  model: ""       # 已废弃兼容字段；模型调度只读取 models
   timeout: 1200
   max_retries: 2
   proxy_url: ""   # 可选：OpenCode/nga 子进程代理，如 "http://127.0.0.1:3131"
   no_proxy: ""    # 可选：OpenCode/nga 子进程 no_proxy；留空时使用内网默认列表
   config_paths: [] # 可选：额外合并的 OpenCode 配置文件，一行/一项一个路径
-  # 可选：多模型池。配置后由模型池统一决定模型、能力、时间和并发。
+  # 模型池。空池或全禁用时 LLM 任务会立即失败；CLI 默认模型也必须显式添加。
   models:
     - id: "fast"
       model: "fast-model"
@@ -179,7 +179,7 @@ vulnerability_validation:
 # fp_review_cli:
 #   tool: "claude"
 #   executable: "claude"
-#   model: ""      # 兼容字段：未配置 models 时使用
+#   model: ""      # 已废弃兼容字段；模型调度只读取 models
 #   timeout: 1200
 #   max_retries: 2
 #   models:
@@ -193,6 +193,7 @@ vulnerability_validation:
 
 > 每个检查项的调用方式（`api` 或 `opencode`）在其 `checker.yaml` 中独立配置，无需全局 `mode` 选项。
 > 每个检查项可在 `checker.yaml` 中设置 `model_capability: low|medium|high` 指定最低模型能力；未配置时默认为 `any`，AI 去误报默认优先使用高能力模型。
+> OpenCode/兼容 CLI 模型必须在 `models[]` 中显式添加并启用；顶层 `model` 不再参与调度。空模型池或全禁用时配置仍可保存，但 LLM 任务会立即失败。如需 CLI 自行选择默认模型，请添加 `use_default_model: true` 的启用行。
 > 模型池的 `time_windows` 使用 Agent 本地每日时间，支持跨午夜窗口；空数组表示全天可用。若存在满足能力要求但当前不在时间窗口内的模型，任务会排队等待，而不会降级使用当前时段的低能力模型。
 > 扫描详情页顶部的「模型看板」会展示当前扫描的 OpenCode 模型池统计，包括每个模型累计任务、成功/失败/超时/取消次数、平均耗时、运行中和排队数；页面刷新后会读取最近一次上报快照。
 > Agent 启动并连接服务器后，也可以在 Web UI 的「客户端」页面中直接保存或校验 LLM API 配置，并在独立「模型池」页签中配置默认模型、能力、每日使用时间和并发；保存后的配置会写回 `agent.yaml`。
@@ -630,13 +631,13 @@ llm_api:
 opencode:
   tool: "nga"
   executable: "nga"
-  model: ""      # 兼容字段：未配置 models 时使用；留空则使用 CLI 默认模型
+  model: ""      # 已废弃兼容字段；模型调度只读取 models
   timeout: 1200
   max_retries: 2
   proxy_url: ""   # 可选：OpenCode/nga 子进程代理，也可用 OPENCODE_PROXY_URL 指定
   no_proxy: ""    # 可选：OpenCode/nga 子进程 no_proxy，也可用 OPENCODE_NO_PROXY 指定
   config_paths: [] # 可选：额外合并的 OpenCode 配置文件；也可用 OPENCODE_CONFIG_PATH 指定
-  models: []     # 可配置多个模型，字段同上方快速开始示例
+  models: []     # 空池/全禁用会让 LLM 任务立即失败；字段同上方快速开始示例
 
 # OpenCode/兼容 CLI 总并发数；位置审计、扫描前 API 识别和 AI 去误报都会复用。
 # 配置 models 后，该值仍是所有模型合计运行数的硬上限
@@ -670,7 +671,7 @@ git_history:
 # fp_review_cli:
 #   tool: "claude"
 #   executable: "claude"
-#   model: ""      # 兼容字段：未配置 models 时使用
+#   model: ""      # 已废弃兼容字段；模型调度只读取 models
 #   timeout: 1200
 #   max_retries: 2
 #   proxy_url: ""
@@ -694,6 +695,7 @@ CLI 工具调用约定：
 OpenCode 模型池统计：
 
 - 位置审计、威胁分析和 AI 去误报都会通过统一调用入口累计模型池统计；扫描管线中的内存 API 预处理已禁用。
+- 模型必须在 `models[]` 中显式添加并启用；顶层 `model` 已废弃且不参与调度。空池或全禁用时任务立即失败，不会隐式使用 CLI 默认模型。
 - 配置模型池后，`opencode_concurrency` 是所有模型合计运行数的硬上限；每个模型还会受自己的 `max_concurrency` 和 `time_windows` 限制。
 - 模型行可设置 `use_default_model: true`，表示参与模型池调度但调用 CLI 时不传 `--model`。
 - 扫描详情页点击「模型看板」可以查看每个模型的累计任务、成功/失败/超时/取消计数、平均耗时、当前运行数和当前排队数。

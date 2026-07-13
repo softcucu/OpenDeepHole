@@ -12,6 +12,7 @@ import pytest
 from backend.models import Candidate, ThreatAuditTask
 from backend.opencode import llm_api_runner
 from backend.opencode.llm_api_runner import LLMApiUnavailableError
+from backend.opencode.model_pool import NoAvailableModelError
 from backend.opencode.runner import (
     _DEFAULT_OPENCODE_NO_PROXY,
     _build_cli_command,
@@ -909,6 +910,35 @@ def test_run_audit_via_opencode_returns_failed_result_after_exhausted_errors(tmp
         assert result.confirmed is False
         assert "boom" in result.failure_reason
         assert result.file == candidate.file
+
+    asyncio.run(run())
+
+
+def test_run_audit_via_opencode_propagates_no_model_without_retry(tmp_path: Path) -> None:
+    async def run() -> None:
+        candidate = _candidate()
+        cfg = SimpleNamespace(
+            opencode=SimpleNamespace(
+                tool="opencode",
+                executable="opencode",
+                invocation_mode="serve",
+                model="legacy-claude-model",
+                timeout=30,
+                max_retries=3,
+                models=[],
+            ),
+            opencode_concurrency=1,
+        )
+        invoke = AsyncMock(side_effect=NoAvailableModelError())
+
+        with (
+            patch("backend.opencode.runner.get_config", return_value=cfg),
+            patch("backend.opencode.runner._invoke_opencode", new=invoke),
+        ):
+            with pytest.raises(NoAvailableModelError):
+                await _run_audit_via_opencode(tmp_path, candidate, "scan-1")
+
+        invoke.assert_awaited_once()
 
     asyncio.run(run())
 

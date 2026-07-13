@@ -163,7 +163,7 @@ async def mine_history(
         _read_session_result_file,
         _session_id_from_output_source,
     )
-    from backend.opencode.model_pool import total_model_capacity
+    from backend.opencode.model_pool import NoAvailableModelError, total_model_capacity
 
     gh = config.git_history
     if not is_git_repo(project_path):
@@ -233,6 +233,8 @@ async def mine_history(
             )
         except asyncio.CancelledError:
             raise
+        except NoAvailableModelError:
+            raise
         except Exception as exc:
             print(f"  [git_history] commit {commit.hash[:10]} 分析失败: {exc}", flush=True)
             return
@@ -289,7 +291,17 @@ async def mine_history(
             finally:
                 queue.task_done()
 
-    await asyncio.gather(*(_worker() for _ in range(concurrency)))
+    workers = [asyncio.create_task(_worker()) for _ in range(concurrency)]
+    try:
+        await asyncio.gather(*workers)
+    except NoAvailableModelError:
+        if cancel_event is not None:
+            cancel_event.set()
+        for worker in workers:
+            if not worker.done():
+                worker.cancel()
+        await asyncio.gather(*workers, return_exceptions=True)
+        raise
     await emit(
         "git_history",
         f"历史问题挖掘完成：分析 {len(commits)} 条提交，提炼 {len(patterns)} 条问题模式",

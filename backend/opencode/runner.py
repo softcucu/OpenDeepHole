@@ -21,6 +21,7 @@ from backend.config import get_config
 from backend.logger import get_logger
 from backend.models import Candidate, OutputSource, ThreatAnalysis, ThreatAuditTask, Vulnerability
 from backend.opencode.model_pool import (
+    NoAvailableModelError,
     acquire_model_lease,
     clear_planned_task,
     configured_global_concurrency,
@@ -280,6 +281,8 @@ async def _run_audit_via_opencode(
             )
         except asyncio.CancelledError:
             raise
+        except NoAvailableModelError:
+            raise
         except Exception as exc:
             # Process error (e.g. certificate error, crash) — may retry
             logger.exception("%s failed for %s:%d (attempt %d)", tool, candidate.file, candidate.line, attempt)
@@ -403,6 +406,8 @@ async def run_project_audit(
                 )
             ]
         except asyncio.CancelledError:
+            raise
+        except NoAvailableModelError:
             raise
         except Exception as exc:
             logger.exception("%s project audit failed for %s (attempt %d)", tool, candidate.vuln_type, attempt)
@@ -648,6 +653,8 @@ async def run_sensitive_clear_audit(
             )
         except asyncio.CancelledError:
             raise
+        except NoAvailableModelError:
+            raise
         except Exception as exc:
             logger.exception("%s sensitive_clear audit failed for %s (attempt %d)", tool, candidate.file, attempt)
             if attempt <= max_retries:
@@ -832,6 +839,8 @@ async def run_project_report_audit(
             return _collect_markdown_reports(report_dir, candidate.vuln_type, attempt_source)
         except asyncio.CancelledError:
             raise
+        except NoAvailableModelError:
+            raise
         except Exception as exc:
             logger.exception("%s report audit failed for %s (attempt %d)", tool, candidate.vuln_type, attempt)
             if attempt <= max_retries:
@@ -983,6 +992,8 @@ async def run_threat_audit(
             ], task)
         except asyncio.CancelledError:
             raise
+        except NoAvailableModelError:
+            raise
         except Exception as exc:
             logger.exception("%s threat audit failed for %s (attempt %d)", tool, task.task_id, attempt)
             if attempt <= max_retries:
@@ -1110,6 +1121,8 @@ async def run_threat_analysis_audit(
                 return parsed
             return None
         except asyncio.CancelledError:
+            raise
+        except NoAvailableModelError:
             raise
         except Exception as exc:
             logger.exception("%s threat analysis failed for %s (attempt %d)", tool, project_id, attempt)

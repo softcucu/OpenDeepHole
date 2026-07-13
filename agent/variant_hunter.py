@@ -76,7 +76,7 @@ async def hunt_variants(
         _result_payloads,
         _session_id_from_output_source,
     )
-    from backend.opencode.model_pool import total_model_capacity
+    from backend.opencode.model_pool import NoAvailableModelError, total_model_capacity
 
     if not patterns:
         return []
@@ -135,6 +135,8 @@ async def hunt_variants(
                 on_invocation_metadata=capture_source,
             )
         except asyncio.CancelledError:
+            raise
+        except NoAvailableModelError:
             raise
         except Exception as exc:
             print(f"  [variant_hunt] 排查失败: {exc}", flush=True)
@@ -210,6 +212,16 @@ async def hunt_variants(
             finally:
                 queue.task_done()
 
-    await asyncio.gather(*(_worker() for _ in range(concurrency)))
+    workers = [asyncio.create_task(_worker()) for _ in range(concurrency)]
+    try:
+        await asyncio.gather(*workers)
+    except NoAvailableModelError:
+        if cancel_event is not None:
+            cancel_event.set()
+        for worker in workers:
+            if not worker.done():
+                worker.cancel()
+        await asyncio.gather(*workers, return_exceptions=True)
+        raise
     await emit("variant_hunt", f"同类变体排查完成：共命中 {len(found)} 处候选")
     return found

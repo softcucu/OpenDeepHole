@@ -20,6 +20,7 @@ from typing import Optional
 from uuid import uuid4
 
 from backend.models import OutputSource, ScanEvent
+from backend.opencode.model_pool import NoAvailableModelError
 from backend.opencode.output_format import with_local_timestamp
 from backend.opencode.result_json import (
     VULNERABILITY_RESULT_JSON_INSTRUCTION,
@@ -531,6 +532,8 @@ async def run_fp_review(
 
             except asyncio.CancelledError:
                 raise
+            except NoAvailableModelError:
+                raise
             except _FpStageFailure as exc:
                 markdown = _stage_failure_markdown(exc)
                 await reporter.push_fp_stage_output(
@@ -734,6 +737,8 @@ async def _run_fp_review_stage(
                 on_invocation_metadata=capture_source,
             )
         except asyncio.CancelledError:
+            raise
+        except NoAvailableModelError:
             raise
         except Exception as exc:
             last_failure = _FpStageFailure(

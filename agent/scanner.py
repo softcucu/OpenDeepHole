@@ -18,6 +18,7 @@ from agent.config import AgentConfig, apply_network_env
 from agent.reporter import Reporter
 from backend.checker_sync import unpack_checker_packages
 from backend.models import Candidate, FeedbackEntry, ScanEvent, ThreatAnalysis, Vulnerability
+from backend.opencode.model_pool import NoAvailableModelError
 from backend.opencode.output_format import with_local_timestamp
 from backend.registry import CHECKERS_DIR_ENV
 from backend.source_filter import source_path_has_ignored_dir
@@ -555,6 +556,8 @@ async def _run_threat_analysis_phase(
                 await maybe
     except asyncio.CancelledError:
         raise
+    except NoAvailableModelError:
+        raise
     except Exception as exc:
         maybe = emit("threat_analysis", f"威胁分析异常（已跳过）: {exc}")
         if asyncio.iscoroutine(maybe):
@@ -584,6 +587,8 @@ async def _wait_for_threat_analysis_task(
     try:
         await task
     except asyncio.CancelledError:
+        raise
+    except NoAvailableModelError:
         raise
     except Exception as exc:
         if emit is not None:
@@ -1357,6 +1362,8 @@ async def run_scan(
                         )
             except asyncio.CancelledError:
                 raise
+            except NoAvailableModelError:
+                raise
             except Exception as exc:
                 await emit("git_history", f"历史挖掘/变体排查异常（已跳过）: {exc}")
 
@@ -1707,6 +1714,8 @@ async def run_scan(
                         timeout=candidate_timeout,
                         project_dir=project_path,
                     )
+            except NoAvailableModelError:
+                raise
             except Exception as exc:
                 await emit("auditing", f"[{global_index + 1}] Analysis error: {exc}", candidate_index=global_index)
 
@@ -1845,6 +1854,8 @@ async def run_scan(
                     return
                 try:
                     await process_candidate(already_done + i, candidate)
+                except NoAvailableModelError:
+                    raise
                 except Exception as exc:
                     # 单个候选的未预期异常不应杀死 worker（否则 gather 会
                     # 级联取消其余 worker，导致整批审计中断）。
@@ -1865,7 +1876,16 @@ async def run_scan(
             )
             cancelled = True
         else:
-            await asyncio.gather(*(audit_worker() for _ in range(audit_concurrency)))
+            audit_workers = [asyncio.create_task(audit_worker()) for _ in range(audit_concurrency)]
+            try:
+                await asyncio.gather(*audit_workers)
+            except NoAvailableModelError:
+                cancel_event.set()
+                for worker_task in audit_workers:
+                    if not worker_task.done():
+                        worker_task.cancel()
+                await asyncio.gather(*audit_workers, return_exceptions=True)
+                raise
             cancelled = cancel_event.is_set()
 
         # --- Phase 8: Report results ---

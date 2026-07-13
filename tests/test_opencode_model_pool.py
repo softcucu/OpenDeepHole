@@ -5,6 +5,7 @@ import pytest
 
 import backend.opencode.model_pool as model_pool_module
 from backend.opencode.model_pool import (
+    NoAvailableModelError,
     acquire_model_lease,
     clear_planned_task,
     clear_planned_tasks,
@@ -43,15 +44,51 @@ def _reset_model_pool():
     yield
 
 
-def test_model_options_falls_back_to_default_model() -> None:
+def test_model_options_empty_pool_does_not_fall_back_to_legacy_model() -> None:
     cfg = SimpleNamespace(tool="opencode", executable="opencode", model="default-model", models=[])
+
+    options = model_options(cfg, global_concurrency=3)
+
+    assert options == []
+
+
+@pytest.mark.parametrize(
+    "models",
+    [
+        [{"id": "disabled", "model": "disabled-model", "enabled": False}],
+        [{"id": "empty", "model": "", "enabled": True}],
+        [{"id": "missing", "enabled": True}],
+    ],
+)
+def test_model_options_excludes_disabled_and_invalid_empty_models(models: list[dict]) -> None:
+    cfg = SimpleNamespace(
+        model="legacy-claude-model",
+        models=models,
+    )
+
+    assert model_options(cfg, global_concurrency=3) == []
+
+
+def test_model_options_keeps_explicit_default_model() -> None:
+    cfg = SimpleNamespace(
+        model="legacy-claude-model",
+        models=[
+            {
+                "model": "ignored-explicit-name",
+                "use_default_model": True,
+                "enabled": True,
+                "max_concurrency": 2,
+            }
+        ],
+    )
 
     options = model_options(cfg, global_concurrency=3)
 
     assert len(options) == 1
     assert options[0].id == "default"
-    assert options[0].model == "default-model"
-    assert options[0].max_concurrency == 3
+    assert options[0].model == ""
+    assert options[0].use_default_model is True
+    assert options[0].max_concurrency == 2
 
 
 def test_model_options_normalizes_enabled_models() -> None:
@@ -149,6 +186,113 @@ def test_immediate_lease_does_not_count_as_queued() -> None:
             assert snapshot["models"][0]["queued"] == 0
         finally:
             await release_model_lease(lease, outcome="success", duration_seconds=0.1)
+
+    asyncio.run(run())
+
+
+def test_acquire_without_models_fails_fast_and_clears_planned_task() -> None:
+    async def run() -> None:
+        cfg = SimpleNamespace(model="legacy-claude-model", models=[])
+        scope = "scope-no-model"
+        planned_id = await register_planned_task(
+            scope,
+            {"task_type": "audit", "file": "src/no-model.c"},
+            task_key="audit:no-model",
+        )
+
+        with pytest.raises(NoAvailableModelError) as exc_info:
+            await asyncio.wait_for(
+                acquire_model_lease(
+                    cfg,
+                    global_concurrency=1,
+                    stats_scope_id=scope,
+                    task_context={
+                        "planned_task_id": planned_id,
+                        "task_type": "audit",
+                        "file": "src/no-model.c",
+                        "prompt": "audit without a configured model",
+                    },
+                ),
+                timeout=0.1,
+            )
+
+        assert str(exc_info.value) == (
+            "模型池没有已启用的模型；请先添加并启用模型。"
+            "如需使用 CLI 默认模型，请显式添加“默认模型”。"
+        )
+        snapshot = model_pool_snapshot(scope)
+        assert snapshot["global_queued"] == 0
+        assert snapshot["queued_tasks"] == []
+        assert snapshot["planned_tasks"] == []
+        assert snapshot["completed_task_count"] == 1
+        completed = snapshot["completed_tasks"][0]
+        assert completed["outcome"] == "failure"
+        assert completed["model_id"] == ""
+        assert completed["model"] == ""
+        assert completed["failure_reason"] == str(exc_info.value)
+        assert completed["task_type"] == "audit"
+        assert completed["file"] == "src/no-model.c"
+        assert completed["prompt"] == "audit without a configured model"
+        assert completed["prompt_length"] == len(completed["prompt"])
+
+    asyncio.run(run())
+
+
+def test_queued_lease_fails_when_model_pool_is_cleared() -> None:
+    async def run() -> None:
+        cfg = SimpleNamespace(
+            models=[
+                {"id": "deep", "model": "deep-model", "capability": "high", "max_concurrency": 1},
+            ],
+        )
+        scope = "scope-dynamically-cleared"
+        first = await acquire_model_lease(
+            cfg,
+            global_concurrency=1,
+            stats_scope_id=scope,
+        )
+        planned_id = await register_planned_task(
+            scope,
+            {"task_type": "threat_audit"},
+            task_key="threat:queued",
+        )
+        queued_task = asyncio.create_task(
+            acquire_model_lease(
+                cfg,
+                global_concurrency=1,
+                stats_scope_id=scope,
+                task_context={
+                    "planned_task_id": planned_id,
+                    "task_type": "threat_audit",
+                    "file": "src/dynamic.c",
+                },
+            )
+        )
+        try:
+            await asyncio.sleep(0.05)
+            queued_snapshot = model_pool_snapshot(scope)
+            assert queued_snapshot["global_queued"] == 1
+            assert queued_snapshot["planned_tasks"] == []
+
+            cfg.models.clear()
+            await refresh_configured_model_pool(cfg, global_concurrency=1)
+
+            with pytest.raises(NoAvailableModelError):
+                await asyncio.wait_for(queued_task, timeout=0.2)
+            failed_snapshot = model_pool_snapshot(scope)
+            assert failed_snapshot["global_queued"] == 0
+            assert failed_snapshot["queued_tasks"] == []
+            assert failed_snapshot["planned_tasks"] == []
+            assert failed_snapshot["completed_task_count"] == 1
+            assert failed_snapshot["completed_tasks"][0]["outcome"] == "failure"
+            assert failed_snapshot["completed_tasks"][0]["task_type"] == "threat_audit"
+            historical = {item["id"]: item for item in failed_snapshot["models"]}
+            assert historical["deep"]["enabled"] is False
+            assert historical["deep"]["available"] is False
+        finally:
+            if not queued_task.done():
+                queued_task.cancel()
+            await release_model_lease(first, outcome="success", duration_seconds=0.1)
 
     asyncio.run(run())
 

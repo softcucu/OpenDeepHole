@@ -946,13 +946,14 @@ class SqliteScanStore(ScanStoreBase):
         status: OpenCodePoolStatus,
     ) -> None:
         now = status.updated_at or ""
+        session_id = agent_session_id or status.agent_session_id or ""
         rows = []
         for model in status.models:
             completed = model.success + model.failure + model.timeout + model.cancelled
             rows.append((
                 agent_name,
                 user_id or "",
-                agent_session_id or status.agent_session_id or "",
+                session_id,
                 model.id,
                 model.model,
                 1 if model.use_default_model else 0,
@@ -976,11 +977,26 @@ class SqliteScanStore(ScanStoreBase):
                 json.dumps(model.active_tasks, ensure_ascii=False),
                 now,
             ))
-        if not rows:
-            return
         with self._lock:
-            self._conn.executemany(
+            # Each report is a complete snapshot for one Agent session.  Clear
+            # the prior transient/configured state first so omitted models (and
+            # an explicitly empty pool) cannot remain schedulable in history.
+            self._conn.execute(
                 """\
+                UPDATE agent_opencode_pool_models
+                SET enabled = 0,
+                    available = 0,
+                    running = 0,
+                    queued = 0,
+                    active_tasks = '[]',
+                    updated_at = CASE WHEN ? <> '' THEN ? ELSE updated_at END
+                WHERE agent_name = ? AND user_id = ? AND agent_session_id = ?
+                """,
+                (now, now, agent_name, user_id or "", session_id),
+            )
+            if rows:
+                self._conn.executemany(
+                    """\
                 INSERT INTO agent_opencode_pool_models (
                     agent_name, user_id, agent_session_id, model_id, model,
                     use_default_model, capability, weight, max_concurrency,
@@ -1012,8 +1028,8 @@ class SqliteScanStore(ScanStoreBase):
                     active_tasks = excluded.active_tasks,
                     updated_at = excluded.updated_at
                 """,
-                rows,
-            )
+                    rows,
+                )
             self._conn.commit()
 
     def get_agent_opencode_pool_status(
@@ -1030,7 +1046,7 @@ class SqliteScanStore(ScanStoreBase):
             SELECT *
             FROM agent_opencode_pool_models
             WHERE agent_name = ? AND user_id = ?
-            ORDER BY updated_at ASC
+            ORDER BY updated_at ASC, rowid ASC
             """,
             (agent_name, user_id or ""),
         )
@@ -1042,13 +1058,13 @@ class SqliteScanStore(ScanStoreBase):
                 model_id,
                 {
                     "id": model_id,
-                    "model": row["model"] or "",
-                    "use_default_model": bool(row["use_default_model"]),
-                    "capability": row["capability"] or "",
-                    "weight": float(row["weight"] or 1.0),
-                    "max_concurrency": int(row["max_concurrency"] or 1),
-                    "enabled": bool(row["enabled"]),
-                    "available": bool(row["available"]),
+                    "model": "",
+                    "use_default_model": False,
+                    "capability": "",
+                    "weight": 1.0,
+                    "max_concurrency": 1,
+                    "enabled": False,
+                    "available": False,
                     "time_windows": [],
                     "queued": 0,
                     "running": 0,
@@ -1062,35 +1078,53 @@ class SqliteScanStore(ScanStoreBase):
                     "last_started_at": "",
                     "last_finished_at": "",
                     "active_tasks": [],
+                    "_has_current_session": False,
                 },
             )
             for key in ("total", "success", "failure", "timeout", "cancelled"):
                 item[key] += int(row[key] or 0)
             item["_duration"] += float(row["total_duration_seconds"] or 0.0)
-            item.update({
-                "model": row["model"] or item["model"],
+            try:
+                windows = json.loads(row["time_windows"] or "[]")
+                if not isinstance(windows, list):
+                    windows = []
+            except Exception:
+                windows = []
+            current_config = {
+                # These are configuration snapshot values, not cumulative
+                # statistics.  In particular, an empty model string is a real
+                # value for an explicitly configured CLI-default model.
+                "model": row["model"],
                 "use_default_model": bool(row["use_default_model"]),
-                "capability": row["capability"] or item["capability"],
-                "weight": float(row["weight"] or item["weight"]),
-                "max_concurrency": int(row["max_concurrency"] or item["max_concurrency"]),
+                "capability": row["capability"],
+                "weight": float(row["weight"]),
+                "max_concurrency": int(row["max_concurrency"]),
                 "enabled": bool(row["enabled"]),
                 "available": bool(row["available"]),
+                "time_windows": windows,
+            }
+            is_current_session = row["agent_session_id"] == agent_session_id
+            if is_current_session or not item["_has_current_session"]:
+                item.update(current_config)
+            if is_current_session:
+                item["_has_current_session"] = True
+            item.update({
                 "last_status": row["last_status"] or item["last_status"],
                 "last_started_at": row["last_started_at"] or item["last_started_at"],
                 "last_finished_at": row["last_finished_at"] or item["last_finished_at"],
             })
-            try:
-                windows = json.loads(row["time_windows"] or "[]")
-                if isinstance(windows, list):
-                    item["time_windows"] = windows
-            except Exception:
-                pass
-            updated_at = row["updated_at"] or updated_at
+            updated_at = max(updated_at, row["updated_at"] or "")
 
         models = []
         for item in aggregate.values():
             completed = item["success"] + item["failure"] + item["timeout"] + item["cancelled"]
             duration = item.pop("_duration")
+            has_current_session = item.pop("_has_current_session")
+            if not has_current_session:
+                item["enabled"] = False
+                item["available"] = False
+            if not online:
+                item["available"] = False
             item["avg_duration_seconds"] = duration / completed if completed else 0.0
             models.append(OpenCodePoolModelStats(**item))
         return AgentOpenCodePoolStatus(

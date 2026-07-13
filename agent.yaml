@@ -33,13 +33,14 @@ llm_api:
 opencode:
   tool: "nga"
   executable: "nga"  # 可执行文件名或完整路径，Windows 示例："C:/tools/nga.cmd"
-  model: ""               # 兼容字段：未配置 models 时使用；留空则使用 CLI 默认模型
+  model: ""               # 已废弃兼容字段；模型调度只读取 models
   timeout: 1200            # 单次调用超时（秒）
   max_retries: 2           # 非超时错误重试次数
   proxy_url: ""            # 可选：OpenCode/nga 子进程代理，如 "http://127.0.0.1:3131"
   no_proxy: ""             # 可选：OpenCode/nga 子进程 no_proxy；留空时使用内网默认列表
   config_paths: []         # 可选：额外合并的 OpenCode 配置文件；也可用 OPENCODE_CONFIG_PATH 指定
-  # 可选：多模型池。未配置时使用上方 model，且所有 checker 都可使用。
+  # 模型池。空池或全禁用时，所有 LLM 任务会立即失败。
+  # 如需 CLI 默认模型，必须显式添加 use_default_model: true 的启用行。
   # models:
   #   - id: "fast"
   #     model: "fast-model"
@@ -84,7 +85,7 @@ vulnerability_validation:
 # fp_review_cli:
 #   tool: "claude"
 #   executable: "claude"
-#   model: ""       # 兼容字段：未配置 models 时使用
+#   model: ""       # 已废弃兼容字段；模型调度只读取 models
 #   timeout: 1200
 #   max_retries: 2
 #   models: []

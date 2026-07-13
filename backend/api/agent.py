@@ -838,26 +838,48 @@ async def get_agent_opencode_pool(
             online=online,
         )
     latest = _agent_opencode_pool_latest.get(agent_id)
-    if latest is not None:
-        active_by_model = {model.id: model.active_tasks for model in latest.models}
+    if online and latest is not None and latest.agent_session_id == agent.agent_session_id:
         live_by_model = {model.id: model for model in latest.models}
         for model in result.models:
             live = live_by_model.get(model.id)
             if live is not None:
+                # The current session snapshot owns configuration and transient
+                # state.  Historical rows only contribute cumulative counters.
+                model.model = live.model
+                model.use_default_model = live.use_default_model
+                model.capability = live.capability
+                model.weight = live.weight
+                model.max_concurrency = live.max_concurrency
                 model.running = live.running
                 model.queued = live.queued
                 model.available = live.available
                 model.enabled = live.enabled
-                model.active_tasks = active_by_model.get(model.id, [])
+                model.time_windows = live.time_windows
+                model.active_tasks = live.active_tasks
+                model.last_status = live.last_status
+                model.last_started_at = live.last_started_at
+                model.last_finished_at = live.last_finished_at
+            else:
+                # A live report is a complete snapshot.  Models absent from it
+                # remain visible for usage history but are no longer usable.
+                model.enabled = False
+                model.available = False
+                model.running = 0
+                model.queued = 0
+                model.active_tasks = []
         known_ids = {model.id for model in result.models}
         for model in latest.models:
             if model.id not in known_ids:
-                result.models.append(model)
+                result.models.append(model.model_copy(deep=True))
+        result.models.sort(key=lambda model: model.id)
         result.global_running = latest.global_running
         result.global_queued = latest.global_queued
         result.queued_tasks = latest.queued_tasks
         result.planned_tasks = latest.planned_tasks
         result.updated_at = latest.updated_at or result.updated_at
+    if not online:
+        for model in result.models:
+            model.available = False
     return result
 
 

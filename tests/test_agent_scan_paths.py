@@ -5,6 +5,7 @@ import unittest
 import sqlite3
 import os
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
@@ -34,7 +35,19 @@ from agent.scanner import (
     refresh_backend_runtime_config,
 )
 from agent.config import AgentConfig
-from backend.models import Candidate, OpenCodePoolStatus, ScanItemStatus, ScanMeta, ScanStatus, ThreatAnalysis
+from backend.api import agent as agent_api
+from backend.models import (
+    AgentInfo,
+    Candidate,
+    OpenCodePoolStatus,
+    ScanItemStatus,
+    ScanMeta,
+    ScanStatus,
+    ThreatAnalysis,
+    ThreatAuditTask,
+    User,
+)
+from backend.opencode.model_pool import NoAvailableModelError
 from backend.store.sqlite import SqliteScanStore
 from backend.threat_analysis import apply_threat_analysis_scan_scope
 
@@ -305,6 +318,85 @@ class AgentScanPathTests(unittest.TestCase):
         self.assertEqual(reporter.pushed[0][1]["analysis_id"], "threat-1")
         self.assertTrue(any("开始基于攻击树的威胁分析" in message for _phase, message in events))
         self.assertTrue(any("威胁分析完成" in message for _phase, message in events))
+
+    def test_threat_analysis_phase_propagates_no_model_error(self) -> None:
+        async def run() -> None:
+            with tempfile.TemporaryDirectory() as tmp:
+                project = Path(tmp) / "project"
+                workspace = Path(tmp) / "workspace"
+                project.mkdir()
+                workspace.mkdir()
+
+                async def emit(_phase: str, _message: str) -> None:
+                    return None
+
+                with patch(
+                    "backend.opencode.runner.run_threat_analysis_audit",
+                    new=AsyncMock(side_effect=NoAvailableModelError()),
+                ):
+                    await _run_threat_analysis_phase(
+                        config=AgentConfig(),
+                        project_path=project.resolve(),
+                        code_scan_path=project.resolve(),
+                        reporter=AsyncMock(),
+                        scan_id="scan-no-model",
+                        product="demo",
+                        workspace=workspace,
+                        cancel_event=threading.Event(),
+                        emit=emit,
+                    )
+
+        with self.assertRaises(NoAvailableModelError):
+            asyncio.run(run())
+
+    def test_threat_auditor_persists_failure_then_propagates_no_model_error(self) -> None:
+        from agent.threat_auditor import run_threat_audit_tasks
+
+        task = ThreatAuditTask(
+            task_id="threat-audit-no-model",
+            surface_node_id="surface-1",
+            surface_name="管理接口",
+            method_node_id="method-1",
+            method_name="认证绕过",
+            code_path="src/api",
+        )
+        reporter = AsyncMock()
+        reporter.get_threat_audit_tasks.return_value = []
+        cancel_event = threading.Event()
+
+        async def run() -> None:
+            with (
+                patch("agent.threat_auditor.build_threat_audit_tasks", return_value=[task]),
+                patch(
+                    "backend.opencode.model_pool.register_planned_task",
+                    new=AsyncMock(return_value="planned-1"),
+                ),
+                patch("backend.opencode.model_pool.total_model_capacity", return_value=1),
+                patch("backend.opencode.model_pool.clear_planned_task", new=AsyncMock()),
+                patch(
+                    "backend.opencode.runner.run_threat_audit",
+                    new=AsyncMock(side_effect=NoAvailableModelError()),
+                ) as runner,
+            ):
+                with self.assertRaises(NoAvailableModelError):
+                    await run_threat_audit_tasks(
+                        config=AgentConfig(),
+                        analysis=ThreatAnalysis(schema_version="1.0", analysis_id="analysis-1"),
+                        reporter=reporter,
+                        scan_id="scan-no-model",
+                        project_path=Path("/tmp/project"),
+                        workspace=Path("/tmp/workspace"),
+                        cancel_event=cancel_event,
+                        emit=AsyncMock(),
+                    )
+                runner.assert_awaited_once()
+
+        asyncio.run(run())
+
+        pushed_tasks = [call.args[1] for call in reporter.push_threat_audit_task.await_args_list]
+        self.assertEqual(pushed_tasks[-1].status, "failed")
+        self.assertEqual(pushed_tasks[-1].failure_reason, str(NoAvailableModelError()))
+        self.assertTrue(cancel_event.is_set())
 
     def test_resume_reuses_stored_threat_analysis_for_matching_scan_scope(self) -> None:
         class FakeReporter:
@@ -1005,6 +1097,341 @@ class ScanStoreCodeScanPathTests(unittest.TestCase):
             self.assertEqual(status.models[0].running, 0)
             self.assertEqual(status.models[0].avg_duration_seconds, 14)
             self.assertEqual(status.models[0].active_tasks, [])
+
+    def test_agent_pool_current_default_model_does_not_inherit_historical_claude(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = SqliteScanStore(Path(tmp) / "scans.db")
+            store.upsert_agent_opencode_pool_status(
+                agent_name="agent-a",
+                user_id="user-1",
+                agent_session_id="session-1",
+                status=OpenCodePoolStatus(
+                    agent_session_id="session-1",
+                    models=[{
+                        "id": "default",
+                        "model": "anthropic/claude-sonnet",
+                        "use_default_model": True,
+                        "capability": "high",
+                        "total": 3,
+                        "success": 3,
+                        "avg_duration_seconds": 10,
+                    }],
+                    updated_at="2026-01-01T00:00:10+00:00",
+                ),
+            )
+            store.upsert_agent_opencode_pool_status(
+                agent_name="agent-a",
+                user_id="user-1",
+                agent_session_id="session-2",
+                status=OpenCodePoolStatus(
+                    agent_session_id="session-2",
+                    models=[{
+                        "id": "default",
+                        "model": "",
+                        "use_default_model": True,
+                        "capability": "low",
+                        "weight": 2,
+                        "max_concurrency": 2,
+                        "time_windows": [{"start": "09:00", "end": "18:00"}],
+                        "total": 2,
+                        "success": 2,
+                        "avg_duration_seconds": 20,
+                    }],
+                    updated_at="2026-01-01T00:00:20+00:00",
+                ),
+            )
+
+            status = store.get_agent_opencode_pool_status(
+                agent_name="agent-a",
+                user_id="user-1",
+                agent_session_id="session-2",
+                online=True,
+            )
+
+            model = status.models[0]
+            self.assertEqual(model.model, "")
+            self.assertTrue(model.use_default_model)
+            self.assertEqual(model.capability, "low")
+            self.assertEqual(model.weight, 2)
+            self.assertEqual(model.max_concurrency, 2)
+            self.assertEqual(model.time_windows, [{"start": "09:00", "end": "18:00"}])
+            self.assertEqual(model.total, 5)
+            self.assertEqual(model.avg_duration_seconds, 14)
+
+    def test_agent_pool_new_session_named_model_disables_historical_default(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = SqliteScanStore(Path(tmp) / "scans.db")
+            store.upsert_agent_opencode_pool_status(
+                agent_name="agent-a",
+                user_id="user-1",
+                agent_session_id="session-1",
+                status=OpenCodePoolStatus(
+                    agent_session_id="session-1",
+                    models=[{
+                        "id": "default",
+                        "model": "anthropic/claude-sonnet",
+                        "use_default_model": True,
+                        "total": 4,
+                        "success": 4,
+                    }],
+                    updated_at="2026-01-01T00:00:10+00:00",
+                ),
+            )
+            store.upsert_agent_opencode_pool_status(
+                agent_name="agent-a",
+                user_id="user-1",
+                agent_session_id="session-2",
+                status=OpenCodePoolStatus(
+                    agent_session_id="session-2",
+                    models=[{
+                        "id": "named",
+                        "model": "openai/gpt-current",
+                        "enabled": True,
+                        "available": True,
+                    }],
+                    updated_at="2026-01-01T00:00:20+00:00",
+                ),
+            )
+
+            status = store.get_agent_opencode_pool_status(
+                agent_name="agent-a",
+                user_id="user-1",
+                agent_session_id="session-2",
+                online=True,
+            )
+
+            models = {model.id: model for model in status.models}
+            self.assertEqual(models["default"].model, "anthropic/claude-sonnet")
+            self.assertEqual(models["default"].total, 4)
+            self.assertFalse(models["default"].enabled)
+            self.assertFalse(models["default"].available)
+            self.assertEqual(models["named"].model, "openai/gpt-current")
+            self.assertTrue(models["named"].enabled)
+            self.assertTrue(models["named"].available)
+
+    def test_agent_pool_empty_snapshot_invalidates_same_session_models(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = SqliteScanStore(Path(tmp) / "scans.db")
+            store.upsert_agent_opencode_pool_status(
+                agent_name="agent-a",
+                user_id="user-1",
+                agent_session_id="session-1",
+                status=OpenCodePoolStatus(
+                    agent_session_id="session-1",
+                    models=[{
+                        "id": "default",
+                        "model": "anthropic/claude-sonnet",
+                        "use_default_model": True,
+                        "running": 1,
+                        "queued": 2,
+                        "active_tasks": [{"task_type": "audit"}],
+                    }],
+                    updated_at="2026-01-01T00:00:10+00:00",
+                ),
+            )
+            store.upsert_agent_opencode_pool_status(
+                agent_name="agent-a",
+                user_id="user-1",
+                agent_session_id="session-1",
+                status=OpenCodePoolStatus(
+                    agent_session_id="session-1",
+                    models=[],
+                    updated_at="2026-01-01T00:00:20+00:00",
+                ),
+            )
+
+            status = store.get_agent_opencode_pool_status(
+                agent_name="agent-a",
+                user_id="user-1",
+                agent_session_id="session-1",
+                online=True,
+            )
+
+            model = status.models[0]
+            self.assertFalse(model.enabled)
+            self.assertFalse(model.available)
+            self.assertEqual(model.running, 0)
+            self.assertEqual(model.queued, 0)
+            self.assertEqual(model.active_tasks, [])
+
+    def test_agent_pool_api_live_snapshot_overrides_config_and_missing_models(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = SqliteScanStore(Path(tmp) / "scans.db")
+            store.upsert_agent_opencode_pool_status(
+                agent_name="agent-a",
+                user_id="user-1",
+                agent_session_id="session-2",
+                status=OpenCodePoolStatus(
+                    agent_session_id="session-2",
+                    models=[
+                        {
+                            "id": "default",
+                            "model": "stale-persisted-model",
+                            "total": 5,
+                            "success": 5,
+                        },
+                        {
+                            "id": "removed",
+                            "model": "removed-model",
+                            "enabled": True,
+                            "available": True,
+                        },
+                    ],
+                    updated_at="2026-01-01T00:00:10+00:00",
+                ),
+            )
+            agent = AgentInfo(
+                agent_id="agent-id",
+                name="agent-a",
+                ip="127.0.0.1",
+                port=8001,
+                last_seen=datetime.now(timezone.utc).isoformat(),
+                user_id="user-1",
+                agent_session_id="session-2",
+            )
+            latest = OpenCodePoolStatus(
+                agent_session_id="session-2",
+                global_running=1,
+                global_queued=2,
+                queued_tasks=[{"task_type": "audit"}],
+                models=[
+                    {
+                        "id": "default",
+                        "model": "",
+                        "use_default_model": True,
+                        "capability": "high",
+                        "weight": 4,
+                        "max_concurrency": 3,
+                        "enabled": True,
+                        "available": True,
+                        "time_windows": [{"start": "10:00", "end": "20:00"}],
+                        "running": 1,
+                        "queued": 2,
+                        "active_tasks": [{"task_type": "audit", "checker": "npd"}],
+                    },
+                    {
+                        "id": "live-only",
+                        "model": "openai/gpt-live",
+                    },
+                ],
+                updated_at="2026-01-01T00:00:20+00:00",
+            )
+            user = User(user_id="user-1", username="alice", role="user")
+            with (
+                patch("backend.api.agent.get_scan_store", return_value=store),
+                patch.dict(agent_api._registered_agents, {"agent-id": agent}, clear=True),
+                patch.dict(agent_api._agent_opencode_pool_latest, {"agent-id": latest}, clear=True),
+            ):
+                status = asyncio.run(
+                    agent_api.get_agent_opencode_pool("agent-id", current_user=user)
+                )
+
+            models = {model.id: model for model in status.models}
+            self.assertEqual(models["default"].model, "")
+            self.assertTrue(models["default"].use_default_model)
+            self.assertEqual(models["default"].capability, "high")
+            self.assertEqual(models["default"].weight, 4)
+            self.assertEqual(models["default"].max_concurrency, 3)
+            self.assertEqual(models["default"].total, 5)
+            self.assertEqual(models["default"].running, 1)
+            self.assertEqual(models["default"].queued, 2)
+            self.assertEqual(
+                models["default"].active_tasks,
+                [{"task_type": "audit", "checker": "npd"}],
+            )
+            self.assertFalse(models["removed"].enabled)
+            self.assertFalse(models["removed"].available)
+            self.assertIn("live-only", models)
+            self.assertEqual(status.global_running, 1)
+            self.assertEqual(status.global_queued, 2)
+
+    def test_agent_pool_api_ignores_live_snapshot_from_other_session(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = SqliteScanStore(Path(tmp) / "scans.db")
+            store.upsert_agent_opencode_pool_status(
+                agent_name="agent-a",
+                user_id="user-1",
+                agent_session_id="session-2",
+                status=OpenCodePoolStatus(
+                    agent_session_id="session-2",
+                    models=[{"id": "default", "model": "current-model"}],
+                ),
+            )
+            agent = AgentInfo(
+                agent_id="agent-id",
+                name="agent-a",
+                ip="127.0.0.1",
+                port=8001,
+                last_seen=datetime.now(timezone.utc).isoformat(),
+                user_id="user-1",
+                agent_session_id="session-2",
+            )
+            stale = OpenCodePoolStatus(
+                agent_session_id="session-1",
+                global_running=1,
+                models=[{
+                    "id": "default",
+                    "model": "anthropic/claude-stale",
+                    "running": 1,
+                }],
+            )
+            with (
+                patch("backend.api.agent.get_scan_store", return_value=store),
+                patch.dict(agent_api._registered_agents, {"agent-id": agent}, clear=True),
+                patch.dict(agent_api._agent_opencode_pool_latest, {"agent-id": stale}, clear=True),
+            ):
+                status = asyncio.run(
+                    agent_api.get_agent_opencode_pool(
+                        "agent-id",
+                        current_user=User(user_id="user-1", username="alice", role="user"),
+                    )
+                )
+
+            self.assertEqual(status.models[0].model, "current-model")
+            self.assertEqual(status.models[0].running, 0)
+            self.assertEqual(status.global_running, 0)
+
+    def test_agent_pool_api_marks_live_models_unavailable_when_agent_is_offline(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = SqliteScanStore(Path(tmp) / "scans.db")
+            store.upsert_agent_opencode_pool_status(
+                agent_name="agent-a",
+                user_id="user-1",
+                agent_session_id="session-1",
+                status=OpenCodePoolStatus(
+                    agent_session_id="session-1",
+                    models=[{"id": "named", "model": "openai/gpt", "available": True}],
+                ),
+            )
+            agent = AgentInfo(
+                agent_id="agent-id",
+                name="agent-a",
+                ip="127.0.0.1",
+                port=8001,
+                last_seen="2026-01-01T00:00:00+00:00",
+                user_id="user-1",
+                agent_session_id="session-1",
+            )
+            latest = OpenCodePoolStatus(
+                agent_session_id="session-1",
+                models=[{"id": "named", "model": "openai/gpt", "available": True}],
+            )
+            with (
+                patch("backend.api.agent.get_scan_store", return_value=store),
+                patch.dict(agent_api._registered_agents, {"agent-id": agent}, clear=True),
+                patch.dict(agent_api._agent_opencode_pool_latest, {"agent-id": latest}, clear=True),
+            ):
+                status = asyncio.run(
+                    agent_api.get_agent_opencode_pool(
+                        "agent-id",
+                        current_user=User(user_id="user-1", username="alice", role="user"),
+                    )
+                )
+
+            self.assertFalse(status.online)
+            self.assertFalse(status.models[0].available)
+            self.assertEqual(status.models[0].running, 0)
+            self.assertEqual(status.global_running, 0)
 
     def test_old_scan_database_migrates_product_column(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

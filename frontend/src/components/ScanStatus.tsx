@@ -1938,6 +1938,9 @@ function ScanTaskQueuePanel({ pool }: { pool: OpenCodePoolStatus | null }) {
                   const isExpanded = expandedTaskId === taskKey;
                   const prompt = scanQueueTaskPrompt(task.task);
                   const promptLength = scanQueueTaskPromptLength(task.task, prompt);
+                  const failureReason = typeof task.task.failure_reason === "string"
+                    ? task.task.failure_reason.trim()
+                    : "";
                   return (
                     <Fragment key={taskKey}>
                       <tr
@@ -1988,28 +1991,38 @@ function ScanTaskQueuePanel({ pool }: { pool: OpenCodePoolStatus | null }) {
                       {isExpanded && (
                         <tr className="border-t border-slate-800/70 bg-slate-950/60">
                           <td colSpan={5} className="px-3 pb-4 pt-0">
-                            <div className="rounded-lg border border-slate-800 bg-slate-950 p-3">
-                              <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
-                                <span className="text-xs font-semibold text-slate-300">Prompt</span>
-                                {prompt && (
-                                  <span className="font-mono text-[11px] text-slate-600">
-                                    {promptLength} chars
-                                  </span>
-                                )}
-                              </div>
-                              {prompt ? (
-                                <pre className="max-h-80 overflow-auto whitespace-pre-wrap break-words rounded-md border border-slate-800 bg-slate-900/80 p-3 font-mono text-xs leading-relaxed text-slate-300">
-                                  {prompt}
-                                </pre>
-                              ) : !["planned", "queued", "running"].includes(task.status) ? (
-                                <div className="rounded-md border border-slate-800 bg-slate-900/60 px-3 py-2 text-xs text-slate-500">
-                                  该历史任务未保存完整 Prompt{promptLength > 0 ? `，仅记录长度 ${promptLength} chars` : ""}。
-                                </div>
-                              ) : (
-                                <div className="rounded-md border border-slate-800 bg-slate-900/60 px-3 py-2 text-xs text-slate-500">
-                                  完整 prompt 尚未生成，进入排队或运行后显示。
+                            <div className="space-y-3 rounded-lg border border-slate-800 bg-slate-950 p-3">
+                              {failureReason && (
+                                <div className="rounded-md border border-red-500/30 bg-red-500/10 px-3 py-2">
+                                  <div className="text-xs font-semibold text-red-200">失败原因</div>
+                                  <div className="mt-1 whitespace-pre-wrap break-words text-xs leading-relaxed text-red-300">
+                                    {failureReason}
+                                  </div>
                                 </div>
                               )}
+                              <div>
+                                <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+                                  <span className="text-xs font-semibold text-slate-300">Prompt</span>
+                                  {prompt && (
+                                    <span className="font-mono text-[11px] text-slate-600">
+                                      {promptLength} chars
+                                    </span>
+                                  )}
+                                </div>
+                                {prompt ? (
+                                  <pre className="max-h-80 overflow-auto whitespace-pre-wrap break-words rounded-md border border-slate-800 bg-slate-900/80 p-3 font-mono text-xs leading-relaxed text-slate-300">
+                                    {prompt}
+                                  </pre>
+                                ) : !["planned", "queued", "running"].includes(task.status) ? (
+                                  <div className="rounded-md border border-slate-800 bg-slate-900/60 px-3 py-2 text-xs text-slate-500">
+                                    该历史任务未保存完整 Prompt{promptLength > 0 ? `，仅记录长度 ${promptLength} chars` : ""}。
+                                  </div>
+                                ) : (
+                                  <div className="rounded-md border border-slate-800 bg-slate-900/60 px-3 py-2 text-xs text-slate-500">
+                                    完整 prompt 尚未生成，进入排队或运行后显示。
+                                  </div>
+                                )}
+                              </div>
                             </div>
                           </td>
                         </tr>
@@ -4273,17 +4286,31 @@ function ModelPoolDashboard({ pool }: { pool: OpenCodePoolStatus | null }) {
   const models = pool?.models ?? [];
   const plannedTasks = pool?.planned_tasks ?? [];
   const queuedTasks = pool?.queued_tasks ?? [];
-  const total = models.reduce((sum, item) => sum + item.total, 0);
-  const success = models.reduce((sum, item) => sum + item.success, 0);
-  const failure = models.reduce((sum, item) => sum + item.failure, 0);
-  const timeout = models.reduce((sum, item) => sum + item.timeout, 0);
-  const cancelled = models.reduce((sum, item) => sum + item.cancelled, 0);
+  const completedTasks = pool?.completed_tasks ?? [];
+  const failedTasks = completedTasks.filter((task) => {
+    const outcome = String(task.outcome || "unknown");
+    return outcome !== "success";
+  });
+  const recentFailedTasks = failedTasks.slice(-10).reverse();
+  const unassignedCompletedTasks = completedTasks.filter(
+    (task) => !String(task.model_id || task.model || "").trim(),
+  );
+  const hasEnabledModel = models.some((model) => model.enabled);
+  const total = models.reduce((sum, item) => sum + item.total, 0) + unassignedCompletedTasks.length;
+  const success = models.reduce((sum, item) => sum + item.success, 0)
+    + unassignedCompletedTasks.filter((task) => task.outcome === "success").length;
+  const failure = models.reduce((sum, item) => sum + item.failure, 0)
+    + unassignedCompletedTasks.filter((task) => task.outcome === "failure").length;
+  const timeout = models.reduce((sum, item) => sum + item.timeout, 0)
+    + unassignedCompletedTasks.filter((task) => task.outcome === "timeout").length;
+  const cancelled = models.reduce((sum, item) => sum + item.cancelled, 0)
+    + unassignedCompletedTasks.filter((task) => task.outcome === "cancelled").length;
 
-  if (!pool || (models.length === 0 && plannedTasks.length === 0 && queuedTasks.length === 0)) {
+  if (!pool) {
     return (
       <div className="flex-1 overflow-y-auto p-5">
         <div className="rounded-lg border border-slate-800 bg-slate-950 px-4 py-5 text-sm text-slate-500">
-          当前扫描尚未产生 OpenCode 模型池统计。开始运行威胁分析、候选点审计或去误报后，这里会显示模型分配情况。
+          当前扫描尚未收到 OpenCode 模型池状态。
         </div>
       </div>
     );
@@ -4291,6 +4318,11 @@ function ModelPoolDashboard({ pool }: { pool: OpenCodePoolStatus | null }) {
 
   return (
     <div className="flex-1 overflow-y-auto p-5 space-y-4">
+      {!hasEnabledModel && (
+        <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-sm leading-6 text-amber-200">
+          当前没有启用的模型，新的 LLM 任务会立即失败。如需使用 CLI 默认模型，必须在 Agent 模型池中显式添加并启用“默认模型”。
+        </div>
+      )}
       <div className="grid grid-cols-2 md:grid-cols-7 gap-3">
         <MetricBox label="计划中" value={plannedTasks.length} tone="amber" />
         <MetricBox label="运行中" value={pool.global_running} tone="cyan" />
@@ -4335,8 +4367,30 @@ function ModelPoolDashboard({ pool }: { pool: OpenCodePoolStatus | null }) {
         </div>
       )}
 
-      <div className="overflow-x-auto rounded-lg border border-slate-800">
-        <table className="w-full min-w-[64rem] text-sm">
+      {failedTasks.length > 0 && (
+        <div className="rounded-lg border border-red-500/30 bg-red-500/10 p-3">
+          <div className="mb-2 text-xs font-semibold text-red-200">
+            任务失败 {failedTasks.length} 个{failedTasks.length > recentFailedTasks.length ? `（显示最近 ${recentFailedTasks.length} 个）` : ""}
+          </div>
+          <div className="space-y-2">
+            {recentFailedTasks.map((task, index) => {
+              const reason = typeof task.failure_reason === "string" && task.failure_reason.trim()
+                ? task.failure_reason.trim()
+                : "未记录失败原因";
+              return (
+                <div key={String(task.task_id || index)} className="rounded border border-red-500/20 bg-slate-950/50 px-3 py-2">
+                  <div className="text-xs font-medium text-red-100">{modelTaskLabel(task)}</div>
+                  <div className="mt-1 whitespace-pre-wrap break-words text-xs leading-relaxed text-red-300">{reason}</div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      {models.length > 0 && (
+        <div className="overflow-x-auto rounded-lg border border-slate-800">
+          <table className="w-full min-w-[64rem] text-sm">
           <thead className="bg-slate-950">
             <tr>
               <th className={thCls}>模型</th>
@@ -4360,7 +4414,7 @@ function ModelPoolDashboard({ pool }: { pool: OpenCodePoolStatus | null }) {
                 <td className={tdCls}>
                   <div className="font-semibold text-slate-100">{model.id}</div>
                   <div className="mt-1 max-w-48 truncate font-mono text-[11px] text-slate-500">
-                    {model.model || "(默认模型)"}
+                    {model.use_default_model ? "(CLI 默认模型)" : (model.model || "(模型名为空)")}
                   </div>
                 </td>
                 <td className={tdCls}>{capabilityLabel(model.capability)}</td>
@@ -4391,8 +4445,9 @@ function ModelPoolDashboard({ pool }: { pool: OpenCodePoolStatus | null }) {
               </tr>
             ))}
           </tbody>
-        </table>
-      </div>
+          </table>
+        </div>
+      )}
     </div>
   );
 }
