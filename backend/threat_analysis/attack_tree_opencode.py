@@ -4,14 +4,37 @@ from __future__ import annotations
 
 import asyncio
 import json
-import time
 from pathlib import Path
+from typing import Any
 from uuid import uuid4
 
-from backend.models import ThreatAnalysis
+from backend.models import ThreatAnalysis, ThreatAnalysisSources
 
-from .parsing import build_threat_analysis_scan_scope
+from .attack_paths import (
+    append_or_merge_attack_path,
+    build_analysis_from_attack_paths,
+    parse_attack_path_data,
+    read_attack_paths_jsonl,
+)
+from .harness import (
+    build_code_index,
+    detect_product_mcp,
+    read_json_object,
+    safe_run_id,
+    write_json,
+)
+from .parsing import (
+    build_threat_analysis_scan_scope,
+    parse_threat_analysis_file,
+    write_threat_analysis_file,
+)
 from .workspace import install_attack_tree_threat_analysis_skill
+
+
+_MAX_GOALS = 30
+_MAX_DOMAINS = 150
+_MAX_SURFACES = 300
+_MAX_CONFIRMATIONS = 300
 
 
 async def run_attack_tree_threat_analysis(
@@ -27,121 +50,418 @@ async def run_attack_tree_threat_analysis(
     product: str = "",
     planned_task_id: str = "",
 ) -> ThreatAnalysis | None:
-    """Run the attack-tree threat-analysis skill and parse ``res.json``."""
+    """Run the layered threat-analysis harness and return normalized results."""
     from backend.opencode import runner as opencode_runner
 
     config = opencode_runner.get_config()
     if config.opencode.mock:
         await opencode_runner._clear_planned_task_id(planned_task_id)
-        return ThreatAnalysis(schema_version="1.0", analysis_id=f"mock-{project_id}")
+        return ThreatAnalysis(schema_version="1.1", analysis_id=f"mock-{project_id}")
 
     install_attack_tree_threat_analysis_skill(workspace, skill_path, reference_catalog_path)
 
     effective_timeout = timeout if timeout is not None else config.opencode.timeout
     tool = opencode_runner._normalize_tool(config.opencode)
-    max_retries = config.opencode.max_retries
     analysis_root = (project_dir or workspace).resolve()
     target_path = (code_scan_path or analysis_root).resolve()
-    result_path = analysis_root / "res.json"
+    run_dir = analysis_root / "runs" / safe_run_id(project_id)
+    stream_path = run_dir / "stream" / "attack_paths.jsonl"
+    contexts_dir = run_dir / "contexts"
+    stages_dir = run_dir / "stages"
+    result_path = run_dir / "res.json"
+    legacy_result_path = analysis_root / "res.json"
     scan_scope = build_threat_analysis_scan_scope(analysis_root, target_path)
-    scan_scope_json = json.dumps(scan_scope.model_dump(), ensure_ascii=False)
 
-    for attempt in range(1, max_retries + 2):
-        result_id = f"threat-analysis-{uuid4().hex}"
-        old_mtime = result_path.stat().st_mtime if result_path.exists() else None
-        started_at = time.time()
-        prompt = (
-            "使用 `attack-tree-threat-analysis` 技能，对被测试项目执行基于攻击树的威胁分析。"
-            f"project_id 为 `{project_id}`。"
-            f"被测试项目根目录为 `{analysis_root}`。"
-            f"本次代码分析范围为 `{target_path}`。"
-            f"产品名称为 `{product or '未指定'}`。"
-            f"最终必须把一个合法 JSON 对象写入 `{result_path}`，文件名必须是 `res.json`。"
-            f"JSON 顶层必须包含 scan_scope，值必须是 {scan_scope_json}。"
-            "JSON 结构必须符合技能文档的 `schema_version/sources/assets/attack_trees/code_path_mappings` 要求。"
-            "如果某类信息无法识别，使用空数组或空字符串，不要编造不存在的代码路径。"
-            "不得修改 `res.json` 之外的任何文件；不需要输出漏洞结论 JSON。"
-        ).replace("\n", " ")
-        log_path = workspace / f"opencode_{result_id}.log"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    (run_dir / "stream").mkdir(parents=True, exist_ok=True)
+    contexts_dir.mkdir(parents=True, exist_ok=True)
+    stages_dir.mkdir(parents=True, exist_ok=True)
 
+    product_mcp_name = str(
+        getattr(config.threat_analysis, "product_mcp_name", "product-info") or ""
+    ).strip()
+    product_mcp_detection_timeout = int(
+        getattr(config.threat_analysis, "product_mcp_detection_timeout_seconds", 60) or 60
+    )
+    mcp_detection = detect_product_mcp(
+        workspace=workspace,
+        project_dir=analysis_root,
+        run_dir=run_dir,
+        product_mcp_name=product_mcp_name,
+        timeout_seconds=product_mcp_detection_timeout,
+    )
+    if on_output:
+        status = "可用" if mcp_detection.get("mcp_available") else "不可用"
+        on_output(
+            f"[{tool}] 产品信息 MCP `{product_mcp_name or '未配置'}` 检测结果：{status}"
+        )
+
+    repo_index = build_code_index(analysis_root, target_path)
+    repo_index_path = contexts_dir / "code_index.json"
+    write_json(repo_index_path, repo_index)
+
+    base_input = {
+        "project_id": project_id,
+        "product": product,
+        "scan_scope": scan_scope.model_dump(),
+        "code_index_path": repo_index_path.as_posix(),
+        "code_index": repo_index,
+        "product_mcp": mcp_detection,
+    }
+    base_input_path = contexts_dir / "base_model.input.json"
+    base_output_path = stages_dir / "base_model.output.json"
+    write_json(base_input_path, base_input)
+
+    await _invoke_stage(
+        opencode_runner=opencode_runner,
+        workspace=workspace,
+        analysis_root=analysis_root,
+        run_dir=run_dir,
+        skill_name="threat-asset-interface-agent",
+        input_path=base_input_path,
+        output_path=base_output_path,
+        timeout=effective_timeout,
+        on_output=on_output,
+        cancel_event=cancel_event,
+        planned_task_id=planned_task_id,
+        stats_scope_id=project_id,
+        attempt=1,
+        task_label="基础资产与接口建模",
+    )
+    base_output = read_json_object(base_output_path)
+    _append_attack_paths_from_output(stream_path, base_output)
+
+    attack_goals = _attack_goals_from_base_output(base_output)[:_MAX_GOALS]
+    domain_tasks: list[dict[str, Any]] = []
+    for index, goal in enumerate(attack_goals, start=1):
+        if _cancelled(cancel_event):
+            break
+        input_path = contexts_dir / "goal" / f"{_safe_id(goal, 'attack_goal_id', index)}.input.json"
+        output_path = stages_dir / "goal" / f"{_safe_id(goal, 'attack_goal_id', index)}.output.json"
+        write_json(input_path, {
+            "project_id": project_id,
+            "product": product,
+            "scan_scope": scan_scope.model_dump(),
+            "code_index_path": repo_index_path.as_posix(),
+            "product_mcp": mcp_detection,
+            "base_model": base_output,
+            "attack_goal": goal,
+        })
+        await _invoke_stage(
+            opencode_runner=opencode_runner,
+            workspace=workspace,
+            analysis_root=analysis_root,
+            run_dir=run_dir,
+            skill_name="threat-attack-goal-agent",
+            input_path=input_path,
+            output_path=output_path,
+            timeout=effective_timeout,
+            on_output=on_output,
+            cancel_event=cancel_event,
+            planned_task_id=planned_task_id,
+            stats_scope_id=project_id,
+            attempt=index,
+            task_label=f"攻击目标分解 {index}/{len(attack_goals)}",
+        )
+        goal_output = read_json_object(output_path)
+        for domain in _dict_items(goal_output.get("domains")):
+            domain_tasks.append({"attack_goal": goal, "attack_domain": domain})
+            if len(domain_tasks) >= _MAX_DOMAINS:
+                break
+        if len(domain_tasks) >= _MAX_DOMAINS:
+            break
+
+    surface_tasks: list[dict[str, Any]] = []
+    for index, task in enumerate(domain_tasks, start=1):
+        if _cancelled(cancel_event):
+            break
+        domain = task["attack_domain"]
+        input_path = contexts_dir / "domain" / f"{_safe_id(domain, 'domain_id', index)}.input.json"
+        output_path = stages_dir / "domain" / f"{_safe_id(domain, 'domain_id', index)}.output.json"
+        write_json(input_path, {
+            "project_id": project_id,
+            "product": product,
+            "scan_scope": scan_scope.model_dump(),
+            "code_index_path": repo_index_path.as_posix(),
+            "product_mcp": mcp_detection,
+            "base_model": base_output,
+            **task,
+        })
+        await _invoke_stage(
+            opencode_runner=opencode_runner,
+            workspace=workspace,
+            analysis_root=analysis_root,
+            run_dir=run_dir,
+            skill_name="threat-attack-domain-agent",
+            input_path=input_path,
+            output_path=output_path,
+            timeout=effective_timeout,
+            on_output=on_output,
+            cancel_event=cancel_event,
+            planned_task_id=planned_task_id,
+            stats_scope_id=project_id,
+            attempt=index,
+            task_label=f"攻击域分析 {index}/{len(domain_tasks)}",
+        )
+        domain_output = read_json_object(output_path)
+        for surface in _dict_items(domain_output.get("surfaces")):
+            surface_tasks.append({**task, "attack_surface": surface})
+            if len(surface_tasks) >= _MAX_SURFACES:
+                break
+        if len(surface_tasks) >= _MAX_SURFACES:
+            break
+
+    confirmation_tasks: list[dict[str, Any]] = []
+    for index, task in enumerate(surface_tasks, start=1):
+        if _cancelled(cancel_event):
+            break
+        surface = task["attack_surface"]
+        input_path = contexts_dir / "surface" / f"{_safe_id(surface, 'surface_id', index)}.input.json"
+        output_path = stages_dir / "surface" / f"{_safe_id(surface, 'surface_id', index)}.output.json"
+        write_json(input_path, {
+            "project_id": project_id,
+            "product": product,
+            "scan_scope": scan_scope.model_dump(),
+            "code_index_path": repo_index_path.as_posix(),
+            "product_mcp": mcp_detection,
+            "base_model": base_output,
+            **task,
+        })
+        await _invoke_stage(
+            opencode_runner=opencode_runner,
+            workspace=workspace,
+            analysis_root=analysis_root,
+            run_dir=run_dir,
+            skill_name="threat-attack-surface-agent",
+            input_path=input_path,
+            output_path=output_path,
+            timeout=effective_timeout,
+            on_output=on_output,
+            cancel_event=cancel_event,
+            planned_task_id=planned_task_id,
+            stats_scope_id=project_id,
+            attempt=index,
+            task_label=f"攻击面分析 {index}/{len(surface_tasks)}",
+        )
+        surface_output = read_json_object(output_path)
+        _append_attack_paths_from_output(stream_path, surface_output, defaults=task)
+        for method_task in _dict_items(surface_output.get("method_confirmation_tasks")):
+            confirmation_tasks.append({**task, "method_confirmation_task": method_task})
+            if len(confirmation_tasks) >= _MAX_CONFIRMATIONS:
+                break
+        if len(confirmation_tasks) >= _MAX_CONFIRMATIONS:
+            break
+
+    for index, task in enumerate(confirmation_tasks, start=1):
+        if _cancelled(cancel_event):
+            break
+        method_task = task["method_confirmation_task"]
+        input_path = contexts_dir / "method" / f"{_safe_id(method_task, 'task_id', index)}.input.json"
+        output_path = stages_dir / "method" / f"{_safe_id(method_task, 'task_id', index)}.output.json"
+        write_json(input_path, {
+            "project_id": project_id,
+            "product": product,
+            "scan_scope": scan_scope.model_dump(),
+            "code_index_path": repo_index_path.as_posix(),
+            "product_mcp": mcp_detection,
+            "base_model": base_output,
+            **task,
+        })
+        await _invoke_stage(
+            opencode_runner=opencode_runner,
+            workspace=workspace,
+            analysis_root=analysis_root,
+            run_dir=run_dir,
+            skill_name="threat-method-confirm-agent",
+            input_path=input_path,
+            output_path=output_path,
+            timeout=effective_timeout,
+            on_output=on_output,
+            cancel_event=cancel_event,
+            planned_task_id=planned_task_id,
+            stats_scope_id=project_id,
+            attempt=index,
+            task_label=f"方法确认 {index}/{len(confirmation_tasks)}",
+        )
+        method_output = read_json_object(output_path)
+        _append_attack_paths_from_output(stream_path, method_output, defaults=task)
+
+    paths = read_attack_paths_jsonl(stream_path)
+    sources = ThreatAnalysisSources(
+        repositories=[scan_scope.code_scan_relative_path or "."],
+        documents=[],
+        mcp_available=bool(mcp_detection.get("mcp_available")),
+        product_mcp_name=product_mcp_name,
+    )
+    analysis = build_analysis_from_attack_paths(
+        paths,
+        analysis_id=f"ATA-{uuid4().hex[:12]}",
+        sources=sources,
+        scan_scope=scan_scope,
+    )
+    write_threat_analysis_file(result_path, analysis)
+    write_threat_analysis_file(legacy_result_path, analysis)
+    if on_output:
+        on_output(
+            f"[{tool}] 威胁分析归并完成：attack_paths={len(analysis.attack_paths)} "
+            f"assets={len(analysis.assets)} output={result_path}"
+        )
+    return parse_threat_analysis_file(result_path)
+
+
+async def _invoke_stage(
+    *,
+    opencode_runner,
+    workspace: Path,
+    analysis_root: Path,
+    run_dir: Path,
+    skill_name: str,
+    input_path: Path,
+    output_path: Path,
+    timeout: int,
+    on_output,
+    cancel_event,
+    planned_task_id: str,
+    stats_scope_id: str,
+    attempt: int,
+    task_label: str,
+) -> None:
+    if _cancelled(cancel_event):
+        return
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    prompt = _stage_prompt(
+        skill_name=skill_name,
+        input_path=input_path,
+        output_path=output_path,
+        task_label=task_label,
+    )
+    if on_output:
+        on_output(f"[threat-analysis] {task_label}: {skill_name}")
+    task_context = {"task_type": "threat_analysis", "stage": skill_name}
+    if planned_task_id:
+        task_context["planned_task_id"] = planned_task_id
+    try:
+        await opencode_runner._invoke_opencode(
+            workspace,
+            prompt,
+            timeout,
+            log_path=run_dir / "logs" / f"{skill_name}-{attempt}.log",
+            on_line=on_output,
+            cancel_event=cancel_event,
+            project_dir=analysis_root,
+            writable_paths=[run_dir],
+            model_capability="high",
+            prefer_high_model=True,
+            stats_scope_id=stats_scope_id,
+            task_context=task_context,
+            attempt=attempt,
+        )
+    except asyncio.CancelledError:
+        raise
+    except opencode_runner.NoAvailableModelError:
+        raise
+    except Exception as exc:
         if on_output:
-            on_output(f"[{tool}] 威胁分析提示词:\n{prompt}")
+            on_output(f"[threat-analysis] {task_label} 失败，继续后续可用结果：{exc}")
+        if not output_path.is_file():
+            write_json(output_path, {"error": str(exc)})
 
-        opencode_runner.logger.info(
-            "Running %s threat analysis: project_id=%s timeout=%ds attempt=%d/%d output=%s",
-            tool, project_id, effective_timeout, attempt, max_retries + 1, result_path,
-        )
 
-        try:
-            task_context = {"task_type": "threat_analysis"}
-            if planned_task_id:
-                task_context["planned_task_id"] = planned_task_id
-            await opencode_runner._invoke_opencode(
-                workspace,
-                prompt,
-                effective_timeout,
-                log_path=log_path,
-                on_line=on_output,
-                cancel_event=cancel_event,
-                project_dir=analysis_root,
-                writable_paths=[analysis_root],
-                model_capability="high",
-                prefer_high_model=True,
-                stats_scope_id=project_id,
-                task_context=task_context,
-                attempt=attempt,
-            )
-        except asyncio.TimeoutError:
-            opencode_runner.logger.error("%s threat analysis timed out for %s", tool, project_id)
-            parsed = opencode_runner._read_fresh_threat_analysis_result(
-                result_path, old_mtime, started_at, log_path,
-                project_dir=analysis_root, code_scan_path=target_path,
-            )
-            if parsed is not None:
-                return parsed
-            return None
-        except asyncio.CancelledError:
-            raise
-        except opencode_runner.NoAvailableModelError:
-            raise
-        except Exception as exc:
-            opencode_runner.logger.exception(
-                "%s threat analysis failed for %s (attempt %d)",
-                tool,
-                project_id,
-                attempt,
-            )
-            if on_output:
-                on_output(f"[retry {attempt}/{max_retries}] {tool} error: {exc}")
-            parsed = opencode_runner._read_fresh_threat_analysis_result(
-                result_path, old_mtime, started_at, log_path,
-                project_dir=analysis_root, code_scan_path=target_path,
-            )
-            if parsed is not None:
-                return parsed
-            if attempt <= max_retries:
-                continue
-            return None
+def _stage_prompt(
+    *,
+    skill_name: str,
+    input_path: Path,
+    output_path: Path,
+    task_label: str,
+) -> str:
+    return (
+        f"使用 `{skill_name}` 技能执行威胁分析阶段：{task_label}。\n"
+        f"读取输入 JSON 文件：`{input_path.resolve()}`。\n"
+        f"将阶段结果写入输出 JSON 文件：`{output_path.resolve()}`。\n"
+        "只处理输入文件指定的当前对象或当前阶段，不要扩展到其他阶段。\n"
+        "输出文件必须是合法 JSON 对象；不要用 Markdown 代码块包裹。\n"
+        "代码路径必须来自输入代码索引或实际检索结果，无法确认时输出空数组。\n"
+        "不得修改输出 JSON 文件之外的任何项目文件。\n"
+    )
 
-        parsed = opencode_runner._read_fresh_threat_analysis_result(
-            result_path, old_mtime, started_at, log_path,
-            project_dir=analysis_root, code_scan_path=target_path,
-        )
-        if parsed is not None:
-            return parsed
-        if attempt <= max_retries:
-            opencode_runner.logger.warning(
-                "%s threat analysis produced no fresh valid res.json; retrying",
-                tool,
-            )
-            if on_output:
-                on_output(f"[retry {attempt}/{max_retries}] No fresh valid res.json written, retrying...")
+
+def _attack_goals_from_base_output(base_output: dict[str, Any]) -> list[dict[str, Any]]:
+    goals = _dict_items(base_output.get("attack_goals"))
+    if goals:
+        return goals
+    out: list[dict[str, Any]] = []
+    assets = _dict_items(base_output.get("assets"))
+    risks = _dict_items(base_output.get("risks"))
+    risks_by_asset: dict[str, list[dict[str, Any]]] = {}
+    for risk in risks:
+        asset_id = str(risk.get("asset_id") or "").strip()
+        if asset_id:
+            risks_by_asset.setdefault(asset_id, []).append(risk)
+    for asset_index, asset in enumerate(assets, start=1):
+        asset_id = str(asset.get("asset_id") or asset.get("id") or f"ASSET-{asset_index:03d}")
+        asset_risks = risks_by_asset.get(asset_id) or _dict_items(asset.get("risks"))
+        for risk_index, risk in enumerate(asset_risks, start=1):
+            risk_id = str(risk.get("risk_id") or risk.get("id") or f"RISK-{asset_index:03d}-{risk_index:03d}")
+            risk_name = str(risk.get("name") or "关键风险")
+            asset_name = str(asset.get("name") or asset_id)
+            out.append({
+                "attack_goal_id": f"GOAL-{asset_index:03d}-{risk_index:03d}",
+                "asset_id": asset_id,
+                "asset_name": asset_name,
+                "risk_id": risk_id,
+                "risk_name": risk_name,
+                "name": f"实现风险：{risk_name}",
+                "related_interface_ids": [],
+                "candidate_code_paths": [],
+            })
+    return out
+
+
+def _append_attack_paths_from_output(
+    stream_path: Path,
+    output: dict[str, Any],
+    defaults: dict[str, Any] | None = None,
+) -> None:
+    defaults = defaults or {}
+    for raw_path in _dict_items(output.get("attack_paths")):
+        merged = _with_attack_path_defaults(raw_path, defaults)
+        append_or_merge_attack_path(stream_path, parse_attack_path_data(merged))
+
+
+def _with_attack_path_defaults(path: dict[str, Any], defaults: dict[str, Any]) -> dict[str, Any]:
+    out = dict(path)
+    for source_key, prefix in (
+        ("attack_goal", "attack_goal"),
+        ("attack_domain", "attack_domain"),
+        ("attack_surface", "attack_surface"),
+    ):
+        value = defaults.get(source_key)
+        if not isinstance(value, dict):
             continue
-        opencode_runner.logger.warning(
-            "%s threat analysis produced no fresh valid res.json after %d attempt(s)",
-            tool,
-            attempt,
-        )
-        return None
+        for key, mapped in (
+            ("asset_id", "asset_id"),
+            ("asset_name", "asset_name"),
+            ("risk_id", "risk_id"),
+            ("risk_name", "risk_name"),
+            ("attack_goal_id", f"{prefix}_id"),
+            ("domain_id", f"{prefix}_id"),
+            ("surface_id", f"{prefix}_id"),
+            ("name", f"{prefix}_name"),
+            ("surface_type", f"{prefix}_type"),
+        ):
+            if mapped not in out and value.get(key):
+                out[mapped] = value.get(key)
+    return out
 
-    return None
+
+def _dict_items(value: Any) -> list[dict[str, Any]]:
+    return [item for item in value if isinstance(item, dict)] if isinstance(value, list) else []
+
+
+def _safe_id(data: dict[str, Any], key: str, index: int) -> str:
+    raw = str(data.get(key) or data.get("id") or index)
+    return "".join(ch if ch.isalnum() or ch in "._-" else "_" for ch in raw)[:80] or str(index)
+
+
+def _cancelled(cancel_event) -> bool:
+    return bool(cancel_event is not None and cancel_event.is_set())

@@ -81,6 +81,8 @@ class GitHistoryConfig(BaseModel):
 class ThreatAnalysisConfig(BaseModel):
     enabled: bool = True
     implementation: str = "attack_tree"
+    product_mcp_name: str = "product-info"
+    product_mcp_detection_timeout_seconds: int = 60
 
 
 class PatternFilterConfig(BaseModel):

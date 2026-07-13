@@ -5,6 +5,16 @@ from __future__ import annotations
 from pathlib import Path
 
 
+_AGENT_SKILL_FILES = {
+    "threat-analysis-harness": "threat-analysis-harness.md",
+    "threat-asset-interface-agent": "threat-asset-interface-agent.md",
+    "threat-attack-goal-agent": "threat-attack-goal-agent.md",
+    "threat-attack-domain-agent": "threat-attack-domain-agent.md",
+    "threat-attack-surface-agent": "threat-attack-surface-agent.md",
+    "threat-method-confirm-agent": "threat-method-confirm-agent.md",
+}
+
+
 def install_attack_tree_threat_analysis_skill(
     workspace: Path,
     skill_path: Path,
@@ -28,3 +38,16 @@ def install_attack_tree_threat_analysis_skill(
             reference_catalog_path.read_text(encoding="utf-8"),
             encoding="utf-8",
         )
+        skills_root = skill_path.parent / "backend" / "threat_analysis" / "skills"
+        for skill_name, filename in _AGENT_SKILL_FILES.items():
+            source = skills_root / filename
+            if not source.is_file():
+                raise FileNotFoundError(f"Threat analysis agent skill not found: {source}")
+            target = workspace / ".opencode" / "skills" / skill_name
+            target.mkdir(parents=True, exist_ok=True)
+            (target / "SKILL.md").write_text(source.read_text(encoding="utf-8"), encoding="utf-8")
+            if skill_name in {"threat-attack-surface-agent", "threat-method-confirm-agent"}:
+                (target / "attack-method-reference-catalog.md").write_text(
+                    reference_catalog_path.read_text(encoding="utf-8"),
+                    encoding="utf-8",
+                )

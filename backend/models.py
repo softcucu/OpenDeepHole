@@ -336,6 +336,8 @@ class ThreatAnalysisSources(BaseModel):
     """Input sources actually used by the attack-tree threat analysis."""
     repositories: list[str] = []
     documents: list[str] = []
+    mcp_available: bool = False
+    product_mcp_name: str = ""
 
 
 class ThreatAnalysisScanScope(BaseModel):
@@ -391,13 +393,52 @@ class ThreatCodePathMapping(BaseModel):
     code_paths: list[ThreatCodePath] = []
 
 
+class ThreatExternalInterface(BaseModel):
+    interface_id: str = ""
+    name: str = ""
+    description: str = ""
+    interface_type: str = "other"
+    component: str = ""
+    exposure: str = ""
+    input_types: list[str] = []
+    auth_required: str = ""
+    affected_asset_ids: list[str] = []
+    candidate_code_paths: list[ThreatCodePath] = []
+    source: str = "code"
+
+
+class ThreatAttackPath(BaseModel):
+    path_id: str = ""
+    fingerprint: str = ""
+    asset_id: str = ""
+    asset_name: str = ""
+    risk_id: str = ""
+    risk_name: str = ""
+    attack_goal_id: str = ""
+    attack_goal_name: str = ""
+    attack_domain_id: str = ""
+    attack_domain_name: str = ""
+    attack_surface_id: str = ""
+    attack_surface_name: str = ""
+    attack_surface_type: str = ""
+    attack_method_id: str = ""
+    attack_method_name: str = ""
+    preconditions: list[str] = []
+    code_paths: list[ThreatCodePath] = []
+    evidence: list[str] = []
+    source: str = "code"
+    agent_sources: list[str] = []
+
+
 class ThreatAnalysis(BaseModel):
     schema_version: str = "1.0"
     analysis_id: str = ""
     sources: ThreatAnalysisSources = Field(default_factory=ThreatAnalysisSources)
     scan_scope: ThreatAnalysisScanScope = Field(default_factory=ThreatAnalysisScanScope)
     assets: list[ThreatAsset] = []
+    high_risk_external_interfaces: list[ThreatExternalInterface] = []
     attack_trees: list[ThreatAttackTree] = []
+    attack_paths: list[ThreatAttackPath] = []
     code_path_mappings: list[ThreatCodePathMapping] = []
     updated_at: str = ""
 
@@ -418,6 +459,9 @@ class ThreatAuditTask(BaseModel):
     asset_name: str = ""
     code_path: str = ""
     code_path_description: str = ""
+    code_paths: list[ThreatCodePath] = []
+    attack_path_id: str = ""
+    attack_path_fingerprint: str = ""
     description: str = ""
     result_vuln_indexes: list[int] = []
     failure_reason: str = ""
@@ -646,6 +690,8 @@ class AgentGitHistoryConfig(BaseModel):
 class AgentThreatAnalysisConfig(BaseModel):
     enabled: bool = True
     implementation: str = "attack_tree"
+    product_mcp_name: str = "product-info"
+    product_mcp_detection_timeout_seconds: int = 60
 
 
 class AgentPatternFilterConfig(BaseModel):

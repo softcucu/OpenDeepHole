@@ -8,9 +8,26 @@
 threat_analysis:
   enabled: true
   implementation: "attack_tree"
+  product_mcp_name: "product-info"
+  product_mcp_detection_timeout_seconds: 60
 ```
 
-`attack_tree` 是默认实现，沿用内置 `attack-tree-threat-analysis.md` 和 `res.json` 输出格式。
+`attack_tree` 是默认实现。运行时会先在 OpenCode 当前配置中检测
+`product_mcp_name` 对应的产品信息 MCP：
+
+- 检测到时，基础建模阶段优先使用该 MCP 获取价值资产、高风险外部接口和关联关系，再做代码增量补充。
+- 未检测到时，基础建模阶段完全从代码识别资产、接口和关联关系。
+
+新流程的事实源是 `runs/<scan_id>/stream/attack_paths.jsonl`。最终
+`runs/<scan_id>/res.json` 由 JSONL 归并生成，项目根目录 `res.json` 仅作为旧缓存兼容副本。
+
+默认实现会安装以下内置 Skill 到 OpenCode workspace：
+
+- `threat-asset-interface-agent`
+- `threat-attack-goal-agent`
+- `threat-attack-domain-agent`
+- `threat-attack-surface-agent`
+- `threat-method-confirm-agent`
 
 ## 新增实现
 

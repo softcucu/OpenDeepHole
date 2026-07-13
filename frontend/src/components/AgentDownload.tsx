@@ -33,6 +33,8 @@ const DEFAULT_GIT_HISTORY: AgentGitHistoryConfig = {
 const DEFAULT_THREAT_ANALYSIS: AgentThreatAnalysisConfig = {
   enabled: true,
   implementation: "attack_tree",
+  product_mcp_name: "product-info",
+  product_mcp_detection_timeout_seconds: 60,
 };
 
 const DEFAULT_VULNERABILITY_VALIDATION = {
@@ -393,7 +395,7 @@ function AgentConfigPanel({ agent }: AgentConfigPanelProps) {
     });
   };
 
-  const setThreatAnalysis = (key: keyof AgentThreatAnalysisConfig, value: string | boolean) => {
+  const setThreatAnalysis = (key: keyof AgentThreatAnalysisConfig, value: string | boolean | number) => {
     setCfg((prev) => ({
       ...prev,
       threat_analysis: {
@@ -776,6 +778,28 @@ function AgentConfigPanel({ agent }: AgentConfigPanelProps) {
                     >
                       <option value="attack_tree">attack_tree</option>
                     </select>
+                  </Field>
+                  <Field label="产品信息 MCP 名称">
+                    <input
+                      value={cfg.threat_analysis?.product_mcp_name || "product-info"}
+                      onChange={(e) => setThreatAnalysis("product_mcp_name", e.target.value)}
+                      className={inputCls}
+                      disabled={!(cfg.threat_analysis?.enabled ?? true)}
+                    />
+                  </Field>
+                  <Field label="MCP 检测超时（秒）">
+                    <input
+                      type="number"
+                      min={5}
+                      max={600}
+                      value={cfg.threat_analysis?.product_mcp_detection_timeout_seconds ?? 60}
+                      onChange={(e) => setThreatAnalysis(
+                        "product_mcp_detection_timeout_seconds",
+                        Number(e.target.value) || 60,
+                      )}
+                      className={inputCls}
+                      disabled={!(cfg.threat_analysis?.enabled ?? true)}
+                    />
                   </Field>
                 </div>
               </div>

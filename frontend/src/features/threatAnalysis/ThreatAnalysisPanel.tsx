@@ -33,6 +33,8 @@ export function ThreatAnalysisPanel({
     (count, tree) => count + tree.nodes.filter((node) => node.node_type === "method").length,
     0,
   ) ?? 0;
+  const externalInterfaceCount = analysis?.high_risk_external_interfaces?.length ?? 0;
+  const attackPathCount = analysis?.attack_paths?.length ?? 0;
   const mappingBySurface = useMemo(() => {
     const out = new Map<string, ThreatCodePathMapping>();
     for (const mapping of analysis?.code_path_mappings ?? []) {
@@ -70,6 +72,8 @@ export function ThreatAnalysisPanel({
           analysis={analysis}
           surfaceCount={surfaceCount}
           methodCount={methodCount}
+          externalInterfaceCount={externalInterfaceCount}
+          attackPathCount={attackPathCount}
         />
         <ThreatAuditTaskList tasks={threatAuditTasks} />
         <EmptyState text="res.json 中未包含关键资产。" />
@@ -84,6 +88,8 @@ export function ThreatAnalysisPanel({
         analysis={analysis}
         surfaceCount={surfaceCount}
         methodCount={methodCount}
+        externalInterfaceCount={externalInterfaceCount}
+        attackPathCount={attackPathCount}
       />
       <ThreatAuditTaskList tasks={threatAuditTasks} />
       <div className="space-y-4">
@@ -163,6 +169,9 @@ function ThreatAuditTaskList({ tasks }: { tasks: ThreatAuditTask[] }) {
               <span className="text-sm text-slate-300">{task.method_name || task.method_node_id || "未标记攻击方式"}</span>
             </div>
             <div className="mt-1 font-mono text-xs text-slate-400 truncate">{task.code_path}</div>
+            {(task.code_paths?.length ?? 0) > 1 && (
+              <div className="mt-1 text-xs text-slate-500">关联路径：{task.code_paths?.length} 个</div>
+            )}
             {task.code_path_description && (
               <div className="mt-1 text-xs text-slate-500 line-clamp-2">{task.code_path_description}</div>
             )}
@@ -183,25 +192,37 @@ function ThreatSummaryStrip({
   analysis,
   surfaceCount,
   methodCount,
+  externalInterfaceCount,
+  attackPathCount,
 }: {
   analysis: ThreatAnalysis;
   surfaceCount: number;
   methodCount: number;
+  externalInterfaceCount: number;
+  attackPathCount: number;
 }) {
   const sourceCount = analysis.sources.repositories.length + analysis.sources.documents.length;
   return (
     <div className="rounded-lg border border-slate-700 bg-slate-900/70 p-4">
-      <div className="grid grid-cols-2 gap-3 lg:grid-cols-5">
+      <div className="grid grid-cols-2 gap-3 lg:grid-cols-6">
         <ThreatSummaryItem label="关键资产" value={analysis.assets.length} />
         <ThreatSummaryItem label="攻击目标" value={analysis.attack_trees.length} />
+        <ThreatSummaryItem label="高风险接口" value={externalInterfaceCount} />
+        <ThreatSummaryItem label="攻击路径" value={attackPathCount} />
         <ThreatSummaryItem label="攻击面" value={surfaceCount} />
         <ThreatSummaryItem label="攻击方式" value={methodCount} />
-        <ThreatSummaryItem label="输入来源" value={sourceCount} />
       </div>
-      {(analysis.analysis_id || analysis.updated_at) && (
+      {(analysis.analysis_id || analysis.updated_at || analysis.sources.product_mcp_name) && (
         <div className="mt-3 flex flex-wrap gap-2 text-xs text-slate-500">
           {analysis.analysis_id && <span>分析 ID：{analysis.analysis_id}</span>}
           {analysis.updated_at && <span>更新时间：{new Date(analysis.updated_at).toLocaleString()}</span>}
+          <span>输入来源：{sourceCount}</span>
+          {analysis.sources.product_mcp_name && (
+            <span>
+              产品 MCP：{analysis.sources.product_mcp_name}
+              {analysis.sources.mcp_available ? "（可用）" : "（未检测到）"}
+            </span>
+          )}
         </div>
       )}
     </div>

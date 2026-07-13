@@ -8,8 +8,11 @@ from backend.opencode.runner import _read_fresh_threat_analysis_result
 from backend.models import ScanItemStatus, ScanMeta, ScanStatus, ThreatAuditTask, Vulnerability
 from backend.store.sqlite import SqliteScanStore
 from backend.threat_analysis import (
+    append_or_merge_attack_path,
     apply_threat_analysis_scan_scope,
+    build_analysis_from_attack_paths,
     parse_threat_analysis_data,
+    parse_attack_path_data,
     parse_threat_analysis_file,
     threat_analysis_scope_matches,
     write_threat_analysis_file,
@@ -93,6 +96,89 @@ class ThreatAnalysisParserTests(unittest.TestCase):
         self.assertEqual(analysis.code_path_mappings[0].code_paths[0].path, "src/api")
         self.assertEqual(analysis.scan_scope.code_scan_relative_path, "src")
 
+    def test_parse_v11_attack_paths_and_interfaces(self) -> None:
+        analysis = parse_threat_analysis_data({
+            "schema_version": "1.1",
+            "sources": {
+                "repositories": ["."],
+                "documents": [],
+                "mcp_available": True,
+                "product_mcp_name": "product-info",
+            },
+            "high_risk_external_interfaces": [
+                {
+                    "interface_id": "IF-1",
+                    "name": "管理 API",
+                    "interface_type": "api",
+                    "candidate_code_paths": ["src/api"],
+                    "source": "mcp_and_code",
+                }
+            ],
+            "attack_paths": [
+                {
+                    "path_id": "AP-1",
+                    "fingerprint": "fp-1",
+                    "asset_id": "ASSET-1",
+                    "asset_name": "管理员权限",
+                    "risk_id": "RISK-1",
+                    "risk_name": "管理员权限被未授权获取",
+                    "attack_goal_id": "GOAL-1",
+                    "attack_goal_name": "绕过管理面身份认证",
+                    "attack_surface_id": "SURFACE-1",
+                    "attack_surface_name": "管理 API",
+                    "attack_method_id": "METHOD-1",
+                    "attack_method_name": "认证绕过",
+                    "code_paths": [{"path": "src/api", "description": "管理接口"}],
+                    "source": "mcp_and_code",
+                }
+            ],
+        })
+
+        self.assertTrue(analysis.sources.mcp_available)
+        self.assertEqual(analysis.sources.product_mcp_name, "product-info")
+        self.assertEqual(analysis.high_risk_external_interfaces[0].candidate_code_paths[0].path, "src/api")
+        self.assertEqual(analysis.attack_paths[0].attack_method_name, "认证绕过")
+
+    def test_attack_paths_jsonl_merges_and_rebuilds_analysis(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            stream_path = Path(tmp) / "runs" / "scan-1" / "stream" / "attack_paths.jsonl"
+            first = parse_attack_path_data({
+                "asset": {"name": "管理员权限"},
+                "risk": {"name": "管理员权限被未授权获取"},
+                "attack_goal": {"name": "绕过管理面身份认证"},
+                "attack_domain": {"name": "管理面"},
+                "attack_surface": {"name": "管理 API", "surface_type": "api"},
+                "attack_method": {"name": "认证绕过"},
+                "code_paths": [{"path": "src/api", "description": "管理 API"}],
+                "evidence": ["route found"],
+                "source": "code",
+            })
+            duplicate = parse_attack_path_data({
+                **first.model_dump(),
+                "preconditions": ["攻击者可访问管理 API"],
+                "evidence": ["auth middleware found"],
+                "source": "mcp",
+            })
+
+            merged = append_or_merge_attack_path(stream_path, first)
+            merged = append_or_merge_attack_path(stream_path, duplicate)
+
+            self.assertEqual(len(merged), 1)
+            self.assertEqual(merged[0].source, "mcp_and_code")
+            self.assertIn("攻击者可访问管理 API", merged[0].preconditions)
+            analysis = build_analysis_from_attack_paths(
+                merged,
+                analysis_id="ATA-JSONL",
+                sources=parse_threat_analysis_data({
+                    "sources": {"repositories": ["."]}
+                }).sources,
+                scan_scope=parse_threat_analysis_data({}).scan_scope,
+            )
+            self.assertEqual(analysis.schema_version, "1.1")
+            self.assertEqual(len(analysis.assets), 1)
+            self.assertEqual(len(analysis.attack_trees), 1)
+            self.assertEqual(analysis.code_path_mappings[0].code_paths[0].path, "src/api")
+
     def test_build_threat_audit_tasks_from_surface_methods_ignores_paths(self) -> None:
         payload = {
             "schema_version": "1.0",
@@ -149,6 +235,43 @@ class ThreatAnalysisParserTests(unittest.TestCase):
         pathless_tasks = build_threat_audit_tasks("scan-1", pathless)
 
         self.assertEqual([task.task_id for task in pathless_tasks], [task.task_id for task in tasks])
+
+    def test_build_threat_audit_tasks_prefers_attack_paths(self) -> None:
+        analysis = parse_threat_analysis_data({
+            "schema_version": "1.1",
+            "attack_paths": [
+                {
+                    "path_id": "AP-1",
+                    "fingerprint": "fp-1",
+                    "asset_id": "ASSET-1",
+                    "asset_name": "管理员权限",
+                    "risk_id": "RISK-1",
+                    "risk_name": "管理员权限被未授权获取",
+                    "attack_goal_id": "GOAL-1",
+                    "attack_goal_name": "绕过管理面身份认证",
+                    "attack_surface_id": "SURFACE-1",
+                    "attack_surface_name": "管理 API",
+                    "attack_method_id": "METHOD-1",
+                    "attack_method_name": "认证绕过",
+                    "code_paths": [{"path": "src/api"}, {"path": "src/auth"}],
+                }
+            ],
+            "attack_trees": [
+                {
+                    "tree_id": "TREE-OLD",
+                    "asset_id": "ASSET-OLD",
+                    "risk_id": "RISK-OLD",
+                    "nodes": [],
+                }
+            ],
+        })
+
+        tasks = build_threat_audit_tasks("scan-1", analysis)
+
+        self.assertEqual(len(tasks), 1)
+        self.assertEqual(tasks[0].attack_path_id, "AP-1")
+        self.assertEqual(tasks[0].attack_path_fingerprint, "fp-1")
+        self.assertEqual([item.path for item in tasks[0].code_paths], ["src/api", "src/auth"])
 
     def test_parse_file_accepts_fenced_json(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -263,6 +386,12 @@ class ThreatAnalysisStoreTests(unittest.TestCase):
                 method_node_id="METHOD-1",
                 method_name="认证绕过",
                 code_path="src/api",
+                code_paths=[
+                    {"path": "src/api", "description": "管理接口"},
+                    {"path": "src/auth", "description": "认证逻辑"},
+                ],
+                attack_path_id="AP-1",
+                attack_path_fingerprint="fp-1",
                 status="completed",
                 result_vuln_indexes=[0],
             )
@@ -289,6 +418,12 @@ class ThreatAnalysisStoreTests(unittest.TestCase):
 
             self.assertEqual(stored_task.scan_id, "scan-1")
             self.assertEqual(loaded_scan.threat_audit_tasks[0].method_name, "认证绕过")
+            self.assertEqual(loaded_scan.threat_audit_tasks[0].attack_path_id, "AP-1")
+            self.assertEqual(loaded_scan.threat_audit_tasks[0].attack_path_fingerprint, "fp-1")
+            self.assertEqual(
+                [item.path for item in loaded_scan.threat_audit_tasks[0].code_paths],
+                ["src/api", "src/auth"],
+            )
             self.assertEqual(loaded_scan.threat_audit_tasks[0].result_vuln_indexes, [0])
             self.assertEqual(loaded_scan.vulnerabilities[0].analysis_source, "threat_audit")
             self.assertEqual(loaded_scan.vulnerabilities[0].source_task_id, "threat-audit-1")

@@ -13,6 +13,7 @@ from agent.config import AgentConfig
 from agent.reporter import Reporter
 from backend.models import (
     ThreatAnalysis,
+    ThreatAttackPath,
     ThreatAttackTree,
     ThreatAttackTreeNode,
     ThreatAuditTask,
@@ -37,6 +38,15 @@ def _stable_task_id(
 ) -> str:
     raw = f"{scan_id}\0{surface_node_id}\0{method_identity}"
     digest = hashlib.sha1(raw.encode("utf-8")).hexdigest()[:20]
+    return f"threat-audit-{digest}"
+
+
+def _stable_attack_path_task_id(scan_id: str, path: ThreatAttackPath) -> str:
+    identity = path.fingerprint or path.path_id or (
+        f"{path.asset_name}\0{path.attack_goal_name}\0{path.attack_domain_name}\0"
+        f"{path.attack_surface_name}\0{path.attack_method_name}"
+    )
+    digest = hashlib.sha1(f"{scan_id}\0{identity}".encode("utf-8")).hexdigest()[:20]
     return f"threat-audit-{digest}"
 
 
@@ -87,6 +97,16 @@ def _description(
     )
 
 
+def _attack_path_description(path: ThreatAttackPath) -> str:
+    return (
+        f"审计攻击路径 `{path.path_id or path.fingerprint}`。"
+        f"目标资产：{path.asset_name or path.asset_id or '未标记'}；"
+        f"攻击目标：{path.attack_goal_name or path.attack_goal_id or '未标记'}；"
+        f"攻击面：{path.attack_surface_name or path.attack_surface_id or '未标记'}；"
+        f"攻击方法：{path.attack_method_name or path.attack_method_id or '未标记'}。"
+    )
+
+
 def _method_identity(method: ThreatAttackTreeNode) -> str:
     node_id = str(method.node_id or "").strip()
     if node_id:
@@ -116,6 +136,43 @@ def _scan_path_from_analysis(analysis: ThreatAnalysis, project_path: Path) -> st
 
 def build_threat_audit_tasks(scan_id: str, analysis: ThreatAnalysis) -> list[ThreatAuditTask]:
     """Build stable audit tasks from attack-tree surface/method mappings."""
+    if analysis.attack_paths:
+        tasks: list[ThreatAuditTask] = []
+        seen: set[str] = set()
+        now = _now()
+        for path in analysis.attack_paths:
+            identity = path.fingerprint or path.path_id
+            if identity in seen:
+                continue
+            seen.add(identity)
+            code_path = path.code_paths[0].path if path.code_paths else ""
+            code_path_description = path.code_paths[0].description if path.code_paths else ""
+            tasks.append(
+                ThreatAuditTask(
+                    task_id=_stable_attack_path_task_id(scan_id, path),
+                    scan_id=scan_id,
+                    status="pending",
+                    surface_node_id=path.attack_surface_id,
+                    surface_name=path.attack_surface_name,
+                    method_node_id=path.attack_method_id,
+                    method_name=path.attack_method_name,
+                    attack_goal=path.attack_goal_name,
+                    risk_id=path.risk_id,
+                    risk_name=path.risk_name,
+                    asset_id=path.asset_id,
+                    asset_name=path.asset_name,
+                    code_path=code_path,
+                    code_path_description=code_path_description,
+                    code_paths=path.code_paths,
+                    attack_path_id=path.path_id,
+                    attack_path_fingerprint=path.fingerprint,
+                    description=_attack_path_description(path),
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
+        return tasks
+
     risk_by_id = _risk_lookup(analysis)
     trees_by_surface: dict[str, tuple[ThreatAttackTree, ThreatAttackTreeNode, list[ThreatAttackTreeNode]]] = {}
     for tree in analysis.attack_trees:

@@ -82,6 +82,8 @@ class GitHistoryConfig:
 class ThreatAnalysisConfig:
     enabled: bool = True
     implementation: str = "attack_tree"
+    product_mcp_name: str = "product-info"
+    product_mcp_detection_timeout_seconds: int = 60
 
 
 @dataclass

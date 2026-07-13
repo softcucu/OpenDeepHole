@@ -862,13 +862,14 @@ async def run_project_report_audit(
 
 
 def _threat_audit_result_defaults(task: ThreatAuditTask) -> _VulnerabilityResultDefaults:
+    primary_code_path = task.code_path or (task.code_paths[0].path if task.code_paths else ".")
     return _VulnerabilityResultDefaults(
-        file=task.code_path or ".",
+        file=primary_code_path,
         line=1,
         function="__threat_path__",
         description=task.description or (
             f"Threat audit for surface `{task.surface_name}` via method `{task.method_name}` "
-            f"on code path `{task.code_path}`"
+            f"on code path `{primary_code_path}`"
         ),
         vuln_type="threat_audit",
     )
@@ -883,7 +884,9 @@ def _annotate_threat_audit_results(
         vuln.source_task_id = task.task_id
         vuln.threat_surface_node_id = task.surface_node_id
         vuln.threat_method_node_id = task.method_node_id
-        vuln.threat_code_path = task.code_path
+        vuln.threat_code_path = task.code_path or ", ".join(
+            item.path for item in task.code_paths if item.path
+        )
     return results
 
 
@@ -929,8 +932,13 @@ async def run_threat_audit(
             scan_path_label = project_dir.resolve().as_posix()
         if not scan_path_label:
             scan_path_label = "当前扫描目录"
+        code_paths_label = ", ".join(
+            item.path for item in task.code_paths if item.path
+        ) or task.code_path or "威胁分析未定位明确代码路径"
         prompt = (
             f"审计代码仓{scan_path_label}中{surface_label}的实现是否存在漏洞，导致{method_label}。"
+            f"威胁分析给出的相关代码路径为：{code_paths_label}。"
+            f"攻击路径上下文：{task.description or '未提供'}。"
         ).replace("\n", " ")
         if attempt > 1:
             prompt += _json_result_retry_message(multiple=True)
@@ -952,6 +960,8 @@ async def run_threat_audit(
             "function": defaults.function,
             "threat_surface_node_id": task.surface_node_id,
             "threat_method_node_id": task.method_node_id,
+            "threat_attack_path_id": task.attack_path_id,
+            "threat_attack_path_fingerprint": task.attack_path_fingerprint,
         }
         if planned_task_id:
             task_context["planned_task_id"] = planned_task_id

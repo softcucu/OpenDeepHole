@@ -201,6 +201,8 @@ export interface SkillReport {
 export interface ThreatAnalysisSources {
   repositories: string[];
   documents: string[];
+  mcp_available?: boolean;
+  product_mcp_name?: string;
 }
 
 export interface ThreatAnalysisScanScope {
@@ -255,13 +257,52 @@ export interface ThreatCodePathMapping {
   code_paths: ThreatCodePath[];
 }
 
+export interface ThreatExternalInterface {
+  interface_id: string;
+  name: string;
+  description: string;
+  interface_type: string;
+  component: string;
+  exposure: string;
+  input_types: string[];
+  auth_required: string;
+  affected_asset_ids: string[];
+  candidate_code_paths: ThreatCodePath[];
+  source: string;
+}
+
+export interface ThreatAttackPath {
+  path_id: string;
+  fingerprint: string;
+  asset_id: string;
+  asset_name: string;
+  risk_id: string;
+  risk_name: string;
+  attack_goal_id: string;
+  attack_goal_name: string;
+  attack_domain_id: string;
+  attack_domain_name: string;
+  attack_surface_id: string;
+  attack_surface_name: string;
+  attack_surface_type: string;
+  attack_method_id: string;
+  attack_method_name: string;
+  preconditions: string[];
+  code_paths: ThreatCodePath[];
+  evidence: string[];
+  source: string;
+  agent_sources: string[];
+}
+
 export interface ThreatAnalysis {
   schema_version: string;
   analysis_id: string;
   sources: ThreatAnalysisSources;
   scan_scope: ThreatAnalysisScanScope;
   assets: ThreatAsset[];
+  high_risk_external_interfaces?: ThreatExternalInterface[];
   attack_trees: ThreatAttackTree[];
+  attack_paths?: ThreatAttackPath[];
   code_path_mappings: ThreatCodePathMapping[];
   updated_at: string;
 }
@@ -281,6 +322,9 @@ export interface ThreatAuditTask {
   asset_name?: string;
   code_path: string;
   code_path_description?: string;
+  code_paths?: ThreatCodePath[];
+  attack_path_id?: string;
+  attack_path_fingerprint?: string;
   description?: string;
   result_vuln_indexes?: number[];
   failure_reason?: string;
@@ -524,6 +568,8 @@ export interface AgentGitHistoryConfig {
 export interface AgentThreatAnalysisConfig {
   enabled: boolean;
   implementation: string;
+  product_mcp_name?: string;
+  product_mcp_detection_timeout_seconds?: number;
 }
 
 export interface AgentPatternFilterConfig {

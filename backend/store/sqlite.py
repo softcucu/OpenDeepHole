@@ -30,6 +30,7 @@ from backend.models import (
     SkillReport,
     ThreatAnalysis,
     ThreatAuditTask,
+    ThreatCodePath,
     UserInDB,
     Vulnerability,
     VulnerabilityValidation,
@@ -232,6 +233,9 @@ CREATE TABLE IF NOT EXISTS threat_audit_tasks (
     asset_name             TEXT NOT NULL DEFAULT '',
     code_path              TEXT NOT NULL DEFAULT '',
     code_path_description  TEXT NOT NULL DEFAULT '',
+    code_paths             TEXT NOT NULL DEFAULT '[]',
+    attack_path_id         TEXT NOT NULL DEFAULT '',
+    attack_path_fingerprint TEXT NOT NULL DEFAULT '',
     description            TEXT NOT NULL DEFAULT '',
     result_vuln_indexes    TEXT NOT NULL DEFAULT '[]',
     failure_reason         TEXT NOT NULL DEFAULT '',
@@ -557,6 +561,9 @@ class SqliteScanStore(ScanStoreBase):
                 asset_name             TEXT NOT NULL DEFAULT '',
                 code_path              TEXT NOT NULL DEFAULT '',
                 code_path_description  TEXT NOT NULL DEFAULT '',
+                code_paths             TEXT NOT NULL DEFAULT '[]',
+                attack_path_id         TEXT NOT NULL DEFAULT '',
+                attack_path_fingerprint TEXT NOT NULL DEFAULT '',
                 description            TEXT NOT NULL DEFAULT '',
                 result_vuln_indexes    TEXT NOT NULL DEFAULT '[]',
                 failure_reason         TEXT NOT NULL DEFAULT '',
@@ -578,6 +585,21 @@ class SqliteScanStore(ScanStoreBase):
                 created_at    TEXT NOT NULL
             );
         """)
+
+        threat_task_cur = self._conn.execute("PRAGMA table_info(threat_audit_tasks)")
+        threat_task_cols = {r[1] for r in threat_task_cur.fetchall()}
+        if "code_paths" not in threat_task_cols:
+            self._conn.execute(
+                "ALTER TABLE threat_audit_tasks ADD COLUMN code_paths TEXT NOT NULL DEFAULT '[]'"
+            )
+        if "attack_path_id" not in threat_task_cols:
+            self._conn.execute(
+                "ALTER TABLE threat_audit_tasks ADD COLUMN attack_path_id TEXT NOT NULL DEFAULT ''"
+            )
+        if "attack_path_fingerprint" not in threat_task_cols:
+            self._conn.execute(
+                "ALTER TABLE threat_audit_tasks ADD COLUMN attack_path_fingerprint TEXT NOT NULL DEFAULT ''"
+            )
         # Ensure FP review tables exist (created by _SCHEMA on fresh DBs; add for old ones)
         self._conn.executescript("""\
             CREATE TABLE IF NOT EXISTS fp_review_jobs (
@@ -1900,9 +1922,10 @@ class SqliteScanStore(ScanStoreBase):
                     (task_id, scan_id, status, surface_node_id, surface_name,
                      method_node_id, method_name, attack_goal, risk_id, risk_name,
                      asset_id, asset_name, code_path, code_path_description,
+                     code_paths, attack_path_id, attack_path_fingerprint,
                      description, result_vuln_indexes, failure_reason, output_source,
                      created_at, started_at, finished_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(task_id) DO UPDATE SET
                     status = excluded.status,
                     surface_node_id = excluded.surface_node_id,
@@ -1916,6 +1939,9 @@ class SqliteScanStore(ScanStoreBase):
                     asset_name = excluded.asset_name,
                     code_path = excluded.code_path,
                     code_path_description = excluded.code_path_description,
+                    code_paths = excluded.code_paths,
+                    attack_path_id = excluded.attack_path_id,
+                    attack_path_fingerprint = excluded.attack_path_fingerprint,
                     description = excluded.description,
                     result_vuln_indexes = excluded.result_vuln_indexes,
                     failure_reason = excluded.failure_reason,
@@ -1939,6 +1965,12 @@ class SqliteScanStore(ScanStoreBase):
                     stored.asset_name,
                     stored.code_path,
                     stored.code_path_description,
+                    json.dumps(
+                        [item.model_dump() for item in stored.code_paths],
+                        ensure_ascii=False,
+                    ),
+                    stored.attack_path_id,
+                    stored.attack_path_fingerprint,
                     stored.description,
                     json.dumps(stored.result_vuln_indexes, ensure_ascii=False),
                     stored.failure_reason,
@@ -1978,6 +2010,30 @@ class SqliteScanStore(ScanStoreBase):
                     continue
             return out
 
+        def _json_code_paths(value: str | None) -> list[ThreatCodePath]:
+            try:
+                raw = json.loads(value or "[]")
+            except Exception:
+                return []
+            if not isinstance(raw, list):
+                return []
+            out: list[ThreatCodePath] = []
+            for item in raw:
+                if isinstance(item, dict):
+                    path = str(item.get("path") or "").strip()
+                    if path:
+                        out.append(
+                            ThreatCodePath(
+                                path=path,
+                                description=str(item.get("description") or "").strip(),
+                            )
+                        )
+                else:
+                    path = str(item or "").strip()
+                    if path:
+                        out.append(ThreatCodePath(path=path))
+            return out
+
         return [
             ThreatAuditTask(
                 task_id=r["task_id"],
@@ -1994,6 +2050,11 @@ class SqliteScanStore(ScanStoreBase):
                 asset_name=r["asset_name"] or "",
                 code_path=r["code_path"] or "",
                 code_path_description=r["code_path_description"] or "",
+                code_paths=_json_code_paths(r["code_paths"] if "code_paths" in r.keys() else "[]"),
+                attack_path_id=r["attack_path_id"] if "attack_path_id" in r.keys() else "",
+                attack_path_fingerprint=(
+                    r["attack_path_fingerprint"] if "attack_path_fingerprint" in r.keys() else ""
+                ),
                 description=r["description"] or "",
                 result_vuln_indexes=_json_int_list(r["result_vuln_indexes"]),
                 failure_reason=r["failure_reason"] or "",

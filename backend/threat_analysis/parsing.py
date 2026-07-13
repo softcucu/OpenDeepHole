@@ -11,10 +11,12 @@ from backend.models import (
     ThreatAnalysisScanScope,
     ThreatAnalysisSources,
     ThreatAsset,
+    ThreatAttackPath,
     ThreatAttackTree,
     ThreatAttackTreeNode,
     ThreatCodePath,
     ThreatCodePathMapping,
+    ThreatExternalInterface,
     ThreatRisk,
 )
 
@@ -63,6 +65,26 @@ def _str_list(value: Any) -> list[str]:
         if normalized:
             out.append(normalized)
     return out
+
+
+def _code_paths(value: Any) -> list[ThreatCodePath]:
+    paths: list[ThreatCodePath] = []
+    if isinstance(value, list):
+        for item in value:
+            if isinstance(item, dict):
+                path = _str(item.get("path"))
+                if path:
+                    paths.append(
+                        ThreatCodePath(
+                            path=path,
+                            description=_str(item.get("description")),
+                        )
+                    )
+            else:
+                path = _str(item)
+                if path:
+                    paths.append(ThreatCodePath(path=path))
+    return paths
 
 
 def _dict_list(value: Any) -> list[dict[str, Any]]:
@@ -149,6 +171,8 @@ def parse_threat_analysis_data(data: dict[str, Any]) -> ThreatAnalysis:
     sources = ThreatAnalysisSources(
         repositories=_str_list(sources_raw.get("repositories")),
         documents=_str_list(sources_raw.get("documents")),
+        mcp_available=bool(sources_raw.get("mcp_available", False)),
+        product_mcp_name=_str(sources_raw.get("product_mcp_name")),
     )
     scan_scope_raw = data.get("scan_scope") if isinstance(data.get("scan_scope"), dict) else {}
     scan_scope = ThreatAnalysisScanScope(
@@ -207,17 +231,55 @@ def parse_threat_analysis_data(data: dict[str, Any]) -> ThreatAnalysis:
 
     mappings: list[ThreatCodePathMapping] = []
     for raw_mapping in _dict_list(data.get("code_path_mappings")):
-        paths = [
-            ThreatCodePath(
-                path=_str(raw_path.get("path")),
-                description=_str(raw_path.get("description")),
-            )
-            for raw_path in _dict_list(raw_mapping.get("code_paths"))
-        ]
         mappings.append(
             ThreatCodePathMapping(
                 surface_node_id=_str(raw_mapping.get("surface_node_id")),
-                code_paths=paths,
+                code_paths=_code_paths(raw_mapping.get("code_paths")),
+            )
+        )
+
+    interfaces: list[ThreatExternalInterface] = []
+    for raw_interface in _dict_list(data.get("high_risk_external_interfaces")):
+        interfaces.append(
+            ThreatExternalInterface(
+                interface_id=_str(raw_interface.get("interface_id")),
+                name=_str(raw_interface.get("name")),
+                description=_str(raw_interface.get("description")),
+                interface_type=_str(raw_interface.get("interface_type"), "other") or "other",
+                component=_str(raw_interface.get("component")),
+                exposure=_str(raw_interface.get("exposure")),
+                input_types=_str_list(raw_interface.get("input_types")),
+                auth_required=_str(raw_interface.get("auth_required")),
+                affected_asset_ids=_str_list(raw_interface.get("affected_asset_ids")),
+                candidate_code_paths=_code_paths(raw_interface.get("candidate_code_paths")),
+                source=_str(raw_interface.get("source"), "code") or "code",
+            )
+        )
+
+    attack_paths: list[ThreatAttackPath] = []
+    for raw_path in _dict_list(data.get("attack_paths")):
+        attack_paths.append(
+            ThreatAttackPath(
+                path_id=_str(raw_path.get("path_id")),
+                fingerprint=_str(raw_path.get("fingerprint")),
+                asset_id=_str(raw_path.get("asset_id")),
+                asset_name=_str(raw_path.get("asset_name")),
+                risk_id=_str(raw_path.get("risk_id")),
+                risk_name=_str(raw_path.get("risk_name")),
+                attack_goal_id=_str(raw_path.get("attack_goal_id")),
+                attack_goal_name=_str(raw_path.get("attack_goal_name")),
+                attack_domain_id=_str(raw_path.get("attack_domain_id")),
+                attack_domain_name=_str(raw_path.get("attack_domain_name")),
+                attack_surface_id=_str(raw_path.get("attack_surface_id")),
+                attack_surface_name=_str(raw_path.get("attack_surface_name")),
+                attack_surface_type=_str(raw_path.get("attack_surface_type")),
+                attack_method_id=_str(raw_path.get("attack_method_id")),
+                attack_method_name=_str(raw_path.get("attack_method_name")),
+                preconditions=_str_list(raw_path.get("preconditions")),
+                code_paths=_code_paths(raw_path.get("code_paths")),
+                evidence=_str_list(raw_path.get("evidence")),
+                source=_str(raw_path.get("source"), "code") or "code",
+                agent_sources=_str_list(raw_path.get("agent_sources")),
             )
         )
 
@@ -227,7 +289,9 @@ def parse_threat_analysis_data(data: dict[str, Any]) -> ThreatAnalysis:
         sources=sources,
         scan_scope=scan_scope,
         assets=assets,
+        high_risk_external_interfaces=interfaces,
         attack_trees=attack_trees,
+        attack_paths=attack_paths,
         code_path_mappings=mappings,
         updated_at=_str(data.get("updated_at")),
     )
