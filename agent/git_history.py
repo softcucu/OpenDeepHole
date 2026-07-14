@@ -152,7 +152,7 @@ def _build_prompt(commit: _Commit, diff: str) -> str:
         "标注最相关的 lens_hint（memory/integer/race/injection/authn/crypto/dos/infoleak）、涉及文件，"
         "并在 rationale 里简述改动要点与判定理由。\n"
         "(3) 若不相关：security_related=false 即可，其它字段可留空。\n\n"
-        "分析完成后通过 structured output 返回 security_related、pattern、lens_hint、files、rationale。"
+        "分析完成后只输出一个 JSON 对象，包含 security_related、pattern、lens_hint、files、rationale。"
     )
 
 

@@ -11,12 +11,12 @@
 - 所有业务模块使用同一个任务入口，不再各自管理 CLI、模型、重试和结果文件。
 - 创建任务后获得稳定的 `task_id`；OpenCode Session 创建后即可获得 `session_id`；任务完成后获得统一结果。
 - 支持向已有 Session 追加 prompt，并通过 `session_id` 查询消息、获取最近结果或删除 Session。
-- 统一表达模型能力、任务优先级、MCP 工具、SKILL、权限、运行目录、执行超时和 JSON Schema 输出。
+- 统一表达模型能力、任务优先级、MCP 工具、SKILL、权限、运行目录、执行超时和期望的 JSON Schema。
 - 在全局并发和单模型并发限制下完成能力匹配、优先级调度和模型升级。
 - 模型配置变化后重新评估排队任务；排队任务内容变化时保留 `task_id`、递增 `revision` 并重新排队。
 - 漏洞验证运行在独立 worker 中，但模型任务仍由 Agent 父进程的公共组件执行。
 
-组件只负责模型任务及其 Session，不负责把业务结果写入漏洞报告、扫描结果或产物文件。业务代码应消费结构化结果并自行完成持久化。
+组件只负责模型任务及其 Session，不负责把业务结果写入漏洞报告、扫描结果或产物文件。业务代码应解析回复文本、校验 JSON 并自行完成持久化。
 
 ## 2. 总体架构
 
@@ -30,7 +30,7 @@ flowchart LR
     M --> R[OpenCodeServeManager]
     R --> O[OpenCode / nga serve]
     O --> X[OpenCode Session]
-    T[MCP / SKILL / 权限 / JSON Schema] --> S
+    T[MCP / SKILL / 权限 / JSON 文本约束] --> S
     X --> Z[OpenCodeTaskResult]
 ```
 
@@ -47,9 +47,9 @@ flowchart LR
 | 层 | 负责 | 不负责 |
 | --- | --- | --- |
 | 业务调用方 | 构造 prompt、选择能力/MCP/SKILL、消费结果 | 直接选具体模型、启动 CLI、维护 Session HTTP 请求 |
-| `OpenCodeTaskService` | 任务规范化、排队、Session 生命周期、结构化结果、取消和重排 | 业务结果入库、业务文件写入 |
+| `OpenCodeTaskService` | 任务规范化、排队、Session 生命周期、文本结果、本地 JSON 提取、取消和重排 | 业务结果入库、业务文件写入 |
 | `model_pool` | 模型能力匹配、优先级、并发、时间窗口和统计 | OpenCode HTTP/Session 协议 |
-| `serve_client` | serve 进程、Session API、消息、原生 JSON Schema、事件流 | 业务调度策略 |
+| `serve_client` | serve 进程、Session API、普通消息和事件流 | 业务调度策略 |
 
 ## 3. 为什么使用一个全局队列
 
@@ -144,8 +144,7 @@ Session 本身由 OpenCode 持久化，公共服务中的任务记录、Session 
 | `skills` | `list[str \| Path]` | `[]` | 本次消息明确加载的 SKILL 名称、目录或 `SKILL.md` 路径 |
 | `timeout_seconds` | `int \| None` | 配置值 | 获得模型后的执行超时，必须大于 0 |
 | `priority` | `int` | `50` | 任务优先级，范围 `1..100` |
-| `output_schema` | `dict \| None` | `None` | OpenCode 原生 JSON Schema 输出约束 |
-| `output_retry_count` | `int` | `2` | 原生结构化输出不满足 Schema 时的重试次数 |
+| `output_schema` | `dict \| None` | `None` | 追加到普通文本提示中的期望 JSON Schema；不会发送 OpenCode 原生 `format` |
 | `permissions` | `list[dict] \| None` | `None` | OpenCode Session 权限规则 |
 | `session_id` | `str \| None` | `None` | 为空时创建 Session；非空时向已有 Session 追加消息 |
 | `writable_paths` | `list[Path]` | `[]` | 构建隔离运行配置时额外允许写入的路径 |
@@ -202,9 +201,9 @@ skills/<name>/SKILL.md
 
 权限是安全边界，不应只依赖 prompt 中的“不要修改文件”。只读审计任务应显式拒绝不需要的写权限，并通过 `mcp_tools` 缩小工具暴露面。
 
-### 5.5 原生结构化输出
+### 5.5 普通文本 JSON 输出
 
-传入 `output_schema` 后，组件使用 OpenCode message 的原生 `json_schema` format，不要求模型调用额外的结果提交工具。成功结果位于 `result.structured`。
+传入 `output_schema` 后，组件会把 Schema 和“最终只回复 JSON”的规则追加到 system prompt。发给 OpenCode 的 message 仍是普通文本消息，不包含原生 `json_schema` format，也不要求模型调用额外的结果提交工具。
 
 推荐使用封闭 Schema：
 
@@ -220,7 +219,7 @@ RESULT_SCHEMA = {
 }
 ```
 
-当指定了 Schema 但 OpenCode 最终没有返回原生结构化数据时，任务状态为 `failure`。此时不要再从 Markdown 或代码块中猜测 JSON。
+任务完成后，组件会从 assistant 文本中提取符合 Schema 的 JSON，并把它作为便利值放入 `result.structured`，同时完整文本仍位于 `result.text`。本地提取失败不会把 OpenCode 任务改成 `failure`，`result.structured` 为 `None`；业务层应继续使用自己的解析、校验和重试规则处理 `result.text`。
 
 ### 5.6 `OpenCodeTaskResult`
 
@@ -230,8 +229,8 @@ RESULT_SCHEMA = {
 | `session_id` | OpenCode Session ID |
 | `message_id` | 当前 assistant message ID |
 | `status` | `success`、`failure`、`timeout` 或 `cancelled` |
-| `text` | 文本结果；结构化输出存在时为其 JSON 文本形式 |
-| `structured` | 原生 JSON Schema 结果，没有 Schema 时通常为 `None` |
+| `text` | OpenCode assistant 的普通文本回复 |
+| `structured` | 从 `text` 本地提取且符合 `output_schema` 的 JSON 便利值；提取失败为 `None` |
 | `model` | 实际响应模型 |
 | `output_source` | 工具、模型池行、能力、任务和 Session 等调用来源元数据 |
 | `error` | 失败原因 |
@@ -298,7 +297,7 @@ result = await service.run_task(spec)
 result.raise_for_status()
 ```
 
-### 6.2 获取结构化结果
+### 6.2 解析 JSON 结果
 
 ```python
 schema = {
@@ -318,12 +317,14 @@ result = await service.run_task(OpenCodeTaskSpec(
     required_capability="high",
     priority=85,
     output_schema=schema,
-    output_retry_count=2,
 ))
 result.raise_for_status()
 
-is_vulnerable = result.structured["is_vulnerable"]
-reason = result.structured["reason"]
+from backend.opencode.llm_json import parse_llm_json_schema
+
+payload = parse_llm_json_schema(result.text, schema)
+is_vulnerable = payload["is_vulnerable"]
+reason = payload["reason"]
 ```
 
 ### 6.3 续写已有 Session
@@ -420,7 +421,7 @@ def validate_product(ctx):
 
     first = ctx.run_opencode_task(
         task_name="PoC 设计",
-        prompt="读取漏洞信息并设计验证步骤，只返回结构化结果。",
+        prompt="读取漏洞信息并设计验证步骤，最终只返回 JSON。",
         required_capability="high",
         directory=ctx.project_path,
         mcp_tools=["view_function_code"],
@@ -443,6 +444,7 @@ def validate_product(ctx):
         priority=80,
     )
 
+    # structured 是父进程从普通回复文本中本地提取的便利值。
     content = second["structured"]["content"]
     # 文件由 Python 写入，模型只负责返回数据。
     artifact_path = Path(ctx.work_dir) / "poc-review.md"
@@ -556,9 +558,9 @@ opencode_concurrency: 4
 
 当前 Agent 进程没有该 Session 的运行配置，通常发生在 Agent 重启后直接查询历史 Session。用正确的 `session_id` 和原 `directory` 先提交一次续写任务，或通过 OpenCode 自身的 Session 管理命令查看历史。
 
-### `OpenCode response did not contain native structured output`
+### 回复不包含有效 JSON
 
-任务指定了 `output_schema`，但服务端没有返回 `structured`。检查 OpenCode/nga 版本是否支持原生 JSON Schema、Schema 本身是否合法，以及模型是否在重试次数内满足约束。业务层不应在此错误后退回文本猜测。
+公共任务组件不会再因为缺少 OpenCode 原生 `structured` 字段而报错。若任务成功但 `result.structured` 为 `None`，说明普通回复文本里没有可提取且符合 `output_schema` 的 JSON；查看 `result.text` 和任务日志，并由业务层按原有规则重试或报告解析失败。
 
 ### 无法更新任务
 

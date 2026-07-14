@@ -268,7 +268,7 @@ def test_run_prompt_uses_project_directory_and_default_tools(monkeypatch, tmp_pa
     asyncio.run(run())
 
 
-def test_run_prompt_continues_session_with_native_schema_and_selected_mcp_tools(
+def test_run_prompt_continues_session_without_native_format_and_with_selected_mcp_tools(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
@@ -282,10 +282,9 @@ def test_run_prompt_continues_session_with_native_schema_and_selected_mcp_tools(
             "mcp__deephole-code__view_struct_code",
         ]
         _FakeAsyncClient.message_info = {
-            "id": "msg_structured",
+            "id": "msg_plain_text",
             "providerID": "provider",
             "modelID": "actual",
-            "structured": {"ok": True},
         }
         monkeypatch.setattr(
             "backend.opencode.serve_client.httpx.AsyncClient",
@@ -296,11 +295,6 @@ def test_run_prompt_continues_session_with_native_schema_and_selected_mcp_tools(
         manager._acquire_session = AsyncMock()
         project = tmp_path / "project"
         project.mkdir()
-        schema = {
-            "type": "object",
-            "properties": {"ok": {"type": "boolean"}},
-            "required": ["ok"],
-        }
         permissions = [{"permission": "edit", "pattern": "*", "action": "deny"}]
 
         details = await manager.run_prompt(
@@ -312,8 +306,6 @@ def test_run_prompt_continues_session_with_native_schema_and_selected_mcp_tools(
             timeout=30,
             session_id="session-existing",
             mcp_tools=["view_function_code"],
-            output_schema=schema,
-            output_retry_count=4,
             system_prompt="selected skill",
             permissions=permissions,
             return_details=True,
@@ -321,8 +313,8 @@ def test_run_prompt_continues_session_with_native_schema_and_selected_mcp_tools(
 
         assert isinstance(details, OpenCodePromptResult)
         assert details.session_id == "session-existing"
-        assert details.message_id == "msg_structured"
-        assert details.structured == {"ok": True}
+        assert details.message_id == "msg_plain_text"
+        assert details.text == "done"
         assert details.model == "provider/actual"
         client = _FakeAsyncClient.instances[0]
         assert all(item["path"] != "/session" for item in client.posts)
@@ -333,11 +325,7 @@ def test_run_prompt_continues_session_with_native_schema_and_selected_mcp_tools(
             "json": {"permission": permissions},
         }]
         message = next(item for item in client.posts if item["path"].endswith("/message"))
-        assert message["json"]["format"] == {
-            "type": "json_schema",
-            "schema": schema,
-            "retryCount": 4,
-        }
+        assert "format" not in message["json"]
         assert message["json"]["system"] == "selected skill"
         assert message["json"]["tools"] == {
             "mcp__deephole-code__view_function_code": True,

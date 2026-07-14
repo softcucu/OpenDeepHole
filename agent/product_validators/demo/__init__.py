@@ -83,8 +83,8 @@ def validate_demo(ctx) -> ValidationResult:
         f"{vulnerability.get('file')}:{vulnerability.get('line')}; report={report_path}",
     )
 
-    # All stages continue the same durable OpenCode session.  Model output is
-    # native structured data; the validator owns the filesystem write.
+    # All stages continue the same durable OpenCode session. The task service
+    # parses the plain JSON reply locally; the validator owns the filesystem write.
     session_id: str | None = None
     for stage_index, (skill_name, artifact_name, retries) in enumerate(STAGES, start=1):
         artifact_path = validation_dir / artifact_name
@@ -99,7 +99,7 @@ def validate_demo(ctx) -> ValidationResult:
             )
             prompt = (
                 f"这是漏洞验证的第 {stage_index}/4 阶段。读取 {report_path}，"
-                f"按照 {skill_name} 的方法完成验证。只通过指定 JSON Schema 返回完整 Markdown "
+                f"按照 {skill_name} 的方法完成验证。最终只输出符合指定 JSON Schema、包含完整 Markdown 的 JSON "
                 f"阶段结论，不要直接写文件。前序阶段信息保留在当前 session 中。"
             )
             try:
@@ -121,7 +121,7 @@ def validate_demo(ctx) -> ValidationResult:
                     artifact_path.write_text(str(content), encoding="utf-8")
                     succeeded = True
                     break
-                last_error = "OpenCode returned empty structured content"
+                last_error = "OpenCode returned empty JSON content"
             except Exception as exc:
                 last_error = str(exc)
             _emit(ctx, f"STEP {stage_index} attempt failed: {last_error}")

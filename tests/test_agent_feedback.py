@@ -241,7 +241,7 @@ class AgentFeedbackTests(unittest.TestCase):
         self.assertEqual(reporter.results, [])
         self.assertEqual(len(reporter.stage_outputs), 1)
         self.assertEqual(reporter.stage_outputs[0][0], "prove_bug")
-        self.assertIn("Missing Markdown artifact and structured result", reporter.stage_outputs[0][1])
+        self.assertIn("Missing Markdown artifact and JSON result", reporter.stage_outputs[0][1])
         self.assertEqual(reporter.progress, [(3, 0), (3, 1)])
         self.assertEqual(reporter.finished, ("complete", None))
 

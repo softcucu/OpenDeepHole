@@ -68,8 +68,8 @@ Each scan runs the full pipeline locally on the agent machine:
 4. Workspace — create_scan_workspace() with per-task opencode.json + skill symlinks + merged feedback
 5. Static   — each checker's analyzer.find_candidates() → scoped candidate list (cached for resume)
 5.5 Git history — (fresh scans, git repo, git_history.enabled) agent/git_history.py mines security-fix
-    patterns from commit history (one structured OpenCode task per commit); agent/variant_hunter.py
-    then hunts whole-repo same-class sites per pattern via structured output → extra candidates tagged
+    patterns from commit history (one JSON-returning OpenCode task per commit); agent/variant_hunter.py
+    then hunts whole-repo same-class sites per pattern via plain-text JSON → extra candidates tagged
     metadata.variant_of, merged into the candidate set. Patterns pushed via POST /api/agent/scan/{id}/git_history
 6. AI audit — run_audit() per deduplicated candidate through OpenCodeTaskService;
     variant_of propagated to Vulnerability; `pattern_filter` can skip candidates whose same-pattern
@@ -86,10 +86,10 @@ Each scan runs the full pipeline locally on the agent machine:
 
 ## Agent — FP Review Pipeline (`agent/fp_reviewer.py`)
 
-Per vulnerability: an optional `history_match` stage first, then the three-stage debate `prove_bug` → `prove_fp` → `final_judge`. Each stage is an OpenCode task using native JSON Schema; Python owns Markdown artifact persistence and retries invalid/missing structured results.
+Per vulnerability: an optional `history_match` stage first, then the three-stage debate `prove_bug` → `prove_fp` → `final_judge`. Each stage returns plain-text JSON from an OpenCode task; Python extracts and validates it, owns Markdown artifact persistence, and retries invalid/missing JSON results.
 
 - **Auto-trigger on completion**: when a scan finishes with status `complete` and ≥1 confirmed vulnerability, the backend automatically starts FP review at the end of `agent_finish_scan` (no manual click). Gated by config `fp_review.auto_on_complete` (default `true`) and skipped if the scan already has an FP review job (avoids duplicate triggers on resume/repeat finish). The shared trigger logic lives in `backend/api/scan.py::_start_fp_review` (used by both the manual `POST /api/scan/{id}/fp_review` endpoint and the auto path; `raise_on_error=False` on the auto path so a blocked review never breaks scan finish). The manual button is retained for re-runs / catching up unreviewed candidates.
-- **History/validation match** (`history_match`, skill `fp_review_match.md`): runs first when git-history patterns exist or the candidate carries `variant_of`; its structured result may directly mark a match as `high` and skip the three-stage debate.
+- **History/validation match** (`history_match`, skill `fp_review_match.md`): runs first when git-history patterns exist or the candidate carries `variant_of`; its parsed JSON result may directly mark a match as `high` and skip the three-stage debate.
 - **Binary severity**: FP-review severity is now high/low only — match or externally-triggerable → `high`, everything else (former medium, fp) → `low` (`_normalize_fp_severity`, debate prompts, and the result endpoint all enforce this).
 - **Early exit**: if `prove_bug` submits `confirmed=false`, the review pushes a final `fp` result with prove_bug's reasoning and skips the other two stages. Only confirmed-by-prove_bug candidates go through the full debate, where `final_judge` decides.
 - **Concurrency**: review workers are sized from `total_model_capacity()`; the agent reports the full set of in-progress vuln indices (`active_indices`) with each progress push. Backend stores it in `fp_review_jobs.current_vuln_indices` (JSON) and the frontend highlights all of them.
@@ -199,7 +199,7 @@ backend/
     feedback.py   — Feedback CRUD
   analyzers/base.py — BaseAnalyzer ABC + Candidate dataclass
   opencode/
-    task_service.py — priority/capability scheduling, OpenCode task/session lifecycle, structured output
+    task_service.py — priority/capability scheduling, OpenCode task/session lifecycle, plain-text output and local JSON extraction
     runner.py     — audit prompt/result compatibility facade over task_service
     serve_client.py — long-lived OpenCode serve process and session API
     config.py     — create_scan_workspace(), cleanup_workspace()

@@ -640,13 +640,10 @@ async def _invoke_stage(
     prompt = _stage_prompt(
         skill_name=skill_name,
         input_path=input_path,
+        output_path=output_path,
         task_label=task_label,
     )
-    task_context = {
-        "task_type": "threat_analysis",
-        "stage": skill_name,
-        "stage_ordinal": attempt,
-    }
+    task_context = {"task_type": "threat_analysis", "stage": skill_name}
     if planned_task_id:
         task_context["planned_task_id"] = planned_task_id
     max_attempts = 1 + _STAGE_FAILURE_RETRIES
@@ -661,8 +658,8 @@ async def _invoke_stage(
         stage_prompt = prompt
         if stage_attempt > 1:
             stage_prompt += (
-                "\n\n上一次执行没有返回可用的阶段 JSON。"
-                "请重新读取输入文件，严格返回合法 JSON 对象。"
+                "\n\n上一次执行没有写出可用的阶段 JSON。"
+                "请重新读取输入文件，严格输出合法 JSON 对象，并覆盖输出文件。"
             )
         if on_output:
             retry_note = (
@@ -672,7 +669,7 @@ async def _invoke_stage(
             )
             on_output(f"[威胁分析] {task_label}{retry_note}")
         try:
-            output_text = await opencode_runner._invoke_opencode(
+            await opencode_runner._invoke_opencode(
                 workspace,
                 stage_prompt,
                 timeout,
@@ -680,25 +677,14 @@ async def _invoke_stage(
                 on_line=on_output,
                 cancel_event=cancel_event,
                 project_dir=analysis_root,
+                writable_paths=[run_dir],
                 model_capability="high",
                 prefer_high_model=True,
                 stats_scope_id=stats_scope_id,
                 task_context=task_context,
                 attempt=stage_attempt,
-                task_name=f"威胁分析：{task_label}",
-                skills=[skill_name],
-                output_schema={"type": "object"},
-                permissions=[
-                    {"permission": "edit", "pattern": "*", "action": "deny"},
-                ],
             )
-            output = json.loads(output_text)
-            if not isinstance(output, dict):
-                raise ValueError(
-                    "Threat-analysis stage structured output must be an object"
-                )
-            _validate_stage_output(skill_name, output)
-            write_json(output_path, output)
+            _validate_stage_output(skill_name, read_json_object(output_path))
             return
         except asyncio.CancelledError:
             raise
@@ -1051,13 +1037,15 @@ def _stage_prompt(
     *,
     skill_name: str,
     input_path: Path,
+    output_path: Path,
     task_label: str,
 ) -> str:
     prompt = (
         f"使用 `{skill_name}` 技能执行威胁分析阶段：{task_label}。\n"
         f"读取输入 JSON 文件：`{input_path.resolve()}`。\n"
+        f"将阶段结果写入输出 JSON 文件：`{output_path.resolve()}`。\n"
         "只处理输入文件指定的当前对象或当前阶段，不要扩展到其他阶段。\n"
-        "通过本消息附带的原生 JSON Schema 返回阶段结果对象。\n"
+        "输出文件必须是合法 JSON 对象；不要用 Markdown 代码块包裹。\n"
         "代码路径必须来自输入代码索引或实际检索结果，无法确认时输出空数组。\n"
         "本工具当前只分析 C/C++ 源文件、头文件和 C/C++ 构建文件；"
         "不要把非 C/C++ 文件作为资产、风险、攻击目标或代码证据依据。\n"
@@ -1065,7 +1053,7 @@ def _stage_prompt(
         "所有面向用户展示的自然语言字段必须使用中文；不要输出英文标题、英文描述或英文严重性标签。\n"
         "所有 `name`、`*_name` 展示字段必须是可读业务名称；不要把 `ASSET-*`、`RISK-*`、"
         "`GOAL-*`、`DOMAIN-*`、`SURFACE-*`、`METHOD-*` 或“未命名/未知/未标记”写入展示字段。\n"
-        "不要写入或修改项目文件；业务层负责保存结构化结果。\n"
+        "不得修改输出 JSON 文件之外的任何项目文件。\n"
     )
     if skill_name == "threat-base-model-shard-planner":
         prompt += (
@@ -1083,7 +1071,7 @@ def _stage_prompt(
             "只调用这一个 Agent 识别完整扫描范围内的价值资产、关键风险、高风险外部接口、资产接口关系和攻击目标。"
             "允许并建议在当前输入范围内使用 Task 派发子 Agent："
             "`threat-asset-enumerator`、`threat-attack-goal-enumerator`、`threat-code-evidence-mapper`。"
-            "子 Agent 只返回分析片段，不写文件；当前 Agent 负责合并子 Agent 结果并返回阶段 JSON。"
+            "子 Agent 只返回分析片段，不写文件；当前 Agent 负责合并子 Agent 结果，并只写入指定输出 JSON。"
             "不要把工作扩展到输入 scope 之外，也不要做资产 × 接口 × 风险的笛卡尔积派发。\n"
         )
     elif skill_name == "threat-base-model-gap-review-agent":

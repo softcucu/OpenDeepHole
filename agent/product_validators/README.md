@@ -189,7 +189,7 @@ ctx.publish_artifact("step-1.md", path=step_1_artifact, title="阶段产物", ki
 ```python
 result = ctx.run_opencode_task(
     task_name="PoC 设计",
-    prompt="根据漏洞报告设计验证步骤，只返回结构化结果。",
+    prompt="根据漏洞报告设计验证步骤，最终只返回 JSON。",
     required_capability="high",       # low | medium | high
     directory=ctx.project_path,
     mcp_tools=["view_function_code"],
@@ -206,6 +206,7 @@ result = ctx.run_opencode_task(
     session_id=None,
 )
 session_id = result["session_id"]
+# structured 是父进程从普通回复文本中本地提取的便利值。
 content = result["structured"]["content"]
 ```
 
@@ -273,7 +274,7 @@ ValidationResult(
 
 ## OpenCode 多阶段验证建议
 
-`demo/__init__.py` 展示了一个四阶段 OpenCode 验证模板：读取漏洞 Markdown，按 STEP 1 到 STEP 4 通过 `ctx.run_opencode_task(...)` 串行执行，并复用同一个 session。模型通过 JSON Schema 返回阶段内容，Python 再写入 `.opendeephole/vulnerability_validation/{scan_id}/vuln-{idx}/`，避免依赖模型直接写文件。
+`demo/__init__.py` 展示了一个四阶段 OpenCode 验证模板：读取漏洞 Markdown，按 STEP 1 到 STEP 4 通过 `ctx.run_opencode_task(...)` 串行执行，并复用同一个 session。模型按 JSON Schema 约束回复普通 JSON 文本，父进程本地提取后由 Python 写入 `.opendeephole/vulnerability_validation/{scan_id}/vuln-{idx}/`，避免依赖模型直接写文件。
 
 多阶段流程建议遵守以下规则：
 

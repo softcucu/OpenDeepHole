@@ -107,6 +107,7 @@ class ThreatAnalysisParserTests(unittest.TestCase):
         prompt = _stage_prompt(
             skill_name="threat-attack-surface-agent",
             input_path=Path("/tmp/input.json"),
+            output_path=Path("/tmp/output.json"),
             task_label="攻击面分析 1/1",
         )
 
@@ -114,7 +115,6 @@ class ThreatAnalysisParserTests(unittest.TestCase):
         self.assertIn("英文严重性标签", prompt)
         self.assertIn("不要把 `ASSET-*`", prompt)
         self.assertIn("唯一上级上下文", prompt)
-        self.assertIn("不要写入或修改项目文件", prompt)
 
     def test_stage_validation_rejects_base_model_attack_paths(self) -> None:
         with self.assertRaisesRegex(RuntimeError, "out-of-scope"):
@@ -231,11 +231,16 @@ class ThreatAnalysisParserTests(unittest.TestCase):
                 self.stages.append(stage)
                 prompt = str(args[1])
                 self.prompts.append(prompt)
+                output_match = re.search(r"将阶段结果写入输出 JSON 文件：`([^`]+)`", prompt)
+                assert output_match is not None
+                output_path = Path(output_match.group(1))
                 input_match = re.search(r"读取输入 JSON 文件：`([^`]+)`", prompt)
                 assert input_match is not None
                 input_data = json.loads(Path(input_match.group(1)).read_text(encoding="utf-8"))
                 if stage == "threat-asset-interface-agent":
-                    return json.dumps({
+                    output_path.parent.mkdir(parents=True, exist_ok=True)
+                    output_path.write_text(
+                        json.dumps({
                             "assets": [
                                 {
                                     "asset_id": "ASSET-1",
@@ -258,7 +263,10 @@ class ThreatAnalysisParserTests(unittest.TestCase):
                                     "candidate_code_paths": ["src/api"],
                                 }
                             ],
-                        })
+                        }),
+                        encoding="utf-8",
+                    )
+                    return ""
                 assert stage == "threat-base-model-gap-review-agent"
                 self.gap_calls += 1
                 current_items = input_data["current_identified_items"]
@@ -324,7 +332,9 @@ class ThreatAnalysisParserTests(unittest.TestCase):
                     },
                 ]
                 payload = payloads[self.gap_calls - 1]
-                return json.dumps(payload)
+                output_path.parent.mkdir(parents=True, exist_ok=True)
+                output_path.write_text(json.dumps(payload), encoding="utf-8")
+                return ""
 
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -714,8 +724,13 @@ class ThreatAnalysisParserTests(unittest.TestCase):
             async def _invoke_opencode(self, *args, **kwargs) -> str:
                 self.calls += 1
                 if self.calls <= 3:
-                    return "{not-json"
-                return json.dumps({"attack_goal_id": "GOAL-1", "domains": []})
+                    self.output_path.write_text("{not-json", encoding="utf-8")
+                else:
+                    self.output_path.write_text(
+                        json.dumps({"attack_goal_id": "GOAL-1", "domains": []}),
+                        encoding="utf-8",
+                    )
+                return ""
 
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

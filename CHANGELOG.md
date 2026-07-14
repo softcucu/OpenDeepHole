@@ -1,11 +1,15 @@
 # 更新日志
 
+## 2026-07-14
+
+- **修复** OpenCode/nga 任务不再请求原生 JSON Schema 输出，避免普通文本 JSON 响应被误判为 `OpenCode response did not contain native structured output` 并耗尽重试；JSON Schema 仅作为普通文本结果约束注入提示，Agent 从回复文本本地提取 JSON，提取失败则交回业务层沿用原有解析和重试逻辑
+
 ## 2026-07-13
 
-- **新增** 抽象统一 `OpenCodeTaskService`：任务可指定名称、低/中/高能力、运行目录、MCP 工具、SKILL、prompt、执行超时、`1..100` 优先级、JSON Schema、session 权限和已有 `session_id`；返回 task/session/message、结构化结果、实际模型和输出来源，并支持 session 查询、结果读取、续写、取消与删除
+- **新增** 抽象统一 `OpenCodeTaskService`：任务可指定名称、低/中/高能力、运行目录、MCP 工具、SKILL、prompt、执行超时、`1..100` 优先级、JSON Schema、session 权限和已有 `session_id`；返回 task/session/message、文本结果、本地提取的 JSON、实际模型和输出来源，并支持 session 查询、结果读取、续写、取消与删除
 - **变更** 所有模型任务统一改走 OpenCode serve/session，包括威胁分析、候选点/项目/威胁审计、敏感信息清理、报告审计、Git 历史、变体排查、去误报、SKILL 创建和漏洞验证；移除 LLM API 配置、OpenAI SDK 依赖、API 探测端点、`submit_*` 结果工具/ResultSink/session 注入插件，以及生产链路中的预注册计划任务
 - **新增** 模型池按优先级降序、同优先级 FIFO 调度；低/中能力任务优先使用最低足够能力模型且可在低档不可用时升级，高能力任务禁止降级；无匹配模型时保留阻塞队列，模型配置或时间窗变化后自动重调度，排队任务更新时保留 task ID 并增加 revision
-- **变更** OpenCode 原生 JSON Schema 成为确定性任务的结果通道，业务层负责校验和落盘；任务超时只从获得模型后开始计算，session 续写固定运行目录并按 session 串行执行
+- **变更** 确定性任务通过普通回复文本返回 JSON，业务层负责解析、校验和落盘；任务超时只从获得模型后开始计算，session 续写固定运行目录并按 session 串行执行
 - **变更** 本地 deephole-code MCP 改为 Agent 进程级共享网关，通过 `project_id` 路由并发扫描的独立索引，并以引用计数保证扫描与并发验证共用路由时不会提前注销；产品验证 worker 新增父进程 OpenCode RPC 和按需项目 MCP 工作区，四阶段示例复用同一 session，验证器直接启动 AI CLI 返回 `126`
 - **修复** Agent 模型池不再把已废弃的顶层 `opencode.model` 或空/全禁用配置自动合成为可用默认模型；默认模型必须通过 `models[]` 中启用的 `use_default_model: true` 行显式添加，无可用模型时 OpenCode 任务会阻塞排队并展示原因，配置更新后自动重新调度
 - **修复** OpenCode/nga serve 的中间输出订阅改为每个 serve 进程共享一条 `/global/event`，旧版本仅在全局端点不支持时按目录共享 `/event`；实例流立即关闭时不再为每个并发任务每秒打印断线/重连，而是聚合告警并按最高 30 秒退避，SSE 不健康期间每秒轮询会话消息快照补齐 LLM 文本、推理及工具状态

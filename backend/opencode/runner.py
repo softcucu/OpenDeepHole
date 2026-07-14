@@ -791,7 +791,7 @@ async def run_project_report_audit(
             f"使用 `{skill_name}` 技能，审计代码扫描路径 `{candidate.file}` 对应的目标代码。"
             f"project_id 为 `{project_id}`。"
             f"这是用户创建的 Markdown 报告型项目级审计任务。"
-            "请在 structured output 的 reports 数组返回一个或多个 Markdown 报告；"
+            "请在最终 JSON 的 reports 数组返回一个或多个 Markdown 报告；"
             "filename 必须使用 .md 扩展名，title 为报告标题，content 为完整 Markdown。"
             "如果没有发现问题，也要返回一个报告说明审计范围和未发现问题的原因。"
         ).replace("\n", " ")
@@ -2220,13 +2220,18 @@ async def _invoke_opencode(
         on_invocation_metadata=on_invocation_metadata,
         cancel_event=cancel_event,
     ))
-    if log_path and result.text:
+    output_text = (
+        json.dumps(result.structured, ensure_ascii=False)
+        if output_schema is not None and result.structured is not None
+        else result.text
+    )
+    if log_path and output_text:
         try:
-            log_path.write_text(result.text, encoding="utf-8")
+            log_path.write_text(output_text, encoding="utf-8")
         except Exception:
             pass
     result.raise_for_status()
-    return result.text
+    return output_text
 
 
 def _parse_result_from_text(text: str, candidate: Candidate) -> Vulnerability | None:

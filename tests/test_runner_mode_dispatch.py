@@ -176,24 +176,16 @@ def test_threat_analysis_result_uses_project_root(tmp_path: Path) -> None:
             opencode_concurrency=1,
             storage=SimpleNamespace(scans_dir=str(scans_dir)),
         )
-        captured_calls: list[dict[str, object]] = []
+        captured: dict[str, object] = {}
 
-        async def fake_invoke(call_workspace: Path, prompt: str, *args, **kwargs) -> str:
-            captured_calls.append({
-                "workspace": call_workspace,
-                "prompt": prompt,
-                "project_dir": kwargs["project_dir"],
-                "output_schema": kwargs["output_schema"],
-                "skills": kwargs["skills"],
-                "permissions": kwargs["permissions"],
-            })
-            return json.dumps({
-                "assets": [],
-                "high_risk_external_interfaces": [],
-                "asset_interface_links": [],
-                "risks": [],
-                "attack_goals": [],
-            })
+        async def fake_invoke(call_workspace: Path, prompt: str, *args, **kwargs) -> None:
+            captured["workspace"] = call_workspace
+            captured["prompt"] = prompt
+            captured["project_dir"] = kwargs["project_dir"]
+            captured["writable_paths"] = kwargs["writable_paths"]
+            match = re.search(r"将阶段结果写入输出 JSON 文件：`([^`]+)`", prompt)
+            assert match is not None
+            Path(match.group(1)).write_text("{}", encoding="utf-8")
 
         with (
             patch("backend.opencode.runner.get_config", return_value=cfg),
@@ -212,31 +204,10 @@ def test_threat_analysis_result_uses_project_root(tmp_path: Path) -> None:
         result_path = project / "runs" / "scan-1" / "res.json"
         assert result_path.is_file()
         assert (project / "res.json").is_file()
-        assert captured_calls
-        assert all(
-            "通过本消息附带的原生 JSON Schema" in str(call["prompt"])
-            for call in captured_calls
-        )
-        assert all(
-            "不要写入或修改项目文件" in str(call["prompt"])
-            for call in captured_calls
-        )
-        assert all(
-            str(project.resolve()) in str(call["prompt"])
-            for call in captured_calls
-        )
-        assert all(call["workspace"] == workspace for call in captured_calls)
-        assert all(
-            call["project_dir"] == project.resolve() for call in captured_calls
-        )
-        assert all(
-            call["output_schema"] == {"type": "object"}
-            for call in captured_calls
-        )
-        assert captured_calls[0]["skills"] == ["threat-asset-interface-agent"]
-        assert all(call["permissions"] == [
-            {"permission": "edit", "pattern": "*", "action": "deny"},
-        ] for call in captured_calls)
+        assert str(project.resolve()) in str(captured["prompt"])
+        assert captured["workspace"] == workspace
+        assert captured["project_dir"] == project.resolve()
+        assert captured["writable_paths"] == [project.resolve() / "runs" / "scan-1"]
 
     asyncio.run(run())
 
@@ -281,56 +252,66 @@ def test_attack_tree_threat_analysis_prioritizes_one_tree_pipeline(tmp_path: Pat
         )
         stage_order: list[str] = []
         output_lines: list[str] = []
-        stage_calls: list[dict[str, object]] = []
+
+        def output_path_from_prompt(prompt: str) -> Path:
+            match = re.search(r"将阶段结果写入输出 JSON 文件：`([^`]+)`", prompt)
+            assert match is not None
+            return Path(match.group(1))
 
         def input_data_from_prompt(prompt: str) -> dict:
             match = re.search(r"读取输入 JSON 文件：`([^`]+)`", prompt)
             assert match is not None
             return json.loads(Path(match.group(1)).read_text(encoding="utf-8"))
 
-        async def fake_invoke(call_workspace: Path, prompt: str, *args, **kwargs) -> str:
-            skill_name = kwargs["skills"][0]
-            stage_calls.append({
-                "workspace": call_workspace,
-                "prompt": prompt,
-                "skill": skill_name,
-                "output_schema": kwargs["output_schema"],
-            })
-            if skill_name == "threat-base-model-shard-planner":
-                return json.dumps({
-                    "planning_summary": "单一 C/C++ 入口使用一个基础建模分片",
-                    "shards": [
-                        {
-                            "type": "entry_family",
-                            "name": "主程序入口",
-                            "description": "覆盖主程序入口相关 C/C++ 路径",
-                            "planning_reason": "当前索引只有一个主程序入口",
-                            "include_paths": ["src/app.cpp"],
-                            "entry_candidates": [],
-                            "languages": ["cpp"],
-                        }
-                    ],
-                })
-            if skill_name == "threat-asset-interface-agent":
-                return json.dumps({
-                    "assets": [],
-                    "high_risk_external_interfaces": [],
-                    "asset_interface_links": [],
-                    "risks": [],
-                    "attack_goals": [
-                        {"attack_goal_id": "GOAL-1", "name": "goal 1"},
-                        {"attack_goal_id": "GOAL-2", "name": "goal 2"},
-                    ]
-                })
-            if skill_name == "threat-base-model-gap-review-agent":
-                return json.dumps({
-                    "assets": [],
-                    "high_risk_external_interfaces": [],
-                    "asset_interface_links": [],
-                    "risks": [],
-                    "attack_goals": [],
-                })
-            if skill_name == "threat-attack-goal-agent":
+        async def fake_invoke(call_workspace: Path, prompt: str, *args, **kwargs) -> None:
+            output_path = output_path_from_prompt(prompt)
+            if "threat-base-model-shard-planner" in prompt:
+                output_path.write_text(
+                    json.dumps({
+                        "planning_summary": "单一 C/C++ 入口使用一个基础建模分片",
+                        "shards": [
+                            {
+                                "type": "entry_family",
+                                "name": "主程序入口",
+                                "description": "覆盖主程序入口相关 C/C++ 路径",
+                                "planning_reason": "当前索引只有一个主程序入口",
+                                "include_paths": ["src/app.cpp"],
+                                "entry_candidates": [],
+                                "languages": ["cpp"],
+                            }
+                        ],
+                    }),
+                    encoding="utf-8",
+                )
+                return
+            if "threat-asset-interface-agent" in prompt:
+                output_path.write_text(
+                    json.dumps({
+                        "assets": [],
+                        "high_risk_external_interfaces": [],
+                        "asset_interface_links": [],
+                        "risks": [],
+                        "attack_goals": [
+                            {"attack_goal_id": "GOAL-1", "name": "goal 1"},
+                            {"attack_goal_id": "GOAL-2", "name": "goal 2"},
+                        ]
+                    }),
+                    encoding="utf-8",
+                )
+                return
+            if "threat-base-model-gap-review-agent" in prompt:
+                output_path.write_text(
+                    json.dumps({
+                        "assets": [],
+                        "high_risk_external_interfaces": [],
+                        "asset_interface_links": [],
+                        "risks": [],
+                        "attack_goals": [],
+                    }),
+                    encoding="utf-8",
+                )
+                return
+            if "threat-attack-goal-agent" in prompt:
                 goal_id = input_data_from_prompt(prompt)["attack_goal"]["attack_goal_id"]
                 stage_order.append(f"goal:{goal_id}")
                 domains = (
@@ -341,8 +322,12 @@ def test_attack_tree_threat_analysis_prioritizes_one_tree_pipeline(tmp_path: Pat
                     if goal_id == "GOAL-1"
                     else [{"domain_id": "DOMAIN-GOAL-2-A", "name": "运维面"}]
                 )
-                return json.dumps({"domains": domains})
-            if skill_name == "threat-attack-domain-agent":
+                output_path.write_text(
+                    json.dumps({"domains": domains}),
+                    encoding="utf-8",
+                )
+                return
+            if "threat-attack-domain-agent" in prompt:
                 input_data = input_data_from_prompt(prompt)
                 goal_id = input_data["attack_goal"]["attack_goal_id"]
                 domain_id = input_data["attack_domain"]["domain_id"]
@@ -358,8 +343,12 @@ def test_attack_tree_threat_analysis_prioritizes_one_tree_pipeline(tmp_path: Pat
                         "surface_id": "SURFACE-GOAL-1-A-2",
                         "name": "管理接口二",
                     })
-                return json.dumps({"surfaces": surfaces})
-            if skill_name == "threat-attack-surface-agent":
+                output_path.write_text(
+                    json.dumps({"surfaces": surfaces}),
+                    encoding="utf-8",
+                )
+                return
+            if "threat-attack-surface-agent" in prompt:
                 input_data = input_data_from_prompt(prompt)
                 goal_id = input_data["attack_goal"]["attack_goal_id"]
                 domain_id = input_data["attack_domain"]["domain_id"]
@@ -382,16 +371,24 @@ def test_attack_tree_threat_analysis_prioritizes_one_tree_pipeline(tmp_path: Pat
                             }
                         ],
                     }
-                return json.dumps(method_payload)
-            if skill_name == "threat-method-confirm-agent":
+                output_path.write_text(
+                    json.dumps(method_payload),
+                    encoding="utf-8",
+                )
+                return
+            if "threat-method-confirm-agent" in prompt:
                 input_data = input_data_from_prompt(prompt)
                 goal_id = input_data["attack_goal"]["attack_goal_id"]
                 domain_id = input_data["attack_domain"]["domain_id"]
                 surface_id = input_data["attack_surface"]["surface_id"]
                 method_id = input_data["method_confirmation_task"]["method_id"]
                 stage_order.append(f"method:{goal_id}:{domain_id}:{surface_id}:{method_id}")
-                return json.dumps({"attack_paths": []})
-            return "{}"
+                output_path.write_text(
+                    json.dumps({"attack_paths": []}),
+                    encoding="utf-8",
+                )
+                return
+            output_path.write_text("{}", encoding="utf-8")
 
         with (
             patch("backend.opencode.runner.get_config", return_value=cfg),
@@ -424,9 +421,6 @@ def test_attack_tree_threat_analysis_prioritizes_one_tree_pipeline(tmp_path: Pat
         assert not any("攻击目标分解并发度" in line for line in output_lines)
         assert not any("攻击域分析并发度" in line for line in output_lines)
         assert not any("攻击面分析并发度" in line for line in output_lines)
-        assert stage_calls
-        assert all(call["output_schema"] == {"type": "object"} for call in stage_calls)
-        assert all("不要写入或修改项目文件" in str(call["prompt"]) for call in stage_calls)
 
     asyncio.run(run())
 

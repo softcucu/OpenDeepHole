@@ -103,7 +103,6 @@ class OpenCodePromptResult:
     message_id: str
     lines: list[str]
     text: str
-    structured: Any = None
     model: str = ""
     raw: Any = field(default=None, repr=False, compare=False)
 
@@ -849,12 +848,6 @@ def _response_message_id(value: Any) -> str:
     if not isinstance(value, dict) or not isinstance(value.get("info"), dict):
         return ""
     return str(value["info"].get("id") or "").strip()
-
-
-def _response_structured(value: Any) -> Any:
-    if not isinstance(value, dict) or not isinstance(value.get("info"), dict):
-        return None
-    return value["info"].get("structured")
 
 
 def _normalize_tool_selector(value: object) -> str:
@@ -1702,8 +1695,6 @@ class OpenCodeServeManager:
         session_id: str | None = None,
         session_title: str = "OpenDeepHole task",
         mcp_tools: list[str] | tuple[str, ...] | None = None,
-        output_schema: dict[str, Any] | None = None,
-        output_retry_count: int = 2,
         system_prompt: str = "",
         permissions: list[dict[str, str]] | None = None,
         return_details: bool = False,
@@ -1777,12 +1768,6 @@ class OpenCodeServeManager:
                 if model:
                     provider_id, model_id = split_model_id(model)
                     payload["model"] = {"providerID": provider_id, "modelID": model_id}
-                if output_schema is not None:
-                    payload["format"] = {
-                        "type": "json_schema",
-                        "schema": output_schema,
-                        "retryCount": max(0, int(output_retry_count)),
-                    }
                 if system_prompt:
                     payload["system"] = system_prompt
 
@@ -1871,7 +1856,6 @@ class OpenCodeServeManager:
                     message_id=_response_message_id(response_data),
                     lines=lines,
                     text="\n".join(response_text),
-                    structured=_response_structured(response_data),
                     model=response_model,
                     raw=response_data,
                 )

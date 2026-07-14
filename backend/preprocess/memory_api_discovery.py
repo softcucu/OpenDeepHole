@@ -513,7 +513,7 @@ def _build_batch_prompt(
         "请判断每个候选是否是真正的底层通用堆内存申请/释放 API 或薄 wrapper。"
         "只保留 malloc/calloc/realloc/strdup/new/delete/free 这类通用堆内存 API 或直接薄封装；"
         "排除结构体/对象专用 create/destroy/free、复杂 cleanup/refcount 生命周期函数、文件/socket/mmap 等资源 API。"
-        "不要写文件，最终通过 structured output 返回结果。"
+        "不要写文件，最终只输出一个 JSON 对象。"
         "JSON 格式必须为："
         "{\"results\":[{\"candidate_id\":\"...\",\"is_memory_api\":true,"
         "\"role\":\"alloc|free|realloc|not_memory\",\"pair_with\":\"对应函数名或空字符串\","

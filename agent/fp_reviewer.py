@@ -678,7 +678,7 @@ async def _run_fp_review_stage(
     for attempt in range(1, max_retries + 2):
         attempt_source: OutputSource | None = None
         attempt_id = uuid4().hex
-        submit_tool_name = "structured result"
+        submit_tool_name = "JSON result"
 
         def capture_source(source: OutputSource) -> None:
             nonlocal attempt_source, last_source
@@ -701,8 +701,8 @@ async def _run_fp_review_stage(
         )
         if attempt > 1:
             prompt += (
-                "上一次尝试未返回完整 structured result。"
-                "即使结论是非问题（confirmed=false），也必须在 stage_markdown 返回完整论证。"
+                "上一次尝试未返回完整 JSON 结果。"
+                "即使结论是非问题（confirmed=false），最终 JSON 的 stage_markdown 也必须返回完整论证。"
             )
         log_path = review_dir / f"fp_{stage}_{attempt_id}.log"
 
@@ -847,8 +847,8 @@ def _build_fp_review_prompt(
             f"已挖掘的历史问题模式列表（可用 git show <出处提交> 复核根因）：\n{patterns_text or '（无）'}\n"
             f"判断标准（满足任一即视为匹配）：(a) 与某条历史问题模式**同根因**（同缺陷类型、同触发条件）；"
             f"(b) 全仓存在对**同一被调点/危险原语**把校验做对了的另一处调用站点，而本候选缺失该校验。"
-            "你必须在 structured output 的 stage_markdown 返回本阶段完整 Markdown 论证。"
-            "分析完成后通过 structured output 提交结论："
+            "你必须在最终 JSON 的 stage_markdown 返回本阶段完整 Markdown 论证。"
+            "分析完成后在同一个最终 JSON 中返回结论："
             "confirmed=true 表示对应上（match_type 填 history 或 validation，match_reference 填"
             f"历史模式根因摘要+出处提交，或正确校验站点 path:line + 一句话说明，并提交 vulnerability_report，"
             f"包含 Summary、Vulnerable Code、Full Call Stack、Root Cause、Why It is Reachable、Impact、Evidence 七个二级标题）；"
@@ -864,7 +864,7 @@ def _build_fp_review_prompt(
             f"review_id 为 `{review_id}`，vuln_index 为 `{vuln_index}`。"
             f"原始描述：{vuln['description']} "
             f"{ai_analysis_ref}"
-            "你必须在 structured output 的 stage_markdown 返回本阶段完整 Markdown 论证。"
+            "你必须在最终 JSON 的 stage_markdown 返回本阶段完整 Markdown 论证。"
             "match_type 和 match_reference 在本阶段使用空字符串。"
             f"默认假设代码是安全的；只有证明真实代码问题时才使用 confirmed=true。"
             f"severity 只分两档：外部可触发的问题使用 high；其余（无法证明外部可触发或非问题）一律使用 low。"
@@ -872,7 +872,7 @@ def _build_fp_review_prompt(
             f"都必须在 vulnerability_report 中提交 Markdown 问题报告，"
             f"并包含 Summary、Vulnerable Code、Full Call Stack、Root Cause、"
             f"Why It is Reachable、Impact、Evidence 七个二级标题。不要使用 CVSS 打分。"
-            "structured output 同时返回 confirmed、severity、description、ai_analysis、"
+            "最终 JSON 同时返回 confirmed、severity、description、ai_analysis、"
             "vulnerability_report、file、line、function。"
         )
     elif stage == "prove_fp":
@@ -886,16 +886,16 @@ def _build_fp_review_prompt(
             f"review_id 为 `{review_id}`，vuln_index 为 `{vuln_index}`。"
             f"原始描述：{vuln['description']} "
             f"{ai_analysis_ref}"
-            f"正方阶段结构化摘要：{bug_summary} "
+            f"正方阶段 JSON 摘要：{bug_summary} "
             f"你必须先读取正方 Markdown 文件 `{prove_bug_path}`，再进行反方论证。"
-            "你必须在 structured output 的 stage_markdown 返回本阶段完整 Markdown 论证。"
+            "你必须在最终 JSON 的 stage_markdown 返回本阶段完整 Markdown 论证。"
             "match_type 和 match_reference 在本阶段使用空字符串。"
             f"如果找到足以证明非问题的理由，使用 confirmed=false 且 severity=low。"
             f"如果反方未能证明非问题，仍使用 confirmed=true；severity 只分两档："
             f"外部可触发为 high，其余一律为 low。"
             f"只要 confirmed=true，"
             f"都必须提交 vulnerability_report，可沿用或修正 prove-bug 的报告。不要使用 CVSS 打分。"
-            "structured output 同时返回 confirmed、severity、description、ai_analysis、"
+            "最终 JSON 同时返回 confirmed、severity、description、ai_analysis、"
             "vulnerability_report、file、line、function。"
         )
     elif stage == "final_judge":
@@ -911,10 +911,10 @@ def _build_fp_review_prompt(
             f"review_id 为 `{review_id}`，vuln_index 为 `{vuln_index}`。"
             f"原始描述：{vuln['description']} "
             f"{ai_analysis_ref}"
-            f"正方阶段结构化摘要：{bug_summary} "
-            f"反方阶段结构化摘要：{fp_summary} "
+            f"正方阶段 JSON 摘要：{bug_summary} "
+            f"反方阶段 JSON 摘要：{fp_summary} "
             f"你必须读取正方 Markdown 文件 `{bug_path}` 和反方 Markdown 文件 `{fp_path}`。"
-            "你必须在 structured output 的 stage_markdown 返回最终裁决完整 Markdown。"
+            "你必须在最终 JSON 的 stage_markdown 返回最终裁决完整 Markdown。"
             "match_type 和 match_reference 在本阶段使用空字符串。"
             f"最终 confirmed=false 表示误报；confirmed=true 表示真实问题。"
             f"severity 只分两档：论证为外部可触发的问题使用 high；其余（无法证明外部可触发或非问题）一律使用 low。"
@@ -923,7 +923,7 @@ def _build_fp_review_prompt(
             f"只要 confirmed=true，"
             f"都必须提交 vulnerability_report，包含 Summary、Vulnerable Code、Full Call Stack、Root Cause、"
             f"Why It is Reachable、Impact、Evidence 七个二级标题。不要使用 CVSS 打分。"
-            "structured output 同时返回 confirmed、severity、description、ai_analysis、"
+            "最终 JSON 同时返回 confirmed、severity、description、ai_analysis、"
             "vulnerability_report、file、line、function。"
         )
     else:
@@ -1021,7 +1021,7 @@ def _stage_reason(stage_result: _FpStageResult) -> str:
 
 def _stage_result_summary(stage_result: _FpStageResult | None) -> str:
     if stage_result is None or stage_result.result is None:
-        return "未提交结构化阶段结论。"
+        return "未提交 JSON 阶段结论。"
     result = stage_result.result
     verdict = "confirmed=true" if result.confirmed else "confirmed=false"
     description = str(result.description or "").replace("\n", " ")[:800]

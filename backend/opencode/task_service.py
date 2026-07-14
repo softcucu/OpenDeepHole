@@ -2,7 +2,7 @@
 
 Every model-backed operation in OpenDeepHole is represented by an
 ``OpenCodeTaskSpec``.  The service owns model scheduling, execution-stage
-timeouts, OpenCode session creation/continuation and structured output.
+timeouts, OpenCode session creation/continuation and plain-text output.
 """
 
 from __future__ import annotations
@@ -21,6 +21,11 @@ from uuid import uuid4
 from backend.config import get_config
 from backend.logger import get_logger
 from backend.models import OutputSource
+from backend.opencode.llm_json import (
+    LLMJsonParseError,
+    parse_llm_json,
+    parse_llm_json_schema,
+)
 from backend.opencode.model_pool import (
     ModelLease,
     acquire_model_lease,
@@ -55,7 +60,6 @@ class OpenCodeTaskSpec:
     timeout_seconds: int | None = None
     priority: int = 50
     output_schema: dict[str, Any] | None = None
-    output_retry_count: int = 2
     permissions: list[dict[str, str]] | None = None
     session_id: str | None = None
     writable_paths: list[Path] = field(default_factory=list)
@@ -216,7 +220,6 @@ class OpenCodeTaskService:
             global_concurrency=(
                 None if global_concurrency is None else int(global_concurrency)
             ),
-            output_retry_count=max(0, int(spec.output_retry_count)),
             permissions=permissions,
             session_id=str(spec.session_id or "").strip() or None,
             writable_paths=[Path(path).resolve() for path in spec.writable_paths],
@@ -408,10 +411,12 @@ class OpenCodeTaskService:
             )
             if spec.output_schema is not None:
                 result_rule = (
-                    "The native structured-output schema attached to this message is the "
-                    "authoritative result contract. Return the final result through that schema; "
-                    "do not call submit_result or any other result-submission MCP tool, even if "
-                    "older SKILL text requests one."
+                    "Return the final result as plain JSON text matching the JSON Schema below. "
+                    "The final assistant message must contain only that JSON value, without a "
+                    "Markdown code fence or surrounding explanation. The application parses the "
+                    "assistant text itself; do not call submit_result or any other result-submission "
+                    "MCP tool.\nJSON Schema:\n"
+                    + json.dumps(spec.output_schema, ensure_ascii=False, indent=2)
                 )
                 system_prompt = "\n\n".join(
                     section for section in (system_prompt, result_rule) if section
@@ -432,8 +437,6 @@ class OpenCodeTaskService:
                         session_id=session_id or None,
                         session_title=spec.task_name,
                         mcp_tools=spec.mcp_tools,
-                        output_schema=spec.output_schema,
-                        output_retry_count=spec.output_retry_count,
                         system_prompt=system_prompt,
                         permissions=spec.permissions,
                         return_details=True,
@@ -444,15 +447,8 @@ class OpenCodeTaskService:
             assert isinstance(details, OpenCodePromptResult)
             session_id = details.session_id
             message_id = details.message_id
-            if spec.output_schema is not None and details.structured is None:
-                raise OpenCodeTaskError(
-                    "OpenCode response did not contain native structured output"
-                )
-            text = (
-                json.dumps(details.structured, ensure_ascii=False)
-                if details.structured is not None
-                else (details.text or "\n".join(details.lines))
-            )
+            text = details.text or "\n".join(details.lines)
+            structured = _parse_text_json(text, spec.output_schema)
             outcome = "success"
             self._finish_record(
                 record,
@@ -460,7 +456,7 @@ class OpenCodeTaskService:
                 session_id=session_id,
                 message_id=message_id,
                 text=text,
-                structured=details.structured,
+                structured=structured,
                 model=source.model or details.model or model,
                 source=source,
                 started_monotonic=started_monotonic,
@@ -635,16 +631,12 @@ class OpenCodeTaskService:
             info = message.get("info") if isinstance(message, dict) else None
             if not isinstance(info, dict) or info.get("role") != "assistant":
                 continue
-            structured = info.get("structured")
             text_parts = []
             for part in message.get("parts") or []:
                 if isinstance(part, dict) and part.get("type") == "text":
                     text_parts.append(str(part.get("text") or ""))
-            text = (
-                json.dumps(structured, ensure_ascii=False)
-                if structured is not None
-                else "\n".join(text_parts)
-            )
+            text = "\n".join(text_parts)
+            structured = _parse_text_json(text)
             return OpenCodeTaskResult(
                 task_id="",
                 session_id=session_id,
@@ -675,6 +667,16 @@ def _cfg_value(config_obj: Any, key: str, default: Any = None) -> Any:
     if isinstance(config_obj, dict):
         return config_obj.get(key, default)
     return getattr(config_obj, key, default)
+
+
+def _parse_text_json(text: str, schema: dict[str, Any] | None = None) -> Any:
+    """Best-effort local JSON extraction; invalid model text stays a normal result."""
+    try:
+        if schema is not None:
+            return parse_llm_json_schema(text, schema)
+        return parse_llm_json(text, None)
+    except (LLMJsonParseError, TypeError, ValueError):
+        return None
 
 
 def record_task_id(lease: ModelLease) -> str:

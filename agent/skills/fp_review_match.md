@@ -25,8 +25,8 @@ description: 去误报「历史/校验匹配」阶段——判断候选漏洞能
 
 ## 输出要求（必须遵守）
 
-1. 在任务指定的 structured output `stage_markdown` 字段返回本阶段完整 Markdown 论证。
-2. 在同一个 structured output 返回结论：
+1. 在最终 JSON 的 `stage_markdown` 字段返回本阶段完整 Markdown 论证。
+2. 在同一个最终 JSON 中返回结论：
    - `confirmed`：是否对应上（true/false）。
    - `match_type`：`history` 或 `validation`（confirmed=true 时必填）。
    - `match_reference`：对应的修复/校验描述——历史模式根因摘要 + 出处提交，或正确校验站点

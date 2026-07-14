@@ -665,7 +665,7 @@ fp_review:
 OpenCode 调用约定：
 
 - `nga` / `opencode`：每个扫描或复核任务使用隔离的 OpenCode 配置目录；Agent 会合并用户全局目录、OpenCode 可执行文件所在目录、真实项目根目录、`opencode.config_paths` 和 `OPENCODE_CONFIG_PATH` 指向的 OpenCode provider/model 配置，再通过 `OPENCODE_CONFIG_CONTENT` 注入当前任务的 MCP URL、SKILL 路径和权限配置；注入环境变量前会移除顶层 `"$schema"`；`opencode.proxy_url` 或 `OPENCODE_PROXY_URL` 会被展开为 `HTTP_PROXY`/`HTTPS_PROXY` 及小写形式传给 OpenCode 子进程，`NO_PROXY/no_proxy` 默认使用内网列表且可由 `opencode.no_proxy` 或 `OPENCODE_NO_PROXY` 覆盖；API `directory` 始终指向真实项目根目录，不复制源码。
-- `nga` / `opencode` 只通过 serve API 调用，默认端口为 `4096`，可用 `OPENCODE_SERVE_PORT` 覆盖。每个任务在 message 级指定需要的 MCP 工具、SKILL system prompt、模型和原生 JSON Schema；权限在 session 创建/续写时设置。
+- `nga` / `opencode` 只通过 serve API 调用，默认端口为 `4096`，可用 `OPENCODE_SERVE_PORT` 覆盖。每个任务在 message 级指定需要的 MCP 工具、SKILL system prompt 和模型；`output_schema` 会转成“最终只回复 JSON”的普通文本约束，不会作为 OpenCode 原生 `format` 发送；权限在 session 创建/续写时设置。
 - OpenCode/nga serve 会话会保留在真实项目目录下，便于用 `opencode session list` 查看历史；Agent 只在取消或超时时 abort session，不在正常完成后删除 session。
 - Agent 进程内只有一个共享 deephole-code MCP 网关；各扫描用 `project_id` 注册自己的 `code_index.db` 路由，不再为每个扫描启动独立 MCP 服务。
 - 漏洞验证 worker 通过父进程 RPC 调用同一个 OpenCode 任务组件；父进程按需复用共享 MCP 网关、注册项目索引路由并向 prompt 补充 `project_id`；验证脚本直接执行 `nga`、`opencode`、`hac` 或 `claude` 会被拒绝。
@@ -689,7 +689,7 @@ handle = service.submit_task(OpenCodeTaskSpec(
     permissions=[{"permission": "edit", "pattern": "*", "action": "deny"}],
 ))
 session_id = await handle.wait_session_id()  # session 创建后即可取得
-result = await handle.result()               # 执行完成后取得结构化结果
+result = await handle.result()               # 执行完成后取得文本及本地提取的 JSON
 
 continued = await service.run_task(OpenCodeTaskSpec(
     task_name="candidate follow-up",

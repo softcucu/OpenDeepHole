@@ -52,7 +52,7 @@ def _config() -> SimpleNamespace:
     )
 
 
-def test_task_service_returns_native_schema_result_and_records_session(tmp_path: Path) -> None:
+def test_task_service_parses_plain_json_text_and_records_session(tmp_path: Path) -> None:
     async def run() -> None:
         service = OpenCodeTaskService()
         manager = SimpleNamespace()
@@ -67,9 +67,8 @@ def test_task_service_returns_native_schema_result_and_records_session(tmp_path:
             return OpenCodePromptResult(
                 session_id="ses_structured",
                 message_id="msg_1",
-                lines=[],
-                text="",
-                structured={"answer": 7},
+                lines=['result: ```json\n{"answer": 7}\n```'],
+                text='result: ```json\n{"answer": 7}\n```',
                 model="provider/actual-model",
             )
 
@@ -113,14 +112,17 @@ def test_task_service_returns_native_schema_result_and_records_session(tmp_path:
         assert result.task_id
         assert result.session_id == "ses_structured"
         assert result.message_id == "msg_1"
+        assert result.text.startswith("result:")
         assert result.structured == {"answer": 7}
         assert result.model == "provider/actual-model"
-        assert captured["output_schema"] == schema
+        assert "output_schema" not in captured
+        assert "output_retry_count" not in captured
         assert captured["mcp_tools"] == ["view_function_code"]
         assert captured["timeout"] == 12
         assert captured["permissions"][0]["action"] == "deny"
         assert captured["return_details"] is True
-        assert "authoritative result contract" in captured["system_prompt"]
+        assert "plain JSON text" in captured["system_prompt"]
+        assert '"answer"' in captured["system_prompt"]
         assert acquire_mock.await_args.kwargs["priority"] == 87
         assert acquire_mock.await_args.kwargs["global_concurrency"] == 3
         assert acquire_mock.await_args.kwargs["strict_capability"] is True
@@ -138,6 +140,59 @@ def test_task_service_returns_native_schema_result_and_records_session(tmp_path:
             assert "continuation directory cannot change" in str(exc)
         else:
             raise AssertionError("directory-changing continuation was accepted")
+
+    asyncio.run(run())
+
+
+def test_task_service_does_not_fail_when_plain_text_has_no_json(tmp_path: Path) -> None:
+    async def run() -> None:
+        service = OpenCodeTaskService()
+        manager = SimpleNamespace()
+
+        async def run_prompt(**kwargs):
+            callback_result = kwargs["on_session_id"]("ses_text")
+            if hasattr(callback_result, "__await__"):
+                await callback_result
+            return OpenCodePromptResult(
+                session_id="ses_text",
+                message_id="msg_text",
+                lines=["analysis completed without a JSON object"],
+                text="analysis completed without a JSON object",
+                model="provider/model-low",
+            )
+
+        manager.run_prompt = run_prompt
+        service._runtime_for_task = AsyncMock(return_value=(
+            _runtime(tmp_path),
+            "provider/model-low",
+            OutputSource(tool="opencode", model_id="model-low", capability="low"),
+        ))
+
+        async def acquire(*_args, **kwargs):
+            return _lease(kwargs["task_id"])
+
+        with (
+            patch("backend.opencode.task_service.get_config", return_value=_config()),
+            patch("backend.opencode.task_service.acquire_model_lease", side_effect=acquire),
+            patch("backend.opencode.task_service.release_model_lease", new=AsyncMock()),
+            patch("backend.opencode.task_service.update_model_lease_context", new=AsyncMock()),
+            patch("backend.opencode.task_service.get_serve_manager", return_value=manager),
+        ):
+            result = await service.run_task(OpenCodeTaskSpec(
+                task_name="plain text fallback",
+                prompt="return JSON",
+                directory=tmp_path,
+                output_schema={
+                    "type": "object",
+                    "properties": {"answer": {"type": "integer"}},
+                    "required": ["answer"],
+                },
+            ))
+
+        assert result.status == "success"
+        assert result.text == "analysis completed without a JSON object"
+        assert result.structured is None
+        result.raise_for_status()
 
     asyncio.run(run())
 
@@ -231,9 +286,8 @@ def test_session_query_result_and_delete_use_saved_runtime(tmp_path: Path) -> No
                     "role": "assistant",
                     "providerID": "provider",
                     "modelID": "model",
-                    "structured": {"ok": True},
                 },
-                "parts": [],
+                "parts": [{"type": "text", "text": "```json\n{\"ok\": true}\n```"}],
             }]),
             delete_session=AsyncMock(return_value=True),
         )
@@ -242,6 +296,7 @@ def test_session_query_result_and_delete_use_saved_runtime(tmp_path: Path) -> No
             result = await service.get_session_result("ses_existing")
             assert result is not None
             assert result.structured == {"ok": True}
+            assert result.text.startswith("```json")
             assert result.model == "provider/model"
             assert await service.delete_session("ses_existing") is True
         assert "ses_existing" not in service._session_runtimes
