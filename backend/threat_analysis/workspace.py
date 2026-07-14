@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 
@@ -12,6 +13,99 @@ _AGENT_SKILL_FILES = {
     "threat-attack-domain-agent": "threat-attack-domain-agent.md",
     "threat-attack-surface-agent": "threat-attack-surface-agent.md",
     "threat-method-confirm-agent": "threat-method-confirm-agent.md",
+}
+
+_THREAT_ANALYSIS_SUBAGENTS = {
+    "threat-asset-enumerator": {
+        "mode": "subagent",
+        "hidden": True,
+        "description": "从产品信息、代码索引和目录结构识别价值资产、资产类型、关键风险和接口关联。",
+        "prompt": (
+            "你是威胁分析第一步的价值资产枚举子 Agent。"
+            "只做资产、风险和接口关系识别，不分析攻击方法或漏洞是否存在。"
+            "当调用方给出目录、语言、入口类型或接口分片时，只分析该分片，并在结果中标注 shard_scope。"
+            "优先使用输入中可用的产品信息 MCP 事实，并用代码索引、目录浏览、grep、read 结果补充。"
+            "输出给调用方的内容必须聚焦 assets、risks、asset_interface_links 和遗漏风险，不要写项目文件。"
+        ),
+        "tools": {
+            "read": True,
+            "list": True,
+            "glob": True,
+            "grep": True,
+            "task": False,
+            "bash": False,
+            "edit": False,
+        },
+        "permission": {
+            "read": "allow",
+            "list": "allow",
+            "glob": "allow",
+            "grep": "allow",
+            "bash": "deny",
+            "edit": "deny",
+            "task": "deny",
+        },
+    },
+    "threat-attack-goal-enumerator": {
+        "mode": "subagent",
+        "hidden": True,
+        "description": "从攻击者视角为价值资产和关键风险枚举可执行、可分解的攻击目标。",
+        "prompt": (
+            "你是威胁分析第一步的攻击目标枚举子 Agent。"
+            "围绕输入资产、风险、外部接口和代码线索，从攻击者视角生成具体攻击目标。"
+            "当调用方给出资产、风险、业务域或接口族分片时，只为该 goal_scope 生成攻击目标。"
+            "攻击目标必须描述攻击者想造成的资产损害结果，不能写成漏洞类型或测试动作。"
+            "输出给调用方的内容必须聚焦 attack_goals、related_interface_ids、candidate_code_paths 和覆盖缺口，不要写项目文件。"
+        ),
+        "tools": {
+            "read": True,
+            "list": True,
+            "glob": True,
+            "grep": True,
+            "task": False,
+            "bash": False,
+            "edit": False,
+        },
+        "permission": {
+            "read": "allow",
+            "list": "allow",
+            "glob": "allow",
+            "grep": "allow",
+            "bash": "deny",
+            "edit": "deny",
+            "task": "deny",
+        },
+    },
+    "threat-code-evidence-mapper": {
+        "mode": "subagent",
+        "hidden": True,
+        "description": "核对资产、接口和攻击目标对应的真实代码路径，标出证据不足或路径缺失的项目。",
+        "prompt": (
+            "你是威胁分析第一步的代码证据映射子 Agent。"
+            "只确认资产、接口、风险和攻击目标是否有真实代码路径支撑。"
+            "当调用方给出候选资产、接口、攻击目标或代码路径分片时，只核对该 evidence_scope。"
+            "代码路径必须来自输入代码索引、目录浏览、grep 或 read 结果；无法确认时明确返回空路径和原因。"
+            "输出给调用方的内容必须聚焦 candidate_code_paths、evidence 和不确定项，不要写项目文件。"
+        ),
+        "tools": {
+            "read": True,
+            "list": True,
+            "glob": True,
+            "grep": True,
+            "task": False,
+            "bash": False,
+            "edit": False,
+        },
+        "permission": {
+            "read": "allow",
+            "list": "allow",
+            "glob": "allow",
+            "grep": "allow",
+            "bash": "deny",
+            "edit": "deny",
+            "task": "deny",
+        },
+    },
 }
 
 
@@ -31,6 +125,7 @@ def install_attack_tree_threat_analysis_skill(
         raise FileNotFoundError(f"Attack method reference catalog not found: {reference_catalog_path}")
 
     with get_workspace_lock(workspace):
+        _install_threat_analysis_subagents(workspace)
         skill_dir = workspace / ".opencode" / "skills" / "attack-tree-threat-analysis"
         skill_dir.mkdir(parents=True, exist_ok=True)
         (skill_dir / "SKILL.md").write_text(skill_path.read_text(encoding="utf-8"), encoding="utf-8")
@@ -51,3 +146,30 @@ def install_attack_tree_threat_analysis_skill(
                     reference_catalog_path.read_text(encoding="utf-8"),
                     encoding="utf-8",
                 )
+
+
+def _install_threat_analysis_subagents(workspace: Path) -> None:
+    """Register threat-analysis subagents in the task-local OpenCode config."""
+    config_path = workspace / "opencode.json"
+    try:
+        data = json.loads(config_path.read_text(encoding="utf-8")) if config_path.is_file() else {}
+    except Exception:
+        data = {}
+    if not isinstance(data, dict):
+        data = {}
+
+    permission = data.setdefault("permission", {})
+    if not isinstance(permission, dict):
+        permission = {}
+        data["permission"] = permission
+    permission["task"] = {"*": "allow"}
+
+    agents = data.setdefault("agent", {})
+    if not isinstance(agents, dict):
+        agents = {}
+        data["agent"] = agents
+    for name, agent_config in _THREAT_ANALYSIS_SUBAGENTS.items():
+        agents[name] = agent_config
+
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    config_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")

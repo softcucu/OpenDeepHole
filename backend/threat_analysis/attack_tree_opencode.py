@@ -570,7 +570,7 @@ def _stage_prompt(
     output_path: Path,
     task_label: str,
 ) -> str:
-    return (
+    prompt = (
         f"使用 `{skill_name}` 技能执行威胁分析阶段：{task_label}。\n"
         f"读取输入 JSON 文件：`{input_path.resolve()}`。\n"
         f"将阶段结果写入输出 JSON 文件：`{output_path.resolve()}`。\n"
@@ -579,6 +579,19 @@ def _stage_prompt(
         "代码路径必须来自输入代码索引或实际检索结果，无法确认时输出空数组。\n"
         "不得修改输出 JSON 文件之外的任何项目文件。\n"
     )
+    if skill_name == "threat-asset-interface-agent":
+        prompt += (
+            "本阶段允许在主 Agent 内调用只读子 Agent 做交叉分析："
+            "`threat-asset-enumerator`、`threat-attack-goal-enumerator`、"
+            "`threat-code-evidence-mapper`。"
+            "代码量较大时，可以按顶层目录、主要语言、外部入口类型、协议/接口族或 MCP 产品模块"
+            "派发多个 `threat-asset-enumerator` 分片实例，再由主 Agent 合并去重。"
+            "资产/风险、候选路径或接口较多时，也可以按资产组、风险类型、接口族或候选路径组"
+            "派发多个 `threat-attack-goal-enumerator` 和 `threat-code-evidence-mapper` 分片实例；"
+            "不要按资产×接口×风险做笛卡尔积派发。"
+            "如果当前运行环境没有子 Agent/Task 能力，主 Agent 必须按相同三个角色自行完成分析。\n"
+        )
+    return prompt
 
 
 def _attack_goals_from_base_output(base_output: dict[str, Any]) -> list[dict[str, Any]]:
