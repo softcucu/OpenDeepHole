@@ -2,6 +2,7 @@
 
 ## 2026-07-14
 
+- **修复** Agent 共享 deephole-code MCP 网关在重启或跨线程事件循环处理 Streamable HTTP SSE 时可能报 `Event ... is bound to a different event loop`：显式要求将 SSE 退出状态按事件循环隔离的 `sse-starlette>=3.0.0`，Linux/Windows Agent 启动器也会识别已安装的旧版并重新安装依赖
 - **修复** OpenCode/nga 任务不再请求原生 JSON Schema 输出，避免普通文本 JSON 响应被误判为 `OpenCode response did not contain native structured output` 并耗尽重试；JSON Schema 仅作为普通文本结果约束注入提示，Agent 从回复文本本地提取 JSON，提取失败则交回业务层沿用原有解析和重试逻辑
 
 ## 2026-07-13

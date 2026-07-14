@@ -107,6 +107,65 @@ def test_streamable_http_tool_call_is_logged_without_result_body(
     assert source_marker not in output
 
 
+def test_streamable_http_survives_gateway_restart_across_event_loops(
+    tmp_path, monkeypatch
+) -> None:
+    project_dir = tmp_path / "project"
+    project_dir.mkdir()
+    source_marker = "MCP_MULTI_LOOP_SOURCE_MARKER"
+    _write_code_index(
+        project_dir,
+        f"int target(void) {{ /* {source_marker} */ return 9; }}",
+    )
+
+    async def call_tool(port: int):
+        async with streamable_http_client(f"http://127.0.0.1:{port}/mcp") as streams:
+            read_stream, write_stream, _get_session_id = streams
+            async with ClientSession(
+                read_stream,
+                write_stream,
+                read_timeout_seconds=timedelta(seconds=3),
+            ) as session:
+                await session.initialize()
+                return await session.call_tool(
+                    "view_function_code",
+                    {"project_id": "scan-restart", "function_name": "target"},
+                    read_timeout_seconds=timedelta(seconds=3),
+                )
+
+    for _attempt in range(2):
+        try:
+            server = LocalMCPServer(
+                project_dir=project_dir,
+                project_id="scan-restart",
+            )
+        except PermissionError:
+            pytest.skip("sandbox does not allow loopback sockets")
+        wait_ready = server._wait_ready
+        monkeypatch.setattr(
+            server,
+            "_wait_ready",
+            lambda wait_ready=wait_ready: wait_ready(timeout=3.0),
+        )
+
+        try:
+            try:
+                port = server.start()
+            except RuntimeError as exc:
+                if isinstance(exc.__cause__, PermissionError):
+                    pytest.skip("sandbox does not allow loopback listeners")
+                raise
+            result = asyncio.run(asyncio.wait_for(call_tool(port), timeout=5.0))
+        finally:
+            server.stop()
+            shutdown_local_mcp_gateway()
+
+        assert result.isError is False
+        assert any(
+            source_marker in getattr(block, "text", "") for block in result.content
+        )
+
+
 def test_wait_ready_fails_when_server_thread_exits(monkeypatch) -> None:
     monkeypatch.setattr("agent.local_mcp._find_free_port", lambda: 43123)
     server = LocalMCPServer()

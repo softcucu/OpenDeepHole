@@ -41,7 +41,7 @@ for /f "delims=" %%I in ('%PYTHON_CMD% -c "import sysconfig; print(sysconfig.get
 if defined PYTHON_SCRIPTS set "PATH=%PYTHON_SCRIPTS%;%PATH%"
 
 set "MISSING_DEPS="
-%PYTHON_CMD% -c "import semgrep, httpx, websockets, yaml, pydantic, tree_sitter, tree_sitter_cpp, uvicorn, fastapi; from mcp.server.fastmcp import FastMCP" 2>nul
+%PYTHON_CMD% -c "import semgrep, httpx, websockets, yaml, pydantic, tree_sitter, tree_sitter_cpp, uvicorn, fastapi; from importlib.metadata import version; from mcp.server.fastmcp import FastMCP; assert int(version('sse-starlette').split('.', 1)[0]) >= 3" 2>nul
 if errorlevel 1 set "MISSING_DEPS=1"
 
 where semgrep >nul 2>nul

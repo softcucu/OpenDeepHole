@@ -102,6 +102,21 @@ class AgentRuntimePackageTests(unittest.TestCase):
             self.assertNotIn("pacman -S --needed", text)
             self.assertNotIn("INSTALL_MSYS2", text)
 
+    def test_mcp_sse_dependency_requires_multi_loop_safe_version(self) -> None:
+        root = Path(__file__).resolve().parent.parent
+        requirements = (root / "requirements.txt").read_text(encoding="utf-8")
+        agent_requirements = (root / "requirements-agent.txt").read_text(
+            encoding="utf-8"
+        )
+        script_text = (root / "run_agent.sh").read_text(encoding="utf-8")
+        batch_text = (root / "run_agent.bat").read_text(encoding="utf-8")
+
+        self.assertIn("sse-starlette>=3.0.0", requirements.splitlines())
+        self.assertIn("sse-starlette>=3.0.0", agent_requirements.splitlines())
+        for text in (script_text, batch_text):
+            self.assertIn("version('sse-starlette')", text)
+            self.assertIn(">= 3", text)
+
     def test_windows_launcher_detects_python_without_py_launcher(self) -> None:
         root = Path(__file__).resolve().parent.parent
         batch_text = (root / "run_agent.bat").read_text(encoding="utf-8")

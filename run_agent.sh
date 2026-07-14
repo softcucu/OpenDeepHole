@@ -95,7 +95,7 @@ check_source_index_tools() {
 add_bundled_ctags_path
 
 # Install dependencies if needed (only on first run or after update)
-if ! "$PYTHON_CMD" -c "import httpx, websockets, yaml, pydantic, tree_sitter, tree_sitter_cpp, uvicorn, fastapi; from mcp.server.fastmcp import FastMCP" 2>/dev/null || ! command -v semgrep >/dev/null 2>&1; then
+if ! "$PYTHON_CMD" -c "import httpx, websockets, yaml, pydantic, tree_sitter, tree_sitter_cpp, uvicorn, fastapi; from importlib.metadata import version; from mcp.server.fastmcp import FastMCP; assert int(version('sse-starlette').split('.', 1)[0]) >= 3" 2>/dev/null || ! command -v semgrep >/dev/null 2>&1; then
     echo "Installing agent dependencies..."
     "$PYTHON_CMD" -m pip install -r requirements-agent.txt
     PYTHON_SCRIPTS="$("$PYTHON_CMD" -c 'import sysconfig; print(sysconfig.get_path("scripts") or "")' 2>/dev/null || true)"
