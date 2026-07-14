@@ -6,7 +6,7 @@ import asyncio
 import inspect
 import json
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Awaitable, Callable
 from uuid import uuid4
 
 from backend.models import ThreatAnalysis, ThreatAnalysisSources, ThreatAttackPath
@@ -78,12 +78,23 @@ async def run_attack_tree_threat_analysis(
     (run_dir / "stream").mkdir(parents=True, exist_ok=True)
     contexts_dir.mkdir(parents=True, exist_ok=True)
     stages_dir.mkdir(parents=True, exist_ok=True)
+    stream_lock = asyncio.Lock()
 
+    async def append_attack_paths(output: dict[str, Any], defaults: dict[str, Any] | None = None) -> None:
+        async with stream_lock:
+            await _append_attack_paths_from_output(
+                stream_path,
+                output,
+                defaults=defaults,
+                on_attack_paths=on_attack_paths,
+            )
+
+    threat_config = getattr(config, "threat_analysis", None)
     product_mcp_name = str(
-        getattr(config.threat_analysis, "product_mcp_name", "product-info") or ""
+        getattr(threat_config, "product_mcp_name", "product-info") or ""
     ).strip()
     product_mcp_detection_timeout = int(
-        getattr(config.threat_analysis, "product_mcp_detection_timeout_seconds", 60) or 60
+        getattr(threat_config, "product_mcp_detection_timeout_seconds", 60) or 60
     )
     mcp_detection = detect_product_mcp(
         workspace=workspace,
@@ -131,19 +142,18 @@ async def run_attack_tree_threat_analysis(
         task_label="基础资产与接口建模",
     )
     base_output = read_json_object(base_output_path)
-    await _append_attack_paths_from_output(
-        stream_path,
-        base_output,
-        on_attack_paths=on_attack_paths,
-    )
+    await append_attack_paths(base_output)
 
     attack_goals = _attack_goals_from_base_output(base_output)[:_MAX_GOALS]
-    domain_tasks: list[dict[str, Any]] = []
-    for index, goal in enumerate(attack_goals, start=1):
+    goal_concurrency = _stage_concurrency(config, len(attack_goals))
+    if on_output and len(attack_goals) > 1:
+        on_output(f"[threat-analysis] 攻击目标分解并发度：{goal_concurrency}/{len(attack_goals)}")
+
+    async def _run_goal_stage(index: int, goal: dict[str, Any]) -> dict[str, Any]:
         if _cancelled(cancel_event):
-            break
-        input_path = contexts_dir / "goal" / f"{_safe_id(goal, 'attack_goal_id', index)}.input.json"
-        output_path = stages_dir / "goal" / f"{_safe_id(goal, 'attack_goal_id', index)}.output.json"
+            return {}
+        input_path = contexts_dir / "goal" / f"{_stage_file_stem(goal, 'attack_goal_id', index)}.input.json"
+        output_path = stages_dir / "goal" / f"{_stage_file_stem(goal, 'attack_goal_id', index)}.output.json"
         write_json(input_path, {
             "project_id": project_id,
             "product": product,
@@ -169,7 +179,16 @@ async def run_attack_tree_threat_analysis(
             attempt=index,
             task_label=f"攻击目标分解 {index}/{len(attack_goals)}",
         )
-        goal_output = read_json_object(output_path)
+        return read_json_object(output_path)
+
+    goal_outputs = await _run_stage_batch(
+        attack_goals,
+        concurrency=goal_concurrency,
+        run_one=_run_goal_stage,
+    )
+
+    domain_tasks: list[dict[str, Any]] = []
+    for goal, goal_output in zip(attack_goals, goal_outputs):
         for domain in _dict_items(goal_output.get("domains")):
             domain_tasks.append({"attack_goal": goal, "attack_domain": domain})
             if len(domain_tasks) >= _MAX_DOMAINS:
@@ -177,13 +196,16 @@ async def run_attack_tree_threat_analysis(
         if len(domain_tasks) >= _MAX_DOMAINS:
             break
 
-    surface_tasks: list[dict[str, Any]] = []
-    for index, task in enumerate(domain_tasks, start=1):
+    domain_concurrency = _stage_concurrency(config, len(domain_tasks))
+    if on_output and len(domain_tasks) > 1:
+        on_output(f"[threat-analysis] 攻击域分析并发度：{domain_concurrency}/{len(domain_tasks)}")
+
+    async def _run_domain_stage(index: int, task: dict[str, Any]) -> dict[str, Any]:
         if _cancelled(cancel_event):
-            break
+            return {}
         domain = task["attack_domain"]
-        input_path = contexts_dir / "domain" / f"{_safe_id(domain, 'domain_id', index)}.input.json"
-        output_path = stages_dir / "domain" / f"{_safe_id(domain, 'domain_id', index)}.output.json"
+        input_path = contexts_dir / "domain" / f"{_stage_file_stem(domain, 'domain_id', index)}.input.json"
+        output_path = stages_dir / "domain" / f"{_stage_file_stem(domain, 'domain_id', index)}.output.json"
         write_json(input_path, {
             "project_id": project_id,
             "product": product,
@@ -209,7 +231,16 @@ async def run_attack_tree_threat_analysis(
             attempt=index,
             task_label=f"攻击域分析 {index}/{len(domain_tasks)}",
         )
-        domain_output = read_json_object(output_path)
+        return read_json_object(output_path)
+
+    domain_outputs = await _run_stage_batch(
+        domain_tasks,
+        concurrency=domain_concurrency,
+        run_one=_run_domain_stage,
+    )
+
+    surface_tasks: list[dict[str, Any]] = []
+    for task, domain_output in zip(domain_tasks, domain_outputs):
         for surface in _dict_items(domain_output.get("surfaces")):
             surface_tasks.append({**task, "attack_surface": surface})
             if len(surface_tasks) >= _MAX_SURFACES:
@@ -217,13 +248,16 @@ async def run_attack_tree_threat_analysis(
         if len(surface_tasks) >= _MAX_SURFACES:
             break
 
-    confirmation_tasks: list[dict[str, Any]] = []
-    for index, task in enumerate(surface_tasks, start=1):
+    surface_concurrency = _stage_concurrency(config, len(surface_tasks))
+    if on_output and len(surface_tasks) > 1:
+        on_output(f"[threat-analysis] 攻击面分析并发度：{surface_concurrency}/{len(surface_tasks)}")
+
+    async def _run_surface_stage(index: int, task: dict[str, Any]) -> dict[str, Any]:
         if _cancelled(cancel_event):
-            break
+            return {}
         surface = task["attack_surface"]
-        input_path = contexts_dir / "surface" / f"{_safe_id(surface, 'surface_id', index)}.input.json"
-        output_path = stages_dir / "surface" / f"{_safe_id(surface, 'surface_id', index)}.output.json"
+        input_path = contexts_dir / "surface" / f"{_stage_file_stem(surface, 'surface_id', index)}.input.json"
+        output_path = stages_dir / "surface" / f"{_stage_file_stem(surface, 'surface_id', index)}.output.json"
         write_json(input_path, {
             "project_id": project_id,
             "product": product,
@@ -250,12 +284,17 @@ async def run_attack_tree_threat_analysis(
             task_label=f"攻击面分析 {index}/{len(surface_tasks)}",
         )
         surface_output = read_json_object(output_path)
-        await _append_attack_paths_from_output(
-            stream_path,
-            surface_output,
-            defaults=task,
-            on_attack_paths=on_attack_paths,
-        )
+        await append_attack_paths(surface_output, defaults=task)
+        return surface_output
+
+    surface_outputs = await _run_stage_batch(
+        surface_tasks,
+        concurrency=surface_concurrency,
+        run_one=_run_surface_stage,
+    )
+
+    confirmation_tasks: list[dict[str, Any]] = []
+    for task, surface_output in zip(surface_tasks, surface_outputs):
         for method_task in _dict_items(surface_output.get("method_confirmation_tasks")):
             confirmation_tasks.append({**task, "method_confirmation_task": method_task})
             if len(confirmation_tasks) >= _MAX_CONFIRMATIONS:
@@ -263,12 +302,16 @@ async def run_attack_tree_threat_analysis(
         if len(confirmation_tasks) >= _MAX_CONFIRMATIONS:
             break
 
-    for index, task in enumerate(confirmation_tasks, start=1):
+    confirmation_concurrency = _stage_concurrency(config, len(confirmation_tasks))
+    if on_output and len(confirmation_tasks) > 1:
+        on_output(f"[threat-analysis] 方法确认并发度：{confirmation_concurrency}/{len(confirmation_tasks)}")
+
+    async def _run_confirmation_stage(index: int, task: dict[str, Any]) -> dict[str, Any]:
         if _cancelled(cancel_event):
-            break
+            return {}
         method_task = task["method_confirmation_task"]
-        input_path = contexts_dir / "method" / f"{_safe_id(method_task, 'task_id', index)}.input.json"
-        output_path = stages_dir / "method" / f"{_safe_id(method_task, 'task_id', index)}.output.json"
+        input_path = contexts_dir / "method" / f"{_stage_file_stem(method_task, 'task_id', index)}.input.json"
+        output_path = stages_dir / "method" / f"{_stage_file_stem(method_task, 'task_id', index)}.output.json"
         write_json(input_path, {
             "project_id": project_id,
             "product": product,
@@ -295,12 +338,14 @@ async def run_attack_tree_threat_analysis(
             task_label=f"方法确认 {index}/{len(confirmation_tasks)}",
         )
         method_output = read_json_object(output_path)
-        await _append_attack_paths_from_output(
-            stream_path,
-            method_output,
-            defaults=task,
-            on_attack_paths=on_attack_paths,
-        )
+        await append_attack_paths(method_output, defaults=task)
+        return method_output
+
+    await _run_stage_batch(
+        confirmation_tasks,
+        concurrency=confirmation_concurrency,
+        run_one=_run_confirmation_stage,
+    )
 
     paths = read_attack_paths_jsonl(stream_path)
     sources = ThreatAnalysisSources(
@@ -381,6 +426,62 @@ async def _invoke_stage(
             on_output(f"[threat-analysis] {task_label} 失败，继续后续可用结果：{exc}")
         if not output_path.is_file():
             write_json(output_path, {"error": str(exc)})
+
+
+def _stage_concurrency(config: Any, pending_count: int) -> int:
+    if pending_count <= 1:
+        return 1
+    try:
+        from backend.opencode.model_pool import total_model_capacity
+
+        global_concurrency = int(getattr(config, "opencode_concurrency", 1) or 1)
+        capacity = total_model_capacity(
+            config.opencode,
+            global_concurrency=max(1, global_concurrency),
+            required_capability="high",
+        )
+    except Exception:
+        capacity = 1
+    return max(1, min(int(capacity or 1), pending_count))
+
+
+async def _run_stage_batch(
+    items: list[dict[str, Any]],
+    *,
+    concurrency: int,
+    run_one: Callable[[int, dict[str, Any]], Awaitable[dict[str, Any]]],
+) -> list[dict[str, Any]]:
+    if not items:
+        return []
+    concurrency = max(1, min(concurrency, len(items)))
+    semaphore = asyncio.Semaphore(concurrency)
+
+    async def _guarded(index: int, item: dict[str, Any]) -> tuple[int, dict[str, Any]]:
+        async with semaphore:
+            return index, await run_one(index, item)
+
+    tasks = [
+        asyncio.create_task(_guarded(index, item))
+        for index, item in enumerate(items, start=1)
+    ]
+    results: list[tuple[int, dict[str, Any]]] = []
+    try:
+        for task in asyncio.as_completed(tasks):
+            results.append(await task)
+    except asyncio.CancelledError:
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        raise
+    except Exception:
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        raise
+    results.sort(key=lambda item: item[0])
+    return [output for _index, output in results]
 
 
 def _stage_prompt(
@@ -483,6 +584,10 @@ def _dict_items(value: Any) -> list[dict[str, Any]]:
 def _safe_id(data: dict[str, Any], key: str, index: int) -> str:
     raw = str(data.get(key) or data.get("id") or index)
     return "".join(ch if ch.isalnum() or ch in "._-" else "_" for ch in raw)[:80] or str(index)
+
+
+def _stage_file_stem(data: dict[str, Any], key: str, index: int) -> str:
+    return f"{index:04d}-{_safe_id(data, key, index)}"
 
 
 def _cancelled(cancel_event) -> bool:

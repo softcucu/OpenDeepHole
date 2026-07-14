@@ -347,10 +347,9 @@ def test_threat_analysis_result_uses_project_root(tmp_path: Path) -> None:
         project = tmp_path / "project"
         scan_root = project / "src"
         scan_root.mkdir(parents=True)
-        skill = tmp_path / "attack-tree-threat-analysis.md"
-        reference = tmp_path / "attack-method-reference-catalog.md"
-        skill.write_text("skill", encoding="utf-8")
-        reference.write_text("reference", encoding="utf-8")
+        repo_root = Path(__file__).resolve().parent.parent
+        skill = repo_root / "attack-tree-threat-analysis.md"
+        reference = repo_root / "attack-method-reference-catalog.md"
 
         cfg = SimpleNamespace(
             opencode=SimpleNamespace(
@@ -371,11 +370,11 @@ def test_threat_analysis_result_uses_project_root(tmp_path: Path) -> None:
         async def fake_invoke(call_workspace: Path, prompt: str, *args, **kwargs) -> None:
             captured["workspace"] = call_workspace
             captured["prompt"] = prompt
+            captured["project_dir"] = kwargs["project_dir"]
             captured["writable_paths"] = kwargs["writable_paths"]
-            (project / "res.json").write_text(
-                '{"schema_version":"1.0","analysis_id":"ATA-SCAN","assets":[]}',
-                encoding="utf-8",
-            )
+            match = re.search(r"将阶段结果写入输出 JSON 文件：`([^`]+)`", prompt)
+            assert match is not None
+            Path(match.group(1)).write_text("{}", encoding="utf-8")
 
         with (
             patch("backend.opencode.runner.get_config", return_value=cfg),
@@ -391,12 +390,106 @@ def test_threat_analysis_result_uses_project_root(tmp_path: Path) -> None:
             )
 
         assert analysis is not None
-        result_path = project / "res.json"
+        result_path = project / "runs" / "scan-1" / "res.json"
         assert result_path.is_file()
-        assert str(result_path) in str(captured["prompt"])
+        assert (project / "res.json").is_file()
         assert str(project.resolve()) in str(captured["prompt"])
         assert captured["workspace"] == workspace
-        assert captured["writable_paths"] == [project.resolve()]
+        assert captured["project_dir"] == project.resolve()
+        assert captured["writable_paths"] == [project.resolve() / "runs" / "scan-1"]
+
+    asyncio.run(run())
+
+
+def test_attack_tree_threat_analysis_runs_goal_stage_concurrently(tmp_path: Path) -> None:
+    async def run() -> None:
+        scans_dir = tmp_path / "scans"
+        workspace = scans_dir / "scan-1" / "opencode_workspace"
+        workspace.mkdir(parents=True)
+        project = tmp_path / "project"
+        scan_root = project / "src"
+        scan_root.mkdir(parents=True)
+        (scan_root / "app.py").write_text("def main():\n    return 0\n", encoding="utf-8")
+        repo_root = Path(__file__).resolve().parent.parent
+        skill = repo_root / "attack-tree-threat-analysis.md"
+        reference = repo_root / "attack-method-reference-catalog.md"
+
+        cfg = SimpleNamespace(
+            opencode=SimpleNamespace(
+                mock=False,
+                tool="opencode",
+                executable="opencode",
+                invocation_mode="serve",
+                model="",
+                timeout=30,
+                max_retries=0,
+                models=[
+                    {
+                        "id": "default-high",
+                        "use_default_model": True,
+                        "capability": "high",
+                        "max_concurrency": 2,
+                    }
+                ],
+            ),
+            opencode_concurrency=2,
+            threat_analysis=SimpleNamespace(
+                product_mcp_name="",
+                product_mcp_detection_timeout_seconds=1,
+            ),
+            storage=SimpleNamespace(scans_dir=str(scans_dir)),
+        )
+        running_goal = 0
+        peak_goal = 0
+        output_lines: list[str] = []
+
+        def output_path_from_prompt(prompt: str) -> Path:
+            match = re.search(r"将阶段结果写入输出 JSON 文件：`([^`]+)`", prompt)
+            assert match is not None
+            return Path(match.group(1))
+
+        async def fake_invoke(call_workspace: Path, prompt: str, *args, **kwargs) -> None:
+            nonlocal running_goal, peak_goal
+            output_path = output_path_from_prompt(prompt)
+            if "threat-asset-interface-agent" in prompt:
+                output_path.write_text(
+                    json.dumps({
+                        "attack_goals": [
+                            {"attack_goal_id": "GOAL-1", "name": "goal 1"},
+                            {"attack_goal_id": "GOAL-2", "name": "goal 2"},
+                        ]
+                    }),
+                    encoding="utf-8",
+                )
+                return
+            if "threat-attack-goal-agent" in prompt:
+                running_goal += 1
+                peak_goal = max(peak_goal, running_goal)
+                try:
+                    await asyncio.sleep(0.05)
+                finally:
+                    running_goal -= 1
+                output_path.write_text('{"domains":[]}', encoding="utf-8")
+                return
+            output_path.write_text("{}", encoding="utf-8")
+
+        with (
+            patch("backend.opencode.runner.get_config", return_value=cfg),
+            patch("backend.opencode.runner._invoke_opencode", new=AsyncMock(side_effect=fake_invoke)),
+        ):
+            analysis = await run_threat_analysis_audit(
+                workspace=workspace,
+                project_id="scan-1",
+                skill_path=skill,
+                reference_catalog_path=reference,
+                project_dir=project,
+                code_scan_path=scan_root,
+                on_output=output_lines.append,
+            )
+
+        assert analysis is not None
+        assert peak_goal == 2
+        assert any("攻击目标分解并发度：2/2" in line for line in output_lines)
 
     asyncio.run(run())
 
