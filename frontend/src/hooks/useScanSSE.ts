@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, useCallback } from "react";
 import { scanSSEUrl, getScanStatus, getFpReview, getAgentIndexStatus } from "../api/client";
+import { getScanThreatAnalysis } from "../features/threatAnalysis/api";
 import type {
   FpReviewJob,
   FpReviewStatus,
@@ -177,6 +178,12 @@ async function refreshFullState(
     setIndexStatus(index);
   } catch {
     // transient — index_status SSE may still arrive later
+  }
+  try {
+    const analysis = await getScanThreatAnalysis(scanId);
+    setScan((prev) => prev ? { ...prev, threat_analysis: analysis } : prev);
+  } catch {
+    // 404 = no threat analysis snapshot yet
   }
 }
 

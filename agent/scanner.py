@@ -17,7 +17,15 @@ import yaml
 from agent.config import AgentConfig, apply_network_env
 from agent.reporter import Reporter
 from backend.checker_sync import unpack_checker_packages
-from backend.models import Candidate, FeedbackEntry, ScanEvent, ThreatAnalysis, ThreatAttackPath, Vulnerability
+from backend.models import (
+    Candidate,
+    FeedbackEntry,
+    ScanEvent,
+    ThreatAnalysis,
+    ThreatAnalysisSources,
+    ThreatAttackPath,
+    Vulnerability,
+)
 from backend.opencode.model_pool import NoAvailableModelError
 from backend.opencode.output_format import with_local_timestamp
 from backend.registry import CHECKERS_DIR_ENV
@@ -37,6 +45,18 @@ GIT_HISTORY_PIPELINE_ENABLED = False
 MEMORY_API_DISCOVERY_PIPELINE_ENABLED = False
 SCAN_MODE_FULL = "full"
 SCAN_MODE_THREAT_ANALYSIS_ONLY = "threat_analysis_only"
+STREAMING_THREAT_ANALYSIS_ID_PREFIX = "STREAMING-ATA-"
+
+
+def _streaming_threat_analysis_id(scan_id: str) -> str:
+    return f"{STREAMING_THREAT_ANALYSIS_ID_PREFIX}{scan_id}"
+
+
+def _is_streaming_threat_analysis(analysis: ThreatAnalysis | None) -> bool:
+    return bool(
+        analysis
+        and analysis.analysis_id.startswith(STREAMING_THREAT_ANALYSIS_ID_PREFIX)
+    )
 
 
 class _StaticProgressGate:
@@ -445,6 +465,7 @@ async def _run_threat_analysis_phase(
     try:
         from backend.threat_analysis import (
             ThreatAnalysisRunContext,
+            build_analysis_from_attack_paths,
             build_threat_analysis_scan_scope,
             get_threat_analysis_implementation,
             threat_analysis_enabled,
@@ -458,12 +479,14 @@ async def _run_threat_analysis_phase(
 
         root_dir = Path(__file__).resolve().parent.parent
         implementation = get_threat_analysis_implementation(config)
+        scan_scope = build_threat_analysis_scan_scope(project_path, code_scan_path)
         attack_path_audit_mode = getattr(
             config.threat_analysis,
             "attack_path_audit_mode",
             "after_analysis",
         )
         immediate_attack_path_audit = attack_path_audit_mode == "immediate"
+        streamed_threat_analysis_signature: tuple[str, ...] | None = None
         streamed_threat_audit_task_ids: set[str] = set()
         streamed_threat_audit_runs: list[asyncio.Task] = []
         streaming_audit_lock = asyncio.Lock()
@@ -472,6 +495,25 @@ async def _run_threat_analysis_phase(
             if retry_threat_audit_task_ids is not None
             else None
         )
+
+        async def _publish_streaming_threat_analysis(paths: list[ThreatAttackPath]) -> None:
+            nonlocal streamed_threat_analysis_signature
+            if cancel_event.is_set() or not paths:
+                return
+            signature = tuple(sorted(path.fingerprint or path.path_id for path in paths))
+            if signature == streamed_threat_analysis_signature:
+                return
+            streamed_threat_analysis_signature = signature
+            analysis = build_analysis_from_attack_paths(
+                paths,
+                analysis_id=_streaming_threat_analysis_id(scan_id),
+                sources=ThreatAnalysisSources(
+                    repositories=[scan_scope.code_scan_relative_path or "."],
+                    documents=[],
+                ),
+                scan_scope=scan_scope,
+            )
+            await reporter.push_threat_analysis(scan_id, analysis.model_dump())
 
         async def _schedule_streaming_threat_audits(paths: list[ThreatAttackPath]) -> None:
             if (
@@ -485,7 +527,7 @@ async def _run_threat_analysis_phase(
             partial_analysis = ThreatAnalysis(
                 schema_version="1.1",
                 analysis_id=f"{scan_id}-streaming-threat-paths",
-                scan_scope=build_threat_analysis_scan_scope(project_path, code_scan_path),
+                scan_scope=scan_scope,
                 attack_paths=paths,
             )
             tasks = build_threat_audit_tasks(scan_id, partial_analysis)
@@ -517,6 +559,10 @@ async def _run_threat_analysis_phase(
                     ))
                 )
 
+        async def _handle_streamed_attack_paths(paths: list[ThreatAttackPath]) -> None:
+            await _publish_streaming_threat_analysis(paths)
+            await _schedule_streaming_threat_audits(paths)
+
         async def _wait_for_streaming_threat_audits() -> None:
             if not streamed_threat_audit_runs:
                 return
@@ -535,7 +581,14 @@ async def _run_threat_analysis_phase(
 
             existing_analysis = await reporter.get_threat_analysis(scan_id)
             if existing_analysis is not None:
-                if threat_analysis_scope_matches(existing_analysis, project_path, code_scan_path):
+                if _is_streaming_threat_analysis(existing_analysis):
+                    maybe = emit(
+                        "threat_analysis",
+                        "发现上次中断的实时威胁分析快照，重新分析以生成最终结果...",
+                    )
+                    if asyncio.iscoroutine(maybe):
+                        await maybe
+                elif threat_analysis_scope_matches(existing_analysis, project_path, code_scan_path):
                     maybe = emit(
                         "threat_analysis",
                         "复用本次任务已完成的威胁分析结果，跳过重新分析",
@@ -577,11 +630,7 @@ async def _run_threat_analysis_phase(
                         with_local_timestamp(line, prefix="[threat]"),
                         flush=True,
                     ),
-                    on_attack_paths=(
-                        _schedule_streaming_threat_audits
-                        if immediate_attack_path_audit
-                        else None
-                    ),
+                    on_attack_paths=_handle_streamed_attack_paths,
                     cancel_event=cancel_event,
                 )
             )

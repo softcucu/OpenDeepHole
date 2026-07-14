@@ -3,6 +3,7 @@ import unittest
 import time
 from pathlib import Path
 
+from agent.scanner import _is_streaming_threat_analysis, _streaming_threat_analysis_id
 from agent.threat_auditor import _scan_path_from_analysis, build_threat_audit_tasks
 from backend.opencode.runner import _read_fresh_threat_analysis_result
 from backend.models import ScanItemStatus, ScanMeta, ScanStatus, ThreatAuditTask, Vulnerability
@@ -42,6 +43,19 @@ def _scan(scan_id: str) -> tuple[ScanStatus, ScanMeta]:
 
 
 class ThreatAnalysisParserTests(unittest.TestCase):
+    def test_streaming_threat_analysis_marker(self) -> None:
+        streaming = parse_threat_analysis_data({
+            "analysis_id": _streaming_threat_analysis_id("scan-1"),
+            "assets": [],
+        })
+        final = parse_threat_analysis_data({
+            "analysis_id": "ATA-FINAL",
+            "assets": [],
+        })
+
+        self.assertTrue(_is_streaming_threat_analysis(streaming))
+        self.assertFalse(_is_streaming_threat_analysis(final))
+
     def test_parse_attack_tree_res_json_shape(self) -> None:
         analysis = parse_threat_analysis_data({
             "schema_version": "1.0",

@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import type {
   ScanEvent,
   ThreatAnalysis,
@@ -54,7 +54,7 @@ export function ThreatAnalysisPanel({
                 {loading ? "威胁分析运行中" : isDone ? "未生成威胁分析结果" : "等待威胁分析结果"}
               </h2>
               <p className="mt-1 text-sm text-slate-400">
-                {isDone ? "当前扫描没有可展示的 res.json 结果。" : "结果生成后会显示关键资产、攻击目标和攻击树。"}
+                {isDone ? "当前扫描没有可展示的 res.json 结果。" : "攻击路径写入后会实时显示关键资产、攻击目标和攻击树。"}
               </p>
             </div>
           </div>
@@ -202,8 +202,15 @@ function ThreatSummaryStrip({
   attackPathCount: number;
 }) {
   const sourceCount = analysis.sources.repositories.length + analysis.sources.documents.length;
+  const isStreaming = analysis.analysis_id.startsWith("STREAMING-ATA-");
   return (
     <div className="rounded-lg border border-slate-700 bg-slate-900/70 p-4">
+      {isStreaming && (
+        <div className="mb-3 inline-flex items-center gap-2 rounded border border-cyan-500/40 bg-cyan-500/10 px-2 py-1 text-xs font-medium text-cyan-200">
+          <span className="h-1.5 w-1.5 rounded-full bg-cyan-300" />
+          实时攻击树
+        </div>
+      )}
       <div className="grid grid-cols-2 gap-3 lg:grid-cols-6">
         <ThreatSummaryItem label="关键资产" value={analysis.assets.length} />
         <ThreatSummaryItem label="攻击目标" value={analysis.attack_trees.length} />
@@ -247,8 +254,15 @@ function ThreatAssetCard({
   trees: ThreatAttackTree[];
   mappingBySurface: Map<string, ThreatCodePathMapping>;
 }) {
-  const [expandedTreeId, setExpandedTreeId] = useState<string | null>(null);
+  const [expandedTreeId, setExpandedTreeId] = useState<string | null>(trees[0]?.tree_id ?? null);
   const riskById = useMemo(() => new Map(asset.risks.map((risk) => [risk.risk_id, risk])), [asset.risks]);
+  const treeIdsKey = trees.map((tree) => tree.tree_id).join("\u0000");
+  useEffect(() => {
+    setExpandedTreeId((current) => {
+      if (current && trees.some((tree) => tree.tree_id === current)) return current;
+      return trees[0]?.tree_id ?? null;
+    });
+  }, [treeIdsKey]);
   const expandedTree = trees.find((tree) => tree.tree_id === expandedTreeId) ?? null;
 
   return (
