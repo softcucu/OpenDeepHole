@@ -23,17 +23,18 @@ threat_analysis:
 
 - 检测到时，基础建模阶段优先使用该 MCP 获取价值资产、高风险外部接口和关联关系，再做代码增量补充。
 - 未检测到时，基础建模阶段完全从代码识别资产、接口和关联关系。
-- 基础建模阶段会在主 `threat-asset-interface-agent` 内启用三个只读子 agent：
-  `threat-asset-enumerator`、`threat-attack-goal-enumerator`、
-  `threat-code-evidence-mapper`。主 agent 汇总三方结果后仍输出原有
+- 基础建模阶段由 Harness 按代码索引、顶层目录或语言启动多个
+  `threat-asset-interface-agent` 分片协调 Agent。每个协调 Agent 可以在自己的
+  scope 内派发 `threat-asset-enumerator`、`threat-attack-goal-enumerator`、
+  `threat-code-evidence-mapper` 子 Agent 做交叉分析，再输出完整基础模型片段。
+- Harness 最终合并多个分片协调 Agent 的结果，仍输出原有
   `assets`、`high_risk_external_interfaces`、`asset_interface_links`、
   `risks`、`attack_goals` JSON 契约。
-- 大代码仓可以按顶层目录、主要语言、入口类型、协议/接口族或 MCP 产品模块
-  派发多个 `threat-asset-enumerator` 分片实例，再由主 agent 合并去重。
-- 资产/风险较多时，`threat-attack-goal-enumerator` 可以按资产组、风险类型、
-  业务域或接口族分片；候选路径或接口较多时，`threat-code-evidence-mapper`
-  可以按候选代码路径组、接口族、资产组或攻击目标组分片。分片要避免
-  资产 × 接口 × 风险的笛卡尔积爆炸。
+- 分片要避免资产 × 接口 × 风险的笛卡尔积爆炸；优先按顶层目录、主要语言、
+  外部入口类型、协议/接口族或 MCP 产品模块粗分片。
+- 基础建模之后采用攻击树优先调度：拿到一个攻击目标后立即展开该目标下的
+  攻击域、攻击面和必要的方法确认，尽快产出这一棵攻击树；不会先把所有攻击目标
+  全部分解完再进入下一层。
 
 新流程的事实源是 `runs/<scan_id>/stream/attack_paths.jsonl`。最终
 `runs/<scan_id>/res.json` 由 JSONL 归并生成，项目根目录 `res.json` 仅作为旧缓存兼容副本。
@@ -41,6 +42,9 @@ threat_analysis:
 默认实现会安装以下内置 Skill 到 OpenCode workspace：
 
 - `threat-asset-interface-agent`
+- `threat-asset-enumerator`
+- `threat-attack-goal-enumerator`
+- `threat-code-evidence-mapper`
 - `threat-attack-goal-agent`
 - `threat-attack-domain-agent`
 - `threat-attack-surface-agent`

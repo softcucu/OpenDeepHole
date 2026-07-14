@@ -108,22 +108,32 @@ export function ThreatAnalysisPanel({
 }
 
 function threatAuditStatusLabel(status: string): string {
-  if (status === "pending") return "待创建";
-  if (status === "queued") return "排队中";
-  if (status === "running") return "运行中";
-  if (status === "completed") return "已完成";
-  if (status === "timeout") return "超时";
-  if (status === "no_result") return "无结果";
-  if (status === "cancelled") return "已取消";
-  if (status === "failed") return "失败";
-  return status || "未知";
+  const normalized = enumKey(status);
+  if (normalized === "pending") return "待创建";
+  if (normalized === "queued") return "排队中";
+  if (normalized === "running") return "运行中";
+  if (normalized === "completed" || normalized === "complete") return "已完成";
+  if (normalized === "timeout") return "超时";
+  if (normalized === "no_result") return "无结果";
+  if (normalized === "cancelled" || normalized === "canceled") return "已取消";
+  if (normalized === "failed" || normalized === "failure" || normalized === "error") return "失败";
+  return chineseOrFallback(status, "未知状态");
 }
 
 function threatAuditStatusClass(status: string): string {
-  if (status === "completed") return pillClass("success");
-  if (status === "running") return pillClass("running");
-  if (status === "queued" || status === "pending") return pillClass("queued");
-  if (status === "failed" || status === "timeout" || status === "no_result" || status === "cancelled") return pillClass("failure");
+  const normalized = enumKey(status);
+  if (normalized === "completed" || normalized === "complete") return pillClass("success");
+  if (normalized === "running") return pillClass("running");
+  if (normalized === "queued" || normalized === "pending") return pillClass("queued");
+  if (
+    normalized === "failed"
+    || normalized === "failure"
+    || normalized === "error"
+    || normalized === "timeout"
+    || normalized === "no_result"
+    || normalized === "cancelled"
+    || normalized === "canceled"
+  ) return pillClass("failure");
   return pillClass("");
 }
 
@@ -151,6 +161,20 @@ function readableThreatLabelFrom(values: Array<string | undefined>, fallback: st
     const normalized = (value || "").trim();
     if (normalized && !looksLikeGeneratedThreatId(normalized)) return normalized;
   }
+  return fallback;
+}
+
+function enumKey(value?: string): string {
+  return (value || "").trim().toLowerCase().replace(/[\s-]+/g, "_");
+}
+
+function containsChinese(value?: string): boolean {
+  return /[\u3400-\u9fff]/.test(value || "");
+}
+
+function chineseOrFallback(value: string | undefined, fallback: string): string {
+  const normalized = (value || "").trim();
+  if (normalized && containsChinese(normalized)) return normalized;
   return fallback;
 }
 
@@ -564,7 +588,7 @@ function ThreatEventList({ events }: { events: ScanEvent[] }) {
           <div key={`${event.timestamp}-${index}`} className="rounded border border-slate-800 bg-slate-950/70 px-3 py-2">
             <div className="flex flex-wrap items-center gap-2 text-xs text-slate-500">
               <span>{event.timestamp ? new Date(event.timestamp).toLocaleString() : ""}</span>
-              <span>{event.phase}</span>
+              <span>{scanEventPhaseLabel(event.phase)}</span>
             </div>
             <div className="mt-1 whitespace-pre-wrap break-words text-sm text-slate-300">{event.message}</div>
           </div>
@@ -595,24 +619,27 @@ function rootGoalName(tree: ThreatAttackTree): string {
 }
 
 function criticalityLabel(value: string): string {
+  const normalized = enumKey(value);
   return {
-    critical: "Critical",
-    high: "High",
-    medium: "Medium",
-    low: "Low",
-  }[value] ?? (value || "Medium");
+    critical: "极高",
+    high: "高",
+    medium: "中",
+    low: "低",
+  }[normalized] ?? chineseOrFallback(value, "中");
 }
 
 function criticalityClass(value: string): string {
+  const normalized = enumKey(value);
   return {
     critical: "border-red-500/40 bg-red-500/10 text-red-200",
     high: "border-amber-500/40 bg-amber-500/10 text-amber-200",
     medium: "border-cyan-500/40 bg-cyan-500/10 text-cyan-200",
     low: "border-slate-600 bg-slate-800 text-slate-300",
-  }[value] ?? "border-slate-600 bg-slate-800 text-slate-300";
+  }[normalized] ?? "border-slate-600 bg-slate-800 text-slate-300";
 }
 
 function assetTypeLabel(value: string): string {
+  const normalized = enumKey(value);
   return {
     service: "服务",
     data: "数据",
@@ -623,10 +650,11 @@ function assetTypeLabel(value: string): string {
     key: "密钥",
     device: "设备",
     other: "其他",
-  }[value] ?? (value || "其他");
+  }[normalized] ?? chineseOrFallback(value, "其他");
 }
 
 function securityPropertyLabel(value: string): string {
+  const normalized = enumKey(value);
   return {
     confidentiality: "机密性",
     integrity: "完整性",
@@ -634,13 +662,19 @@ function securityPropertyLabel(value: string): string {
     authenticity: "真实性",
     authorization: "授权",
     accountability: "可审计",
-  }[value] ?? (value || "风险");
+  }[normalized] ?? chineseOrFallback(value, "风险");
 }
 
 function surfaceTypeLabel(value: string): string {
+  const normalized = enumKey(value);
   return {
     protocol: "协议",
-    api: "API",
+    api: "应用接口",
+    rest: "应用接口",
+    graphql: "应用接口",
+    rpc: "远程调用",
+    web: "网页入口",
+    cli: "命令行",
     interface: "接口",
     service: "服务",
     port: "端口",
@@ -651,23 +685,43 @@ function surfaceTypeLabel(value: string): string {
     package: "软件包",
     physical: "物理",
     other: "其他",
-  }[value] ?? (value || "其他");
+  }[normalized] ?? chineseOrFallback(value, "其他");
 }
 
 function threatNodeLabel(value: string): string {
+  const normalized = enumKey(value);
   return {
     goal: "攻击目标",
     domain: "攻击域",
     surface: "攻击面",
     method: "攻击方式",
-  }[value] ?? (value || "节点");
+  }[normalized] ?? chineseOrFallback(value, "节点");
+}
+
+function scanEventPhaseLabel(value: string): string {
+  const normalized = enumKey(value);
+  return {
+    threat_analysis: "威胁分析",
+    threat_audit: "威胁审计",
+    opencode_output: "模型输出",
+    static_analysis: "静态分析",
+    auditing: "候选点审计",
+    fp_review: "误报复核",
+    variant_hunt: "同类问题挖掘",
+    git_history: "代码历史分析",
+    mcp_ready: "环境准备",
+    init: "初始化",
+    index_status: "代码索引",
+    validation: "漏洞验证",
+  }[normalized] ?? chineseOrFallback(value, "系统日志");
 }
 
 function threatNodeClass(value: string): string {
+  const normalized = enumKey(value);
   return {
     goal: "border-emerald-500/40 bg-emerald-500/10 text-emerald-50",
     domain: "border-blue-500/35 bg-blue-500/10 text-blue-50",
     surface: "border-cyan-500/35 bg-cyan-500/10 text-cyan-50",
     method: "border-rose-500/35 bg-rose-500/10 text-rose-50",
-  }[value] ?? "border-slate-700 bg-slate-900 text-slate-100";
+  }[normalized] ?? "border-slate-700 bg-slate-900 text-slate-100";
 }

@@ -7,7 +7,7 @@ from pathlib import Path
 
 from agent.scanner import _is_streaming_threat_analysis, _streaming_threat_analysis_id
 from agent.threat_auditor import _scan_path_from_analysis, build_threat_audit_tasks
-from backend.threat_analysis.attack_tree_opencode import _invoke_stage
+from backend.threat_analysis.attack_tree_opencode import _invoke_stage, _run_base_model_agents, _stage_prompt
 from backend.opencode.runner import _read_fresh_threat_analysis_result
 from backend.models import ScanItemStatus, ScanMeta, ScanStatus, ThreatAuditTask, Vulnerability
 from backend.store.sqlite import SqliteScanStore
@@ -46,6 +46,131 @@ def _scan(scan_id: str) -> tuple[ScanStatus, ScanMeta]:
 
 
 class ThreatAnalysisParserTests(unittest.TestCase):
+    def test_stage_prompt_requires_chinese_display_text(self) -> None:
+        prompt = _stage_prompt(
+            skill_name="threat-attack-surface-agent",
+            input_path=Path("/tmp/input.json"),
+            output_path=Path("/tmp/output.json"),
+            task_label="攻击面分析 1/1",
+        )
+
+        self.assertIn("所有面向用户展示的自然语言字段必须使用中文", prompt)
+        self.assertIn("英文严重性标签", prompt)
+
+    def test_base_model_uses_shard_coordinator_agents_and_merges_outputs(self) -> None:
+        class FakeOpenCodeRunner:
+            class NoAvailableModelError(RuntimeError):
+                pass
+
+            def __init__(self, stage_dir: Path) -> None:
+                self.stage_dir = stage_dir
+                self.stages: list[str] = []
+                self.prompts: list[str] = []
+
+            async def _invoke_opencode(self, *args, **kwargs) -> str:
+                stage = kwargs["task_context"]["stage"]
+                self.stages.append(stage)
+                self.prompts.append(str(args[1]))
+                call_index = len(self.stages)
+                outputs = [
+                    (
+                        self.stage_dir / "base_model" / f"base_model_agent_{call_index:03d}.output.json",
+                        {
+                            "assets": [
+                                {
+                                    "asset_id": "ASSET-1",
+                                    "name": "管理员权限",
+                                    "risks": [{"risk_id": "RISK-1", "name": "权限被未授权获取"}],
+                                }
+                            ],
+                            "high_risk_external_interfaces": [
+                                {"interface_id": "IF-1", "name": "管理 API", "candidate_code_paths": []}
+                            ],
+                            "asset_interface_links": [{"asset_id": "ASSET-1", "interface_id": "IF-1"}],
+                            "risks": [{"risk_id": "RISK-1", "asset_id": "ASSET-1", "name": "权限被未授权获取"}],
+                            "attack_goals": [
+                                {
+                                    "attack_goal_id": "GOAL-1",
+                                    "asset_id": "ASSET-1",
+                                    "risk_id": "RISK-1",
+                                    "name": "绕过管理面认证获取管理员权限",
+                                    "related_interface_ids": ["IF-1"],
+                                    "candidate_code_paths": ["src/api"],
+                                }
+                            ],
+                        },
+                    ),
+                    (
+                        self.stage_dir / "base_model" / f"base_model_agent_{call_index:03d}.output.json",
+                        {
+                            "assets": [
+                                {
+                                    "asset_id": "ASSET-2",
+                                    "name": "用户配置数据",
+                                    "risks": [{"risk_id": "RISK-2", "name": "配置被未授权篡改"}],
+                                }
+                            ],
+                            "high_risk_external_interfaces": [
+                                {"interface_id": "IF-2", "name": "配置接口", "candidate_code_paths": ["web/config"]}
+                            ],
+                            "asset_interface_links": [{"asset_id": "ASSET-2", "interface_id": "IF-2"}],
+                            "risks": [{"risk_id": "RISK-2", "asset_id": "ASSET-2", "name": "配置被未授权篡改"}],
+                            "attack_goals": [
+                                {
+                                    "attack_goal_id": "GOAL-2",
+                                    "asset_id": "ASSET-2",
+                                    "risk_id": "RISK-2",
+                                    "name": "通过配置接口篡改关键配置",
+                                    "related_interface_ids": ["IF-2"],
+                                    "candidate_code_paths": ["web/config"],
+                                }
+                            ],
+                        },
+                    ),
+                ]
+                output_path, payload = outputs[call_index - 1]
+                output_path.parent.mkdir(parents=True, exist_ok=True)
+                output_path.write_text(json.dumps(payload), encoding="utf-8")
+                return ""
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            runner = FakeOpenCodeRunner(root / "run" / "stages")
+            result = asyncio.run(_run_base_model_agents(
+                opencode_runner=runner,
+                workspace=root,
+                analysis_root=root,
+                run_dir=root / "run",
+                contexts_dir=root / "run" / "contexts",
+                stages_dir=root / "run" / "stages",
+                base_input={
+                    "project_id": "scan-1",
+                    "scan_scope": {"code_scan_relative_path": "src"},
+                    "code_index": {
+                        "files": ["src/api/auth.py", "src/web/config/routes.py"],
+                        "entry_candidates": ["src/api/auth.py", "src/web/config/routes.py"],
+                        "languages": [{"language": "python", "files": 2}],
+                    },
+                    "product_mcp": {},
+                },
+                output_path=root / "run" / "stages" / "base_model.output.json",
+                timeout=1,
+                on_output=None,
+                cancel_event=None,
+                planned_task_id="",
+                stats_scope_id="scan-1",
+            ))
+
+            self.assertEqual(runner.stages, [
+                "threat-asset-interface-agent",
+                "threat-asset-interface-agent",
+            ])
+            self.assertTrue(all("允许并建议在当前分片范围内使用 Task 派发子 Agent" in prompt for prompt in runner.prompts))
+            self.assertEqual(result["assets"][0]["name"], "管理员权限")
+            self.assertEqual(result["assets"][1]["name"], "用户配置数据")
+            self.assertEqual(result["attack_goals"][1]["candidate_code_paths"], ["web/config"])
+            self.assertEqual(result["high_risk_external_interfaces"][1]["candidate_code_paths"], ["web/config"])
+
     def test_threat_analysis_stage_retries_invalid_json_three_times(self) -> None:
         class FakeOpenCodeRunner:
             class NoAvailableModelError(RuntimeError):
