@@ -6,14 +6,22 @@ import unittest
 import time
 from pathlib import Path
 
-from agent.scanner import _is_streaming_threat_analysis, _streaming_threat_analysis_id
+from agent.scanner import (
+    _is_streaming_threat_analysis,
+    _opencode_pool_has_pipeline_work,
+    _streaming_threat_analysis_id,
+)
 from agent.threat_auditor import _scan_path_from_analysis, build_threat_audit_tasks
 from backend.threat_analysis.attack_tree_opencode import (
+    _attack_goals_from_base_output,
     _base_model_agent_shards,
     _invoke_stage,
     _merge_base_model_outputs,
     _run_base_model_agents,
     _stage_prompt,
+    _validate_stage_output,
+    _with_attack_path_defaults,
+    _with_method_confirmation_task_defaults,
 )
 from backend.threat_analysis.harness import build_code_index
 from backend.opencode.runner import _read_fresh_threat_analysis_result
@@ -54,6 +62,47 @@ def _scan(scan_id: str) -> tuple[ScanStatus, ScanMeta]:
 
 
 class ThreatAnalysisParserTests(unittest.TestCase):
+    def test_opencode_pool_pipeline_work_ignores_post_scan_fp_review(self) -> None:
+        self.assertFalse(
+            _opencode_pool_has_pipeline_work(
+                {
+                    "planned_tasks": [{"task_type": "fp_review"}],
+                    "queued_tasks": [],
+                    "models": [
+                        {
+                            "active_tasks": [
+                                {"task_type": "fp_review"},
+                            ],
+                        },
+                    ],
+                }
+            )
+        )
+        self.assertTrue(
+            _opencode_pool_has_pipeline_work(
+                {
+                    "planned_tasks": [],
+                    "queued_tasks": [{"task_type": "threat_analysis"}],
+                    "models": [],
+                }
+            )
+        )
+        self.assertTrue(
+            _opencode_pool_has_pipeline_work(
+                {
+                    "planned_tasks": [],
+                    "queued_tasks": [],
+                    "models": [
+                        {
+                            "active_tasks": [
+                                {"task_type": "threat_audit"},
+                            ],
+                        },
+                    ],
+                }
+            )
+        )
+
     def test_stage_prompt_requires_chinese_display_text(self) -> None:
         prompt = _stage_prompt(
             skill_name="threat-attack-surface-agent",
@@ -64,6 +113,78 @@ class ThreatAnalysisParserTests(unittest.TestCase):
 
         self.assertIn("所有面向用户展示的自然语言字段必须使用中文", prompt)
         self.assertIn("英文严重性标签", prompt)
+        self.assertIn("不要把 `ASSET-*`", prompt)
+        self.assertIn("唯一上级上下文", prompt)
+
+    def test_stage_validation_rejects_base_model_attack_paths(self) -> None:
+        with self.assertRaisesRegex(RuntimeError, "out-of-scope"):
+            _validate_stage_output(
+                "threat-asset-interface-agent",
+                {
+                    "assets": [],
+                    "high_risk_external_interfaces": [],
+                    "asset_interface_links": [],
+                    "risks": [],
+                    "attack_goals": [],
+                    "attack_paths": [
+                        {
+                            "attack_method_name": "泛洪攻击",
+                            "code_paths": [{"path": "src/amf/context.cpp"}],
+                        }
+                    ],
+                },
+            )
+
+    def test_stage_validation_rejects_generated_or_missing_method_names(self) -> None:
+        with self.assertRaisesRegex(RuntimeError, "readable display label"):
+            _validate_stage_output(
+                "threat-attack-surface-agent",
+                {
+                    "methods": [
+                        {
+                            "method_id": "METHOD-UE-CONTEXT-STEAL",
+                            "name": "METHOD-UE-CONTEXT-STEAL",
+                        }
+                    ],
+                    "attack_paths": [],
+                    "method_confirmation_tasks": [],
+                },
+            )
+
+        with self.assertRaisesRegex(RuntimeError, "readable attack method name"):
+            _validate_stage_output(
+                "threat-method-confirm-agent",
+                {
+                    "attack_paths": [
+                        {
+                            "attack_method_id": "METHOD-UE-CONTEXT-STEAL",
+                            "code_paths": [{"path": "src/amf/context.cpp"}],
+                        }
+                    ],
+                },
+            )
+
+    def test_stage_validation_rejects_attack_path_method_mismatch(self) -> None:
+        with self.assertRaisesRegex(RuntimeError, "attack method must match one item in methods"):
+            _validate_stage_output(
+                "threat-attack-surface-agent",
+                {
+                    "methods": [
+                        {
+                            "method_id": "METHOD-AUTH-BYPASS",
+                            "name": "认证绕过",
+                        }
+                    ],
+                    "attack_paths": [
+                        {
+                            "attack_method_id": "METHOD-FLOOD",
+                            "attack_method_name": "接口泛洪",
+                            "code_paths": [{"path": "src/api.cpp"}],
+                        }
+                    ],
+                    "method_confirmation_tasks": [],
+                },
+            )
 
     def test_build_code_index_limits_scope_to_cpp_files(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -453,6 +574,143 @@ class ThreatAnalysisParserTests(unittest.TestCase):
                 "attack_goal_id": "GOAL-A",
             }
         ])
+
+    def test_attack_goals_are_enriched_with_asset_and_risk_names(self) -> None:
+        goals = _attack_goals_from_base_output({
+            "assets": [
+                {
+                    "asset_id": "ASSET-UE",
+                    "name": "UE 上下文数据",
+                    "risks": [{"risk_id": "RISK-UE", "name": "UE 上下文被未授权窃取"}],
+                }
+            ],
+            "risks": [
+                {
+                    "risk_id": "RISK-UE",
+                    "asset_id": "ASSET-UE",
+                    "name": "UE 上下文被未授权窃取",
+                }
+            ],
+            "attack_goals": [
+                {
+                    "attack_goal_id": "GOAL-UE",
+                    "asset_id": "ASSET-UE",
+                    "risk_id": "RISK-UE",
+                    "name": "窃取 UE 上下文",
+                }
+            ],
+        })
+
+        self.assertEqual(goals[0]["asset_name"], "UE 上下文数据")
+        self.assertEqual(goals[0]["risk_name"], "UE 上下文被未授权窃取")
+        self.assertEqual(goals[0]["name"], "窃取 UE 上下文")
+
+    def test_attack_path_defaults_override_mismatched_stage_context(self) -> None:
+        normalized = _with_attack_path_defaults(
+            {
+                "asset_name": "基站可用性",
+                "risk_name": "服务不可用",
+                "attack_goal_id": "GOAL-DOS",
+                "attack_goal_name": "造成基站服务中断",
+                "attack_domain_id": "DOMAIN-N2",
+                "attack_domain_name": "N2 信令域",
+                "attack_surface_id": "SURFACE-NGAP",
+                "attack_surface_name": "NGAP 信令入口",
+                "attack_method_id": "METHOD-FLOOD",
+                "attack_method_name": "泛洪攻击",
+                "code_paths": [{"path": "src/amf/context.cpp"}],
+            },
+            {
+                "attack_goal": {
+                    "attack_goal_id": "GOAL-UE-CONTEXT",
+                    "asset_id": "ASSET-UE",
+                    "asset_name": "UE 上下文数据",
+                    "risk_id": "RISK-UE",
+                    "risk_name": "UE 上下文被未授权窃取",
+                    "name": "窃取 UE 上下文",
+                },
+                "attack_domain": {
+                    "domain_id": "DOMAIN-CONTEXT",
+                    "name": "UE 上下文管理域",
+                },
+                "attack_surface": {
+                    "surface_id": "SURFACE-CONTEXT-API",
+                    "name": "UE 上下文查询接口",
+                    "surface_type": "api",
+                },
+                "method_confirmation_task": {
+                    "method_id": "METHOD-UE-CONTEXT-STEAL",
+                    "name": "UE 上下文窃取",
+                },
+            },
+            {"attack_paths": []},
+        )
+        path = parse_attack_path_data(normalized)
+
+        self.assertEqual(path.asset_name, "UE 上下文数据")
+        self.assertEqual(path.risk_name, "UE 上下文被未授权窃取")
+        self.assertEqual(path.attack_goal_id, "GOAL-UE-CONTEXT")
+        self.assertEqual(path.attack_goal_name, "窃取 UE 上下文")
+        self.assertEqual(path.attack_domain_name, "UE 上下文管理域")
+        self.assertEqual(path.attack_surface_name, "UE 上下文查询接口")
+        self.assertEqual(path.attack_surface_type, "api")
+        self.assertEqual(path.attack_method_id, "METHOD-UE-CONTEXT-STEAL")
+        self.assertEqual(path.attack_method_name, "UE 上下文窃取")
+
+    def test_attack_path_defaults_fill_method_name_from_surface_methods(self) -> None:
+        normalized = _with_attack_path_defaults(
+            {
+                "attack_method_id": "METHOD-UE-CONTEXT-STEAL",
+                "attack_method_name": "METHOD-UE-CONTEXT-STEAL",
+                "code_paths": [{"path": "src/amf/context.cpp"}],
+            },
+            {
+                "attack_goal": {
+                    "attack_goal_id": "GOAL-UE-CONTEXT",
+                    "asset_id": "ASSET-UE",
+                    "asset_name": "UE 上下文数据",
+                    "risk_id": "RISK-UE",
+                    "risk_name": "UE 上下文被未授权窃取",
+                    "name": "窃取 UE 上下文",
+                },
+                "attack_domain": {"domain_id": "DOMAIN-CONTEXT", "name": "UE 上下文管理域"},
+                "attack_surface": {"surface_id": "SURFACE-CONTEXT-API", "name": "UE 上下文查询接口"},
+            },
+            {
+                "methods": [
+                    {
+                        "method_id": "METHOD-UE-CONTEXT-STEAL",
+                        "name": "UE 上下文窃取",
+                        "preconditions": ["攻击者可访问上下文查询接口"],
+                    }
+                ],
+                "attack_paths": [],
+            },
+        )
+        path = parse_attack_path_data(normalized)
+
+        self.assertEqual(path.attack_method_name, "UE 上下文窃取")
+        self.assertEqual(path.preconditions, ["攻击者可访问上下文查询接口"])
+
+    def test_method_confirmation_tasks_inherit_method_names_from_surface_output(self) -> None:
+        task = _with_method_confirmation_task_defaults(
+            {
+                "task_id": "CONFIRM-1",
+                "method_id": "METHOD-UE-CONTEXT-STEAL",
+                "attack_method_name": "泛洪攻击",
+            },
+            {
+                "methods": [
+                    {
+                        "method_id": "METHOD-UE-CONTEXT-STEAL",
+                        "name": "UE 上下文窃取",
+                    }
+                ]
+            },
+        )
+
+        self.assertEqual(task["attack_method_id"], "METHOD-UE-CONTEXT-STEAL")
+        self.assertEqual(task["attack_method_name"], "UE 上下文窃取")
 
     def test_threat_analysis_stage_retries_invalid_json_three_times(self) -> None:
         class FakeOpenCodeRunner:

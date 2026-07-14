@@ -503,24 +503,77 @@ def test_attack_tree_threat_analysis_prioritizes_one_tree_pipeline(tmp_path: Pat
             if "threat-attack-goal-agent" in prompt:
                 goal_id = input_data_from_prompt(prompt)["attack_goal"]["attack_goal_id"]
                 stage_order.append(f"goal:{goal_id}")
+                domains = (
+                    [
+                        {"domain_id": "DOMAIN-GOAL-1-A", "name": "管理面"},
+                        {"domain_id": "DOMAIN-GOAL-1-B", "name": "信令面"},
+                    ]
+                    if goal_id == "GOAL-1"
+                    else [{"domain_id": "DOMAIN-GOAL-2-A", "name": "运维面"}]
+                )
                 output_path.write_text(
-                    json.dumps({"domains": [{"domain_id": f"DOMAIN-{goal_id}", "name": "管理面"}]}),
+                    json.dumps({"domains": domains}),
                     encoding="utf-8",
                 )
                 return
             if "threat-attack-domain-agent" in prompt:
-                goal_id = input_data_from_prompt(prompt)["attack_goal"]["attack_goal_id"]
-                stage_order.append(f"domain:{goal_id}")
+                input_data = input_data_from_prompt(prompt)
+                goal_id = input_data["attack_goal"]["attack_goal_id"]
+                domain_id = input_data["attack_domain"]["domain_id"]
+                stage_order.append(f"domain:{goal_id}:{domain_id}")
+                surfaces = [
+                    {
+                        "surface_id": f"SURFACE-{domain_id.removeprefix('DOMAIN-')}-1",
+                        "name": "管理接口一",
+                    }
+                ]
+                if domain_id == "DOMAIN-GOAL-1-A":
+                    surfaces.append({
+                        "surface_id": "SURFACE-GOAL-1-A-2",
+                        "name": "管理接口二",
+                    })
                 output_path.write_text(
-                    json.dumps({"surfaces": [{"surface_id": f"SURFACE-{goal_id}", "name": "管理接口"}]}),
+                    json.dumps({"surfaces": surfaces}),
                     encoding="utf-8",
                 )
                 return
             if "threat-attack-surface-agent" in prompt:
-                goal_id = input_data_from_prompt(prompt)["attack_goal"]["attack_goal_id"]
-                stage_order.append(f"surface:{goal_id}")
+                input_data = input_data_from_prompt(prompt)
+                goal_id = input_data["attack_goal"]["attack_goal_id"]
+                domain_id = input_data["attack_domain"]["domain_id"]
+                surface_id = input_data["attack_surface"]["surface_id"]
+                stage_order.append(f"surface:{goal_id}:{domain_id}:{surface_id}")
+                method_payload = {
+                    "methods": [],
+                    "attack_paths": [],
+                    "method_confirmation_tasks": [],
+                }
+                if surface_id == "SURFACE-GOAL-1-A-1":
+                    method_payload = {
+                        "methods": [{"method_id": "METHOD-AUTH", "name": "认证绕过"}],
+                        "attack_paths": [],
+                        "method_confirmation_tasks": [
+                            {
+                                "task_id": "CONFIRM-AUTH",
+                                "method_id": "METHOD-AUTH",
+                                "attack_method_name": "认证绕过",
+                            }
+                        ],
+                    }
                 output_path.write_text(
-                    json.dumps({"methods": [], "attack_paths": [], "method_confirmation_tasks": []}),
+                    json.dumps(method_payload),
+                    encoding="utf-8",
+                )
+                return
+            if "threat-method-confirm-agent" in prompt:
+                input_data = input_data_from_prompt(prompt)
+                goal_id = input_data["attack_goal"]["attack_goal_id"]
+                domain_id = input_data["attack_domain"]["domain_id"]
+                surface_id = input_data["attack_surface"]["surface_id"]
+                method_id = input_data["method_confirmation_task"]["method_id"]
+                stage_order.append(f"method:{goal_id}:{domain_id}:{surface_id}:{method_id}")
+                output_path.write_text(
+                    json.dumps({"attack_paths": []}),
                     encoding="utf-8",
                 )
                 return
@@ -543,14 +596,20 @@ def test_attack_tree_threat_analysis_prioritizes_one_tree_pipeline(tmp_path: Pat
         assert analysis is not None
         assert stage_order == [
             "goal:GOAL-1",
-            "domain:GOAL-1",
-            "surface:GOAL-1",
+            "domain:GOAL-1:DOMAIN-GOAL-1-A",
+            "surface:GOAL-1:DOMAIN-GOAL-1-A:SURFACE-GOAL-1-A-1",
+            "method:GOAL-1:DOMAIN-GOAL-1-A:SURFACE-GOAL-1-A-1:METHOD-AUTH",
+            "surface:GOAL-1:DOMAIN-GOAL-1-A:SURFACE-GOAL-1-A-2",
+            "domain:GOAL-1:DOMAIN-GOAL-1-B",
+            "surface:GOAL-1:DOMAIN-GOAL-1-B:SURFACE-GOAL-1-B-1",
             "goal:GOAL-2",
-            "domain:GOAL-2",
-            "surface:GOAL-2",
+            "domain:GOAL-2:DOMAIN-GOAL-2-A",
+            "surface:GOAL-2:DOMAIN-GOAL-2-A:SURFACE-GOAL-2-A-1",
         ]
         assert any("攻击树优先调度" in line for line in output_lines)
         assert not any("攻击目标分解并发度" in line for line in output_lines)
+        assert not any("攻击域分析并发度" in line for line in output_lines)
+        assert not any("攻击面分析并发度" in line for line in output_lines)
 
     asyncio.run(run())
 

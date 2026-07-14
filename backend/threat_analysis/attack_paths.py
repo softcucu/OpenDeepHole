@@ -62,15 +62,23 @@ _GENERATED_ID_PATTERN = re.compile(
     r"^(?:METHOD|NODE|AP|ASSET|RISK|GOAL|DOMAIN|SURFACE|TREE)-[A-Z0-9][A-Z0-9-]*$",
     re.IGNORECASE,
 )
+_PLACEHOLDER_LABEL_PATTERN = re.compile(
+    r"^(?:未命名|未标记|未知)(?:资产|风险|攻击目标|攻击域|攻击面|"
+    r"攻击方式|攻击方法|对象|方法)?$"
+)
 
 
 def _looks_like_generated_id(value: str) -> bool:
     return bool(_GENERATED_ID_PATTERN.fullmatch(_text(value)))
 
 
+def _looks_like_placeholder_label(value: str) -> bool:
+    return bool(_PLACEHOLDER_LABEL_PATTERN.fullmatch(_text(value)))
+
+
 def _readable_label(value: Any) -> str:
     text = _text(value)
-    return "" if _looks_like_generated_id(text) else text
+    return "" if _looks_like_generated_id(text) or _looks_like_placeholder_label(text) else text
 
 
 def _normalize_path(value: str) -> str:
@@ -156,12 +164,26 @@ def parse_attack_path_data(data: dict[str, Any]) -> ThreatAttackPath:
 
 
 def _fill_missing_ids(path: ThreatAttackPath) -> ThreatAttackPath:
-    asset_id = path.asset_id or _stable_id("ASSET", path.asset_name)
-    risk_id = path.risk_id or _stable_id("RISK", asset_id, path.risk_name)
-    goal_id = path.attack_goal_id or _stable_id("GOAL", risk_id, path.attack_goal_name)
-    domain_id = path.attack_domain_id or _stable_id("DOMAIN", goal_id, path.attack_domain_name)
-    surface_id = path.attack_surface_id or _stable_id("SURFACE", domain_id, path.attack_surface_name)
-    method_id = path.attack_method_id or _stable_id("METHOD", surface_id, path.attack_method_name)
+    code_path_key = "|".join(_normalize_path(item.path) for item in path.code_paths if _text(item.path))
+    asset_anchor = (
+        path.asset_name
+        or path.risk_name
+        or path.attack_goal_name
+        or path.attack_surface_name
+        or path.attack_method_name
+        or code_path_key
+    )
+    asset_id = path.asset_id or _stable_id("ASSET", asset_anchor)
+    risk_anchor = path.risk_name or path.attack_goal_name or path.attack_method_name or code_path_key
+    risk_id = path.risk_id or _stable_id("RISK", asset_id, risk_anchor)
+    goal_anchor = path.attack_goal_name or path.attack_surface_name or path.attack_method_name or code_path_key
+    goal_id = path.attack_goal_id or _stable_id("GOAL", risk_id, goal_anchor)
+    domain_anchor = path.attack_domain_name or path.attack_surface_name or path.attack_method_name or code_path_key
+    domain_id = path.attack_domain_id or _stable_id("DOMAIN", goal_id, domain_anchor)
+    surface_anchor = path.attack_surface_name or path.attack_method_name or code_path_key
+    surface_id = path.attack_surface_id or _stable_id("SURFACE", domain_id, surface_anchor)
+    method_anchor = path.attack_method_name or "|".join(path.preconditions) or "|".join(path.evidence) or code_path_key
+    method_id = path.attack_method_id or _stable_id("METHOD", surface_id, method_anchor)
     return path.model_copy(update={
         "asset_id": asset_id,
         "risk_id": risk_id,

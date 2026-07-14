@@ -14,6 +14,9 @@ const STATIC_CANDIDATE_PAGE_SIZE = 20;
 const SCAN_QUEUE_PAGE_SIZE = 12;
 const AGENT_DISCONNECT_ERROR = "Agent 断开连接";
 const FINAL_USER_VERDICTS = new Set(["confirmed", "false_positive"]);
+const STREAMING_THREAT_ANALYSIS_ID_PREFIX = "STREAMING-ATA-";
+const ACTIVE_THREAT_TASK_STATUSES = new Set(["pending", "queued", "running", "analyzing", "auditing"]);
+const THREAT_POOL_TASK_TYPES = new Set(["threat_analysis", "threat_audit"]);
 
 type MainTab = "overview" | "threat" | "mining" | "validation" | "issues";
 type MiningTab = "static_analysis" | "candidate_audit" | "fp_review";
@@ -128,9 +131,45 @@ function candidateKey(item: Pick<Candidate, "file" | "line" | "function" | "vuln
   return `${item.file}\u0000${item.line}\u0000${item.function}\u0000${item.vuln_type}`;
 }
 
+function isStreamingThreatAnalysis(scan: ScanStatusType): boolean {
+  return Boolean(scan.threat_analysis?.analysis_id?.startsWith(STREAMING_THREAT_ANALYSIS_ID_PREFIX));
+}
+
+function isActiveThreatAuditStatus(status: string | null | undefined): boolean {
+  return ACTIVE_THREAT_TASK_STATUSES.has(String(status || "").trim().toLowerCase());
+}
+
+function poolTaskType(task: Record<string, unknown>): string {
+  const direct = String(task.task_type || "").trim();
+  if (direct) return direct.toLowerCase();
+  const context = task.context;
+  if (context && typeof context === "object") {
+    return String((context as Record<string, unknown>).task_type || "").trim().toLowerCase();
+  }
+  return "";
+}
+
+function isThreatPoolTask(task: Record<string, unknown>): boolean {
+  return THREAT_POOL_TASK_TYPES.has(poolTaskType(task));
+}
+
+function hasActiveThreatPoolWork(pool: OpenCodePoolStatus | null | undefined): boolean {
+  if (!pool) return false;
+  if ((pool.planned_tasks ?? []).some(isThreatPoolTask)) return true;
+  if ((pool.queued_tasks ?? []).some(isThreatPoolTask)) return true;
+  return (pool.models ?? []).some((model) => (model.active_tasks ?? []).some(isThreatPoolTask));
+}
+
+function hasActiveThreatWork(scan: ScanStatusType): boolean {
+  return isStreamingThreatAnalysis(scan)
+    || (scan.threat_audit_tasks ?? []).some((task) => isActiveThreatAuditStatus(task.status))
+    || hasActiveThreatPoolWork(scan.opencode_pool);
+}
+
 function currentStageLabel(scan: ScanStatusType, events: ScanEvent[]): string {
   if (scan.status === "error") return "异常中断";
   if (scan.status === "cancelled") return "已取消";
+  if (hasActiveThreatWork(scan)) return "威胁分析 / 威胁审计";
   if (scan.status === "complete") return "完成";
   const latest = [...events].reverse().find((event) => event.phase !== "opencode_output");
   if (latest?.phase === "fp_review") return "漏洞挖掘 / 对抗式去误报";
@@ -235,8 +274,18 @@ export default function ScanStatus({ scanId, onBack }: Props) {
   const [gitHistory, setGitHistory] = useState<HistoryPattern[]>([]);
   const [threatAnalysisLoading, setThreatAnalysisLoading] = useState(false);
 
-  const isRunning = scan && (scan.status === "pending" || scan.status === "analyzing" || scan.status === "auditing");
-  const isDone = scan && (scan.status === "complete" || scan.status === "error" || scan.status === "cancelled");
+  const completeButThreatActive = Boolean(scan && scan.status === "complete" && hasActiveThreatWork(scan));
+  const isRunning = scan && (
+    scan.status === "pending"
+    || scan.status === "analyzing"
+    || scan.status === "auditing"
+    || completeButThreatActive
+  );
+  const isDone = scan && (
+    scan.status === "error"
+    || scan.status === "cancelled"
+    || (scan.status === "complete" && !completeButThreatActive)
+  );
 
   useEffect(() => {
     getCheckers().then(setCheckers).catch(() => {});
@@ -838,7 +887,8 @@ export default function ScanStatus({ scanId, onBack }: Props) {
             <span className="text-sm text-slate-400">
               {scan.status === "cancelled"
                 ? (agentDisconnectError ? (scan.agent_online ? "扫描已中断" : "Agent 断开，已中断") : "已取消")
-                : isDone ? "扫描完成" : "扫描中..."}
+                : scan.status === "error" ? "扫描异常"
+                  : isRunning ? "扫描中..." : isDone ? "扫描完成" : "扫描中..."}
             </span>
             {scan.agent_name && (
               <span className="flex items-center gap-1.5 text-sm text-slate-400 border-l border-slate-600 pl-4">
@@ -1425,7 +1475,8 @@ function ProcessFlowNav({
   const candidateCount = candidates.length || scan.total_candidates || scan.vulnerabilities.length;
   const staticRunning = scan.status === "analyzing" && !scan.static_analysis_done;
   const staticDone = scan.static_analysis_done || candidateCount > 0 || scan.status === "auditing" || scan.status === "complete";
-  const threatRunning = (threatAnalysisLoading && !scan.threat_analysis)
+  const threatRunning = hasActiveThreatWork(scan)
+    || (threatAnalysisLoading && !scan.threat_analysis)
     || (!isDone && hasEvent(scan.events, ["threat_analysis"]) && !scan.threat_analysis);
   const auditRunning = scan.status === "auditing" || Boolean(scan.current_candidate);
   const auditDone = scan.status === "complete"

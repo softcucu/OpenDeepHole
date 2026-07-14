@@ -10,7 +10,7 @@ import shutil
 import threading
 import time
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
 
 import yaml
 
@@ -46,6 +46,15 @@ MEMORY_API_DISCOVERY_PIPELINE_ENABLED = False
 SCAN_MODE_FULL = "full"
 SCAN_MODE_THREAT_ANALYSIS_ONLY = "threat_analysis_only"
 STREAMING_THREAT_ANALYSIS_ID_PREFIX = "STREAMING-ATA-"
+SCAN_PIPELINE_OPENCODE_TASK_TYPES = {
+    "",
+    "audit",
+    "git_history",
+    "threat_analysis",
+    "threat_audit",
+    "variant_hunt",
+}
+OPENCODE_POOL_TERMINAL_DRAIN_TIMEOUT_SECONDS = 30.0
 
 
 def _streaming_threat_analysis_id(scan_id: str) -> str:
@@ -57,6 +66,99 @@ def _is_streaming_threat_analysis(analysis: ThreatAnalysis | None) -> bool:
         analysis
         and analysis.analysis_id.startswith(STREAMING_THREAT_ANALYSIS_ID_PREFIX)
     )
+
+
+def _pool_task_type(task: Any) -> str:
+    if not isinstance(task, dict):
+        return ""
+    return str(task.get("task_type") or "").strip()
+
+
+def _pool_task_matches_types(task: Any, task_types: set[str]) -> bool:
+    return _pool_task_type(task) in task_types
+
+
+def _opencode_pool_has_pipeline_work(
+    snapshot: dict[str, Any],
+    task_types: set[str] = SCAN_PIPELINE_OPENCODE_TASK_TYPES,
+) -> bool:
+    for key in ("planned_tasks", "queued_tasks"):
+        tasks = snapshot.get(key)
+        if isinstance(tasks, list) and any(
+            _pool_task_matches_types(task, task_types) for task in tasks
+        ):
+            return True
+    models = snapshot.get("models")
+    if isinstance(models, list):
+        for model in models:
+            if not isinstance(model, dict):
+                continue
+            active_tasks = model.get("active_tasks")
+            if isinstance(active_tasks, list) and any(
+                _pool_task_matches_types(task, task_types) for task in active_tasks
+            ):
+                return True
+    return False
+
+
+async def _wait_for_opencode_pool_pipeline_work(
+    scan_id: str,
+    task_types: set[str] = SCAN_PIPELINE_OPENCODE_TASK_TYPES,
+    timeout_seconds: float = OPENCODE_POOL_TERMINAL_DRAIN_TIMEOUT_SECONDS,
+) -> None:
+    """Wait briefly for scan-pipeline OpenCode work to leave the model pool."""
+    from backend.opencode.model_pool import model_pool_snapshot, wait_for_model_pool_update
+
+    deadline = time.monotonic() + max(0.0, timeout_seconds)
+    snapshot = model_pool_snapshot(scan_id)
+    while _opencode_pool_has_pipeline_work(snapshot, task_types):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            print(
+                f"Warning: OpenCode pool still has scan pipeline work for {scan_id}; "
+                "finishing with terminal pool cleanup",
+                flush=True,
+            )
+            return
+        last_updated_at = str(snapshot.get("updated_at") or "")
+        await wait_for_model_pool_update(
+            scan_id,
+            last_updated_at=last_updated_at,
+            timeout=min(1.0, remaining),
+        )
+        snapshot = model_pool_snapshot(scan_id)
+
+
+async def _drain_opencode_pool_before_finish(
+    scan_id: str,
+    pool_status_stop: asyncio.Event,
+    pool_status_task: asyncio.Task | None,
+    task_types: set[str] = SCAN_PIPELINE_OPENCODE_TASK_TYPES,
+) -> None:
+    """Clear planned scan work and publish the final pool snapshot before finish_scan."""
+    try:
+        from backend.opencode.model_pool import clear_planned_tasks
+        await clear_planned_tasks(scan_id, task_types)
+    except Exception:
+        pass
+    try:
+        await _wait_for_opencode_pool_pipeline_work(scan_id, task_types)
+    except Exception as exc:
+        print(f"Warning: failed to drain OpenCode pool before finish: {exc}", flush=True)
+    pool_status_stop.set()
+    if pool_status_task is not None:
+        try:
+            await pool_status_task
+        except Exception:
+            pass
+
+
+async def _clear_finished_opencode_pool_history(scan_id: str) -> None:
+    try:
+        from backend.opencode.model_pool import clear_completed_tasks
+        await clear_completed_tasks(scan_id)
+    except Exception:
+        pass
 
 
 class _StaticProgressGate:
@@ -1026,6 +1128,29 @@ async def run_scan(
     pool_status_task: asyncio.Task | None = None
     threat_analysis_task: asyncio.Task | None = None
 
+    async def finish_scan_after_pool_drain(
+        status: str,
+        total_candidates: int,
+        processed_candidates: int,
+        *,
+        vulnerabilities: list[Vulnerability] | None = None,
+        error_message: str | None = None,
+    ) -> None:
+        await _drain_opencode_pool_before_finish(
+            scan_id,
+            pool_status_stop,
+            pool_status_task,
+        )
+        await reporter.finish_scan(
+            scan_id,
+            vulnerabilities or [],
+            status,
+            total_candidates,
+            processed_candidates,
+            error_message=error_message,
+        )
+        await _clear_finished_opencode_pool_history(scan_id)
+
     try:
         normalized_scan_mode = str(scan_mode or SCAN_MODE_FULL).strip().lower()
         if normalized_scan_mode in {"threat_only", "threat-analysis-only"}:
@@ -1220,7 +1345,7 @@ async def run_scan(
                 _remove_sqlite_files(temp_db_path)
                 db = None
                 await emit("init", "Code indexing stopped by user")
-                await reporter.finish_scan(scan_id, [], "cancelled", 0, 0)
+                await finish_scan_after_pool_drain("cancelled", 0, 0)
                 return
             # Flush WAL so the DB file is self-contained
             index_db.mark_index_complete()
@@ -1319,10 +1444,10 @@ async def run_scan(
                 db = None
             if cancel_event.is_set():
                 await emit("complete", "仅威胁分析任务已取消")
-                await reporter.finish_scan(scan_id, [], "cancelled", 0, 0)
+                await finish_scan_after_pool_drain("cancelled", 0, 0)
                 return
             await emit("complete", "仅威胁分析任务完成")
-            await reporter.finish_scan(scan_id, [], "complete", 0, 0)
+            await finish_scan_after_pool_drain("complete", 0, 0)
             shutil.rmtree(scan_dir, ignore_errors=True)
             return
 
@@ -1454,7 +1579,7 @@ async def run_scan(
                     cancel_event=cancel_event,
                     emit=emit,
                 )
-                await reporter.finish_scan(scan_id, [], "cancelled", 0, 0)
+                await finish_scan_after_pool_drain("cancelled", 0, 0)
                 return
 
             total = len(candidates)
@@ -1589,7 +1714,7 @@ async def run_scan(
                 emit=emit,
             )
             await emit("complete", "No static candidates found")
-            await reporter.finish_scan(scan_id, [], "complete", 0, 0)
+            await finish_scan_after_pool_drain("complete", 0, 0)
             shutil.rmtree(scan_dir, ignore_errors=True)
             return
 
@@ -2068,8 +2193,10 @@ async def run_scan(
                 cancel_event=cancel_event,
                 emit=emit,
             )
-            await reporter.finish_scan(
-                scan_id, [], "cancelled", total, already_done + processed_this_run
+            await finish_scan_after_pool_drain(
+                "cancelled",
+                total,
+                already_done + processed_this_run,
             )
             # Do NOT delete scan_dir on cancel — needed for resume
             return
@@ -2084,7 +2211,7 @@ async def run_scan(
             "complete",
             f"Scan complete: {confirmed_count} confirmed / {total} total candidates",
         )
-        await reporter.finish_scan(scan_id, [], "complete", total, total)
+        await finish_scan_after_pool_drain("complete", total, total)
         # Clean up on successful completion
         shutil.rmtree(scan_dir, ignore_errors=True)
 
@@ -2102,7 +2229,7 @@ async def run_scan(
             pass
         try:
             await reporter.send_event(scan_id, ScanEvent.create("error", f"Scan failed: {exc}"))
-            await reporter.finish_scan(scan_id, [], "error", 0, 0, error_message=str(exc))
+            await finish_scan_after_pool_drain("error", 0, 0, error_message=str(exc))
         except Exception:
             pass
         # Clean up on error
@@ -2110,22 +2237,12 @@ async def run_scan(
         raise
 
     finally:
-        try:
-            from backend.opencode.model_pool import clear_planned_tasks
-            await clear_planned_tasks(scan_id, {"audit", "threat_analysis", "threat_audit"})
-        except Exception:
-            pass
-        pool_status_stop.set()
-        if pool_status_task is not None:
-            try:
-                await pool_status_task
-            except Exception:
-                pass
-        try:
-            from backend.opencode.model_pool import clear_completed_tasks
-            await clear_completed_tasks(scan_id)
-        except Exception:
-            pass
+        await _drain_opencode_pool_before_finish(
+            scan_id,
+            pool_status_stop,
+            pool_status_task,
+        )
+        await _clear_finished_opencode_pool_history(scan_id)
         try:
             if mcp_server:
                 from agent import mcp_registry
