@@ -75,6 +75,19 @@ _OPENCODE_PROCESS_ENV_KEYS = (
     "NO_PROXY",
     "no_proxy",
 )
+_GENERATED_THREAT_ID_PATTERN = re.compile(
+    r"^(?:METHOD|NODE|AP|ASSET|RISK|GOAL|DOMAIN|SURFACE|TREE)-[A-Z0-9][A-Z0-9-]*$",
+    re.IGNORECASE,
+)
+
+
+def _threat_display_label(value: str, fallback: str) -> str:
+    normalized = str(value or "").strip()
+    if normalized and not _GENERATED_THREAT_ID_PATTERN.fullmatch(normalized):
+        return normalized
+    return fallback
+
+
 _OPENCODE_PROXY_CLEAR_ENV_KEYS = ("ALL_PROXY", "all_proxy")
 
 
@@ -863,12 +876,13 @@ async def run_project_report_audit(
 
 def _threat_audit_result_defaults(task: ThreatAuditTask) -> _VulnerabilityResultDefaults:
     primary_code_path = task.code_path or (task.code_paths[0].path if task.code_paths else ".")
+    method_label = _threat_display_label(task.method_name, "相关攻击方式")
     return _VulnerabilityResultDefaults(
         file=primary_code_path,
         line=1,
         function="__threat_path__",
         description=task.description or (
-            f"Threat audit for surface `{task.surface_name}` via method `{task.method_name}` "
+            f"Threat audit for surface `{task.surface_name}` via method `{method_label}` "
             f"on code path `{primary_code_path}`"
         ),
         vuln_type="threat_audit",
@@ -922,8 +936,8 @@ async def run_threat_audit(
             attempt_source = source
             last_source = source
 
-        surface_label = task.surface_name or task.surface_node_id or "相关攻击面"
-        method_label = task.method_name or task.method_node_id or "相关攻击方式"
+        surface_label = _threat_display_label(task.surface_name, "相关攻击面")
+        method_label = _threat_display_label(task.method_name, "相关攻击方式")
         if isinstance(scan_path, Path):
             scan_path_label = scan_path.resolve().as_posix()
         else:

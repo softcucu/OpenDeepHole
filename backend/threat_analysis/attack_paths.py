@@ -58,6 +58,21 @@ def _normalize_name(value: str) -> str:
     return re.sub(r"\s+", " ", _text(value).lower())
 
 
+_GENERATED_ID_PATTERN = re.compile(
+    r"^(?:METHOD|NODE|AP|ASSET|RISK|GOAL|DOMAIN|SURFACE|TREE)-[A-Z0-9][A-Z0-9-]*$",
+    re.IGNORECASE,
+)
+
+
+def _looks_like_generated_id(value: str) -> bool:
+    return bool(_GENERATED_ID_PATTERN.fullmatch(_text(value)))
+
+
+def _readable_label(value: Any) -> str:
+    text = _text(value)
+    return "" if _looks_like_generated_id(text) else text
+
+
 def _normalize_path(value: str) -> str:
     normalized = _text(value).replace("\\", "/")
     normalized = re.sub(r"/+", "/", normalized).strip("/")
@@ -104,12 +119,12 @@ def parse_attack_path_data(data: dict[str, Any]) -> ThreatAttackPath:
     surface = data.get("attack_surface") if isinstance(data.get("attack_surface"), dict) else {}
     method = data.get("attack_method") if isinstance(data.get("attack_method"), dict) else {}
 
-    asset_name = _text(data.get("asset_name") or asset.get("name"))
-    risk_name = _text(data.get("risk_name") or risk.get("name"))
-    goal_name = _text(data.get("attack_goal_name") or goal.get("name"))
-    domain_name = _text(data.get("attack_domain_name") or domain.get("name"))
-    surface_name = _text(data.get("attack_surface_name") or surface.get("name"))
-    method_name = _text(data.get("attack_method_name") or method.get("name"))
+    asset_name = _readable_label(data.get("asset_name") or asset.get("name"))
+    risk_name = _readable_label(data.get("risk_name") or risk.get("name"))
+    goal_name = _readable_label(data.get("attack_goal_name") or goal.get("name"))
+    domain_name = _readable_label(data.get("attack_domain_name") or domain.get("name"))
+    surface_name = _readable_label(data.get("attack_surface_name") or surface.get("name"))
+    method_name = _readable_label(data.get("attack_method_name") or method.get("name"))
     code_paths = _code_paths(data.get("code_paths"))
 
     path = ThreatAttackPath(
@@ -271,16 +286,21 @@ def build_analysis_from_attack_paths(
     tree_data: dict[tuple[str, str, str], dict[str, Any]] = {}
 
     for path in normalized_paths:
+        asset_name = path.asset_name or "未命名资产"
+        risk_name = path.risk_name or "未命名风险"
+        goal_name = path.attack_goal_name or "未命名攻击目标"
+        domain_name = path.attack_domain_name or "未命名攻击域"
+        surface_name = path.attack_surface_name or "未命名攻击面"
         asset = assets_by_id.get(path.asset_id)
         risk = ThreatRisk(
             risk_id=path.risk_id,
-            name=path.risk_name,
-            description=path.risk_name,
+            name=risk_name,
+            description=risk_name,
         )
         if asset is None:
             assets_by_id[path.asset_id] = ThreatAsset(
                 asset_id=path.asset_id,
-                name=path.asset_name,
+                name=asset_name,
                 asset_type="other",
                 criticality="medium",
                 risks=[risk] if path.risk_id else [],
@@ -292,7 +312,7 @@ def build_analysis_from_attack_paths(
         if interface is None:
             interfaces_by_id[path.attack_surface_id] = ThreatExternalInterface(
                 interface_id=path.attack_surface_id,
-                name=path.attack_surface_name,
+                name=surface_name,
                 interface_type=path.attack_surface_type or "other",
                 affected_asset_ids=[path.asset_id] if path.asset_id else [],
                 candidate_code_paths=path.code_paths,
@@ -313,22 +333,22 @@ def build_analysis_from_attack_paths(
             "asset_id": path.asset_id,
             "risk_id": path.risk_id,
             "goal_id": path.attack_goal_id,
-            "goal_name": path.attack_goal_name,
+            "goal_name": goal_name,
             "domains": {},
         })
         domains = current["domains"]
         domain = domains.setdefault(path.attack_domain_id, {
-            "name": path.attack_domain_name,
+            "name": domain_name,
             "surfaces": {},
         })
         surfaces = domain["surfaces"]
         surface = surfaces.setdefault(path.attack_surface_id, {
-            "name": path.attack_surface_name,
+            "name": surface_name,
             "surface_type": path.attack_surface_type,
             "methods": {},
         })
         surface["methods"].setdefault(path.attack_method_id, {
-            "name": path.attack_method_name,
+            "name": path.attack_method_name or "未命名攻击方式",
             "preconditions": path.preconditions,
             "basis": path.evidence,
         })

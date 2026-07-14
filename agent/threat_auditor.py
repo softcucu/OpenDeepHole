@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import re
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
@@ -25,10 +26,29 @@ from backend.opencode.output_format import with_local_timestamp
 
 COMPLETED_THREAT_AUDIT_STATUS = "completed"
 RETRYABLE_THREAT_AUDIT_STATUSES = {"failed", "timeout", "no_result", "cancelled"}
+_GENERATED_THREAT_ID_PATTERN = re.compile(
+    r"^(?:METHOD|NODE|AP|ASSET|RISK|GOAL|DOMAIN|SURFACE|TREE)-[A-Z0-9][A-Z0-9-]*$",
+    re.IGNORECASE,
+)
 
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _looks_like_generated_id(value: str) -> bool:
+    return bool(_GENERATED_THREAT_ID_PATTERN.fullmatch(str(value or "").strip()))
+
+
+def _display_label(name: str, fallback: str) -> str:
+    normalized = str(name or "").strip()
+    if normalized and not _looks_like_generated_id(normalized):
+        return normalized
+    return fallback
+
+
+def _display_method_name(name: str, fallback: str = "未命名攻击方式") -> str:
+    return _display_label(name, fallback)
 
 
 def _stable_task_id(
@@ -90,20 +110,27 @@ def _description(
     method: ThreatAttackTreeNode,
     tree: ThreatAttackTree,
 ) -> str:
+    surface_label = _display_label(surface.name or "", "未命名攻击面")
+    method_label = _display_method_name(method.name or "")
+    goal_label = _display_label(tree.attack_goal or "", "未标记")
     return (
-        f"审计攻击面节点 `{surface.name or surface.node_id}`，"
-        f"攻击方式 `{method.name or method.node_id or '未标记攻击方式'}`。"
-        f"攻击目标：{tree.attack_goal or '未标记'}。"
+        f"审计攻击面节点 `{surface_label}`，"
+        f"攻击方式 `{method_label}`。"
+        f"攻击目标：{goal_label}。"
     )
 
 
 def _attack_path_description(path: ThreatAttackPath) -> str:
+    asset_label = _display_label(path.asset_name or "", "未标记")
+    goal_label = _display_label(path.attack_goal_name or "", "未标记")
+    surface_label = _display_label(path.attack_surface_name or "", "未标记")
+    method_label = _display_method_name(path.attack_method_name or "", "未标记")
     return (
         f"审计攻击路径 `{path.path_id or path.fingerprint}`。"
-        f"目标资产：{path.asset_name or path.asset_id or '未标记'}；"
-        f"攻击目标：{path.attack_goal_name or path.attack_goal_id or '未标记'}；"
-        f"攻击面：{path.attack_surface_name or path.attack_surface_id or '未标记'}；"
-        f"攻击方法：{path.attack_method_name or path.attack_method_id or '未标记'}。"
+        f"目标资产：{asset_label}；"
+        f"攻击目标：{goal_label}；"
+        f"攻击面：{surface_label}；"
+        f"攻击方法：{method_label}。"
     )
 
 
@@ -118,8 +145,8 @@ def _method_identity(method: ThreatAttackTreeNode) -> str:
 
 
 def _task_label(task: ThreatAuditTask) -> str:
-    surface = task.surface_name or task.surface_node_id or "未标记攻击面"
-    method = task.method_name or task.method_node_id or "未标记攻击方式"
+    surface = _display_label(task.surface_name or "", "未标记攻击面")
+    method = _display_method_name(task.method_name or "", "未标记攻击方式")
     return f"{surface} / {method}"
 
 
@@ -153,14 +180,14 @@ def build_threat_audit_tasks(scan_id: str, analysis: ThreatAnalysis) -> list[Thr
                     scan_id=scan_id,
                     status="pending",
                     surface_node_id=path.attack_surface_id,
-                    surface_name=path.attack_surface_name,
+                    surface_name=_display_label(path.attack_surface_name or "", "未命名攻击面"),
                     method_node_id=path.attack_method_id,
-                    method_name=path.attack_method_name,
-                    attack_goal=path.attack_goal_name,
+                    method_name=_display_method_name(path.attack_method_name or ""),
+                    attack_goal=_display_label(path.attack_goal_name or "", "未命名攻击目标"),
                     risk_id=path.risk_id,
-                    risk_name=path.risk_name,
+                    risk_name=_display_label(path.risk_name or "", "未命名风险"),
                     asset_id=path.asset_id,
-                    asset_name=path.asset_name,
+                    asset_name=_display_label(path.asset_name or "", "未命名资产"),
                     code_path=code_path,
                     code_path_description=code_path_description,
                     code_paths=path.code_paths,
@@ -207,14 +234,14 @@ def build_threat_audit_tasks(scan_id: str, analysis: ThreatAnalysis) -> list[Thr
                     scan_id=scan_id,
                     status="pending",
                     surface_node_id=surface.node_id,
-                    surface_name=surface.name,
+                    surface_name=_display_label(surface.name or "", "未命名攻击面"),
                     method_node_id=method.node_id or method_identity,
-                    method_name=method.name,
-                    attack_goal=tree.attack_goal,
+                    method_name=_display_method_name(method.name or ""),
+                    attack_goal=_display_label(tree.attack_goal or "", "未命名攻击目标"),
                     risk_id=tree.risk_id,
-                    risk_name=risk_name,
+                    risk_name=_display_label(risk_name or "", "未命名风险"),
                     asset_id=asset_id,
-                    asset_name=asset_name,
+                    asset_name=_display_label(asset_name or "", "未命名资产"),
                     code_path="",
                     code_path_description="",
                     description=_description(surface=surface, method=method, tree=tree),

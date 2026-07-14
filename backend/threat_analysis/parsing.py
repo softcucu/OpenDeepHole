@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -47,6 +48,17 @@ def _str(value: Any, default: str = "") -> str:
     if value is None:
         return default
     return str(value).strip()
+
+
+_GENERATED_ID_PATTERN = re.compile(
+    r"^(?:METHOD|NODE|AP|ASSET|RISK|GOAL|DOMAIN|SURFACE|TREE)-[A-Z0-9][A-Z0-9-]*$",
+    re.IGNORECASE,
+)
+
+
+def _readable(value: Any, default: str = "") -> str:
+    normalized = _str(value, default)
+    return "" if _GENERATED_ID_PATTERN.fullmatch(normalized) else normalized
 
 
 def _str_or_none(value: Any) -> str | None:
@@ -186,7 +198,7 @@ def parse_threat_analysis_data(data: dict[str, Any]) -> ThreatAnalysis:
         risks = [
             ThreatRisk(
                 risk_id=_str(raw_risk.get("risk_id")),
-                name=_str(raw_risk.get("name")),
+                name=_readable(raw_risk.get("name")),
                 security_property=_str(raw_risk.get("security_property")),
                 description=_str(raw_risk.get("description")),
             )
@@ -195,7 +207,7 @@ def parse_threat_analysis_data(data: dict[str, Any]) -> ThreatAnalysis:
         assets.append(
             ThreatAsset(
                 asset_id=_str(raw_asset.get("asset_id")),
-                name=_str(raw_asset.get("name")),
+                name=_readable(raw_asset.get("name")),
                 description=_str(raw_asset.get("description")),
                 asset_type=_str(raw_asset.get("asset_type"), "other") or "other",
                 criticality=_str(raw_asset.get("criticality"), "medium") or "medium",
@@ -210,7 +222,7 @@ def parse_threat_analysis_data(data: dict[str, Any]) -> ThreatAnalysis:
                 node_id=_str(raw_node.get("node_id")),
                 parent_id=_str_or_none(raw_node.get("parent_id")),
                 node_type=_str(raw_node.get("node_type")),
-                name=_str(raw_node.get("name")),
+                name=_readable(raw_node.get("name")),
                 order=_int(raw_node.get("order")),
                 basis=_str_list(raw_node.get("basis")),
                 surface_type=_str(raw_node.get("surface_type")),
@@ -223,7 +235,7 @@ def parse_threat_analysis_data(data: dict[str, Any]) -> ThreatAnalysis:
                 tree_id=_str(raw_tree.get("tree_id")),
                 asset_id=_str(raw_tree.get("asset_id")),
                 risk_id=_str(raw_tree.get("risk_id")),
-                attack_goal=_str(raw_tree.get("attack_goal")),
+                attack_goal=_readable(raw_tree.get("attack_goal")),
                 root_node_id=_str(raw_tree.get("root_node_id")),
                 nodes=nodes,
             )
@@ -243,7 +255,7 @@ def parse_threat_analysis_data(data: dict[str, Any]) -> ThreatAnalysis:
         interfaces.append(
             ThreatExternalInterface(
                 interface_id=_str(raw_interface.get("interface_id")),
-                name=_str(raw_interface.get("name")),
+                name=_readable(raw_interface.get("name")),
                 description=_str(raw_interface.get("description")),
                 interface_type=_str(raw_interface.get("interface_type"), "other") or "other",
                 component=_str(raw_interface.get("component")),
@@ -263,18 +275,18 @@ def parse_threat_analysis_data(data: dict[str, Any]) -> ThreatAnalysis:
                 path_id=_str(raw_path.get("path_id")),
                 fingerprint=_str(raw_path.get("fingerprint")),
                 asset_id=_str(raw_path.get("asset_id")),
-                asset_name=_str(raw_path.get("asset_name")),
+                asset_name=_readable(raw_path.get("asset_name")),
                 risk_id=_str(raw_path.get("risk_id")),
-                risk_name=_str(raw_path.get("risk_name")),
+                risk_name=_readable(raw_path.get("risk_name")),
                 attack_goal_id=_str(raw_path.get("attack_goal_id")),
-                attack_goal_name=_str(raw_path.get("attack_goal_name")),
+                attack_goal_name=_readable(raw_path.get("attack_goal_name")),
                 attack_domain_id=_str(raw_path.get("attack_domain_id")),
-                attack_domain_name=_str(raw_path.get("attack_domain_name")),
+                attack_domain_name=_readable(raw_path.get("attack_domain_name")),
                 attack_surface_id=_str(raw_path.get("attack_surface_id")),
-                attack_surface_name=_str(raw_path.get("attack_surface_name")),
+                attack_surface_name=_readable(raw_path.get("attack_surface_name")),
                 attack_surface_type=_str(raw_path.get("attack_surface_type")),
                 attack_method_id=_str(raw_path.get("attack_method_id")),
-                attack_method_name=_str(raw_path.get("attack_method_name")),
+                attack_method_name=_readable(raw_path.get("attack_method_name")),
                 preconditions=_str_list(raw_path.get("preconditions")),
                 code_paths=_code_paths(raw_path.get("code_paths")),
                 evidence=_str_list(raw_path.get("evidence")),

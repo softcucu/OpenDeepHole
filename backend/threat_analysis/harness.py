@@ -25,46 +25,33 @@ _SKIP_DIRS = {
 
 _LANG_BY_EXT = {
     ".c": "c",
+    ".c++": "cpp",
     ".cc": "cpp",
     ".cpp": "cpp",
     ".cxx": "cpp",
+    ".cu": "cpp",
     ".h": "c/cpp",
+    ".h++": "cpp",
+    ".hh": "cpp",
     ".hpp": "cpp",
-    ".go": "go",
-    ".java": "java",
-    ".js": "javascript",
-    ".jsx": "javascript",
-    ".ts": "typescript",
-    ".tsx": "typescript",
-    ".py": "python",
-    ".rs": "rust",
-    ".php": "php",
-    ".rb": "ruby",
-    ".cs": "csharp",
-    ".kt": "kotlin",
-    ".swift": "swift",
-    ".sh": "shell",
-    ".yaml": "yaml",
-    ".yml": "yaml",
-    ".json": "json",
-    ".xml": "xml",
-    ".proto": "protobuf",
+    ".hxx": "cpp",
+    ".cuh": "cpp",
+    ".ipp": "cpp",
+    ".inl": "cpp",
 }
 
 _BUILD_FILES = {
     "CMakeLists.txt",
-    "Makefile",
-    "pom.xml",
-    "build.gradle",
-    "build.gradle.kts",
-    "package.json",
-    "go.mod",
-    "Cargo.toml",
-    "pyproject.toml",
-    "requirements.txt",
-    "setup.py",
+    "compile_commands.json",
+    "configure",
     "configure.ac",
+    "GNUmakefile",
+    "Kbuild",
+    "Kconfig",
+    "Makefile",
+    "makefile",
     "meson.build",
+    "meson_options.txt",
 }
 
 _ENTRY_PATTERNS = re.compile(
@@ -92,10 +79,10 @@ def read_json_object(path: Path) -> dict[str, Any]:
 
 
 def build_code_index(project_root: Path, scan_root: Path) -> dict[str, Any]:
-    """Build a compact, deterministic repository index for Agent prompts."""
+    """Build a deterministic C/C++ repository index for Agent prompts."""
     project_root = project_root.resolve()
     scan_root = scan_root.resolve()
-    directories: list[str] = []
+    directories: set[str] = set()
     files: list[str] = []
     build_files: list[str] = []
     entry_candidates: list[str] = []
@@ -108,10 +95,6 @@ def build_code_index(project_root: Path, scan_root: Path) -> dict[str, Any]:
             rel_dir = root_path.relative_to(project_root).as_posix()
         except ValueError:
             rel_dir = root_path.as_posix()
-        directories.append(rel_dir or ".")
-        if len(directories) > 800:
-            dirnames[:] = []
-            continue
         for filename in sorted(filenames):
             file_path = root_path / filename
             try:
@@ -120,26 +103,45 @@ def build_code_index(project_root: Path, scan_root: Path) -> dict[str, Any]:
                 rel_file = file_path.as_posix()
             if filename in _BUILD_FILES:
                 build_files.append(rel_file)
+                _add_index_directory(directories, rel_dir)
             language = _LANG_BY_EXT.get(file_path.suffix.lower())
             if language:
                 language_counts[language] = language_counts.get(language, 0) + 1
-                if len(files) < 1200:
-                    files.append(rel_file)
-            if _ENTRY_PATTERNS.search(rel_file) and len(entry_candidates) < 400:
+                files.append(rel_file)
+                _add_index_directory(directories, rel_dir)
+            if language and _ENTRY_PATTERNS.search(rel_file):
                 entry_candidates.append(rel_file)
 
     return {
         "project_root": project_root.as_posix(),
         "scan_root": scan_root.as_posix(),
-        "directories": directories[:800],
-        "files": files[:1200],
+        "scope": {
+            "languages": ["c", "cpp", "c/cpp"],
+            "description": "仅索引 C/C++ 源文件、头文件和 C/C++ 构建文件",
+        },
+        "directories": _sorted_index_directories(directories),
+        "files": files,
         "languages": sorted(
             ({"language": lang, "files": count} for lang, count in language_counts.items()),
             key=lambda item: (-item["files"], item["language"]),
         ),
-        "build_files": build_files[:200],
-        "entry_candidates": entry_candidates[:400],
+        "build_files": build_files,
+        "entry_candidates": entry_candidates,
     }
+
+
+def _add_index_directory(directories: set[str], rel_dir: str) -> None:
+    normalized = rel_dir or "."
+    directories.add(normalized)
+    if normalized == "." or normalized.startswith("/"):
+        return
+    parts = [part for part in normalized.split("/") if part]
+    for index in range(1, len(parts)):
+        directories.add("/".join(parts[:index]))
+
+
+def _sorted_index_directories(directories: set[str]) -> list[str]:
+    return sorted(directories, key=lambda value: (value != ".", value))
 
 
 def configured_opencode_mcp_names(

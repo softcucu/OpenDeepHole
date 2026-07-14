@@ -268,7 +268,7 @@ class OpencodeWorkspaceTests(unittest.TestCase):
 
             self.assertFalse((workspace / ".opencode" / "skills" / "threat-path-audit").exists())
 
-    def test_threat_analysis_install_registers_first_stage_subagents(self) -> None:
+    def test_threat_analysis_install_registers_first_step_agent_skills(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repo_root = Path(__file__).resolve().parents[1]
             workspace = Path(tmp)
@@ -284,8 +284,12 @@ class OpencodeWorkspaceTests(unittest.TestCase):
             )
 
             config = json.loads((workspace / "opencode.json").read_text(encoding="utf-8"))
-            agents = config["agent"]
-            self.assertEqual(config["permission"]["task"], {"*": "allow"})
+            self.assertEqual(config.get("permission", {}).get("task"), {"*": "allow"})
+            self.assertTrue((
+                workspace / ".opencode" / "skills" / "threat-base-model-shard-planner" / "SKILL.md"
+            ).is_file())
+            agents = config.get("agent", {})
+            self.assertIsInstance(agents, dict)
             for name in (
                 "threat-asset-enumerator",
                 "threat-attack-goal-enumerator",
@@ -293,24 +297,22 @@ class OpencodeWorkspaceTests(unittest.TestCase):
             ):
                 self.assertEqual(agents[name]["mode"], "subagent")
                 self.assertTrue(agents[name]["hidden"])
-            self.assertIn("shard_scope", agents["threat-asset-enumerator"]["prompt"])
-            self.assertIn("goal_scope", agents["threat-attack-goal-enumerator"]["prompt"])
-            self.assertIn("evidence_scope", agents["threat-code-evidence-mapper"]["prompt"])
+                self.assertEqual(agents[name]["permission"]["task"], "deny")
+                self.assertFalse(agents[name]["tools"]["task"])
+                self.assertTrue((workspace / ".opencode" / "skills" / name / "SKILL.md").is_file())
 
-            skill = (
-                workspace
-                / ".opencode"
-                / "skills"
-                / "threat-asset-interface-agent"
-                / "SKILL.md"
+            asset_skill = (
+                workspace / ".opencode" / "skills" / "threat-asset-enumerator" / "SKILL.md"
             ).read_text(encoding="utf-8")
-            self.assertIn("threat-asset-enumerator", skill)
-            self.assertIn("threat-attack-goal-enumerator", skill)
-            self.assertIn("threat-code-evidence-mapper", skill)
-            self.assertIn("多个 `threat-asset-enumerator`", skill)
-            self.assertIn("多个 `threat-attack-goal-enumerator`", skill)
-            self.assertIn("多个 `threat-code-evidence-mapper`", skill)
-            self.assertIn("笛卡尔积", skill)
+            goal_skill = (
+                workspace / ".opencode" / "skills" / "threat-attack-goal-enumerator" / "SKILL.md"
+            ).read_text(encoding="utf-8")
+            evidence_skill = (
+                workspace / ".opencode" / "skills" / "threat-code-evidence-mapper" / "SKILL.md"
+            ).read_text(encoding="utf-8")
+            self.assertIn("shard_scope", asset_skill)
+            self.assertIn("goal_scope", goal_skill)
+            self.assertIn("evidence_scope", evidence_skill)
 
     def test_scan_workspaces_are_isolated_per_scan_for_same_project(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -401,7 +401,7 @@ def test_threat_analysis_result_uses_project_root(tmp_path: Path) -> None:
     asyncio.run(run())
 
 
-def test_attack_tree_threat_analysis_runs_goal_stage_concurrently(tmp_path: Path) -> None:
+def test_attack_tree_threat_analysis_prioritizes_one_tree_pipeline(tmp_path: Path) -> None:
     async def run() -> None:
         scans_dir = tmp_path / "scans"
         workspace = scans_dir / "scan-1" / "opencode_workspace"
@@ -409,7 +409,7 @@ def test_attack_tree_threat_analysis_runs_goal_stage_concurrently(tmp_path: Path
         project = tmp_path / "project"
         scan_root = project / "src"
         scan_root.mkdir(parents=True)
-        (scan_root / "app.py").write_text("def main():\n    return 0\n", encoding="utf-8")
+        (scan_root / "app.cpp").write_text("int main() { return 0; }\n", encoding="utf-8")
         repo_root = Path(__file__).resolve().parent.parent
         skill = repo_root / "attack-tree-threat-analysis.md"
         reference = repo_root / "attack-method-reference-catalog.md"
@@ -439,8 +439,7 @@ def test_attack_tree_threat_analysis_runs_goal_stage_concurrently(tmp_path: Path
             ),
             storage=SimpleNamespace(scans_dir=str(scans_dir)),
         )
-        running_goal = 0
-        peak_goal = 0
+        stage_order: list[str] = []
         output_lines: list[str] = []
 
         def output_path_from_prompt(prompt: str) -> Path:
@@ -448,12 +447,39 @@ def test_attack_tree_threat_analysis_runs_goal_stage_concurrently(tmp_path: Path
             assert match is not None
             return Path(match.group(1))
 
+        def input_data_from_prompt(prompt: str) -> dict:
+            match = re.search(r"读取输入 JSON 文件：`([^`]+)`", prompt)
+            assert match is not None
+            return json.loads(Path(match.group(1)).read_text(encoding="utf-8"))
+
         async def fake_invoke(call_workspace: Path, prompt: str, *args, **kwargs) -> None:
-            nonlocal running_goal, peak_goal
             output_path = output_path_from_prompt(prompt)
+            if "threat-base-model-shard-planner" in prompt:
+                output_path.write_text(
+                    json.dumps({
+                        "planning_summary": "单一 C/C++ 入口使用一个基础建模分片",
+                        "shards": [
+                            {
+                                "type": "entry_family",
+                                "name": "主程序入口",
+                                "description": "覆盖主程序入口相关 C/C++ 路径",
+                                "planning_reason": "当前索引只有一个主程序入口",
+                                "include_paths": ["src/app.cpp"],
+                                "entry_candidates": [],
+                                "languages": ["cpp"],
+                            }
+                        ],
+                    }),
+                    encoding="utf-8",
+                )
+                return
             if "threat-asset-interface-agent" in prompt:
                 output_path.write_text(
                     json.dumps({
+                        "assets": [],
+                        "high_risk_external_interfaces": [],
+                        "asset_interface_links": [],
+                        "risks": [],
                         "attack_goals": [
                             {"attack_goal_id": "GOAL-1", "name": "goal 1"},
                             {"attack_goal_id": "GOAL-2", "name": "goal 2"},
@@ -463,13 +489,28 @@ def test_attack_tree_threat_analysis_runs_goal_stage_concurrently(tmp_path: Path
                 )
                 return
             if "threat-attack-goal-agent" in prompt:
-                running_goal += 1
-                peak_goal = max(peak_goal, running_goal)
-                try:
-                    await asyncio.sleep(0.05)
-                finally:
-                    running_goal -= 1
-                output_path.write_text('{"domains":[]}', encoding="utf-8")
+                goal_id = input_data_from_prompt(prompt)["attack_goal"]["attack_goal_id"]
+                stage_order.append(f"goal:{goal_id}")
+                output_path.write_text(
+                    json.dumps({"domains": [{"domain_id": f"DOMAIN-{goal_id}", "name": "管理面"}]}),
+                    encoding="utf-8",
+                )
+                return
+            if "threat-attack-domain-agent" in prompt:
+                goal_id = input_data_from_prompt(prompt)["attack_goal"]["attack_goal_id"]
+                stage_order.append(f"domain:{goal_id}")
+                output_path.write_text(
+                    json.dumps({"surfaces": [{"surface_id": f"SURFACE-{goal_id}", "name": "管理接口"}]}),
+                    encoding="utf-8",
+                )
+                return
+            if "threat-attack-surface-agent" in prompt:
+                goal_id = input_data_from_prompt(prompt)["attack_goal"]["attack_goal_id"]
+                stage_order.append(f"surface:{goal_id}")
+                output_path.write_text(
+                    json.dumps({"methods": [], "attack_paths": [], "method_confirmation_tasks": []}),
+                    encoding="utf-8",
+                )
                 return
             output_path.write_text("{}", encoding="utf-8")
 
@@ -488,8 +529,16 @@ def test_attack_tree_threat_analysis_runs_goal_stage_concurrently(tmp_path: Path
             )
 
         assert analysis is not None
-        assert peak_goal == 2
-        assert any("攻击目标分解并发度：2/2" in line for line in output_lines)
+        assert stage_order == [
+            "goal:GOAL-1",
+            "domain:GOAL-1",
+            "surface:GOAL-1",
+            "goal:GOAL-2",
+            "domain:GOAL-2",
+            "surface:GOAL-2",
+        ]
+        assert any("攻击树优先调度" in line for line in output_lines)
+        assert not any("攻击目标分解并发度" in line for line in output_lines)
 
     asyncio.run(run())
 
