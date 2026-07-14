@@ -36,6 +36,11 @@ _MAX_GOALS = 30
 _MAX_DOMAINS = 150
 _MAX_SURFACES = 300
 _MAX_CONFIRMATIONS = 300
+_STAGE_FAILURE_RETRIES = 3
+
+
+class _StageOutputError(RuntimeError):
+    """Raised when a threat-analysis stage did not write a usable JSON object."""
 
 
 async def run_attack_tree_threat_analysis(
@@ -390,42 +395,116 @@ async def _invoke_stage(
     if _cancelled(cancel_event):
         return
     output_path.parent.mkdir(parents=True, exist_ok=True)
+    log_dir = run_dir / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
     prompt = _stage_prompt(
         skill_name=skill_name,
         input_path=input_path,
         output_path=output_path,
         task_label=task_label,
     )
-    if on_output:
-        on_output(f"[threat-analysis] {task_label}: {skill_name}")
     task_context = {"task_type": "threat_analysis", "stage": skill_name}
     if planned_task_id:
         task_context["planned_task_id"] = planned_task_id
-    try:
-        await opencode_runner._invoke_opencode(
-            workspace,
-            prompt,
-            timeout,
-            log_path=run_dir / "logs" / f"{skill_name}-{attempt}.log",
-            on_line=on_output,
-            cancel_event=cancel_event,
-            project_dir=analysis_root,
-            writable_paths=[run_dir],
-            model_capability="high",
-            prefer_high_model=True,
-            stats_scope_id=stats_scope_id,
-            task_context=task_context,
-            attempt=attempt,
-        )
-    except asyncio.CancelledError:
-        raise
-    except opencode_runner.NoAvailableModelError:
-        raise
-    except Exception as exc:
+    max_attempts = 1 + _STAGE_FAILURE_RETRIES
+    last_error: Exception | None = None
+    for stage_attempt in range(1, max_attempts + 1):
+        if _cancelled(cancel_event):
+            return
+        try:
+            output_path.unlink(missing_ok=True)
+        except Exception:
+            pass
+        stage_prompt = prompt
+        if stage_attempt > 1:
+            stage_prompt += (
+                "\n\n上一次执行没有写出可用的阶段 JSON。"
+                "请重新读取输入文件，严格输出合法 JSON 对象，并覆盖输出文件。"
+            )
         if on_output:
-            on_output(f"[threat-analysis] {task_label} 失败，继续后续可用结果：{exc}")
-        if not output_path.is_file():
-            write_json(output_path, {"error": str(exc)})
+            retry_note = (
+                f" 重试 {stage_attempt - 1}/{_STAGE_FAILURE_RETRIES}"
+                if stage_attempt > 1
+                else ""
+            )
+            on_output(f"[threat-analysis] {task_label}: {skill_name}{retry_note}")
+        try:
+            await opencode_runner._invoke_opencode(
+                workspace,
+                stage_prompt,
+                timeout,
+                log_path=log_dir / f"{skill_name}-{attempt}-attempt-{stage_attempt}.log",
+                on_line=on_output,
+                cancel_event=cancel_event,
+                project_dir=analysis_root,
+                writable_paths=[run_dir],
+                model_capability="high",
+                prefer_high_model=True,
+                stats_scope_id=stats_scope_id,
+                task_context=task_context,
+                attempt=stage_attempt,
+            )
+            _validate_stage_output(skill_name, read_json_object(output_path))
+            return
+        except asyncio.CancelledError:
+            raise
+        except opencode_runner.NoAvailableModelError as exc:
+            last_error = exc
+            if stage_attempt >= max_attempts:
+                write_json(output_path, {"error": str(exc)})
+                raise
+        except Exception as exc:
+            last_error = exc
+            if stage_attempt >= max_attempts:
+                break
+        if on_output:
+            on_output(
+                f"[threat-analysis] {task_label} 第 {stage_attempt}/{max_attempts} 次失败："
+                f"{last_error}，准备重试..."
+            )
+    failure = str(last_error or "unknown error")
+    if on_output:
+        on_output(
+            f"[threat-analysis] {task_label} 失败，已重试 {_STAGE_FAILURE_RETRIES} 次，"
+            f"继续后续可用结果：{failure}"
+        )
+    write_json(output_path, {"error": failure})
+
+
+def _validate_stage_output(skill_name: str, output: dict[str, Any]) -> None:
+    if not output:
+        raise _StageOutputError("stage output is empty")
+    if output.get("error"):
+        raise _StageOutputError(str(output.get("error")))
+    required_list_fields = {
+        "threat-asset-interface-agent": [
+            "assets",
+            "high_risk_external_interfaces",
+            "asset_interface_links",
+            "risks",
+            "attack_goals",
+        ],
+        "threat-attack-goal-agent": ["domains"],
+        "threat-attack-domain-agent": ["surfaces"],
+        "threat-attack-surface-agent": [
+            "methods",
+            "attack_paths",
+            "method_confirmation_tasks",
+        ],
+        "threat-method-confirm-agent": ["attack_paths"],
+    }.get(skill_name, [])
+    missing = [field for field in required_list_fields if field not in output]
+    if missing:
+        raise _StageOutputError(f"stage output missing field(s): {', '.join(missing)}")
+    wrong_type = [
+        field
+        for field in required_list_fields
+        if field in output and not isinstance(output[field], list)
+    ]
+    if wrong_type:
+        raise _StageOutputError(
+            f"stage output field(s) must be arrays: {', '.join(wrong_type)}"
+        )
 
 
 def _stage_concurrency(config: Any, pending_count: int) -> int:
@@ -491,7 +570,7 @@ def _stage_prompt(
     output_path: Path,
     task_label: str,
 ) -> str:
-    return (
+    prompt = (
         f"使用 `{skill_name}` 技能执行威胁分析阶段：{task_label}。\n"
         f"读取输入 JSON 文件：`{input_path.resolve()}`。\n"
         f"将阶段结果写入输出 JSON 文件：`{output_path.resolve()}`。\n"
@@ -500,6 +579,19 @@ def _stage_prompt(
         "代码路径必须来自输入代码索引或实际检索结果，无法确认时输出空数组。\n"
         "不得修改输出 JSON 文件之外的任何项目文件。\n"
     )
+    if skill_name == "threat-asset-interface-agent":
+        prompt += (
+            "本阶段允许在主 Agent 内调用只读子 Agent 做交叉分析："
+            "`threat-asset-enumerator`、`threat-attack-goal-enumerator`、"
+            "`threat-code-evidence-mapper`。"
+            "代码量较大时，可以按顶层目录、主要语言、外部入口类型、协议/接口族或 MCP 产品模块"
+            "派发多个 `threat-asset-enumerator` 分片实例，再由主 Agent 合并去重。"
+            "资产/风险、候选路径或接口较多时，也可以按资产组、风险类型、接口族或候选路径组"
+            "派发多个 `threat-attack-goal-enumerator` 和 `threat-code-evidence-mapper` 分片实例；"
+            "不要按资产×接口×风险做笛卡尔积派发。"
+            "如果当前运行环境没有子 Agent/Task 能力，主 Agent 必须按相同三个角色自行完成分析。\n"
+        )
+    return prompt
 
 
 def _attack_goals_from_base_output(base_output: dict[str, Any]) -> list[dict[str, Any]]:

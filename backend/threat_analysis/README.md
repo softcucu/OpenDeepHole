@@ -23,6 +23,17 @@ threat_analysis:
 
 - 检测到时，基础建模阶段优先使用该 MCP 获取价值资产、高风险外部接口和关联关系，再做代码增量补充。
 - 未检测到时，基础建模阶段完全从代码识别资产、接口和关联关系。
+- 基础建模阶段会在主 `threat-asset-interface-agent` 内启用三个只读子 agent：
+  `threat-asset-enumerator`、`threat-attack-goal-enumerator`、
+  `threat-code-evidence-mapper`。主 agent 汇总三方结果后仍输出原有
+  `assets`、`high_risk_external_interfaces`、`asset_interface_links`、
+  `risks`、`attack_goals` JSON 契约。
+- 大代码仓可以按顶层目录、主要语言、入口类型、协议/接口族或 MCP 产品模块
+  派发多个 `threat-asset-enumerator` 分片实例，再由主 agent 合并去重。
+- 资产/风险较多时，`threat-attack-goal-enumerator` 可以按资产组、风险类型、
+  业务域或接口族分片；候选路径或接口较多时，`threat-code-evidence-mapper`
+  可以按候选代码路径组、接口族、资产组或攻击目标组分片。分片要避免
+  资产 × 接口 × 风险的笛卡尔积爆炸。
 
 新流程的事实源是 `runs/<scan_id>/stream/attack_paths.jsonl`。最终
 `runs/<scan_id>/res.json` 由 JSONL 归并生成，项目根目录 `res.json` 仅作为旧缓存兼容副本。

@@ -1,9 +1,13 @@
+import asyncio
+import json
 import tempfile
 import unittest
 import time
 from pathlib import Path
 
+from agent.scanner import _is_streaming_threat_analysis, _streaming_threat_analysis_id
 from agent.threat_auditor import _scan_path_from_analysis, build_threat_audit_tasks
+from backend.threat_analysis.attack_tree_opencode import _invoke_stage
 from backend.opencode.runner import _read_fresh_threat_analysis_result
 from backend.models import ScanItemStatus, ScanMeta, ScanStatus, ThreatAuditTask, Vulnerability
 from backend.store.sqlite import SqliteScanStore
@@ -42,6 +46,66 @@ def _scan(scan_id: str) -> tuple[ScanStatus, ScanMeta]:
 
 
 class ThreatAnalysisParserTests(unittest.TestCase):
+    def test_threat_analysis_stage_retries_invalid_json_three_times(self) -> None:
+        class FakeOpenCodeRunner:
+            class NoAvailableModelError(RuntimeError):
+                pass
+
+            def __init__(self, output_path: Path) -> None:
+                self.output_path = output_path
+                self.calls = 0
+
+            async def _invoke_opencode(self, *args, **kwargs) -> str:
+                self.calls += 1
+                if self.calls <= 3:
+                    self.output_path.write_text("{not-json", encoding="utf-8")
+                else:
+                    self.output_path.write_text(
+                        json.dumps({"attack_goal_id": "GOAL-1", "domains": []}),
+                        encoding="utf-8",
+                    )
+                return ""
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            output_path = root / "run" / "stages" / "goal.output.json"
+            runner = FakeOpenCodeRunner(output_path)
+            logs: list[str] = []
+
+            asyncio.run(_invoke_stage(
+                opencode_runner=runner,
+                workspace=root,
+                analysis_root=root,
+                run_dir=root / "run",
+                skill_name="threat-attack-goal-agent",
+                input_path=root / "input.json",
+                output_path=output_path,
+                timeout=1,
+                on_output=logs.append,
+                cancel_event=None,
+                planned_task_id="",
+                stats_scope_id="scan-1",
+                attempt=1,
+                task_label="攻击目标分解 1/1",
+            ))
+
+            self.assertEqual(runner.calls, 4)
+            self.assertEqual(json.loads(output_path.read_text(encoding="utf-8"))["domains"], [])
+            self.assertTrue(any("重试 3/3" in line for line in logs))
+
+    def test_streaming_threat_analysis_marker(self) -> None:
+        streaming = parse_threat_analysis_data({
+            "analysis_id": _streaming_threat_analysis_id("scan-1"),
+            "assets": [],
+        })
+        final = parse_threat_analysis_data({
+            "analysis_id": "ATA-FINAL",
+            "assets": [],
+        })
+
+        self.assertTrue(_is_streaming_threat_analysis(streaming))
+        self.assertFalse(_is_streaming_threat_analysis(final))
+
     def test_parse_attack_tree_res_json_shape(self) -> None:
         analysis = parse_threat_analysis_data({
             "schema_version": "1.0",
