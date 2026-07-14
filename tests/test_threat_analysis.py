@@ -94,7 +94,7 @@ class ThreatAnalysisParserTests(unittest.TestCase):
         self.assertNotIn("src/server.py", index["files"])
         self.assertNotIn("src/package.json", index["build_files"])
 
-    def test_base_model_uses_shard_coordinator_agents_and_merges_outputs(self) -> None:
+    def test_base_model_uses_single_initial_agent_then_three_gap_review_agents(self) -> None:
         class FakeOpenCodeRunner:
             class NoAvailableModelError(RuntimeError):
                 pass
@@ -103,7 +103,7 @@ class ThreatAnalysisParserTests(unittest.TestCase):
                 self.stage_dir = stage_dir
                 self.stages: list[str] = []
                 self.prompts: list[str] = []
-                self.asset_calls = 0
+                self.gap_calls = 0
 
             async def _invoke_opencode(self, *args, **kwargs) -> str:
                 stage = kwargs["task_context"]["stage"]
@@ -113,56 +113,13 @@ class ThreatAnalysisParserTests(unittest.TestCase):
                 output_match = re.search(r"将阶段结果写入输出 JSON 文件：`([^`]+)`", prompt)
                 assert output_match is not None
                 output_path = Path(output_match.group(1))
-                if stage == "threat-base-model-shard-planner":
+                input_match = re.search(r"读取输入 JSON 文件：`([^`]+)`", prompt)
+                assert input_match is not None
+                input_data = json.loads(Path(input_match.group(1)).read_text(encoding="utf-8"))
+                if stage == "threat-asset-interface-agent":
                     output_path.parent.mkdir(parents=True, exist_ok=True)
                     output_path.write_text(
                         json.dumps({
-                            "planning_summary": "按管理面链路和驱动协议链路规划两个语义分片",
-                            "shards": [
-                                {
-                                    "type": "entry_family",
-                                    "name": "管理面认证与配置链路",
-                                    "description": "覆盖管理 API、认证和配置变更相关 C/C++ 路径",
-                                    "planning_reason": "这些路径共同服务管理面入口和配置资产",
-                                    "include_paths": [
-                                        "src/api/auth.cpp",
-                                        "src/api/session.cpp",
-                                        "src/web/config/routes.cpp",
-                                        "src/web/config/store.cpp",
-                                    ],
-                                    "entry_candidates": [
-                                        "src/api/auth.cpp",
-                                        "src/web/config/routes.cpp",
-                                    ],
-                                    "languages": ["cpp"],
-                                },
-                                {
-                                    "type": "entry_family",
-                                    "name": "驱动协议入口链路",
-                                    "description": "覆盖驱动 ioctl 和协议解析相关 C/C++ 路径",
-                                    "planning_reason": "这些路径共同承接外部驱动和协议输入",
-                                    "include_paths": [
-                                        "src/driver/ioctl.cpp",
-                                        "src/protocol/codec.cpp",
-                                    ],
-                                    "entry_candidates": [
-                                        "src/driver/ioctl.cpp",
-                                        "src/protocol/codec.cpp",
-                                    ],
-                                    "languages": ["cpp"],
-                                },
-                            ],
-                        }),
-                        encoding="utf-8",
-                    )
-                    return ""
-                assert stage == "threat-asset-interface-agent"
-                self.asset_calls += 1
-                call_index = self.asset_calls
-                outputs = [
-                    (
-                        output_path,
-                        {
                             "assets": [
                                 {
                                     "asset_id": "ASSET-1",
@@ -185,37 +142,75 @@ class ThreatAnalysisParserTests(unittest.TestCase):
                                     "candidate_code_paths": ["src/api"],
                                 }
                             ],
-                        },
-                    ),
-                    (
-                        output_path,
-                        {
-                            "assets": [
-                                {
-                                    "asset_id": "ASSET-2",
-                                    "name": "用户配置数据",
-                                    "risks": [{"risk_id": "RISK-2", "name": "配置被未授权篡改"}],
-                                }
-                            ],
-                            "high_risk_external_interfaces": [
-                                {"interface_id": "IF-2", "name": "配置接口", "candidate_code_paths": ["web/config"]}
-                            ],
-                            "asset_interface_links": [{"asset_id": "ASSET-2", "interface_id": "IF-2"}],
-                            "risks": [{"risk_id": "RISK-2", "asset_id": "ASSET-2", "name": "配置被未授权篡改"}],
-                            "attack_goals": [
-                                {
-                                    "attack_goal_id": "GOAL-2",
-                                    "asset_id": "ASSET-2",
-                                    "risk_id": "RISK-2",
-                                    "name": "通过配置接口篡改关键配置",
-                                    "related_interface_ids": ["IF-2"],
-                                    "candidate_code_paths": ["web/config"],
-                                }
-                            ],
-                        },
-                    ),
+                        }),
+                        encoding="utf-8",
+                    )
+                    return ""
+                assert stage == "threat-base-model-gap-review-agent"
+                self.gap_calls += 1
+                current_items = input_data["current_identified_items"]
+                assert current_items["assets"][0]["name"] == "管理员权限"
+                assert current_items["attack_goals"][0]["name"] == "绕过管理面认证获取管理员权限"
+                payloads = [
+                    {
+                        "assets": [
+                            {
+                                "asset_id": "ASSET-2",
+                                "name": "用户配置数据",
+                                "candidate_code_paths": ["src/web/config/routes.cpp"],
+                                "risks": [{"risk_id": "RISK-2", "name": "配置被未授权篡改"}],
+                            }
+                        ],
+                        "high_risk_external_interfaces": [
+                            {"interface_id": "IF-2", "name": "配置接口", "candidate_code_paths": ["src/web/config/routes.cpp"]}
+                        ],
+                        "asset_interface_links": [{"asset_id": "ASSET-2", "interface_id": "IF-2"}],
+                        "risks": [{"risk_id": "RISK-2", "asset_id": "ASSET-2", "name": "配置被未授权篡改"}],
+                        "attack_goals": [
+                            {
+                                "attack_goal_id": "GOAL-2",
+                                "asset_id": "ASSET-2",
+                                "risk_id": "RISK-2",
+                                "name": "通过配置接口篡改关键配置",
+                                "related_interface_ids": ["IF-2"],
+                                "candidate_code_paths": ["src/web/config/routes.cpp"],
+                            }
+                        ],
+                    },
+                    {
+                        "assets": [
+                            {
+                                "asset_id": "ASSET-3",
+                                "name": "用户配置数据",
+                                "candidate_code_paths": ["src/web/config/store.cpp"],
+                                "risks": [{"risk_id": "RISK-3", "name": "配置被未授权篡改"}],
+                            }
+                        ],
+                        "high_risk_external_interfaces": [
+                            {"interface_id": "IF-3", "name": "配置接口", "candidate_code_paths": ["src/web/config/store.cpp"]}
+                        ],
+                        "asset_interface_links": [{"asset_id": "ASSET-3", "interface_id": "IF-3"}],
+                        "risks": [{"risk_id": "RISK-3", "asset_id": "ASSET-3", "name": "配置被未授权篡改"}],
+                        "attack_goals": [
+                            {
+                                "attack_goal_id": "GOAL-3",
+                                "asset_id": "ASSET-3",
+                                "risk_id": "RISK-3",
+                                "name": "通过配置接口篡改关键配置",
+                                "related_interface_ids": ["IF-3"],
+                                "candidate_code_paths": ["src/web/config/store.cpp"],
+                            }
+                        ],
+                    },
+                    {
+                        "assets": [],
+                        "high_risk_external_interfaces": [],
+                        "asset_interface_links": [],
+                        "risks": [],
+                        "attack_goals": [],
+                    },
                 ]
-                output_path, payload = outputs[call_index - 1]
+                payload = payloads[self.gap_calls - 1]
                 output_path.parent.mkdir(parents=True, exist_ok=True)
                 output_path.write_text(json.dumps(payload), encoding="utf-8")
                 return ""
@@ -262,20 +257,25 @@ class ThreatAnalysisParserTests(unittest.TestCase):
                 stats_scope_id="scan-1",
             ))
 
-            self.assertEqual(runner.stages, [
-                "threat-base-model-shard-planner",
-                "threat-asset-interface-agent",
-                "threat-asset-interface-agent",
-            ])
-            self.assertIn("分片数量不要按目录数量机械决定", runner.prompts[0])
+            self.assertEqual(runner.stages[0], "threat-asset-interface-agent")
+            self.assertEqual(runner.stages.count("threat-asset-interface-agent"), 1)
+            self.assertEqual(runner.stages.count("threat-base-model-gap-review-agent"), 3)
+            self.assertNotIn("threat-base-model-shard-planner", runner.stages)
+            self.assertIn("只调用这一个 Agent", runner.prompts[0])
             self.assertTrue(all(
-                "允许并建议在当前分片范围内使用 Task 派发子 Agent" in prompt
+                "current_identified_items.assets" in prompt
                 for prompt in runner.prompts[1:]
             ))
             self.assertEqual(result["assets"][0]["name"], "管理员权限")
             self.assertEqual(result["assets"][1]["name"], "用户配置数据")
-            self.assertEqual(result["attack_goals"][1]["candidate_code_paths"], ["web/config"])
-            self.assertEqual(result["high_risk_external_interfaces"][1]["candidate_code_paths"], ["web/config"])
+            self.assertEqual(
+                set(result["attack_goals"][1]["candidate_code_paths"]),
+                {"src/web/config/routes.cpp", "src/web/config/store.cpp"},
+            )
+            self.assertEqual(
+                set(result["high_risk_external_interfaces"][1]["candidate_code_paths"]),
+                {"src/web/config/routes.cpp", "src/web/config/store.cpp"},
+            )
 
     def test_base_model_shards_follow_cpp_paths_without_six_agent_cap(self) -> None:
         files = [f"src/module{i}/entry.cpp" for i in range(1, 9)]

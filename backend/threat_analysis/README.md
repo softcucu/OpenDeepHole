@@ -25,19 +25,15 @@ threat_analysis:
   Python、TypeScript、Go、Java 等非 C/C++ 文件不会进入代码索引、分片派发或代码证据。
 - 检测到时，基础建模阶段优先使用该 MCP 获取价值资产、高风险外部接口和关联关系，再做代码增量补充。
 - 未检测到时，基础建模阶段完全从代码识别资产、接口和关联关系。
-- 基础建模阶段先由 `threat-base-model-shard-planner` 根据 C/C++ 代码索引、
-  入口候选、构建文件、产品/MCP 信息和启发式候选规划语义分片；目录数量只作为候选信号，
-  不直接决定 Agent 数量。
-- Harness 按 planner 输出启动多个 `threat-asset-interface-agent` 分片协调 Agent。
-  每个协调 Agent 可以在自己的 scope 内派发 `threat-asset-enumerator`、
-  `threat-attack-goal-enumerator`、`threat-code-evidence-mapper` 子 Agent
-  做交叉分析，再输出完整基础模型片段。
-- Harness 最终合并多个分片协调 Agent 的结果，仍输出原有
+- 基础建模阶段先启动 1 个 `threat-asset-interface-agent`，一次性识别当前完整
+  C/C++ 扫描范围内的价值资产、关键风险、高风险外部接口、资产接口关系和攻击目标。
+- 初始识别完成后，Harness 会把当前已识别的价值资产和攻击目标列入输入，
+  并行启动 3 个 `threat-base-model-gap-review-agent` 追问是否存在遗漏。
+  追问 Agent 只输出遗漏或需要补充的项目，已覆盖项目不重复输出。
+- Harness 最终合并初始识别 Agent 和 3 个追问 Agent 的结果，仍输出原有
   `assets`、`high_risk_external_interfaces`、`asset_interface_links`、
   `risks`、`attack_goals` JSON 契约。
-- 分片不设置固定 Agent 数量上限；数量由价值资产边界、外部入口族、协议/接口族、
-  共享基础能力、构建目标、产品/MCP 模块和代码耦合关系决定。分片要避免资产 × 接口 × 风险的笛卡尔积爆炸。
-- 基础建模合并会先把跨分片的资产、风险、接口和攻击目标 ID 归一，再按人类可读
+- 基础建模合并会先把初始识别和追问补充中的资产、风险、接口和攻击目标 ID 归一，再按人类可读
   名称和语义 key 去重，避免同一价值资产被多个 `ASSET-*` 编号重复保留。
 - 基础建模之后采用攻击树优先调度：拿到一个攻击目标后立即展开该目标下的
   攻击域、攻击面和必要的方法确认，尽快产出这一棵攻击树；不会先把所有攻击目标
@@ -50,6 +46,7 @@ threat_analysis:
 
 - `threat-base-model-shard-planner`
 - `threat-asset-interface-agent`
+- `threat-base-model-gap-review-agent`
 - `threat-asset-enumerator`
 - `threat-attack-goal-enumerator`
 - `threat-code-evidence-mapper`

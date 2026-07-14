@@ -288,6 +288,9 @@ class OpencodeWorkspaceTests(unittest.TestCase):
             self.assertTrue((
                 workspace / ".opencode" / "skills" / "threat-base-model-shard-planner" / "SKILL.md"
             ).is_file())
+            self.assertTrue((
+                workspace / ".opencode" / "skills" / "threat-base-model-gap-review-agent" / "SKILL.md"
+            ).is_file())
             agents = config.get("agent", {})
             self.assertIsInstance(agents, dict)
             for name in (

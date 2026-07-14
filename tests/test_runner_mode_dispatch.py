@@ -488,6 +488,18 @@ def test_attack_tree_threat_analysis_prioritizes_one_tree_pipeline(tmp_path: Pat
                     encoding="utf-8",
                 )
                 return
+            if "threat-base-model-gap-review-agent" in prompt:
+                output_path.write_text(
+                    json.dumps({
+                        "assets": [],
+                        "high_risk_external_interfaces": [],
+                        "asset_interface_links": [],
+                        "risks": [],
+                        "attack_goals": [],
+                    }),
+                    encoding="utf-8",
+                )
+                return
             if "threat-attack-goal-agent" in prompt:
                 goal_id = input_data_from_prompt(prompt)["attack_goal"]["attack_goal_id"]
                 stage_order.append(f"goal:{goal_id}")

@@ -10,6 +10,7 @@ _AGENT_SKILL_FILES = {
     "threat-analysis-harness": "threat-analysis-harness.md",
     "threat-base-model-shard-planner": "threat-base-model-shard-planner.md",
     "threat-asset-interface-agent": "threat-asset-interface-agent.md",
+    "threat-base-model-gap-review-agent": "threat-base-model-gap-review-agent.md",
     "threat-asset-enumerator": "threat-asset-enumerator.md",
     "threat-attack-goal-enumerator": "threat-attack-goal-enumerator.md",
     "threat-code-evidence-mapper": "threat-code-evidence-mapper.md",

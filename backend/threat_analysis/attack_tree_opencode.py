@@ -38,6 +38,7 @@ _MAX_DOMAINS = 150
 _MAX_SURFACES = 300
 _MAX_CONFIRMATIONS = 300
 _STAGE_FAILURE_RETRIES = 3
+_BASE_MODEL_GAP_REVIEW_AGENT_COUNT = 3
 _BASE_MODEL_TARGET_FILES_PER_AGENT = 180
 _CPP_CODE_EXTENSIONS = {
     ".c",
@@ -468,50 +469,76 @@ async def _run_base_model_agents(
     planned_task_id: str,
     stats_scope_id: str,
 ) -> dict[str, Any]:
-    """Run first-step shard coordinator agents and merge their JSON fragments."""
+    """Run first-step coordinator once, then merge three omission-review agents."""
     base_context_dir = contexts_dir / "base_model"
     base_stage_dir = stages_dir / "base_model"
-    shards = await _plan_base_model_agent_shards(
+
+    initial_input_path = base_context_dir / "base_model_initial.input.json"
+    initial_output_path = base_stage_dir / "base_model_initial.output.json"
+    full_scope = _base_model_full_scan_scope(base_input)
+    write_json(initial_input_path, {
+        **base_input,
+        "base_model_agent_scope": full_scope,
+        "shard_scope": full_scope,
+        "subagent_plan": {
+            "allowed": True,
+            "agents": [
+                "threat-asset-enumerator",
+                "threat-attack-goal-enumerator",
+                "threat-code-evidence-mapper",
+            ],
+            "description": (
+                "当前基础建模 Agent 负责一次性识别完整扫描范围内的价值资产、"
+                "关键风险、高风险外部接口、资产接口关系和攻击目标；可在内部派发只读子 Agent，"
+                "但 Harness 层只启动这一个初始识别 Agent。"
+            ),
+        },
+    })
+    await _invoke_stage(
         opencode_runner=opencode_runner,
         workspace=workspace,
         analysis_root=analysis_root,
         run_dir=run_dir,
-        contexts_dir=contexts_dir,
-        stages_dir=stages_dir,
-        base_input=base_input,
+        skill_name="threat-asset-interface-agent",
+        input_path=initial_input_path,
+        output_path=initial_output_path,
         timeout=timeout,
         on_output=on_output,
         cancel_event=cancel_event,
         planned_task_id=planned_task_id,
         stats_scope_id=stats_scope_id,
+        attempt=1,
+        task_label="基础建模初始识别",
     )
-    try:
-        config = opencode_runner.get_config()
-    except Exception:
-        config = None
-    shard_concurrency = _stage_concurrency(config, len(shards)) if config is not None else 1
-    if on_output and len(shards) > 1:
-        on_output(f"[威胁分析] 基础建模分片 Agent 并发度：{shard_concurrency}/{len(shards)}")
+    initial_output = read_json_object(initial_output_path)
+    initial_model = _merge_base_model_outputs(initial_output)
+    if not _dict_items(initial_model.get("attack_goals")):
+        initial_model["attack_goals"] = _attack_goals_from_base_output(initial_model)
 
-    async def _run_shard_agent(index: int, shard: dict[str, Any]) -> dict[str, Any]:
+    if on_output:
+        on_output(
+            "[威胁分析] 基础建模初始识别完成："
+            f"资产 {len(_dict_items(initial_model.get('assets')))} 个，"
+            f"攻击目标 {len(_dict_items(initial_model.get('attack_goals')))} 个"
+        )
+
+    async def _run_gap_review_agent(index: int, task: dict[str, Any]) -> dict[str, Any]:
         if _cancelled(cancel_event):
             return {}
-        input_path = base_context_dir / f"base_model_agent_{index:03d}.input.json"
-        output_path_for_agent = base_stage_dir / f"base_model_agent_{index:03d}.output.json"
+        input_path = base_context_dir / f"base_model_gap_review_{index:03d}.input.json"
+        output_path_for_agent = base_stage_dir / f"base_model_gap_review_{index:03d}.output.json"
         write_json(input_path, {
             **base_input,
-            "base_model_agent_scope": shard,
-            "shard_scope": shard,
-            "subagent_plan": {
-                "allowed": True,
-                "agents": [
-                    "threat-asset-enumerator",
-                    "threat-attack-goal-enumerator",
-                    "threat-code-evidence-mapper",
-                ],
-                "description": (
-                    "当前基础建模 Agent 可以在自己的分片范围内派发资产枚举、"
-                    "攻击目标枚举和代码证据核对子 Agent，再自行合并输出完整基础模型片段。"
+            "base_model_agent_scope": full_scope,
+            "initial_base_model": initial_model,
+            "current_identified_items": _base_model_review_current_items(initial_model),
+            "gap_review": {
+                "review_index": task.get("review_index", index),
+                "review_total": _BASE_MODEL_GAP_REVIEW_AGENT_COUNT,
+                "instruction": (
+                    "下面已经列出当前识别到的价值资产和攻击目标。"
+                    "请检查是否遗漏价值资产、关键风险、高风险外部接口、资产接口关系或攻击目标；"
+                    "只输出遗漏或需要补充的项目，已覆盖的项目不要重复输出。"
                 ),
             },
         })
@@ -520,7 +547,7 @@ async def _run_base_model_agents(
             workspace=workspace,
             analysis_root=analysis_root,
             run_dir=run_dir,
-            skill_name="threat-asset-interface-agent",
+            skill_name="threat-base-model-gap-review-agent",
             input_path=input_path,
             output_path=output_path_for_agent,
             timeout=timeout,
@@ -529,23 +556,32 @@ async def _run_base_model_agents(
             planned_task_id=planned_task_id,
             stats_scope_id=stats_scope_id,
             attempt=index,
-            task_label=f"基础建模分片 {index}/{len(shards)}",
+            task_label=f"基础建模遗漏追问 {index}/{_BASE_MODEL_GAP_REVIEW_AGENT_COUNT}",
         )
         return read_json_object(output_path_for_agent)
 
-    shard_outputs = await _run_stage_batch(
-        shards,
-        concurrency=shard_concurrency,
-        run_one=_run_shard_agent,
+    review_tasks = [
+        {"review_index": index}
+        for index in range(1, _BASE_MODEL_GAP_REVIEW_AGENT_COUNT + 1)
+    ]
+    if on_output:
+        on_output(
+            "[威胁分析] 基础建模遗漏追问 Agent 并发度："
+            f"{_BASE_MODEL_GAP_REVIEW_AGENT_COUNT}/{_BASE_MODEL_GAP_REVIEW_AGENT_COUNT}"
+        )
+    review_outputs = await _run_stage_batch(
+        review_tasks,
+        concurrency=_BASE_MODEL_GAP_REVIEW_AGENT_COUNT,
+        run_one=_run_gap_review_agent,
     )
 
-    merged = _merge_base_model_outputs(*shard_outputs)
+    merged = _merge_base_model_outputs(initial_model, *review_outputs)
     if not _dict_items(merged.get("attack_goals")):
         merged["attack_goals"] = _attack_goals_from_base_output(merged)
     write_json(output_path, merged)
     if on_output:
         on_output(
-            "[威胁分析] 基础建模分片 Agent 结果已合并："
+            "[威胁分析] 基础建模识别与追问结果已合并："
             f"资产 {len(_dict_items(merged.get('assets')))} 个，"
             f"高风险接口 {len(_dict_items(merged.get('high_risk_external_interfaces')))} 个，"
             f"攻击目标 {len(_dict_items(merged.get('attack_goals')))} 个"
@@ -739,6 +775,13 @@ def _validate_stage_output(skill_name: str, output: dict[str, Any]) -> None:
             "risks",
             "attack_goals",
         ],
+        "threat-base-model-gap-review-agent": [
+            "assets",
+            "high_risk_external_interfaces",
+            "asset_interface_links",
+            "risks",
+            "attack_goals",
+        ],
         "threat-attack-goal-agent": ["domains"],
         "threat-attack-domain-agent": ["surfaces"],
         "threat-attack-surface-agent": [
@@ -850,11 +893,22 @@ def _stage_prompt(
         )
     elif skill_name == "threat-asset-interface-agent":
         prompt += (
-            "这是 Harness 启动的第一步基础建模分片协调 Agent。"
-            "允许并建议在当前分片范围内使用 Task 派发子 Agent："
+            "这是 Harness 启动的第一步基础建模初始识别 Agent。"
+            "只调用这一个 Agent 识别完整扫描范围内的价值资产、关键风险、高风险外部接口、资产接口关系和攻击目标。"
+            "允许并建议在当前输入范围内使用 Task 派发子 Agent："
             "`threat-asset-enumerator`、`threat-attack-goal-enumerator`、`threat-code-evidence-mapper`。"
             "子 Agent 只返回分析片段，不写文件；当前 Agent 负责合并子 Agent 结果，并只写入指定输出 JSON。"
             "不要把工作扩展到输入 scope 之外，也不要做资产 × 接口 × 风险的笛卡尔积派发。\n"
+        )
+    elif skill_name == "threat-base-model-gap-review-agent":
+        prompt += (
+            "这是威胁分析第一步的遗漏追问 Agent。"
+            "输入 JSON 的 `current_identified_items.assets` 已列出当前识别到的价值资产，"
+            "`current_identified_items.attack_goals` 已列出当前识别到的攻击目标。"
+            "请基于这两份清单和完整代码索引判断是否有遗漏；只输出遗漏或需要补充的价值资产、"
+            "关键风险、高风险外部接口、资产接口关系和攻击目标。"
+            "已覆盖的项目不要重复输出；如果没有遗漏，输出空数组。"
+            "不要分析攻击域、攻击面、攻击方法或漏洞是否存在。\n"
         )
     elif skill_name in {
         "threat-asset-enumerator",
@@ -875,6 +929,82 @@ _BASE_MODEL_LIST_FIELDS = [
     "risks",
     "attack_goals",
 ]
+
+
+def _base_model_full_scan_scope(base_input: dict[str, Any]) -> dict[str, Any]:
+    code_index = base_input.get("code_index") if isinstance(base_input.get("code_index"), dict) else {}
+    files = _unique_cpp_paths(code_index.get("files") or [])
+    entry_candidates = _unique_cpp_paths(code_index.get("entry_candidates") or [])
+    languages = sorted({
+        language
+        for language in (_language_from_index_path(path) for path in files)
+        if language
+    })
+    return {
+        "shard_id": "BASE-INITIAL-001",
+        "type": "full_scan",
+        "name": "完整 C/C++ 扫描范围",
+        "description": "一次性识别完整 C/C++ 扫描范围内的资产、接口、风险、攻击目标和代码证据",
+        "include_paths": files,
+        "entry_candidates": entry_candidates,
+        "languages": languages,
+    }
+
+
+def _base_model_review_current_items(model: dict[str, Any]) -> dict[str, list[dict[str, Any]]]:
+    risks_by_asset: dict[str, list[dict[str, Any]]] = {}
+    for risk in _dict_items(model.get("risks")):
+        asset_id = str(risk.get("asset_id") or "").strip()
+        if asset_id:
+            risks_by_asset.setdefault(asset_id, []).append(risk)
+
+    assets: list[dict[str, Any]] = []
+    for asset in _dict_items(model.get("assets")):
+        asset_id = str(asset.get("asset_id") or asset.get("id") or "").strip()
+        asset_risks = _merge_object_lists(
+            "risks",
+            _dict_items(asset.get("risks")),
+            risks_by_asset.get(asset_id, []),
+        )
+        assets.append({
+            "asset_id": asset_id,
+            "name": _readable_stage_label(asset.get("name") or asset.get("asset_name")),
+            "asset_type": str(asset.get("asset_type") or asset.get("type") or "").strip(),
+            "risks": [
+                {
+                    "risk_id": str(risk.get("risk_id") or risk.get("id") or "").strip(),
+                    "name": _readable_stage_label(risk.get("name") or risk.get("risk_name")),
+                }
+                for risk in asset_risks
+            ],
+            "candidate_code_paths": _list_field(asset, "candidate_code_paths"),
+        })
+
+    attack_goals: list[dict[str, Any]] = []
+    for goal in _dict_items(model.get("attack_goals")):
+        attack_goals.append({
+            "attack_goal_id": str(goal.get("attack_goal_id") or goal.get("goal_id") or goal.get("id") or "").strip(),
+            "asset_id": str(goal.get("asset_id") or "").strip(),
+            "risk_id": str(goal.get("risk_id") or "").strip(),
+            "name": _readable_stage_label(goal.get("name") or goal.get("attack_goal") or goal.get("attack_goal_name")),
+            "related_interface_ids": _list_field(goal, "related_interface_ids", "interface_ids"),
+            "candidate_code_paths": _list_field(goal, "candidate_code_paths"),
+        })
+
+    return {
+        "assets": assets,
+        "attack_goals": attack_goals,
+    }
+
+
+def _list_field(item: dict[str, Any], *keys: str) -> list[Any]:
+    for key in keys:
+        value = item.get(key)
+        if isinstance(value, list):
+            return list(value)
+        if value not in (None, ""):
+            return [value]
+    return []
 
 
 def _base_model_agent_shards(base_input: dict[str, Any]) -> list[dict[str, Any]]:
