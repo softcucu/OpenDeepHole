@@ -645,19 +645,8 @@ async def handle_feedback_selection_update(scan_id: str, feedback_entries: list[
         task = _task_manager.get(scan_id)
         if task is not None:
             task.feedback_entries = feedback_entries
-            try:
-                from backend.models import FeedbackEntry
-                from backend.opencode.config import refresh_skills
-                selected_feedback = [FeedbackEntry(**entry) for entry in feedback_entries]
-                workspace = Path.home() / ".opendeephole" / "scans" / scan_id / "opencode_workspace"
-                await asyncio.to_thread(
-                    refresh_skills,
-                    workspace,
-                    task.project_path,
-                    selected_feedback,
-                )
-            except Exception as exc:
-                print(f"Warning: failed to refresh scan skills for feedback update: {exc}")
+    from backend.opencode.task_service import set_scan_feedback_entries
+    set_scan_feedback_entries(scan_id, feedback_entries)
     from agent.fp_reviewer import set_fp_review_feedback
     set_fp_review_feedback(scan_id, feedback_entries)
 
@@ -750,34 +739,21 @@ async def _run_skill_creator(
         raise RuntimeError("Agent config is not initialized")
 
     from agent.scanner import _configure_backend
+    from backend.opencode.config import get_global_opencode_workspace, get_workspace_lock
     from backend.opencode.runner import _invoke_opencode
 
-    workspace = Path.home() / ".opendeephole" / "skill_create" / request_id
-    if workspace.exists():
-        shutil.rmtree(workspace, ignore_errors=True)
-    skills_root = workspace / ".opencode" / "skills"
-    _write_skill_creator_package(skill_creator_package or {}, skills_root)
-    (workspace / "opencode.json").write_text(
-        json.dumps(
-            {
-                "$schema": "https://opencode.ai/config.json",
-                "skills": {"paths": [str((workspace / ".opencode" / "skills").resolve())]},
-                "permission": {
-                    "read": {"*": "allow"},
-                    "list": {"*": "allow"},
-                    "glob": {"*": "allow"},
-                    "grep": {"*": "allow"},
-                    "external_directory": {"*": "allow"},
-                    "edit": {"*": "deny"},
-                },
-            },
-            ensure_ascii=False,
-            indent=2,
-        ),
-        encoding="utf-8",
-    )
+    request_dir = Path.home() / ".opendeephole" / "skill_create" / request_id
+    if request_dir.exists():
+        shutil.rmtree(request_dir, ignore_errors=True)
+    request_dir.mkdir(parents=True, exist_ok=True)
+    workspace = get_global_opencode_workspace()
+    with get_workspace_lock(workspace):
+        _write_skill_creator_package(
+            skill_creator_package or {},
+            workspace / ".opencode" / "skills",
+        )
 
-    _configure_backend(_config, workspace)
+    _configure_backend(_config, request_dir)
     prompt = _skill_creator_prompt(name, description, user_input)
 
     def on_output(line: str) -> None:
@@ -785,17 +761,15 @@ async def _run_skill_creator(
             print(with_local_timestamp(line, prefix="[skill_create]"), flush=True)
 
     output_text = await _invoke_opencode(
-        workspace,
         prompt,
         timeout=_config.opencode.timeout,
         on_line=on_output,
-        project_dir=workspace,
+        directory=request_dir,
         model_capability="high",
         prefer_high_model=True,
         task_name="skill_create",
         priority=70,
-        mcp_tools=[],
-        skills=[_SKILL_CREATOR_NAME],
+        task_metadata={"task_type": "skill_create"},
         output_schema={
             "type": "object",
             "properties": {

@@ -664,8 +664,9 @@ fp_review:
 
 OpenCode 调用约定：
 
-- `nga` / `opencode`：每个扫描或复核任务使用隔离的 OpenCode 配置目录；Agent 会合并用户全局目录、OpenCode 可执行文件所在目录、真实项目根目录、`opencode.config_paths` 和 `OPENCODE_CONFIG_PATH` 指向的 OpenCode provider/model 配置，再通过 `OPENCODE_CONFIG_CONTENT` 注入当前任务的 MCP URL、SKILL 路径和权限配置；注入环境变量前会移除顶层 `"$schema"`；`opencode.proxy_url` 或 `OPENCODE_PROXY_URL` 会被展开为 `HTTP_PROXY`/`HTTPS_PROXY` 及小写形式传给 OpenCode 子进程，`NO_PROXY/no_proxy` 默认使用内网列表且可由 `opencode.no_proxy` 或 `OPENCODE_NO_PROXY` 覆盖；API `directory` 始终指向真实项目根目录，不复制源码。
-- `nga` / `opencode` 只通过 serve API 调用，默认端口为 `4096`，可用 `OPENCODE_SERVE_PORT` 覆盖。每个任务在 message 级指定需要的 MCP 工具、SKILL system prompt 和模型；`output_schema` 会转成“最终只回复 JSON”的普通文本约束，不会作为 OpenCode 原生 `format` 发送；权限在 session 创建/续写时设置。
+- `nga` / `opencode`：整个 Agent 固定使用 `~/.opendeephole/opencode_workspace`，扫描、复核和验证不再创建各自的配置 workspace，也不再向项目目录镜像运行配置。Agent 会合并用户全局目录、OpenCode 可执行文件所在目录、`opencode.config_paths` 和 `OPENCODE_CONFIG_PATH` 指向的 provider/model 配置，再通过稳定的 `OPENCODE_CONFIG_CONTENT` 启动 serve；API `directory` 始终指向真实代码目录。
+- `nga` / `opencode` 只通过 serve API 调用，默认端口为 `4096`，可用 `OPENCODE_SERVE_PORT` 覆盖。所有内置/checker SKILL 注册到全局 skill root，由 OpenCode 按 prompt 名称加载；MCP 工具默认全部可用。任务权限由 `directory`、当前 `scan_id` 对应的扫描目录和 `writable_paths` 自动计算。
+- `output_schema` 使用普通文本 JSON 约束，不发送 OpenCode 原生 `format`。JSON 不合规时默认在原 session 追加 2 次纠正；`attempt` 表示纠正仍失败或普通执行错误后重新排队并创建新 session 的次数，未传时使用 `opencode.max_retries`。
 - OpenCode/nga serve 会话会保留在真实项目目录下，便于用 `opencode session list` 查看历史；Agent 只在取消或超时时 abort session，不在正常完成后删除 session。
 - Agent 进程内只有一个共享 deephole-code MCP 网关；各扫描用 `project_id` 注册自己的 `code_index.db` 路由，不再为每个扫描启动独立 MCP 服务。
 - 漏洞验证 worker 通过父进程 RPC 调用同一个 OpenCode 任务组件；父进程按需复用共享 MCP 网关、注册项目索引路由并向 prompt 补充 `project_id`；验证脚本直接执行 `nga`、`opencode`、`hac` 或 `claude` 会被拒绝。
@@ -681,12 +682,11 @@ handle = service.submit_task(OpenCodeTaskSpec(
     prompt="...",
     directory=project_path,
     required_capability="medium",
-    mcp_tools=["view_function_code"],
-    skills=["npd"],
     timeout_seconds=1200,
     priority=60,
     output_schema={"type": "object", "properties": {}, "additionalProperties": False},
-    permissions=[{"permission": "edit", "pattern": "*", "action": "deny"}],
+    output_retry_count=2,
+    attempt=None,
 ))
 session_id = await handle.wait_session_id()  # session 创建后即可取得
 result = await handle.result()               # 执行完成后取得文本及本地提取的 JSON
@@ -707,7 +707,7 @@ OpenCode 模型池统计：
 - 模型必须在 `models[]` 中显式添加并启用；顶层 `model` 已废弃且不参与调度。空池、能力不满足或时间窗外时任务保持阻塞排队，配置变化后自动重新调度。
 - 配置模型池后，`opencode_concurrency` 是所有模型合计运行数的硬上限；每个模型还会受自己的 `max_concurrency` 和 `time_windows` 限制。
 - 任务优先级范围为 `1..100`，数值越大越先运行，同优先级按 FIFO；低/中能力任务优先用最低足够能力模型，在其不可用时可升级，高能力任务不会降级。
-- 任务超时只计算获得模型后的执行阶段，不包含排队时间。排队中的任务修改模型、能力、优先级或其它参数时保留 task ID、增加 revision 并重新入队；运行中任务不被隐式重启。
+- 任务超时只计算每条模型消息的执行阶段，不包含排队时间。新 session 重试保持同一 task ID、释放并重新申请模型 Lease；模型池 completed-task 历史只记录一次最终状态。排队中的任务修改能力、优先级或其它参数时保留 task ID、增加 revision 并重新入队。
 - 模型行可设置 `use_default_model: true`，表示参与模型池调度但调用 CLI 时不传 `--model`。
 - 扫描详情页点击「模型看板」可以查看每个模型的累计任务、成功/失败/超时/取消计数、平均耗时、当前运行数和当前排队数。
 - Agent 会在模型池状态变化时上报快照，无变化时只保留低频心跳；服务端会保存到扫描记录中，页面刷新或重新进入扫描详情后会显示最近一次快照。

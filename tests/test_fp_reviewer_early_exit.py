@@ -57,8 +57,7 @@ class FpReviewerEarlyExitTests(unittest.TestCase):
             with (
                 patch("agent.fp_reviewer.Path.home", return_value=Path(tmp)),
                 patch("agent.mcp_registry.lookup", return_value=(12345, "active-scan")),
-                patch.object(fp_reviewer, "_create_fp_workspace", side_effect=lambda p, *a, **k: Path(p)),
-                patch.object(fp_reviewer, "_cleanup_fp_workspace"),
+                patch.object(fp_reviewer, "_create_fp_workspace", return_value=Path(tmp) / "workspace"),
                 patch.object(fp_reviewer, "_run_fp_review_stage", stage_mock),
                 patch.object(fp_reviewer, "effective_fp_review_cli_config", return_value=cli_config),
                 patch("backend.opencode.model_pool.total_model_capacity", return_value=1),
@@ -101,8 +100,7 @@ class FpReviewerEarlyExitTests(unittest.TestCase):
             with (
                 patch("agent.fp_reviewer.Path.home", return_value=Path(tmp)),
                 patch("agent.mcp_registry.lookup", return_value=(12345, "active-scan")),
-                patch.object(fp_reviewer, "_create_fp_workspace", side_effect=lambda p, *a, **k: Path(p)),
-                patch.object(fp_reviewer, "_cleanup_fp_workspace"),
+                patch.object(fp_reviewer, "_create_fp_workspace", return_value=Path(tmp) / "workspace"),
                 patch.object(fp_reviewer, "_run_fp_review_stage", stage_mock),
                 patch.object(fp_reviewer, "effective_fp_review_cli_config", return_value=cli_config),
                 patch("backend.opencode.model_pool.total_model_capacity", return_value=1),
@@ -151,8 +149,7 @@ class FpReviewerEarlyExitTests(unittest.TestCase):
             with (
                 patch("agent.fp_reviewer.Path.home", return_value=Path(tmp)),
                 patch("agent.mcp_registry.lookup", return_value=(12345, "active-scan")),
-                patch.object(fp_reviewer, "_create_fp_workspace", side_effect=lambda p, *a, **k: Path(p)),
-                patch.object(fp_reviewer, "_cleanup_fp_workspace"),
+                patch.object(fp_reviewer, "_create_fp_workspace", return_value=Path(tmp) / "workspace"),
                 patch.object(fp_reviewer, "_run_fp_review_stage", stage_mock),
                 patch.object(fp_reviewer, "effective_fp_review_cli_config", return_value=cli_config),
                 patch("backend.opencode.model_pool.total_model_capacity", return_value=1),

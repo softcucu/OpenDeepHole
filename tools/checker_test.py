@@ -378,17 +378,25 @@ async def _run_audits(
 
     from agent import mcp_registry
     from agent.local_mcp import LocalMCPServer
-    from backend.opencode.config import cleanup_workspace, create_scan_workspace
+    from backend.opencode.config import get_global_opencode_workspace
     from backend.opencode.runner import run_audit, run_project_audit, run_sensitive_clear_audit
+    from backend.opencode.task_service import (
+        reset_opencode_execution_context,
+        set_opencode_execution_context,
+    )
 
     agent_project_dir = _agent_project_dir_for_index(index_db)
     scan_id = f"checker-test-{uuid4().hex[:12]}"
+    execution_context_token = set_opencode_execution_context(
+        scan_id=scan_id,
+        scan_work_dir=Path.home() / ".opendeephole" / "scans" / scan_id,
+    )
     mcp_server = LocalMCPServer(project_dir=agent_project_dir, project_id=scan_id)
     workspace: Path | None = None
     try:
         port = mcp_server.start()
         mcp_registry.register(project_path, port, scan_id)
-        workspace = create_scan_workspace(scan_id, project_path, [], port)
+        workspace = get_global_opencode_workspace(mcp_port=port)
         results: list[dict[str, Any]] = []
         cancel_event = threading.Event()
         for candidate in candidates:
@@ -441,8 +449,7 @@ async def _run_audits(
         import backend.config as backend_config
         backend_config._config = None
         mcp_server.stop()
-        if workspace is not None:
-            cleanup_workspace(workspace)
+        reset_opencode_execution_context(execution_context_token)
 
 
 def _agent_project_dir_for_index(index_db: Path) -> Path:

@@ -63,9 +63,9 @@ Each scan runs the full pipeline locally on the agent machine:
 
 ```
 1. Index    — tree-sitter C++ parse → code_index.db (reuses IndexStore cache if available)
-2. Feedback — fetch false-positive history from server (for SKILL enrichment)
+2. Feedback — fetch selected experience for task-local prompt enrichment
 3. MCP      — register project_id → code_index.db on the Agent-owned shared gateway
-4. Workspace — create_scan_workspace() with per-task opencode.json + skill symlinks + merged feedback
+4. OpenCode — refresh the Agent-wide ~/.opendeephole/opencode_workspace and global SKILL registry
 5. Static   — each checker's analyzer.find_candidates() → scoped candidate list (cached for resume)
 5.5 Git history — (fresh scans, git repo, git_history.enabled) agent/git_history.py mines security-fix
     patterns from commit history (one JSON-returning OpenCode task per commit); agent/variant_hunter.py
@@ -166,7 +166,9 @@ tail -f logs/opendeephole.log
 - Logging uses `backend/logger.py` — get logger with `get_logger(__name__)`
 - Pydantic models for all API request/response in `backend/models.py`
 - `vuln_type` is a plain string (not enum) matching the checker directory name
-- CLI config workspaces are created per scan/review under the task directory; `opencode`/`nga` receive config through `OPENCODE_CONFIG_CONTENT` while `--dir` still points at the real project root
+- One Agent-wide OpenCode workspace lives at `~/.opendeephole/opencode_workspace`; scans/reviews/validators bind scope and permissions per task, while API `directory` points at the real code root
+- OpenCode TaskSpec does not expose workspace, scope/task context, MCP/SKILL selectors, permissions, CLI config, or global concurrency; the Agent computes them centrally
+- JSON Schema failures are corrected in the same session first; `attempt` counts fresh-session retries that release and reacquire a model Lease
 - Agent OpenCode configs are stored server-side in `_agent_configs` (keyed by agent name) and pushed to agents on connect and UI save
 - Model-pool scheduling (`backend/opencode/model_pool.py`): `opencode_concurrency` is a global Agent gate, with per-model `max_concurrency`; pending tasks are priority-descending/FIFO, require capability without downgrade, prefer the lowest sufficient model, and remain blocked until model configuration/time-window changes make them runnable
 - **Always update both README.md and CLAUDE.md when making structural or architectural changes**
@@ -202,7 +204,7 @@ backend/
     task_service.py — priority/capability scheduling, OpenCode task/session lifecycle, plain-text output and local JSON extraction
     runner.py     — audit prompt/result compatibility facade over task_service
     serve_client.py — long-lived OpenCode serve process and session API
-    config.py     — create_scan_workspace(), cleanup_workspace()
+    config.py     — Agent-wide workspace initialization and global SKILL registration
   registry.py     — Auto-discovers and loads checkers from checkers/
   store/          — SQLite scan store (scans, vulnerabilities, events, feedback, processed keys)
   models.py       — All Pydantic models

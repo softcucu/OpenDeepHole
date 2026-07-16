@@ -193,8 +193,7 @@ def test_checker_test_cli_audit_uses_existing_audit_path(tmp_path: Path, monkeyp
     monkeypatch.setattr("agent.local_mcp.LocalMCPServer", DummyMCPServer)
     monkeypatch.setattr("agent.mcp_registry.register", lambda *args, **kwargs: None)
     monkeypatch.setattr("agent.mcp_registry.unregister", lambda *args, **kwargs: None)
-    monkeypatch.setattr("backend.opencode.config.create_scan_workspace", lambda *args, **kwargs: project_dir)
-    monkeypatch.setattr("backend.opencode.config.cleanup_workspace", lambda *args, **kwargs: None)
+    monkeypatch.setattr("backend.opencode.config.get_global_opencode_workspace", lambda *args, **kwargs: project_dir)
     monkeypatch.setattr("backend.opencode.runner.run_audit", fake_run_audit)
 
     rc = checker_test.main([
@@ -288,8 +287,7 @@ def test_checker_test_cli_project_audit_returns_multiple_results(tmp_path: Path,
     monkeypatch.setattr("agent.local_mcp.LocalMCPServer", DummyMCPServer)
     monkeypatch.setattr("agent.mcp_registry.register", lambda *args, **kwargs: None)
     monkeypatch.setattr("agent.mcp_registry.unregister", lambda *args, **kwargs: None)
-    monkeypatch.setattr("backend.opencode.config.create_scan_workspace", lambda *args, **kwargs: project_dir)
-    monkeypatch.setattr("backend.opencode.config.cleanup_workspace", lambda *args, **kwargs: None)
+    monkeypatch.setattr("backend.opencode.config.get_global_opencode_workspace", lambda *args, **kwargs: project_dir)
     monkeypatch.setattr("backend.opencode.runner.run_project_audit", fake_run_project_audit)
 
     rc = checker_test.main([

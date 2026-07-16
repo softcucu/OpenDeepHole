@@ -184,7 +184,7 @@ ctx.publish_artifact("step-1.md", path=step_1_artifact, title="阶段产物", ki
 
 ### `ctx.run_opencode_task(...)`
 
-通过 Agent 父进程的统一 OpenCode 队列执行模型任务。验证 worker 不创建 CLI 子进程；模型选择、优先级、执行超时、权限、MCP、SKILL、JSON Schema 和 session 都由公共组件管理。
+通过 Agent 父进程的统一 OpenCode 队列执行模型任务。验证 worker 不创建 CLI 子进程；模型选择、优先级、执行超时、权限、MCP、SKILL、JSON Schema、重试和 session 都由公共组件管理。
 
 ```python
 result = ctx.run_opencode_task(
@@ -192,8 +192,6 @@ result = ctx.run_opencode_task(
     prompt="根据漏洞报告设计验证步骤，最终只返回 JSON。",
     required_capability="high",       # low | medium | high
     directory=ctx.project_path,
-    mcp_tools=["view_function_code"],
-    skills=["validation-poc"],
     timeout_seconds=ctx.timeout_seconds,
     priority=80,                       # 1..100，数值越大越优先
     output_schema={
@@ -202,17 +200,19 @@ result = ctx.run_opencode_task(
         "required": ["content"],
         "additionalProperties": False,
     },
-    permissions=[{"permission": "edit", "pattern": "*", "action": "deny"}],
+    output_retry_count=2,               # 同 session JSON 纠正次数
+    attempt=2,                          # 全新 session 重试次数
     session_id=None,
+    writable_paths=[],
 )
 session_id = result["session_id"]
 # structured 是父进程从普通回复文本中本地提取的便利值。
 content = result["structured"]["content"]
 ```
 
-后续阶段把返回的 `session_id` 再传入，即可在同一 OpenCode session 中追加 prompt。session 的运行目录固定不能更换；每次追加仍可独立指定模型能力、MCP 工具、SKILL、权限和输出 Schema。任务超时只从真正获得模型并开始执行时计算，排队时间不计入单次 OpenCode 执行超时，但仍受验证流程的整体超时约束。
+后续阶段把返回的 `session_id` 再传入，即可在同一 OpenCode session 中追加 prompt。session 的运行目录固定不能更换；每次追加可独立指定模型能力、输出 Schema 和双层重试。任务超时只从真正获得模型并开始执行时计算，排队时间不计入单次 OpenCode 执行超时，但仍受验证流程的整体超时约束。
 
-验证父进程会按需把当前扫描的 `code_index.db` 注册到共享 MCP 网关，并自动在 prompt 前补充 deephole-code 所需的 `project_id`。按名称选择的 SKILL 会从验证工作区和任务 `directory` 下的 `.opencode/skills`、`.agents/skills` 或 `skills` 目录查找；也可传入 SKILL 目录或 `SKILL.md` 的绝对路径。
+验证父进程会按需把当前扫描的 `code_index.db` 注册到共享 MCP 网关，并自动在 prompt 前补充 deephole-code 所需的 `project_id`。验证器不传 MCP、SKILL 或权限选择：全部 MCP 工具默认可用，内置 SKILL 位于 Agent 全局 workspace，任务 prompt 直接点名要使用的 SKILL；项目标准 SKILL 目录继续由 OpenCode 自动发现。默认仅当前扫描目录可由文件编辑工具写入，额外路径通过 `writable_paths` 明确增加；`bash` 按全局约定保持允许。
 
 ### `ctx.cancelled()`
 

@@ -869,6 +869,7 @@ async def release_model_lease(
     *,
     outcome: str | None = None,
     duration_seconds: float | None = None,
+    record_completion: bool = True,
 ) -> None:
     if lease is None:
         return
@@ -900,7 +901,7 @@ async def release_model_lease(
         if duration_seconds is not None and duration_seconds >= 0:
             global_item.total_duration_seconds += duration_seconds
         global_item.last_finished_at = finished_at
-        if active_task is not None and lease.stats_scope_id:
+        if record_completion and active_task is not None and lease.stats_scope_id:
             context = dict(active_task.get("context") or {})
             prompt = context.get("prompt")
             if isinstance(prompt, str) and "prompt_length" not in context:

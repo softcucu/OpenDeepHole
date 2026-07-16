@@ -670,19 +670,23 @@ async def _invoke_stage(
             on_output(f"[威胁分析] {task_label}{retry_note}")
         try:
             await opencode_runner._invoke_opencode(
-                workspace,
                 stage_prompt,
                 timeout,
                 log_path=log_dir / f"{skill_name}-{attempt}-attempt-{stage_attempt}.log",
                 on_line=on_output,
                 cancel_event=cancel_event,
-                project_dir=analysis_root,
+                directory=analysis_root,
                 writable_paths=[run_dir],
                 model_capability="high",
                 prefer_high_model=True,
-                stats_scope_id=stats_scope_id,
-                task_context=task_context,
-                attempt=stage_attempt,
+                task_name=f"威胁分析：{task_label}",
+                task_metadata={
+                    **task_context,
+                    "stage_ordinal": attempt,
+                    "stage_attempt": stage_attempt,
+                    "stats_scope_id": stats_scope_id,
+                },
+                attempt=0,
             )
             _validate_stage_output(skill_name, read_json_object(output_path))
             return

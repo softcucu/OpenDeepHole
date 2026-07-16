@@ -10,8 +10,6 @@ from pathlib import Path
 
 from backend.config import get_config
 from backend.logger import get_logger
-from backend.models import FeedbackEntry
-from backend.opencode.feedback_format import format_feedback_experience
 from backend.registry import get_registry
 
 logger = get_logger(__name__)
@@ -19,9 +17,19 @@ logger = get_logger(__name__)
 # Subdirectories in checker dirs that should be symlinked into the workspace
 _SKILL_RESOURCE_DIRS = {"references", "scripts", "assets"}
 _OBSOLETE_THREAT_AUDIT_SKILL_NAME = "threat-path-audit"
+_GLOBAL_WORKSPACE = Path.home() / ".opendeephole" / "opencode_workspace"
+_BUILTIN_AGENT_SKILLS = {
+    "history-match": Path("agent/skills/fp_review_match.md"),
+    "prove-bug": Path("agent/skills/fp_review.md"),
+    "prove-fp": Path("agent/skills/fp_review_discriminator.md"),
+    "final-judge": Path("agent/skills/fp_review_final.md"),
+    "git-history-mine": Path("agent/skills/git_history_mine.md"),
+    "variant-hunt": Path("agent/skills/variant_hunt.md"),
+}
 
 _workspace_locks: dict[str, threading.RLock] = {}
 _workspace_locks_guard = threading.Lock()
+_initialized_workspace: Path | None = None
 
 
 def get_workspace_lock(workspace: Path) -> threading.RLock:
@@ -35,65 +43,70 @@ def get_workspace_lock(workspace: Path) -> threading.RLock:
         return lock
 
 
-def create_scan_workspace(
-    scan_id: str,
-    project_dir: Path | None = None,
-    feedback_entries: list[FeedbackEntry] | None = None,
-    mcp_port: int | None = None,
-) -> Path:
-    """Create an opencode workspace for a scan.
+def get_global_opencode_workspace(*, mcp_port: int | None = None) -> Path:
+    """Return and initialize the single Agent-wide OpenCode workspace.
 
-    The workspace contains only OpenCode configuration and generated skills.
-    It is deliberately kept outside the project directory so concurrent scans
-    of the same project do not overwrite each other's MCP URL.
-
-    Args:
-        scan_id: Unique scan identifier.
-        project_dir: Project directory used only for legacy feedback lookup.
-
-    Returns:
-        Path to the workspace directory.
+    The workspace contains stable MCP/skill configuration only. Scan-specific
+    state (scope, selected feedback and writable roots) is attached to each
+    task by :mod:`backend.opencode.task_service` and is never written here.
     """
-    config = get_config()
-    scans_dir = Path(config.storage.scans_dir)
-    if scans_dir.name == scan_id:
-        workspace = scans_dir / "opencode_workspace"
-    else:
-        workspace = scans_dir / scan_id / "opencode_workspace"
+    global _initialized_workspace
+    workspace = _GLOBAL_WORKSPACE
     workspace.mkdir(parents=True, exist_ok=True)
-
     with get_workspace_lock(workspace):
-        _write_opencode_config(workspace, mcp_port=mcp_port)
-        refresh_skills(workspace, project_dir, feedback_entries)
-
-    logger.info("Created opencode workspace: %s", workspace)
+        # A caller that owns/has just joined the Agent-wide MCP gateway provides
+        # its actual port. Without one, keep an existing config intact so a
+        # task cannot accidentally replace a dynamically allocated gateway URL
+        # with the configured fallback port.
+        config_missing = not (workspace / "opencode.json").is_file()
+        if mcp_port is not None or config_missing:
+            _write_opencode_config(workspace, mcp_port=mcp_port)
+        resolved_workspace = workspace.resolve()
+        if (
+            mcp_port is not None
+            or config_missing
+            or _initialized_workspace != resolved_workspace
+        ):
+            _link_skills(workspace)
+            _install_builtin_skills(workspace)
+            _initialized_workspace = resolved_workspace
     return workspace
 
 
-def refresh_skills(
-    workspace: Path,
-    project_dir: Path | None = None,
-    feedback_entries: list[FeedbackEntry] | None = None,
-) -> None:
-    """Regenerate SKILL files in an existing workspace.
-
-    Can be called mid-scan to hot-update skills when the user changes
-    the active feedback entries.
-    """
-    with get_workspace_lock(workspace):
-        _link_skills(workspace, project_dir, feedback_entries=feedback_entries)
+def _write_text_atomic(path: Path, content: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.tmp")
+    temporary.write_text(content, encoding="utf-8")
+    os.replace(temporary, path)
 
 
-def _merge_feedback_section(original: str, fp_section: str | None) -> str:
-    if not fp_section:
-        return original
-    return (
-        original.rstrip()
-        + "\n\n## 历史用户经验\n\n"
-        + "以下是用户在审计过程中选择注入的经验，"
-        + "分析时应结合这些经验校验结论：\n"
-        + fp_section
-    )
+def _install_builtin_skills(workspace: Path) -> None:
+    """Materialize every repository-owned skill in the global skill root."""
+    repo_root = Path(__file__).resolve().parents[2]
+    skills_root = workspace / ".opencode" / "skills"
+    for skill_name, relative_source in _BUILTIN_AGENT_SKILLS.items():
+        source = repo_root / relative_source
+        if not source.is_file():
+            logger.warning("Built-in OpenCode skill source missing: %s", source)
+            continue
+        _write_text_atomic(
+            skills_root / skill_name / "SKILL.md",
+            source.read_text(encoding="utf-8"),
+        )
+
+    # The attack-tree workflow owns a main skill, six stage skills and shared
+    # reference material. Register all of them up front; OpenCode discovers the
+    # catalog and loads only a skill selected by the task prompt.
+    from backend.threat_analysis.workspace import install_attack_tree_threat_analysis_skill
+
+    skill_path = repo_root / "attack-tree-threat-analysis.md"
+    reference_path = repo_root / "attack-method-reference-catalog.md"
+    if skill_path.is_file() and reference_path.is_file():
+        install_attack_tree_threat_analysis_skill(
+            workspace,
+            skill_path,
+            reference_path,
+        )
 
 
 def _link_skill_resources(entry, link_dir: Path) -> None:
@@ -174,15 +187,8 @@ def _write_opencode_config(workspace: Path, mcp_port: int | None = None) -> None
 
 def _link_skills(
     workspace: Path,
-    project_dir: Path | None = None,
-    feedback_entries: list[FeedbackEntry] | None = None,
 ) -> None:
-    """Create skill definitions from all registered checkers.
-
-    When *feedback_entries* are provided, entries are grouped by vuln_type and
-    appended to the corresponding SKILL as a "历史用户经验" section. Falls back
-    to the legacy ``skill_fp/`` flat files when no entries are supplied.
-    """
+    """Register stable definitions from all checkers in the global workspace."""
     skills_target = workspace / ".opencode" / "skills"
     skills_target.mkdir(parents=True, exist_ok=True)
 
@@ -195,26 +201,8 @@ def _link_skills(
     elif obsolete_threat_skill.is_dir():
         shutil.rmtree(obsolete_threat_skill)
 
-    # Group feedback entries by vuln_type for quick lookup
-    feedback_by_type: dict[str, list[FeedbackEntry]] = {}
-    if feedback_entries:
-        for fb in feedback_entries:
-            feedback_by_type.setdefault(fb.vuln_type, []).append(fb)
-
-    # Legacy fallback directory
-    fp_dir = project_dir / "skill_fp" if project_dir else None
-
     registry = get_registry()
     for name, entry in registry.items():
-        # 构建反馈内容（API 和 opencode 模式共用）
-        fp_section: str | None = None
-        if name in feedback_by_type:
-            fp_section = format_feedback_experience(feedback_by_type[name])
-        elif fp_dir:
-            fp_file = fp_dir / f"{name}.md"
-            if fp_file.is_file():
-                fp_section = fp_file.read_text(encoding="utf-8")
-
         link_dir = skills_target / name
         link_dir.mkdir(exist_ok=True)
 
@@ -225,12 +213,7 @@ def _link_skills(
                 if prompt_dest.exists():
                     os.remove(prompt_dest)
                 original = entry.prompt_path.read_text(encoding="utf-8")
-                prompt_dest.write_text(
-                    _merge_feedback_section(original, fp_section),
-                    encoding="utf-8",
-                )
-                if fp_section:
-                    logger.debug("Merged FP experience into prompt for checker %s", name)
+                prompt_dest.write_text(original, encoding="utf-8")
             # Legacy API checkers are executed only through OpenCode now.  Keep
             # prompt.txt compatibility by materializing a temporary SKILL.
             if entry.skill_path.is_file():
@@ -238,12 +221,7 @@ def _link_skills(
                 if skill_dest.exists():
                     os.remove(skill_dest)
                 original = entry.skill_path.read_text(encoding="utf-8")
-                skill_dest.write_text(
-                    _merge_feedback_section(original, fp_section),
-                    encoding="utf-8",
-                )
-                if fp_section:
-                    logger.debug("Merged FP experience into fallback skill for checker %s", name)
+                skill_dest.write_text(original, encoding="utf-8")
             else:
                 logger.warning(
                     "Checker %s uses deprecated mode=api; wrapping prompt.txt as a temporary OpenCode SKILL",
@@ -260,7 +238,7 @@ def _link_skills(
                     f"name: {name}\n"
                     "description: Legacy prompt.txt checker wrapped for OpenCode execution.\n"
                     "---\n\n"
-                    + _merge_feedback_section(prompt_text, fp_section),
+                    + prompt_text,
                     encoding="utf-8",
                 )
             _link_skill_resources(entry, link_dir)
@@ -276,116 +254,8 @@ def _link_skills(
             os.remove(skill_dest)
 
         original = entry.skill_path.read_text(encoding="utf-8")
-        skill_dest.write_text(
-            _merge_feedback_section(original, fp_section),
-            encoding="utf-8",
-        )
-        if fp_section:
-            logger.debug("Merged FP experience into skill for checker %s", name)
+        skill_dest.write_text(original, encoding="utf-8")
 
         _link_skill_resources(entry, link_dir)
 
     logger.debug("Linked skills for %d checkers", len(registry))
-
-
-def cleanup_workspace(workspace: Path) -> None:
-    """Remove opencode artifacts written into the workspace directory.
-
-    New scan workspaces are isolated ``opencode_workspace`` directories and can
-    be removed as a whole.  The legacy selective cleanup remains as a guard in
-    case callers pass a project-root workspace from an older runtime.
-    """
-    with get_workspace_lock(workspace):
-        if workspace.name == "opencode_workspace":
-            try:
-                shutil.rmtree(workspace, ignore_errors=True)
-            except Exception as exc:
-                logger.warning("Failed to remove opencode workspace %s: %s", workspace, exc)
-            return
-
-        checker_names = list(get_registry().keys())
-        skills_dir = workspace / ".opencode" / "skills"
-        try:
-            if skills_dir.is_dir():
-                for checker_name in checker_names:
-                    skill_dir = skills_dir / checker_name
-                    if skill_dir.is_symlink():
-                        skill_dir.unlink()
-                    elif skill_dir.is_dir():
-                        shutil.rmtree(skill_dir)
-        except Exception as exc:
-            logger.warning("Failed to remove checker skill dirs from workspace: %s", exc)
-
-        try:
-            if skills_dir.is_dir() and not any(skills_dir.iterdir()):
-                skills_dir.rmdir()
-        except Exception as exc:
-            logger.warning("Failed to remove empty skills dir from workspace: %s", exc)
-
-        opencode_dir = workspace / ".opencode"
-        try:
-            if opencode_dir.is_dir() and not any(opencode_dir.iterdir()):
-                opencode_dir.rmdir()
-        except Exception as exc:
-            logger.warning("Failed to remove empty .opencode dir from workspace: %s", exc)
-
-        opencode_json = workspace / "opencode.json"
-        try:
-            # Keep MCP config while any skill remains, especially fp-review.
-            if opencode_json.exists() and not opencode_dir.exists():
-                opencode_json.unlink()
-        except Exception as exc:
-            logger.warning("Failed to remove opencode.json from workspace: %s", exc)
-
-        _cleanup_copied_cli_skills(workspace, checker_names)
-
-
-def _cleanup_copied_cli_skills(workspace: Path, skill_names: list[str]) -> None:
-    """Remove OpenDeepHole skill copies written for Claude/Gemini-compatible CLIs."""
-    for root in (workspace / ".claude" / "skills", workspace / ".gemini" / "skills"):
-        try:
-            if root.is_dir():
-                for name in skill_names:
-                    skill_dir = root / name
-                    if skill_dir.is_symlink():
-                        skill_dir.unlink()
-                    elif skill_dir.is_dir():
-                        shutil.rmtree(skill_dir)
-                if not any(root.iterdir()):
-                    root.rmdir()
-        except Exception as exc:
-            logger.warning("Failed to remove copied CLI skills from %s: %s", root, exc)
-
-    claude_dir = workspace / ".claude"
-    try:
-        mcp_config = claude_dir / "opendeephole-mcp.json"
-        if mcp_config.exists():
-            mcp_config.unlink()
-        if claude_dir.is_dir() and not any(claude_dir.iterdir()):
-            claude_dir.rmdir()
-    except Exception as exc:
-        logger.warning("Failed to remove Claude CLI artifacts: %s", exc)
-
-
-def get_skill_content(workspace: Path, vuln_type: str) -> str | None:
-    """Read the current SKILL/PROMPT content for a given vuln_type from a workspace."""
-    skill_dir = workspace / ".opencode" / "skills" / vuln_type
-    # 优先 SKILL.md（opencode 模式），其次 PROMPT.md（API 模式）
-    for filename in ("SKILL.md", "PROMPT.md"):
-        path = skill_dir / filename
-        if path.is_file():
-            return path.resolve().read_text(encoding="utf-8")
-    return None
-
-
-def install_attack_tree_threat_analysis_skill(
-    workspace: Path,
-    skill_path: Path,
-    reference_catalog_path: Path,
-) -> None:
-    """Compatibility wrapper for the moved threat-analysis workspace helper."""
-    from backend.threat_analysis.workspace import (
-        install_attack_tree_threat_analysis_skill as install_skill,
-    )
-
-    install_skill(workspace, skill_path, reference_catalog_path)

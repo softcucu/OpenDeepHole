@@ -125,16 +125,6 @@ def _commit_diff(project_path: Path, commit_hash: str) -> str:
     return text
 
 
-def _ensure_skill(workspace: Path) -> None:
-    """把 git 历史挖掘 skill 写入工作区，供 OpenCode 任务加载。"""
-    skill_src = Path(__file__).parent / "skills" / "git_history_mine.md"
-    skill_dir = workspace / ".opencode" / "skills" / "git-history-mine"
-    skill_dir.mkdir(parents=True, exist_ok=True)
-    (skill_dir / "SKILL.md").write_text(
-        skill_src.read_text(encoding="utf-8"), encoding="utf-8"
-    )
-
-
 def _build_prompt(commit: _Commit, diff: str) -> str:
     return (
         "你在对一份 C/C++ 源码树做白盒漏洞挖掘的**历史问题模式挖掘**子任务"
@@ -160,11 +150,9 @@ async def mine_history(
     *,
     config,
     project_path: Path,
-    workspace: Path,
     scan_id: str,
     cancel_event: Optional[threading.Event],
     emit: EmitFn,
-    cli_config,
 ) -> list[HistoryPattern]:
     """挖掘 git 历史安全问题模式。
 
@@ -186,15 +174,15 @@ async def mine_history(
         return []
 
     await emit("git_history", f"开始分析 {len(commits)} 条提交的历史安全问题模式...")
-    _ensure_skill(workspace)
-
     patterns: list[HistoryPattern] = []
     seen_keys: set[str] = set()
     lock = asyncio.Lock()
     processed = 0
 
     capacity = total_model_capacity(
-        cli_config, global_concurrency=config.opencode_concurrency, required_capability="any"
+        config.opencode,
+        global_concurrency=config.opencode_concurrency,
+        required_capability="any",
     )
     concurrency = max(1, min(capacity, len(commits)))
 
@@ -202,7 +190,8 @@ async def mine_history(
     for c in commits:
         queue.put_nowait(c)
 
-    scan_dir = workspace.parent
+    scan_dir = Path.home() / ".opendeephole" / "scans" / scan_id / "logs"
+    scan_dir.mkdir(parents=True, exist_ok=True)
 
     async def _mine_one(commit: _Commit) -> None:
         nonlocal processed
@@ -215,21 +204,21 @@ async def mine_history(
 
         try:
             output_text = await _invoke_opencode(
-                workspace,
                 prompt,
-                int(getattr(cli_config, "timeout", 1200) or 1200),
+                int(getattr(config.opencode, "timeout", 1200) or 1200),
                 log_path=log_path,
                 on_line=lambda line: print(
                     with_local_timestamp(line, prefix="[git_history]"),
                     flush=True,
                 ),
                 cancel_event=cancel_event,
-                cli_config=cli_config,
-                project_dir=project_path,
+                directory=project_path,
                 model_capability="any",
-                stats_scope_id=scan_id,
                 task_name=f"Git 历史审计 {commit.hash[:10]}",
-                skills=["git-history-mine"],
+                task_metadata={
+                    "task_type": "git_history",
+                    "commit": commit.hash,
+                },
                 output_schema=_HISTORY_PATTERN_JSON_SCHEMA,
             )
         except asyncio.CancelledError:

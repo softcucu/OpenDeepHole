@@ -1,5 +1,14 @@
 # 更新日志
 
+## 2026-07-16
+
+- **变更** `OpenCodeTaskSpec` 收敛为任务名、prompt、真实 `directory`、能力/超时/优先级、JSON Schema、双层重试、Session、`writable_paths` 和回调；移除调用方传入的 `workspace`、`scope_id`、`task_context`、MCP/SKILL 选择、权限、CLI 配置及全局并发覆盖，扫描作用域和任务元数据改由 Agent 执行入口自动绑定
+- **变更** 整个 Agent 固定复用 `~/.opendeephole/opencode_workspace`，扫描、误报复核、漏洞验证和 SKILL 创建不再创建独立 OpenCode 配置目录或向项目内镜像运行配置；checker、误报复核、Git 历史、变体排查和攻击树威胁分析 SKILL 统一注册到全局 skill root，由 OpenCode 按 prompt 名称按需加载
+- **变更** OpenCode Session 权限由任务服务统一计算：真实 `directory` 可读、当前 `~/.opendeephole/scans/<scan_id>` 和显式 `writable_paths` 可由文件工具写入，全部 MCP/SKILL 默认可用；`bash` 按现有产品约定保持完全允许，因此项目目录只读约束不构成 OS 级 shell 沙箱
+- **新增** JSON Schema 任务默认在原 Session 上追加最多 2 次纠正提示，重复目标 Schema 并要求只输出 JSON；纠正耗尽或普通执行异常后，`attempt` 按“全新 Session 重试次数”释放模型并重新排队，未传时使用 `opencode.max_retries`，超时、取消和无可用模型不重试
+- **修复** 全新 Session 重试保持同一个逻辑 task ID、重新选择模型并在 `OutputSource.attempt`/模型池上下文记录实际重试序号；中间尝试不再重复追加 completed-task 终态，最终结果保留最后 Session、文本和失败原因，`wait_session_id()` 仍可提前返回首个 Session 而 `result.session_id` 始终表示最终 Session
+- **变更** 候选审计、项目/威胁/报告审计、敏感信息清理、误报复核和验证 demo 移除各自的外层模型重试循环，统一由公共任务服务执行同 Session JSON 纠正与新 Session 重试；validator `ctx.run_opencode_task(...)` 同步移除 MCP/SKILL/权限参数并新增 `output_retry_count`、`attempt` 和 `writable_paths`
+
 ## 2026-07-14
 
 - **修复** Agent 共享 deephole-code MCP 网关在重启或跨线程事件循环处理 Streamable HTTP SSE 时可能报 `Event ... is bound to a different event loop`：显式要求将 SSE 退出状态按事件循环隔离的 `sse-starlette>=3.0.0`，Linux/Windows Agent 启动器也会识别已安装的旧版并重新安装依赖

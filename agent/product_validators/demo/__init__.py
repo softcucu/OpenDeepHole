@@ -20,6 +20,7 @@ ARTIFACT_SCHEMA = {
     "properties": {
         "content": {
             "type": "string",
+            "minLength": 1,
             "description": "Complete Markdown content for this validation stage",
         },
     },
@@ -90,41 +91,38 @@ def validate_demo(ctx) -> ValidationResult:
         artifact_path = validation_dir / artifact_name
         succeeded = False
         last_error = ""
-        for attempt in range(1, retries + 2):
-            if ctx.cancelled():
-                return _cancelled_result()
-            _emit(
-                ctx,
-                f"STEP {stage_index} running {skill_name}, attempt {attempt}/{retries + 1}",
+        if ctx.cancelled():
+            return _cancelled_result()
+        _emit(ctx, f"STEP {stage_index} running {skill_name}")
+        prompt = (
+            f"这是漏洞验证的第 {stage_index}/4 阶段。读取 {report_path}，"
+            f"按照 {skill_name} 的方法完成验证。最终只输出符合指定 JSON Schema、包含完整 Markdown 的 JSON "
+            f"阶段结论，不要直接写文件。前序阶段信息保留在当前 session 中。"
+        )
+        try:
+            task_result = ctx.run_opencode_task(
+                task_name=f"validation:{skill_name}",
+                prompt=prompt,
+                required_capability="high",
+                directory=project_dir,
+                timeout_seconds=ctx.timeout_seconds,
+                priority=80,
+                output_schema=ARTIFACT_SCHEMA,
+                attempt=retries,
+                session_id=session_id,
             )
-            prompt = (
-                f"这是漏洞验证的第 {stage_index}/4 阶段。读取 {report_path}，"
-                f"按照 {skill_name} 的方法完成验证。最终只输出符合指定 JSON Schema、包含完整 Markdown 的 JSON "
-                f"阶段结论，不要直接写文件。前序阶段信息保留在当前 session 中。"
-            )
-            try:
-                task_result = ctx.run_opencode_task(
-                    task_name=f"validation:{skill_name}",
-                    prompt=prompt,
-                    required_capability="high",
-                    directory=project_dir,
-                    skills=[skill_name],
-                    timeout_seconds=ctx.timeout_seconds,
-                    priority=80,
-                    output_schema=ARTIFACT_SCHEMA,
-                    session_id=session_id,
-                )
-                session_id = str(task_result.get("session_id") or session_id or "") or None
-                structured = task_result.get("structured")
-                content = structured.get("content") if isinstance(structured, dict) else ""
-                if str(content or "").strip():
-                    artifact_path.write_text(str(content), encoding="utf-8")
-                    succeeded = True
-                    break
+            session_id = str(task_result.get("session_id") or session_id or "") or None
+            structured = task_result.get("structured")
+            content = structured.get("content") if isinstance(structured, dict) else ""
+            if str(content or "").strip():
+                artifact_path.write_text(str(content), encoding="utf-8")
+                succeeded = True
+            else:
                 last_error = "OpenCode returned empty JSON content"
-            except Exception as exc:
-                last_error = str(exc)
-            _emit(ctx, f"STEP {stage_index} attempt failed: {last_error}")
+        except Exception as exc:
+            last_error = str(exc)
+        if not succeeded:
+            _emit(ctx, f"STEP {stage_index} failed: {last_error}")
 
         if not succeeded:
             return ValidationResult(

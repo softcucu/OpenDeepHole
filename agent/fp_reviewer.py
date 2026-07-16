@@ -32,8 +32,6 @@ _FP_FEEDBACK_FILE = Path.home() / ".opendeephole" / "fp_feedback.json"
 _FP_REVIEW_FEEDBACK: dict[str, list[dict]] = {}
 # 每次复核的 git 历史问题模式快照（list[dict]，来自后端 GET .../git_history）
 _FP_REVIEW_HISTORY: dict[str, list[dict]] = {}
-_FP_REVIEW_SKILLS = ("history-match", "prove-bug", "prove-fp", "final-judge")
-_LEGACY_FP_REVIEW_SKILLS = ("fp-review", "fp-review-discriminator")
 _FP_STAGE_LABELS = {
     "history_match": "历史/校验匹配",
     "prove_bug": "正方论证",
@@ -54,7 +52,7 @@ _FP_STAGE_JSON_SCHEMA = {
     "type": "object",
     "properties": {
         **VULNERABILITY_RESULT_JSON_SCHEMA["properties"],
-        "stage_markdown": {"type": "string"},
+        "stage_markdown": {"type": "string", "minLength": 1},
         "match_type": {"type": "string"},
         "match_reference": {"type": "string"},
     },
@@ -204,6 +202,15 @@ async def run_fp_review(
     review_dir = Path.home() / ".opendeephole" / "fp_reviews" / review_id
     review_dir.mkdir(parents=True, exist_ok=True)
     set_fp_review_feedback(scan_id, feedback_entries or [])
+    from backend.opencode.task_service import (
+        reset_opencode_execution_context,
+        set_opencode_execution_context,
+    )
+    execution_context_token = set_opencode_execution_context(
+        scan_id=scan_id,
+        scan_work_dir=Path.home() / ".opendeephole" / "scans" / scan_id,
+        feedback_entries=feedback_entries or [],
+    )
     processed_reviews = 0
 
     # 拉取本次扫描挖掘出的 git 历史问题模式，供「历史/校验匹配」阶段使用
@@ -218,7 +225,6 @@ async def run_fp_review(
     active = mcp_registry.lookup(project)
 
     own_mcp_server = None         # only set in Mode B
-    workspace: Optional[Path] = None
     _patched_cfg: bool = False    # whether we changed the backend config
     pool_status_stop = asyncio.Event()
     pool_status_task = asyncio.create_task(
@@ -265,9 +271,9 @@ async def run_fp_review(
 
         await emit("fp_review", f"Starting FP review: {len(vulnerabilities)} confirmed vulnerabilities")
 
-        # Create an isolated config workspace with opencode.json + FP-review skills.
-        workspace = _create_fp_workspace(review_dir / "opencode_workspace", mcp_port)
-        await emit("fp_review", "FP review workspace ready")
+        # Register FP skills in the single Agent-wide OpenCode workspace.
+        _create_fp_workspace(mcp_port)
+        await emit("fp_review", "Global OpenCode workspace ready")
 
         from backend.models import Candidate
 
@@ -306,12 +312,6 @@ async def run_fp_review(
             result_submitted = False
 
             try:
-                vuln_workspace = _create_fp_workspace(
-                    workspace / str(vuln_index),
-                    mcp_port,
-                    vuln_type=vuln["vuln_type"],
-                    feedback_entries=get_fp_review_feedback(scan_id),
-                )
                 fake_candidate = Candidate(
                     file=vuln["file"],
                     line=vuln["line"],
@@ -339,7 +339,6 @@ async def run_fp_review(
                     history_match = await _run_fp_review_stage(
                         stage="history_match",
                         scan_id=scan_id,
-                        workspace=vuln_workspace,
                         review_dir=review_dir,
                         review_id=review_id,
                         vuln_index=vuln_index,
@@ -349,7 +348,6 @@ async def run_fp_review(
                         project_id_for_prompt=project_id_for_prompt,
                         timeout=current_fp_cli.timeout,
                         cancel_event=cancel_event,
-                        cli_config=current_fp_cli,
                         project=project,
                         candidate=fake_candidate,
                         ai_analysis_path=ai_analysis_path,
@@ -401,7 +399,6 @@ async def run_fp_review(
                     prove_bug = await _run_fp_review_stage(
                         stage="prove_bug",
                         scan_id=scan_id,
-                        workspace=vuln_workspace,
                         review_dir=review_dir,
                         review_id=review_id,
                         vuln_index=vuln_index,
@@ -411,7 +408,6 @@ async def run_fp_review(
                         project_id_for_prompt=project_id_for_prompt,
                         timeout=current_fp_cli.timeout,
                         cancel_event=cancel_event,
-                        cli_config=current_fp_cli,
                         project=project,
                         candidate=fake_candidate,
                         ai_analysis_path=ai_analysis_path,
@@ -456,7 +452,6 @@ async def run_fp_review(
                         prove_fp = await _run_fp_review_stage(
                             stage="prove_fp",
                             scan_id=scan_id,
-                            workspace=vuln_workspace,
                             review_dir=review_dir,
                             review_id=review_id,
                             vuln_index=vuln_index,
@@ -467,7 +462,6 @@ async def run_fp_review(
                             project_id_for_prompt=project_id_for_prompt,
                             timeout=current_fp_cli.timeout,
                             cancel_event=cancel_event,
-                            cli_config=current_fp_cli,
                             project=project,
                             candidate=fake_candidate,
                             prove_bug=prove_bug,
@@ -490,7 +484,6 @@ async def run_fp_review(
                         final_judge = await _run_fp_review_stage(
                             stage="final_judge",
                             scan_id=scan_id,
-                            workspace=vuln_workspace,
                             review_dir=review_dir,
                             review_id=review_id,
                             vuln_index=vuln_index,
@@ -504,7 +497,6 @@ async def run_fp_review(
                             project_id_for_prompt=project_id_for_prompt,
                             timeout=current_fp_cli.timeout,
                             cancel_event=cancel_event,
-                            cli_config=current_fp_cli,
                             project=project,
                             candidate=fake_candidate,
                             prove_bug=prove_bug,
@@ -621,8 +613,6 @@ async def run_fp_review(
             await clear_completed_tasks(scan_id)
         except Exception:
             pass
-        if workspace is not None:
-            _cleanup_fp_workspace(workspace)
         if own_mcp_server is not None:
             own_mcp_server.stop()
         if _patched_cfg:
@@ -635,6 +625,7 @@ async def run_fp_review(
         _FP_REVIEW_FEEDBACK.pop(scan_id, None)
         _FP_REVIEW_HISTORY.pop(scan_id, None)
         shutil.rmtree(review_dir, ignore_errors=True)
+        reset_opencode_execution_context(execution_context_token)
 
 
 # ---------------------------------------------------------------------------
@@ -645,7 +636,6 @@ async def _run_fp_review_stage(
     *,
     stage: str,
     scan_id: str,
-    workspace: Path,
     review_dir: Path,
     review_id: str,
     vuln_index: int,
@@ -656,7 +646,6 @@ async def _run_fp_review_stage(
     project_id_for_prompt: str,
     timeout: int,
     cancel_event: threading.Event | None,
-    cli_config,
     project: Path,
     candidate,
     prove_bug: _FpStageResult | None = None,
@@ -671,138 +660,99 @@ async def _run_fp_review_stage(
         _vulnerability_from_payload,
     )
 
-    max_retries = max(0, int(getattr(cli_config, "max_retries", 0) or 0))
-    last_failure: _FpStageFailure | None = None
-    last_source: OutputSource | None = None
+    output_source: OutputSource | None = None
 
-    for attempt in range(1, max_retries + 2):
-        attempt_source: OutputSource | None = None
-        attempt_id = uuid4().hex
-        submit_tool_name = "JSON result"
+    def capture_source(source: OutputSource) -> None:
+        nonlocal output_source
+        output_source = source
 
-        def capture_source(source: OutputSource) -> None:
-            nonlocal attempt_source, last_source
-            attempt_source = source
-            last_source = source
-
-        prompt = _build_fp_review_prompt(
-            stage=stage,
-            vuln=vuln,
-            project_id_for_prompt=project_id_for_prompt,
-            review_id=review_id,
-            vuln_index=vuln_index,
-            output_markdown_path=output_markdown_path,
-            input_markdown_paths=input_markdown_paths or [],
-            prove_bug=prove_bug,
-            prove_fp=prove_fp,
-            ai_analysis_path=ai_analysis_path,
-            history_patterns=history_patterns,
-            variant_of=variant_of,
+    prompt = _build_fp_review_prompt(
+        stage=stage,
+        vuln=vuln,
+        project_id_for_prompt=project_id_for_prompt,
+        review_id=review_id,
+        vuln_index=vuln_index,
+        output_markdown_path=output_markdown_path,
+        input_markdown_paths=input_markdown_paths or [],
+        prove_bug=prove_bug,
+        prove_fp=prove_fp,
+        ai_analysis_path=ai_analysis_path,
+        history_patterns=history_patterns,
+        variant_of=variant_of,
+    )
+    log_path = review_dir / f"fp_{stage}_{uuid4().hex}.log"
+    try:
+        try:
+            if output_markdown_path.exists():
+                output_markdown_path.unlink()
+        except OSError:
+            pass
+        output_text = await _invoke_opencode(
+            prompt,
+            timeout,
+            log_path=log_path,
+            on_line=lambda line: print(
+                with_local_timestamp(line, prefix=f"[fp_{stage}]"),
+                flush=True,
+            ),
+            cancel_event=cancel_event,
+            directory=project,
+            writable_paths=[artifact_dir],
+            model_capability="high",
+            prefer_high_model=True,
+            on_invocation_metadata=capture_source,
+            task_name=f"去误报复核 {stage}",
+            task_metadata={
+                "task_type": "fp_review",
+                "review_id": review_id,
+                "stage": stage,
+                "vuln_index": vuln_index,
+                "checker": vuln.get("vuln_type", ""),
+                "file": vuln.get("file", ""),
+                "line": vuln.get("line", 0),
+                "function": vuln.get("function", ""),
+            },
+            output_schema=_FP_STAGE_JSON_SCHEMA,
         )
-        if attempt > 1:
-            prompt += (
-                "上一次尝试未返回完整 JSON 结果。"
-                "即使结论是非问题（confirmed=false），最终 JSON 的 stage_markdown 也必须返回完整论证。"
-            )
-        log_path = review_dir / f"fp_{stage}_{attempt_id}.log"
-
-        try:
-            try:
-                if output_markdown_path.exists():
-                    output_markdown_path.unlink()
-            except OSError:
-                pass
-            output_text = await _invoke_opencode(
-                workspace,
-                prompt,
-                timeout,
-                log_path=log_path,
-                on_line=lambda line: print(
-                    with_local_timestamp(line, prefix=f"[fp_{stage}]"),
-                    flush=True,
-                ),
-                cancel_event=cancel_event,
-                cli_config=cli_config,
-                project_dir=project,
-                model_capability="high",
-                prefer_high_model=True,
-                stats_scope_id=scan_id,
-                task_context={
-                    "task_type": "fp_review",
-                    "review_id": review_id,
-                    "stage": stage,
-                    "vuln_index": vuln_index,
-                    "checker": vuln.get("vuln_type", ""),
-                    "file": vuln.get("file", ""),
-                    "line": vuln.get("line", 0),
-                    "function": vuln.get("function", ""),
-                },
-                attempt=attempt,
-                on_invocation_metadata=capture_source,
-                task_name=f"去误报复核 {stage}",
-                skills=[stage.replace("_", "-")],
-                output_schema=_FP_STAGE_JSON_SCHEMA,
-            )
-        except asyncio.CancelledError:
-            raise
-        except NoAvailableModelError:
-            raise
-        except Exception as exc:
-            last_failure = _FpStageFailure(
-                stage=stage,
-                session_id=_session_id_from_output_source(attempt_source),
-                artifact_path=output_markdown_path,
-                log_path=log_path,
-                reason=f"CLI invocation failed on attempt {attempt}/{max_retries + 1}: {exc}",
-                output_source=attempt_source,
-            )
-            continue
-
-        payload: dict = {}
-        try:
-            payload = json.loads(output_text)
-            result = _vulnerability_from_payload(payload, candidate)
-        except Exception:
-            result = None
-        markdown = str(payload.get("stage_markdown") or "")
-        if markdown.strip():
-            output_markdown_path.parent.mkdir(parents=True, exist_ok=True)
-            output_markdown_path.write_text(markdown, encoding="utf-8")
-        missing: list[str] = []
-        if not markdown.strip():
-            missing.append("Markdown artifact")
-        if result is None:
-            missing.append(submit_tool_name)
-        if not missing:
-            return _FpStageResult(
-                session_id=_session_id_from_output_source(attempt_source),
-                result=result,
-                payload=payload,
-                markdown=markdown,
-                output_source=attempt_source or OutputSource(),
-            )
-
-        last_failure = _FpStageFailure(
+    except asyncio.CancelledError:
+        raise
+    except NoAvailableModelError:
+        raise
+    except Exception as exc:
+        raise _FpStageFailure(
             stage=stage,
-            session_id=_session_id_from_output_source(attempt_source),
+            session_id=_session_id_from_output_source(output_source),
             artifact_path=output_markdown_path,
             log_path=log_path,
-            reason=(
-                f"Missing {' and '.join(missing)} on attempt "
-                f"{attempt}/{max_retries + 1}"
-            ),
-            output_source=attempt_source,
-        )
+            reason=f"OpenCode stage failed after configured session retries: {exc}",
+            output_source=output_source,
+        ) from exc
 
-    if last_failure is not None:
-        raise last_failure
-    raise _FpStageFailure(
-        stage=stage,
-        session_id="",
-        artifact_path=output_markdown_path,
-        log_path=review_dir,
-        reason="Stage did not run",
-        output_source=last_source,
+    payload: dict = {}
+    try:
+        payload = json.loads(output_text)
+        result = _vulnerability_from_payload(payload, candidate)
+    except Exception:
+        result = None
+    markdown = str(payload.get("stage_markdown") or "")
+    if markdown.strip():
+        output_markdown_path.parent.mkdir(parents=True, exist_ok=True)
+        output_markdown_path.write_text(markdown, encoding="utf-8")
+    if result is None or not markdown.strip():
+        raise _FpStageFailure(
+            stage=stage,
+            session_id=_session_id_from_output_source(output_source),
+            artifact_path=output_markdown_path,
+            log_path=log_path,
+            reason="Schema-valid FP stage result could not be converted",
+            output_source=output_source,
+        )
+    return _FpStageResult(
+        session_id=_session_id_from_output_source(output_source),
+        result=result,
+        payload=payload,
+        markdown=markdown,
+        output_source=output_source or OutputSource(),
     )
 
 
@@ -1079,111 +1029,9 @@ def _has_required_issue_report_sections(report: str) -> bool:
 
 
 def _create_fp_workspace(
-    workspace: Path,
     mcp_port: int,
-    vuln_type: str | None = None,
-    feedback_entries: list[dict] | None = None,
 ) -> Path:
-    """Ensure isolated opencode config and FP-review skills exist."""
-    from backend.opencode.config import build_opencode_config, get_workspace_lock
-    from backend.opencode.feedback_format import format_feedback_experience
+    """Return the Agent-wide workspace where FP skills are pre-registered."""
+    from backend.opencode.config import get_global_opencode_workspace
 
-    with get_workspace_lock(workspace):
-        workspace.mkdir(parents=True, exist_ok=True)
-        skills_root = (workspace / ".opencode" / "skills").resolve()
-        (workspace / "opencode.json").write_text(
-            json.dumps(
-                build_opencode_config(
-                    f"http://127.0.0.1:{mcp_port}/mcp",
-                    [str(skills_root)],
-                ),
-                indent=2,
-            ),
-            encoding="utf-8",
-        )
-
-        matching_feedback = [
-            entry for entry in feedback_entries or []
-            if not vuln_type or entry.get("vuln_type") == vuln_type
-        ]
-        fp_section = format_feedback_experience(matching_feedback)
-        _write_fp_skill(
-            workspace,
-            "history-match",
-            Path(__file__).parent / "skills" / "fp_review_match.md",
-            fp_section,
-        )
-        _write_fp_skill(
-            workspace,
-            "prove-bug",
-            Path(__file__).parent / "skills" / "fp_review.md",
-            fp_section,
-        )
-        _write_fp_skill(
-            workspace,
-            "prove-fp",
-            Path(__file__).parent / "skills" / "fp_review_discriminator.md",
-            fp_section,
-        )
-        _write_fp_skill(
-            workspace,
-            "final-judge",
-            Path(__file__).parent / "skills" / "fp_review_final.md",
-            fp_section,
-        )
-
-    return workspace
-
-
-def _write_fp_skill(workspace: Path, skill_name: str, skill_src: Path, fp_section: str) -> None:
-    skills_dir = workspace / ".opencode" / "skills" / skill_name
-    skills_dir.mkdir(parents=True, exist_ok=True)
-    content = skill_src.read_text(encoding="utf-8")
-    if fp_section:
-        content = content.rstrip() + (
-            "\n\n## 历史用户经验\n\n"
-            "以下是用户在审计过程中选择注入的经验，"
-            "复核时应结合这些经验校验结论：\n"
-            + fp_section
-        )
-    (skills_dir / "SKILL.md").write_text(content, encoding="utf-8")
-
-
-def _cleanup_fp_workspace(workspace: Path) -> None:
-    """Remove FP review artifacts written into the isolated config workspace."""
-    from backend.opencode.config import get_workspace_lock
-
-    with get_workspace_lock(workspace):
-        if workspace.name == "opencode_workspace":
-            shutil.rmtree(workspace, ignore_errors=True)
-            return
-
-        try:
-            for skill_name in (*_FP_REVIEW_SKILLS, *_LEGACY_FP_REVIEW_SKILLS):
-                fp_skill_dir = workspace / ".opencode" / "skills" / skill_name
-                if fp_skill_dir.is_dir():
-                    shutil.rmtree(fp_skill_dir)
-            for root in (workspace / ".claude" / "skills", workspace / ".gemini" / "skills"):
-                for skill_name in (*_FP_REVIEW_SKILLS, *_LEGACY_FP_REVIEW_SKILLS):
-                    copied_fp_skill = root / skill_name
-                    if copied_fp_skill.is_dir():
-                        shutil.rmtree(copied_fp_skill)
-                if root.is_dir() and not any(root.iterdir()):
-                    root.rmdir()
-            claude_mcp = workspace / ".claude" / "opendeephole-mcp.json"
-            if claude_mcp.exists():
-                claude_mcp.unlink()
-            claude_dir = workspace / ".claude"
-            if claude_dir.is_dir() and not any(claude_dir.iterdir()):
-                claude_dir.rmdir()
-            skills_dir = workspace / ".opencode" / "skills"
-            if skills_dir.is_dir() and not any(skills_dir.iterdir()):
-                skills_dir.rmdir()
-            oc_dir = workspace / ".opencode"
-            if oc_dir.is_dir() and not any(oc_dir.iterdir()):
-                oc_dir.rmdir()
-            opencode_json = workspace / "opencode.json"
-            if opencode_json.exists() and not oc_dir.exists():
-                opencode_json.unlink()
-        except Exception:
-            pass
+    return get_global_opencode_workspace(mcp_port=mcp_port)

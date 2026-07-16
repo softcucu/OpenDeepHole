@@ -12,6 +12,8 @@ import dataclasses
 import json
 import re
 import time
+from contextlib import contextmanager
+from contextvars import ContextVar, Token
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -28,6 +30,7 @@ from backend.opencode.llm_json import (
 )
 from backend.opencode.model_pool import (
     ModelLease,
+    NoAvailableModelError,
     acquire_model_lease,
     configured_global_concurrency,
     normalize_priority,
@@ -47,25 +50,136 @@ def _now_iso() -> str:
 
 
 @dataclass(frozen=True)
+class OpenCodeExecutionContext:
+    """Agent-owned metadata captured when a task is submitted.
+
+    Callers of ``run_task()`` do not supply scan scope or arbitrary task
+    context. Scan/validation orchestration binds it once at the execution
+    boundary, and every submitted task snapshots that binding.
+    """
+
+    scan_id: str = ""
+    scan_work_dir: Path | None = None
+    task_metadata: dict[str, Any] = field(default_factory=dict)
+    feedback_entries: tuple[dict[str, Any], ...] = ()
+
+
+_execution_context: ContextVar[OpenCodeExecutionContext] = ContextVar(
+    "opencode_execution_context",
+    default=OpenCodeExecutionContext(),
+)
+_scan_feedback_entries: dict[str, tuple[dict[str, Any], ...]] = {}
+_INHERIT_CONTEXT_VALUE = object()
+
+
+def _feedback_snapshot(entries: Any) -> tuple[dict[str, Any], ...]:
+    snapshot: list[dict[str, Any]] = []
+    for entry in entries or ():
+        if isinstance(entry, dict):
+            snapshot.append(dict(entry))
+        elif hasattr(entry, "model_dump"):
+            value = entry.model_dump()
+            if isinstance(value, dict):
+                snapshot.append(dict(value))
+        elif dataclasses.is_dataclass(entry):
+            value = dataclasses.asdict(entry)
+            if isinstance(value, dict):
+                snapshot.append(value)
+    return tuple(snapshot)
+
+
+def set_opencode_execution_context(
+    *,
+    scan_id: str | None = None,
+    scan_work_dir: Path | None | object = _INHERIT_CONTEXT_VALUE,
+    task_metadata: dict[str, Any] | None = None,
+    feedback_entries: Any = None,
+) -> Token[OpenCodeExecutionContext]:
+    """Bind Agent-owned scope for the current async execution tree.
+
+    ``scan_id=None`` inherits the current scope. Pass an empty ``scan_id`` to
+    clear the scope and its inherited work directory, or
+    ``scan_work_dir=None`` to clear only that directory. The returned token
+    must be reset by the owner.
+    """
+    current = _execution_context.get()
+    next_scan_id = current.scan_id if scan_id is None else str(scan_id or "").strip()
+    if scan_work_dir is _INHERIT_CONTEXT_VALUE:
+        next_work_dir = current.scan_work_dir
+        if scan_id is not None and not next_scan_id:
+            next_work_dir = None
+    elif scan_work_dir is None:
+        next_work_dir = None
+    else:
+        next_work_dir = Path(scan_work_dir).resolve()
+    metadata = dict(current.task_metadata)
+    if task_metadata:
+        metadata.update(task_metadata)
+    feedback = (
+        current.feedback_entries
+        if feedback_entries is None
+        else _feedback_snapshot(feedback_entries)
+    )
+    return _execution_context.set(OpenCodeExecutionContext(
+        scan_id=next_scan_id,
+        scan_work_dir=next_work_dir,
+        task_metadata=metadata,
+        feedback_entries=feedback,
+    ))
+
+
+def reset_opencode_execution_context(token: Token[OpenCodeExecutionContext]) -> None:
+    _execution_context.reset(token)
+
+
+def set_scan_feedback_entries(scan_id: str, entries: Any) -> None:
+    normalized_scan_id = str(scan_id or "").strip()
+    if normalized_scan_id:
+        _scan_feedback_entries[normalized_scan_id] = _feedback_snapshot(entries)
+
+
+def clear_scan_feedback_entries(scan_id: str) -> None:
+    _scan_feedback_entries.pop(str(scan_id or "").strip(), None)
+
+
+def get_opencode_execution_context() -> OpenCodeExecutionContext:
+    """Return a defensive snapshot of the currently bound Agent context."""
+    return _snapshot_execution_context()
+
+
+@contextmanager
+def bind_opencode_execution_context(**kwargs: Any):
+    token = set_opencode_execution_context(**kwargs)
+    try:
+        yield _execution_context.get()
+    finally:
+        reset_opencode_execution_context(token)
+
+
+def _snapshot_execution_context() -> OpenCodeExecutionContext:
+    current = _execution_context.get()
+    feedback = _scan_feedback_entries.get(current.scan_id, current.feedback_entries)
+    return OpenCodeExecutionContext(
+        scan_id=current.scan_id,
+        scan_work_dir=current.scan_work_dir,
+        task_metadata=dict(current.task_metadata),
+        feedback_entries=tuple(dict(entry) for entry in feedback),
+    )
+
+
+@dataclass(frozen=True)
 class OpenCodeTaskSpec:
     task_name: str
     prompt: str
     directory: Path
     required_capability: str = "low"
-    workspace: Path | None = None
-    scope_id: str = ""
-    task_context: dict[str, Any] = field(default_factory=dict)
-    mcp_tools: list[str] | None = None
-    skills: list[str | Path] = field(default_factory=list)
     timeout_seconds: int | None = None
     priority: int = 50
     output_schema: dict[str, Any] | None = None
-    permissions: list[dict[str, str]] | None = None
+    output_retry_count: int = 2
     session_id: str | None = None
     writable_paths: list[Path] = field(default_factory=list)
-    cli_config: Any = None
-    global_concurrency: int | None = None
-    attempt: int = 0
+    attempt: int | None = None
     on_output: Callable[[str], Any] | None = field(default=None, compare=False, repr=False)
     on_invocation_metadata: Callable[[OutputSource], Any] | None = field(
         default=None,
@@ -108,6 +222,10 @@ class OpenCodeTaskError(RuntimeError):
         self.result = result
 
 
+class _InvalidStructuredOutput(RuntimeError):
+    """The model completed, but every same-session JSON correction failed."""
+
+
 class _CombinedCancelEvent:
     def __init__(self, internal: asyncio.Event, external: Any = None) -> None:
         self.internal = internal
@@ -128,6 +246,7 @@ class _TaskRecord:
     result_future: asyncio.Future[OpenCodeTaskResult]
     session_future: asyncio.Future[str]
     cancel_event: asyncio.Event
+    execution_context: OpenCodeExecutionContext
     status: str = "queued"
     started_at: str = ""
     worker: asyncio.Task[None] | None = None
@@ -200,32 +319,27 @@ class OpenCodeTaskService:
         if not prompt.strip():
             raise ValueError("OpenCode prompt is required")
         directory = Path(spec.directory).resolve()
-        workspace = Path(spec.workspace).resolve() if spec.workspace is not None else directory
         timeout = spec.timeout_seconds
         if timeout is not None and int(timeout) <= 0:
             raise ValueError("OpenCode timeout_seconds must be positive")
-        global_concurrency = spec.global_concurrency
-        if global_concurrency is not None and int(global_concurrency) <= 0:
-            raise ValueError("OpenCode global_concurrency must be positive")
-        permissions = _normalize_permissions(spec.permissions)
+        output_retry_count = int(spec.output_retry_count)
+        if output_retry_count < 0:
+            raise ValueError("OpenCode output_retry_count cannot be negative")
+        attempt = spec.attempt
+        if attempt is not None and int(attempt) < 0:
+            raise ValueError("OpenCode attempt cannot be negative")
         return dataclasses.replace(
             spec,
             task_name=task_name,
             prompt=prompt,
             directory=directory,
-            workspace=workspace,
             required_capability=normalize_requirement(spec.required_capability),
             priority=normalize_priority(spec.priority),
             timeout_seconds=None if timeout is None else int(timeout),
-            global_concurrency=(
-                None if global_concurrency is None else int(global_concurrency)
-            ),
-            permissions=permissions,
+            output_retry_count=output_retry_count,
+            attempt=None if attempt is None else int(attempt),
             session_id=str(spec.session_id or "").strip() or None,
             writable_paths=[Path(path).resolve() for path in spec.writable_paths],
-            skills=list(spec.skills or []),
-            mcp_tools=None if spec.mcp_tools is None else list(spec.mcp_tools),
-            task_context=dict(spec.task_context or {}),
         )
 
     def submit_task(self, spec: OpenCodeTaskSpec) -> OpenCodeTaskHandle:
@@ -247,6 +361,7 @@ class OpenCodeTaskService:
             result_future=loop.create_future(),
             session_future=loop.create_future(),
             cancel_event=asyncio.Event(),
+            execution_context=_snapshot_execution_context(),
         )
         if normalized.session_id:
             record.session_future.set_result(normalized.session_id)
@@ -322,201 +437,303 @@ class OpenCodeTaskService:
     async def _run_record(self, record: _TaskRecord) -> None:
         spec = record.spec
         combined_cancel = _CombinedCancelEvent(record.cancel_event, spec.cancel_event)
-        config = get_config()
-        explicit_cli_config = spec.cli_config is not None
-        cli_config_source: Any = spec.cli_config or (lambda: get_config().opencode)
-        global_concurrency: Any
-        if spec.global_concurrency is not None:
-            global_concurrency = spec.global_concurrency
-        else:
-            global_concurrency = (
-                configured_global_concurrency(config)
-                if explicit_cli_config
-                else (lambda: configured_global_concurrency(get_config()))
-            )
-        task_context = {
-            **spec.task_context,
-            "task_name": spec.task_name,
-            "prompt": spec.prompt,
-            "prompt_length": len(spec.prompt),
-            "priority": spec.priority,
-            "revision": record.revision,
-        }
-        lease: ModelLease | None = None
-        outcome = "failure"
-        started_monotonic = 0.0
-        session_id = str(spec.session_id or "")
-        message_id = ""
-        source = OutputSource()
-        try:
-            lease = await acquire_model_lease(
-                cli_config_source,
-                global_concurrency=global_concurrency,
-                required_capability=spec.required_capability,
-                prefer_high=False,
-                cancel_event=combined_cancel,
-                stats_scope_id=spec.scope_id,
-                task_context=task_context,
-                priority=spec.priority,
-                task_id=record.task_id,
-                revision=record.revision,
-                strict_capability=True,
-                prefer_lowest_capability=True,
-                wait_when_unavailable=True,
-            )
-            if lease is None:
+        cli_config_source = lambda: _task_cli_config(record.execution_context)
+        global_concurrency = lambda: configured_global_concurrency(get_config())
+        configured_retry_count = int(
+            _cfg_value(_task_cli_config(record.execution_context), "max_retries", 2) or 0
+        )
+        fresh_retry_count = (
+            configured_retry_count if spec.attempt is None else int(spec.attempt)
+        )
+        total_session_attempts = fresh_retry_count + 1
+        accumulated_duration = 0.0
+        first_session_id = str(spec.session_id or "")
+        final_session_id = first_session_id
+        last_message_id = ""
+        last_text = ""
+        last_model = ""
+        last_source = OutputSource()
+
+        for session_attempt in range(1, total_session_attempts + 1):
+            lease: ModelLease | None = None
+            attempt_started = 0.0
+            attempt_outcome = "failure"
+            terminal_release = True
+            session_id = first_session_id if session_attempt == 1 else ""
+            message_id = ""
+            text = ""
+            structured: Any = None
+            source = OutputSource(attempt=session_attempt)
+            runtime: _SessionRuntime | None = None
+            model = ""
+            retry_reason = ""
+            try:
+                task_context = _model_pool_task_context(
+                    record,
+                    session_attempt=session_attempt,
+                    total_session_attempts=total_session_attempts,
+                )
+                lease = await acquire_model_lease(
+                    cli_config_source,
+                    global_concurrency=global_concurrency,
+                    required_capability=spec.required_capability,
+                    prefer_high=False,
+                    cancel_event=combined_cancel,
+                    stats_scope_id=record.execution_context.scan_id,
+                    task_context=task_context,
+                    priority=spec.priority,
+                    task_id=record.task_id,
+                    revision=record.revision,
+                    strict_capability=True,
+                    prefer_lowest_capability=True,
+                    wait_when_unavailable=True,
+                )
+                if lease is None:
+                    if record.requeue_requested:
+                        return
+                    attempt_outcome = "cancelled"
+                    self._finish_record(
+                        record,
+                        status="cancelled",
+                        session_id=session_id,
+                        source=source,
+                        error="OpenCode task cancelled while queued",
+                        duration_seconds=accumulated_duration,
+                    )
+                    return
+
+                record.status = "running"
+                if not record.started_at:
+                    record.started_at = lease.started_at_iso or _now_iso()
+                attempt_started = lease.started_at or time.monotonic()
+                runtime, model, source = await self._runtime_for_task(
+                    record,
+                    lease,
+                    session_attempt=session_attempt,
+                )
+                source.attempt = session_attempt
+                if spec.on_invocation_metadata:
+                    spec.on_invocation_metadata(source)
+
+                async def record_session(value: str) -> None:
+                    nonlocal session_id, final_session_id
+                    session_id = str(value or "").strip()
+                    final_session_id = session_id
+                    if not session_id or runtime is None:
+                        return
+                    self._session_directories[session_id] = spec.directory
+                    self._session_runtimes[session_id] = runtime
+                    # Alias a newly-created task lock to its durable session
+                    # before exposing it to callers.
+                    self._session_locks.setdefault(session_id, session_lock)
+                    self._active_session_tasks[session_id] = record.task_id
+                    source.serve_session_id = session_id
+                    if not record.session_future.done():
+                        record.session_future.set_result(session_id)
+                    await update_model_lease_context(lease, {
+                        "serve_session_id": session_id,
+                        "session_attempt": session_attempt,
+                    })
+
+                def record_model(value: str) -> None:
+                    if value:
+                        source.model = str(value)
+
+                system_prompt = _task_system_prompt(record)
+                permissions = _task_permissions(record)
+                timeout_seconds = (
+                    spec.timeout_seconds
+                    or lease.option.timeout
+                    or int(_cfg_value(_task_cli_config(record.execution_context), "timeout", 1200))
+                )
+                lock_key = session_id or f"new:{record.task_id}:{session_attempt}"
+                session_lock = self._session_locks.setdefault(lock_key, asyncio.Lock())
+                prompt = spec.prompt
+                try:
+                    async with session_lock:
+                        for output_attempt in range(spec.output_retry_count + 1):
+                            details = await get_serve_manager().run_prompt(
+                                **runtime.kwargs(),
+                                prompt=prompt,
+                                model=model,
+                                timeout=timeout_seconds,
+                                on_line=spec.on_output,
+                                on_session_id=record_session,
+                                on_response_model=record_model,
+                                cancel_event=combined_cancel,
+                                session_id=session_id or None,
+                                session_title=spec.task_name,
+                                mcp_tools=None,
+                                system_prompt=system_prompt,
+                                permissions=permissions,
+                                return_details=True,
+                            )
+                            assert isinstance(details, OpenCodePromptResult)
+                            session_id = details.session_id
+                            final_session_id = session_id
+                            message_id = details.message_id
+                            text = details.text or "\n".join(details.lines)
+                            structured = _parse_text_json(text, spec.output_schema)
+                            if spec.output_schema is None or structured is not None:
+                                break
+                            if output_attempt >= spec.output_retry_count:
+                                raise _InvalidStructuredOutput(
+                                    "OpenCode exhausted same-session JSON corrections "
+                                    f"({spec.output_retry_count}) without matching the target schema"
+                                )
+                            prompt = _json_correction_prompt(spec.output_schema)
+                            if spec.on_output:
+                                spec.on_output(
+                                    "[json-correction "
+                                    f"{output_attempt + 1}/{spec.output_retry_count}] "
+                                    "requesting schema-compliant JSON in the same session"
+                                )
+                finally:
+                    if lock_key.startswith("new:"):
+                        self._session_locks.pop(lock_key, None)
+
+                attempt_outcome = "success"
+                last_message_id = message_id
+                last_text = text
+                last_model = source.model or details.model or model
+                last_source = source
+                active_duration = (
+                    max(0.0, time.monotonic() - attempt_started)
+                    if attempt_started
+                    else 0.0
+                )
+                self._finish_record(
+                    record,
+                    status="success",
+                    session_id=session_id,
+                    message_id=message_id,
+                    text=text,
+                    structured=structured,
+                    model=last_model,
+                    source=source,
+                    duration_seconds=accumulated_duration + active_duration,
+                )
+                return
+            except asyncio.TimeoutError as exc:
+                attempt_outcome = "timeout"
+                last_source = source
+                self._finish_record(
+                    record,
+                    status="timeout",
+                    session_id=final_session_id or session_id,
+                    message_id=message_id or last_message_id,
+                    text=text or last_text,
+                    model=source.model or model or last_model,
+                    source=source,
+                    error=str(exc) or "OpenCode task timed out",
+                    duration_seconds=accumulated_duration + _elapsed(attempt_started),
+                )
+                return
+            except asyncio.CancelledError:
                 if record.requeue_requested:
                     return
-                outcome = "cancelled"
+                attempt_outcome = "cancelled"
+                last_source = source
                 self._finish_record(
                     record,
                     status="cancelled",
-                    session_id=session_id,
+                    session_id=final_session_id or session_id,
+                    message_id=message_id or last_message_id,
+                    text=text or last_text,
+                    model=source.model or model or last_model,
                     source=source,
-                    error="OpenCode task cancelled while queued",
+                    error="OpenCode task cancelled",
+                    duration_seconds=accumulated_duration + _elapsed(attempt_started),
                 )
                 return
-
-            record.status = "running"
-            record.started_at = lease.started_at_iso or _now_iso()
-            started_monotonic = lease.started_at or time.monotonic()
-
-            runtime, model, source = await self._runtime_for_task(spec, lease)
-            if spec.on_invocation_metadata:
-                spec.on_invocation_metadata(source)
-
-            async def record_session(value: str) -> None:
-                nonlocal session_id
-                session_id = str(value or "").strip()
-                self._session_directories[session_id] = spec.directory
-                self._session_runtimes[session_id] = runtime
-                # Alias a newly-created task lock to its durable session before
-                # exposing session_id.  A caller can immediately append another
-                # prompt, but it will wait until the creating message finishes.
-                self._session_locks.setdefault(session_id, session_lock)
-                self._active_session_tasks[session_id] = record.task_id
-                source.serve_session_id = session_id
-                if not record.session_future.done():
-                    record.session_future.set_result(session_id)
-                await update_model_lease_context(lease, {"serve_session_id": session_id})
-
-            def record_model(value: str) -> None:
-                if value:
-                    source.model = str(value)
-
-            system_prompt = _load_skill_system_prompt(
-                runtime.config_workspace or spec.workspace or spec.directory,
-                spec.skills,
-                directory=spec.directory,
-            )
-            if spec.output_schema is not None:
-                result_rule = (
-                    "Return the final result as plain JSON text matching the JSON Schema below. "
-                    "The final assistant message must contain only that JSON value, without a "
-                    "Markdown code fence or surrounding explanation. The application parses the "
-                    "assistant text itself; do not call submit_result or any other result-submission "
-                    "MCP tool.\nJSON Schema:\n"
-                    + json.dumps(spec.output_schema, ensure_ascii=False, indent=2)
+            except NoAvailableModelError as exc:
+                attempt_outcome = "failure"
+                last_source = source
+                self._finish_record(
+                    record,
+                    status="failure",
+                    session_id=final_session_id or session_id,
+                    message_id=message_id or last_message_id,
+                    text=text or last_text,
+                    model=source.model or model or last_model,
+                    source=source,
+                    error=str(exc),
+                    duration_seconds=accumulated_duration + _elapsed(attempt_started),
                 )
-                system_prompt = "\n\n".join(
-                    section for section in (system_prompt, result_rule) if section
+                return
+            except _InvalidStructuredOutput as exc:
+                retry_reason = str(exc)
+                if message_id:
+                    last_message_id = message_id
+                if text:
+                    last_text = text
+                last_model = source.model or model or last_model
+                last_source = source
+            except Exception as exc:
+                retry_reason = str(exc) or type(exc).__name__
+                if message_id:
+                    last_message_id = message_id
+                if text:
+                    last_text = text
+                last_model = source.model or model or last_model
+                last_source = source
+                logger.exception(
+                    "OpenCode task %s session attempt %d/%d failed",
+                    record.task_id,
+                    session_attempt,
+                    total_session_attempts,
                 )
-            lock_key = session_id or f"new:{record.task_id}"
-            session_lock = self._session_locks.setdefault(lock_key, asyncio.Lock())
-            try:
-                async with session_lock:
-                    details = await get_serve_manager().run_prompt(
-                        **runtime.kwargs(),
-                        prompt=spec.prompt,
-                        model=model,
-                        timeout=spec.timeout_seconds or int(_cfg_value(spec.cli_config or get_config().opencode, "timeout", 1200)),
-                        on_line=spec.on_output,
-                        on_session_id=record_session,
-                        on_response_model=record_model,
-                        cancel_event=combined_cancel,
-                        session_id=session_id or None,
-                        session_title=spec.task_name,
-                        mcp_tools=spec.mcp_tools,
-                        system_prompt=system_prompt,
-                        permissions=spec.permissions,
-                        return_details=True,
-                    )
             finally:
-                if lock_key.startswith("new:"):
-                    self._session_locks.pop(lock_key, None)
-            assert isinstance(details, OpenCodePromptResult)
-            session_id = details.session_id
-            message_id = details.message_id
-            text = details.text or "\n".join(details.lines)
-            structured = _parse_text_json(text, spec.output_schema)
-            outcome = "success"
-            self._finish_record(
-                record,
-                status="success",
-                session_id=session_id,
-                message_id=message_id,
-                text=text,
-                structured=structured,
-                model=source.model or details.model or model,
-                source=source,
-                started_monotonic=started_monotonic,
-            )
-        except asyncio.TimeoutError as exc:
-            outcome = "timeout"
-            self._finish_record(
-                record,
-                status="timeout",
-                session_id=session_id,
-                message_id=message_id,
-                source=source,
-                error=str(exc) or f"OpenCode task timed out after {spec.timeout_seconds}s",
-                started_monotonic=started_monotonic,
-            )
-        except asyncio.CancelledError:
-            if record.requeue_requested:
-                return
-            outcome = "cancelled"
-            self._finish_record(
-                record,
-                status="cancelled",
-                session_id=session_id,
-                message_id=message_id,
-                source=source,
-                error="OpenCode task cancelled",
-                started_monotonic=started_monotonic,
-            )
-        except Exception as exc:
-            outcome = "failure"
-            logger.exception("OpenCode task %s failed", record.task_id)
+                if session_id and self._active_session_tasks.get(session_id) == record.task_id:
+                    self._active_session_tasks.pop(session_id, None)
+                attempt_duration = _elapsed(attempt_started)
+                accumulated_duration += attempt_duration
+                # A fresh-session retry is one logical task. Release its model
+                # slot now, but append terminal history/outcome only once.
+                if retry_reason and session_attempt < total_session_attempts:
+                    terminal_release = False
+                await release_model_lease(
+                    lease,
+                    outcome=attempt_outcome if terminal_release else None,
+                    duration_seconds=attempt_duration if lease is not None else None,
+                    record_completion=terminal_release,
+                )
+
+            if retry_reason and session_attempt < total_session_attempts:
+                record.status = "queued"
+                if spec.on_output:
+                    spec.on_output(
+                        f"[session-retry {session_attempt}/{fresh_retry_count}] "
+                        f"{retry_reason}; requeueing with a new session"
+                    )
+                continue
+
             self._finish_record(
                 record,
                 status="failure",
-                session_id=session_id,
-                message_id=message_id,
-                source=source,
-                error=str(exc),
-                started_monotonic=started_monotonic,
+                session_id=final_session_id or session_id,
+                message_id=last_message_id,
+                text=last_text,
+                model=last_model,
+                source=last_source,
+                error=retry_reason or "OpenCode task failed",
+                duration_seconds=accumulated_duration,
             )
-        finally:
-            if session_id and self._active_session_tasks.get(session_id) == record.task_id:
-                self._active_session_tasks.pop(session_id, None)
-            duration = (
-                max(0.0, time.monotonic() - started_monotonic)
-                if started_monotonic
-                else None
-            )
-            await release_model_lease(lease, outcome=outcome, duration_seconds=duration)
+            return
 
     async def _runtime_for_task(
         self,
-        spec: OpenCodeTaskSpec,
+        record: _TaskRecord,
         lease: ModelLease,
+        *,
+        session_attempt: int,
     ) -> tuple[_SessionRuntime, str, OutputSource]:
-        # Imported lazily to keep runner's compatibility facade free of an
-        # import cycle while the lower-level workspace helpers are migrated.
+        """Build a stable serve runtime from the Agent-wide workspace."""
         from backend.opencode import runner as runtime_helpers
+        from backend.opencode.config import get_global_opencode_workspace
 
-        cli_config = spec.cli_config or get_config().opencode
+        spec = record.spec
+        cli_config = _task_cli_config(record.execution_context)
         effective = runtime_helpers._effective_cli_config(cli_config, lease.option)
         tool = runtime_helpers._normalize_tool(effective)
         if tool not in {"opencode", "nga"}:
@@ -525,24 +742,14 @@ class OpenCodeTaskService:
             raise ValueError("OpenCode tasks require serve invocation mode")
         executable = runtime_helpers._resolve_cli_executable(effective)
         model = str(_cfg_value(effective, "model", "") or "")
-        workspace = spec.workspace or spec.directory
-        cwd = runtime_helpers._select_cli_cwd(
-            workspace,
-            tool,
-            spec.directory,
-            runtime_namespace=runtime_helpers._serve_runtime_namespace(workspace),
-        )
-        config_workspace = runtime_helpers._prepare_cli_workspace(
-            workspace,
-            tool,
-            runtime_cwd=cwd,
-            writable_paths=spec.writable_paths,
-        )
+        config_workspace = get_global_opencode_workspace()
         serve_env = runtime_helpers._build_cli_env(
             config_workspace,
             tool,
-            writable_paths=spec.writable_paths,
-            project_dir=spec.directory,
+            # Task-specific access is carried by session permissions, keeping
+            # the serve config hash stable across directories and retries.
+            writable_paths=None,
+            project_dir=None,
             executable=executable,
             cli_config=effective,
         )
@@ -563,7 +770,7 @@ class OpenCodeTaskService:
             capability=lease.option.capability,
             required_capability=spec.required_capability,
             task_id=record_task_id(lease),
-            attempt=spec.attempt,
+            attempt=session_attempt,
             started_at=lease.started_at_iso,
             serve_session_id=str(spec.session_id or ""),
         )
@@ -581,7 +788,7 @@ class OpenCodeTaskService:
         structured: Any = None,
         model: str = "",
         error: str = "",
-        started_monotonic: float = 0.0,
+        duration_seconds: float = 0.0,
     ) -> None:
         record.status = status
         if not record.session_future.done():
@@ -601,11 +808,7 @@ class OpenCodeTaskService:
             queued_at=record.queued_at,
             started_at=record.started_at,
             finished_at=_now_iso(),
-            duration_seconds=(
-                max(0.0, time.monotonic() - started_monotonic)
-                if started_monotonic
-                else 0.0
-            ),
+            duration_seconds=max(0.0, float(duration_seconds or 0.0)),
             revision=record.revision,
         ))
 
@@ -669,6 +872,147 @@ def _cfg_value(config_obj: Any, key: str, default: Any = None) -> Any:
     return getattr(config_obj, key, default)
 
 
+def _elapsed(started: float) -> float:
+    return max(0.0, time.monotonic() - started) if started else 0.0
+
+
+def _task_cli_config(context: OpenCodeExecutionContext) -> Any:
+    """Select an Agent-owned CLI profile without exposing it on TaskSpec."""
+    config = get_config()
+    task_type = str(context.task_metadata.get("task_type") or "").strip()
+    if task_type == "fp_review" and getattr(config, "fp_review_cli", None) is not None:
+        return config.fp_review_cli
+    return config.opencode
+
+
+def _model_pool_task_context(
+    record: _TaskRecord,
+    *,
+    session_attempt: int,
+    total_session_attempts: int,
+) -> dict[str, Any]:
+    spec = record.spec
+    context = {
+        **record.execution_context.task_metadata,
+        "task_name": spec.task_name,
+        "prompt": spec.prompt,
+        "prompt_length": len(spec.prompt),
+        "priority": spec.priority,
+        "revision": record.revision,
+        "session_attempt": session_attempt,
+        "retry_ordinal": session_attempt - 1,
+        "session_attempts": total_session_attempts,
+    }
+    # A planned task is consumed once. A fresh-session retry is still the same
+    # logical task and must not consume the plan entry again.
+    if session_attempt > 1:
+        context.pop("planned_task_id", None)
+    return context
+
+
+def _json_result_rule(schema: dict[str, Any]) -> str:
+    return (
+        "Return the final result as plain JSON text matching the JSON Schema below. "
+        "The final assistant message must contain only that JSON value, without a "
+        "Markdown code fence or surrounding explanation. The application parses the "
+        "assistant text itself; do not call submit_result or any other result-submission "
+        "MCP tool.\nJSON Schema:\n"
+        + json.dumps(schema, ensure_ascii=False, indent=2)
+    )
+
+
+def _json_correction_prompt(schema: dict[str, Any]) -> str:
+    return (
+        "Your previous response was not valid JSON matching the required schema. "
+        "Correct only the final result now. Return exactly one JSON value, with no "
+        "Markdown fence, prose, or tool call.\nJSON Schema:\n"
+        + json.dumps(schema, ensure_ascii=False, indent=2)
+    )
+
+
+def _task_system_prompt(record: _TaskRecord) -> str:
+    from backend.opencode.feedback_format import format_feedback_experience
+
+    sections: list[str] = []
+    checker = str(record.execution_context.task_metadata.get("checker") or "").strip()
+    if checker:
+        matching = [
+            entry
+            for entry in record.execution_context.feedback_entries
+            if str(entry.get("vuln_type") or "").strip() == checker
+        ]
+        feedback = format_feedback_experience(matching)
+        if feedback:
+            sections.append(
+                "## Selected scan feedback\n\n"
+                "The following user-selected experience applies to this checker. "
+                "Use it as evidence and guidance, while still verifying the current code:\n"
+                + feedback
+            )
+    if record.spec.output_schema is not None:
+        sections.append(_json_result_rule(record.spec.output_schema))
+    return "\n\n".join(sections)
+
+
+def _permission_path_patterns(path: Path) -> list[str]:
+    from backend.opencode.config import writable_edit_patterns
+
+    return writable_edit_patterns(str(path.resolve()))
+
+
+def _task_permissions(record: _TaskRecord) -> list[dict[str, str]]:
+    """Compute session permissions from directory, scan scope and escape paths.
+
+    Bash intentionally remains fully allowed, per the runtime contract. The
+    read-only guarantee for ``directory`` therefore applies to OpenCode's file
+    editing tools; shell commands can still write there.
+    """
+    spec = record.spec
+    context = record.execution_context
+    from backend.opencode.config import get_global_opencode_workspace
+
+    external_roots = [spec.directory, get_global_opencode_workspace()]
+    write_roots: list[Path] = []
+    if context.scan_work_dir is not None:
+        external_roots.append(context.scan_work_dir)
+        write_roots.append(context.scan_work_dir)
+    for path in spec.writable_paths:
+        external_roots.append(path)
+        write_roots.append(path)
+
+    rules: list[dict[str, str]] = []
+
+    def add(permission: str, pattern: str, action: str) -> None:
+        rules.append({
+            "permission": permission,
+            "pattern": pattern,
+            "action": action,
+        })
+
+    for permission in ("read", "list", "glob", "grep"):
+        add(permission, "*", "allow")
+
+    add("external_directory", "*", "deny")
+    seen_external: set[str] = set()
+    for root in external_roots:
+        for pattern in _permission_path_patterns(root):
+            if pattern not in seen_external:
+                add("external_directory", pattern, "allow")
+                seen_external.add(pattern)
+
+    add("edit", "*", "deny")
+    seen_write: set[str] = set()
+    for root in write_roots:
+        for pattern in _permission_path_patterns(root):
+            if pattern not in seen_write:
+                add("edit", pattern, "allow")
+                seen_write.add(pattern)
+
+    add("bash", "*", "allow")
+    add("skill", "*", "allow")
+    return rules
+
+
 def _parse_text_json(text: str, schema: dict[str, Any] | None = None) -> Any:
     """Best-effort local JSON extraction; invalid model text stays a normal result."""
     try:
@@ -689,78 +1033,6 @@ def _message_model(info: dict[str, Any]) -> str:
     if not provider or not model:
         return model
     return model if model.startswith(f"{provider}/") else f"{provider}/{model}"
-
-
-def _normalize_permissions(
-    permissions: list[dict[str, str]] | None,
-) -> list[dict[str, str]] | None:
-    if permissions is None:
-        return None
-    normalized: list[dict[str, str]] = []
-    for rule in permissions:
-        if not isinstance(rule, dict):
-            raise ValueError("OpenCode permission rules must be objects")
-        permission = str(rule.get("permission") or "").strip()
-        pattern = str(rule.get("pattern") or "").strip()
-        action = str(rule.get("action") or "").strip().lower()
-        if not permission or not pattern or action not in {"allow", "deny", "ask"}:
-            raise ValueError(f"Invalid OpenCode permission rule: {rule!r}")
-        normalized.append({
-            "permission": permission,
-            "pattern": pattern,
-            "action": action,
-        })
-    return normalized
-
-
-def _load_skill_system_prompt(
-    workspace: Path,
-    skills: list[str | Path],
-    *,
-    directory: Path | None = None,
-) -> str:
-    if not skills:
-        return ""
-    sections: list[str] = []
-    search_bases = [workspace]
-    if directory is not None and directory.resolve() != workspace.resolve():
-        search_bases.append(directory.resolve())
-    roots = [
-        root
-        for base in search_bases
-        for root in (
-            base / ".opencode" / "skills",
-            base / ".agents" / "skills",
-            base / "skills",
-        )
-    ]
-    for raw in skills:
-        candidate = Path(raw)
-        skill_file: Path | None = None
-        if candidate.is_absolute() or candidate.exists():
-            if candidate.is_dir():
-                candidate = candidate / "SKILL.md"
-            if candidate.is_file():
-                skill_file = candidate.resolve()
-        else:
-            name = str(raw).strip()
-            for root in roots:
-                resolved = root / name / "SKILL.md"
-                if resolved.is_file():
-                    skill_file = resolved.resolve()
-                    break
-        if skill_file is None:
-            raise ValueError(f"OpenCode SKILL not found: {raw}")
-        content = skill_file.read_text(encoding="utf-8", errors="replace")
-        sections.append(
-            f"## Task SKILL: {skill_file.parent.name}\n"
-            f"Skill root: {skill_file.parent}\n\n{content.strip()}"
-        )
-    return (
-        "The following SKILL instructions are explicitly selected for this task. "
-        "Follow them for this message and resolve referenced resources relative to each skill root.\n\n"
-        + "\n\n".join(sections)
-    )
 
 
 _service: OpenCodeTaskService | None = None

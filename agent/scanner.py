@@ -1110,6 +1110,19 @@ async def run_scan(
     scan_dir = Path.home() / ".opendeephole" / "scans" / scan_id
     scan_dir.mkdir(parents=True, exist_ok=True)
 
+    from backend.opencode.task_service import (
+        clear_scan_feedback_entries,
+        reset_opencode_execution_context,
+        set_opencode_execution_context,
+        set_scan_feedback_entries,
+    )
+    set_scan_feedback_entries(scan_id, feedback_entries or [])
+    execution_context_token = set_opencode_execution_context(
+        scan_id=scan_id,
+        scan_work_dir=scan_dir,
+        feedback_entries=feedback_entries or [],
+    )
+
     mcp_server = None
     workspace: Optional[Path] = None
     previous_checkers_dir = os.environ.get(CHECKERS_DIR_ENV)
@@ -1371,16 +1384,13 @@ async def run_scan(
             mcp_registry.register(project_path, mcp_port, scan_id)
             await emit("mcp_ready", f"Local MCP server ready on port {mcp_port}")
 
-        # --- Phase 4: Create workspace (links SKILLs, merges feedback) ---
-        from backend.opencode.config import create_scan_workspace, cleanup_workspace
+        # --- Phase 4: Refresh the single Agent-wide OpenCode workspace ---
+        from backend.opencode.config import get_global_opencode_workspace
         workspace = await asyncio.to_thread(
-            create_scan_workspace,
-            scan_id,
-            project_path,
-            selected_feedback,
-            mcp_port,
+            get_global_opencode_workspace,
+            mcp_port=mcp_port,
         )
-        await emit("init", "Analysis workspace ready")
+        await emit("init", "Global OpenCode workspace ready")
 
         # --- Phase 5: Configured threat analysis (fresh scans only, background) ---
         from backend.threat_analysis import threat_analysis_enabled
@@ -1587,11 +1597,9 @@ async def run_scan(
                 history_patterns = await mine_history(
                     config=config,
                     project_path=project_path,
-                    workspace=workspace,
                     scan_id=scan_id,
                     cancel_event=cancel_event,
                     emit=emit,
-                    cli_config=config.opencode,
                 )
                 if history_patterns:
                     await reporter.push_git_history(scan_id, history_patterns)
@@ -1606,12 +1614,10 @@ async def run_scan(
                         patterns=history_patterns,
                         project_path=project_path,
                         code_scan_path=code_scan_path,
-                        workspace=workspace,
                         scan_id=scan_id,
                         checker_types=list(registry.keys()),
                         cancel_event=cancel_event,
                         emit=emit,
-                        cli_config=config.opencode,
                     )
                     existing_keys = {
                         (c.file, c.line, c.function, c.vuln_type) for c in candidates
@@ -2203,15 +2209,12 @@ async def run_scan(
                 await asyncio.to_thread(mcp_server.stop)
         except Exception:
             pass
-        # 清理 API runner 缓存的 DB 连接
-        try:
-            if workspace is not None:
-                await asyncio.to_thread(cleanup_workspace, workspace)
-        finally:
-            if previous_checkers_dir is None:
-                os.environ.pop(CHECKERS_DIR_ENV, None)
-            else:
-                os.environ[CHECKERS_DIR_ENV] = previous_checkers_dir
-            import backend.registry as _reg
-            _reg._registry = None
-            _reg._registry_dirs = None
+        reset_opencode_execution_context(execution_context_token)
+        clear_scan_feedback_entries(scan_id)
+        if previous_checkers_dir is None:
+            os.environ.pop(CHECKERS_DIR_ENV, None)
+        else:
+            os.environ[CHECKERS_DIR_ENV] = previous_checkers_dir
+        import backend.registry as _reg
+        _reg._registry = None
+        _reg._registry_dirs = None

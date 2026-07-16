@@ -473,16 +473,14 @@ async def _run_memory_api_batch(
     )
     log_path = output_path.with_suffix(".log")
     output_text = await _invoke_opencode(
-        workspace,
         prompt,
         timeout,
         log_path=log_path,
         on_line=on_line,
         cancel_event=cancel_event,
-        project_dir=project_root,
+        directory=project_root,
         model_capability="any",
-        stats_scope_id=project_id,
-        task_context={
+        task_metadata={
             "task_type": "memory_api_discovery",
             "batch_index": batch_index,
             "batch_count": batch_count,

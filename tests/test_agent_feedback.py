@@ -201,7 +201,7 @@ class AgentFeedbackTests(unittest.TestCase):
             config = AgentConfig(opencode=OpenCodeConfig(timeout=1, max_retries=0))
             invoke = AsyncMock()
 
-            async def invoke_side_effect(workspace, prompt, timeout, **kwargs):
+            async def invoke_side_effect(prompt, timeout, **kwargs):
                 _write_stage_artifact_from_prompt(prompt)
 
             invoke.side_effect = invoke_side_effect
@@ -211,7 +211,6 @@ class AgentFeedbackTests(unittest.TestCase):
                     patch("agent.fp_reviewer.Path.home", return_value=Path(tmp)),
                     patch("agent.mcp_registry.lookup", return_value=(7000, "scan-1")),
                     patch.object(fp_reviewer, "_create_fp_workspace", return_value=workspace),
-                    patch.object(fp_reviewer, "_cleanup_fp_workspace"),
                     patch("backend.config.get_config", return_value=SimpleNamespace()),
                     patch("backend.opencode.runner._invoke_opencode", new=invoke),
                 ):
@@ -241,7 +240,7 @@ class AgentFeedbackTests(unittest.TestCase):
         self.assertEqual(reporter.results, [])
         self.assertEqual(len(reporter.stage_outputs), 1)
         self.assertEqual(reporter.stage_outputs[0][0], "prove_bug")
-        self.assertIn("Missing Markdown artifact and JSON result", reporter.stage_outputs[0][1])
+        self.assertIn("Schema-valid FP stage result could not be converted", reporter.stage_outputs[0][1])
         self.assertEqual(reporter.progress, [(3, 0), (3, 1)])
         self.assertEqual(reporter.finished, ("complete", None))
 
@@ -301,7 +300,7 @@ class AgentFeedbackTests(unittest.TestCase):
                 "{}",
             ]
 
-            async def invoke_side_effect(workspace, prompt, timeout, **kwargs):
+            async def invoke_side_effect(prompt, timeout, **kwargs):
                 _write_stage_artifact_from_prompt(prompt)
                 return outputs.pop(0)
 
@@ -312,7 +311,6 @@ class AgentFeedbackTests(unittest.TestCase):
                     patch("agent.fp_reviewer.Path.home", return_value=Path(tmp)),
                     patch("agent.mcp_registry.lookup", return_value=(7000, "scan-1")),
                     patch.object(fp_reviewer, "_create_fp_workspace", return_value=workspace),
-                    patch.object(fp_reviewer, "_cleanup_fp_workspace"),
                     patch("backend.config.get_config", return_value=SimpleNamespace()),
                     patch("backend.opencode.runner._invoke_opencode", new=invoke),
                 ):
@@ -385,7 +383,7 @@ class AgentFeedbackTests(unittest.TestCase):
             config = AgentConfig(opencode=OpenCodeConfig(timeout=1, max_retries=0))
             invoke = AsyncMock()
 
-            async def invoke_side_effect(workspace, prompt, timeout, **kwargs):
+            async def invoke_side_effect(prompt, timeout, **kwargs):
                 _write_stage_artifact_from_prompt(prompt)
                 return _stage_json_result(
                     confirmed=False,
@@ -401,7 +399,6 @@ class AgentFeedbackTests(unittest.TestCase):
                     patch("agent.fp_reviewer.Path.home", return_value=Path(tmp)),
                     patch("agent.mcp_registry.lookup", return_value=(7000, "scan-1")),
                     patch.object(fp_reviewer, "_create_fp_workspace", return_value=workspace),
-                    patch.object(fp_reviewer, "_cleanup_fp_workspace"),
                     patch("backend.config.get_config", return_value=SimpleNamespace()),
                     patch("backend.opencode.runner._invoke_opencode", new=invoke),
                 ):

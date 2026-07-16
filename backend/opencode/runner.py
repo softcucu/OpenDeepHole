@@ -11,6 +11,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -96,7 +97,7 @@ _MARKDOWN_REPORTS_JSON_SCHEMA = {
                 "properties": {
                     "filename": {"type": "string"},
                     "title": {"type": "string"},
-                    "content": {"type": "string"},
+                    "content": {"type": "string", "minLength": 1},
                 },
                 "required": ["filename", "title", "content"],
                 "additionalProperties": False,
@@ -105,6 +106,14 @@ _MARKDOWN_REPORTS_JSON_SCHEMA = {
     },
     "required": ["reports"],
     "additionalProperties": False,
+}
+
+_SENSITIVE_CLEAR_RESULT_JSON_SCHEMA = {
+    **VULNERABILITY_RESULT_JSON_SCHEMA,
+    "properties": {
+        **VULNERABILITY_RESULT_JSON_SCHEMA["properties"],
+        "ai_analysis": {"type": "string", "minLength": 1},
+    },
 }
 
 
@@ -214,112 +223,88 @@ async def _run_audit_via_opencode(
         if checker_entry and checker_entry.skill_name
         else candidate.vuln_type
     )
-    max_retries = config.opencode.max_retries
-    last_source: OutputSource | None = None
+    output_source: OutputSource | None = None
 
-    for attempt in range(1, max_retries + 2):  # attempt 1 .. max_retries+1
-        attempt_source: OutputSource | None = None
-        attempt_id = uuid4().hex
+    def capture_source(source: OutputSource) -> None:
+        nonlocal output_source
+        output_source = source
 
-        def capture_source(source: OutputSource) -> None:
-            nonlocal attempt_source, last_source
-            attempt_source = source
-            last_source = source
-
-        prompt = (
-            f"使用 `{skill_name}` 技能，分析位于 "
-            f"{candidate.file}:{candidate.line} 函数 `{candidate.function}` 中"
-            f"潜在的 {candidate.vuln_type.upper()} 漏洞。"
-            f"project_id 为 `{project_id}`。"
-            f"详情：{candidate.description} "
-            f"分析完成后按最终结果返回规则输出 JSON 结论。"
+    prompt = _with_json_result_instruction((
+        f"使用 `{skill_name}` 技能，分析位于 "
+        f"{candidate.file}:{candidate.line} 函数 `{candidate.function}` 中"
+        f"潜在的 {candidate.vuln_type.upper()} 漏洞。"
+        f"project_id 为 `{project_id}`。"
+        f"详情：{candidate.description} "
+        f"分析完成后按最终结果返回规则输出 JSON 结论。"
+    ).replace("\n", " "))
+    log_path = _scan_task_log_path(project_id, f"audit-{uuid4().hex}.log")
+    if on_output:
+        on_output(f"[{tool}] 初始提示词:\n{prompt}")
+    logger.info(
+        "Running %s audit: %s:%d (%s) timeout=%ds",
+        tool,
+        candidate.file,
+        candidate.line,
+        candidate.vuln_type,
+        effective_timeout,
+    )
+    try:
+        output_text = await _invoke_opencode(
+            prompt,
+            effective_timeout,
+            log_path=log_path,
+            on_line=on_output,
+            cancel_event=cancel_event,
+            directory=project_dir or workspace,
+            model_capability=getattr(checker_entry, "model_capability", "any"),
+            on_invocation_metadata=capture_source,
+            task_name=f"候选点审计 {candidate.vuln_type}",
+            task_metadata=_candidate_task_context(candidate),
+            output_schema=VULNERABILITY_RESULT_JSON_SCHEMA,
         )
-        if attempt > 1:
-            prompt += _json_result_retry_message()
-        prompt = _with_json_result_instruction(prompt.replace('\n', ' '))
-
-        log_path = workspace / f"opencode_attempt_{attempt_id}.log"
-
-        if on_output:
-            on_output(f"[{tool}] 初始提示词:\n{prompt}")
-
-        logger.info(
-            "Running %s audit: %s:%d (%s) timeout=%ds attempt=%d/%d",
+    except asyncio.TimeoutError:
+        logger.error(
+            "%s timed out for %s:%d (timeout=%ds)",
             tool,
-            candidate.file, candidate.line, candidate.vuln_type,
-            effective_timeout, attempt, max_retries + 1,
+            candidate.file,
+            candidate.line,
+            effective_timeout,
         )
-
-        try:
-            output_text = await _invoke_opencode(
-                workspace, prompt, effective_timeout,
-                log_path=log_path, on_line=on_output, cancel_event=cancel_event,
-                project_dir=project_dir,
-                model_capability=getattr(checker_entry, "model_capability", "any"),
-                stats_scope_id=project_id,
-                task_context=_candidate_task_context(candidate),
-                attempt=attempt,
-                on_invocation_metadata=capture_source,
-                task_name=f"候选点审计 {candidate.vuln_type}",
-                skills=[skill_name],
-                output_schema=VULNERABILITY_RESULT_JSON_SCHEMA,
-            )
-        except asyncio.TimeoutError:
-            # Timeout — no retry; check if result was submitted before kill
-            logger.error("%s timed out for %s:%d (timeout=%ds)", tool, candidate.file, candidate.line, effective_timeout)
-            return Vulnerability(
-                file=candidate.file,
-                line=candidate.line,
-                function=candidate.function,
-                vuln_type=candidate.vuln_type,
-                severity="unknown",
-                description=candidate.description,
-                ai_analysis="Analysis timed out",
-                confirmed=False,
-                ai_verdict="timeout",
-                failure_reason=_failure_reason(log_path, f"{tool} timed out after {effective_timeout} seconds"),
-                output_source=attempt_source or OutputSource(),
-            )
-        except asyncio.CancelledError:
-            raise
-        except NoAvailableModelError:
-            raise
-        except Exception as exc:
-            # Process error (e.g. certificate error, crash) — may retry
-            logger.exception("%s failed for %s:%d (attempt %d)", tool, candidate.file, candidate.line, attempt)
-            if attempt <= max_retries:
-                logger.info("Retrying opencode for %s:%d ...", candidate.file, candidate.line)
-                if on_output:
-                    on_output(f"[retry {attempt}/{max_retries}] {tool} error: {exc}")
-                continue
-            return _apply_output_source(_failed_result(
-                candidate,
-                _failure_reason(log_path, f"{tool} error: {exc}"),
-            ), attempt_source)
-
-        # Process completed — parse final JSON result
-        result = _parse_result_from_text(output_text, candidate)
-        if result is not None:
-            return _apply_output_source(result, attempt_source)
-
-        # JSON result was not returned — retry if attempts remain
-        if attempt <= max_retries:
-            logger.warning(
-                "%s did not return valid JSON result for %s:%d (attempt %d), retrying...",
-                tool, candidate.file, candidate.line, attempt,
-            )
-            if on_output:
-                on_output(f"[retry {attempt}/{max_retries}] No valid JSON result returned, retrying...")
-            continue
-
-        logger.warning("%s did not return valid JSON result for %s:%d after %d attempts", tool, candidate.file, candidate.line, attempt)
+        return Vulnerability(
+            file=candidate.file,
+            line=candidate.line,
+            function=candidate.function,
+            vuln_type=candidate.vuln_type,
+            severity="unknown",
+            description=candidate.description,
+            ai_analysis="Analysis timed out",
+            confirmed=False,
+            ai_verdict="timeout",
+            failure_reason=_failure_reason(
+                log_path,
+                f"{tool} timed out after {effective_timeout} seconds",
+            ),
+            output_source=output_source or OutputSource(),
+        )
+    except asyncio.CancelledError:
+        raise
+    except NoAvailableModelError:
+        raise
+    except Exception as exc:
+        logger.exception("%s failed for %s:%d", tool, candidate.file, candidate.line)
         return _apply_output_source(_failed_result(
             candidate,
-            _failure_reason(log_path, f"{tool} completed but did not return a valid JSON result"),
-            analysis="OpenCode completed without returning a valid JSON result",
-        ), attempt_source)
+            _failure_reason(log_path, f"{tool} error: {exc}"),
+        ), output_source)
 
-    return _apply_output_source(_failed_result(candidate, "OpenCode did not return a result"), last_source)
+    result = _parse_result_from_text(output_text, candidate)
+    if result is not None:
+        return _apply_output_source(result, output_source)
+    return _apply_output_source(_failed_result(
+        candidate,
+        _failure_reason(log_path, f"{tool} completed but did not return a valid JSON result"),
+        analysis="OpenCode completed without returning a valid JSON result",
+    ), output_source)
 
 
 async def run_project_audit(
@@ -346,105 +331,83 @@ async def run_project_audit(
         if checker_entry and checker_entry.skill_name
         else candidate.vuln_type
     )
-    max_retries = config.opencode.max_retries
-    last_source: OutputSource | None = None
+    output_source: OutputSource | None = None
 
-    for attempt in range(1, max_retries + 2):
-        attempt_source: OutputSource | None = None
-        attempt_id = uuid4().hex
+    def capture_source(source: OutputSource) -> None:
+        nonlocal output_source
+        output_source = source
 
-        def capture_source(source: OutputSource) -> None:
-            nonlocal attempt_source, last_source
-            attempt_source = source
-            last_source = source
-
-        prompt = (
-            f"使用 `{skill_name}` 技能，审计代码扫描路径 `{candidate.file}` 对应的目标代码。"
-            f"project_id 为 `{project_id}`。"
-            f"这是项目级审计任务，不是单个候选点复核。"
-            f"file=`{candidate.file}`，line={candidate.line}，function=`{candidate.function}`。"
-        ).replace("\n", " ")
-        if attempt > 1:
-            prompt += _json_result_retry_message(multiple=True)
-        prompt = _with_json_result_instruction(prompt, multiple=True)
-        log_path = workspace / f"opencode_attempt_{attempt_id}.log"
-
-        if on_output:
-            on_output(f"[{tool}] 初始提示词:\n{prompt}")
-
-        logger.info(
-            "Running %s project audit: %s (%s) timeout=%ds attempt=%d/%d",
-            tool, candidate.file, candidate.vuln_type,
-            effective_timeout, attempt, max_retries + 1,
+    prompt = _with_json_result_instruction((
+        f"使用 `{skill_name}` 技能，审计代码扫描路径 `{candidate.file}` 对应的目标代码。"
+        f"project_id 为 `{project_id}`。"
+        "这是项目级审计任务，不是单个候选点复核。"
+        f"file=`{candidate.file}`，line={candidate.line}，function=`{candidate.function}`。"
+    ).replace("\n", " "), multiple=True)
+    log_path = _scan_task_log_path(project_id, f"project-audit-{uuid4().hex}.log")
+    if on_output:
+        on_output(f"[{tool}] 初始提示词:\n{prompt}")
+    logger.info(
+        "Running %s project audit: %s (%s) timeout=%ds",
+        tool,
+        candidate.file,
+        candidate.vuln_type,
+        effective_timeout,
+    )
+    try:
+        output_text = await _invoke_opencode(
+            prompt,
+            effective_timeout,
+            log_path=log_path,
+            on_line=on_output,
+            cancel_event=cancel_event,
+            directory=project_dir or workspace,
+            model_capability=getattr(checker_entry, "model_capability", "any"),
+            on_invocation_metadata=capture_source,
+            task_name=f"项目审计 {candidate.vuln_type}",
+            task_metadata=_candidate_task_context(candidate, "project_audit"),
+            output_schema=VULNERABILITY_RESULTS_JSON_SCHEMA,
+        )
+    except asyncio.TimeoutError:
+        logger.error(
+            "%s project audit timed out for %s (timeout=%ds)",
+            tool,
+            candidate.vuln_type,
+            effective_timeout,
+        )
+        return [Vulnerability(
+            file=candidate.file,
+            line=candidate.line,
+            function=candidate.function,
+            vuln_type=candidate.vuln_type,
+            severity="unknown",
+            description=candidate.description,
+            ai_analysis="Analysis timed out",
+            confirmed=False,
+            ai_verdict="timeout",
+            failure_reason=_failure_reason(log_path, f"{tool} timed out after {effective_timeout} seconds"),
+            output_source=output_source or OutputSource(),
+        )]
+    except asyncio.CancelledError:
+        raise
+    except NoAvailableModelError:
+        raise
+    except Exception as exc:
+        logger.exception("%s project audit failed for %s", tool, candidate.vuln_type)
+        return _apply_output_source_to_list(
+            [_failed_result(candidate, _failure_reason(log_path, f"{tool} error: {exc}"))],
+            output_source,
         )
 
-        try:
-            output_text = await _invoke_opencode(
-                workspace, prompt, effective_timeout,
-                log_path=log_path, on_line=on_output, cancel_event=cancel_event,
-                project_dir=project_dir,
-                model_capability=getattr(checker_entry, "model_capability", "any"),
-                stats_scope_id=project_id,
-                task_context=_candidate_task_context(candidate, "project_audit"),
-                attempt=attempt,
-                on_invocation_metadata=capture_source,
-                task_name=f"项目审计 {candidate.vuln_type}",
-                skills=[skill_name],
-                output_schema=VULNERABILITY_RESULTS_JSON_SCHEMA,
-            )
-        except asyncio.TimeoutError:
-            logger.error("%s project audit timed out for %s (timeout=%ds)", tool, candidate.vuln_type, effective_timeout)
-            return [
-                Vulnerability(
-                    file=candidate.file,
-                    line=candidate.line,
-                    function=candidate.function,
-                    vuln_type=candidate.vuln_type,
-                    severity="unknown",
-                    description=candidate.description,
-                    ai_analysis="Analysis timed out",
-                    confirmed=False,
-                    ai_verdict="timeout",
-                    failure_reason=_failure_reason(log_path, f"{tool} timed out after {effective_timeout} seconds"),
-                    output_source=attempt_source or OutputSource(),
-                )
-            ]
-        except asyncio.CancelledError:
-            raise
-        except NoAvailableModelError:
-            raise
-        except Exception as exc:
-            logger.exception("%s project audit failed for %s (attempt %d)", tool, candidate.vuln_type, attempt)
-            if attempt <= max_retries:
-                if on_output:
-                    on_output(f"[retry {attempt}/{max_retries}] {tool} error: {exc}")
-                continue
-            return _apply_output_source_to_list(
-                [_failed_result(candidate, _failure_reason(log_path, f"{tool} error: {exc}"))],
-                attempt_source,
-            )
-
-        results = _parse_results_from_text(output_text, candidate)
-        if results:
-            return _apply_output_source_to_list(results, attempt_source)
-        if attempt <= max_retries:
-            logger.warning(
-                "%s project audit did not return valid JSON results for %s (attempt %d), retrying...",
-                tool, candidate.vuln_type, attempt,
-            )
-            if on_output:
-                on_output(f"[retry {attempt}/{max_retries}] No valid JSON results returned, retrying...")
-            continue
-        logger.warning("%s project audit did not return valid JSON results for %s after %d attempts", tool, candidate.vuln_type, attempt)
-        return _apply_output_source_to_list([
-            _failed_result(
-                candidate,
-                _failure_reason(log_path, f"{tool} completed but did not return valid JSON results"),
-                analysis="OpenCode completed without returning valid JSON results",
-            )
-        ], attempt_source)
-
-    return _apply_output_source_to_list([_failed_result(candidate, "OpenCode did not return a result")], last_source)
+    results = _parse_results_from_text(output_text, candidate)
+    if results:
+        return _apply_output_source_to_list(results, output_source)
+    return _apply_output_source_to_list([
+        _failed_result(
+            candidate,
+            _failure_reason(log_path, f"{tool} completed but did not return valid JSON results"),
+            analysis="OpenCode completed without returning valid JSON results",
+        )
+    ], output_source)
 
 
 def _sensitive_clear_function(candidate: Candidate) -> dict:
@@ -579,123 +542,90 @@ async def run_sensitive_clear_audit(
         if checker_entry and checker_entry.skill_name
         else candidate.vuln_type
     )
-    max_retries = config.opencode.max_retries
-    last_source: OutputSource | None = None
+    output_source: OutputSource | None = None
 
-    for attempt in range(1, max_retries + 2):
-        attempt_source: OutputSource | None = None
-        attempt_id = uuid4().hex
+    def capture_source(source: OutputSource) -> None:
+        nonlocal output_source
+        output_source = source
 
-        def capture_source(source: OutputSource) -> None:
-            nonlocal attempt_source, last_source
-            attempt_source = source
-            last_source = source
-
-        prompt = _with_json_result_instruction(
-            _sensitive_clear_prompt(skill_name, candidate, project_id)
+    prompt = _with_json_result_instruction(
+        _sensitive_clear_prompt(skill_name, candidate, project_id)
+    )
+    log_path = _scan_task_log_path(project_id, f"sensitive-clear-{uuid4().hex}.log")
+    if on_output:
+        on_output(f"[{tool}] 初始提示词:\n{prompt}")
+    logger.info(
+        "Running %s sensitive_clear function audit: %s timeout=%ds",
+        tool,
+        candidate.file,
+        effective_timeout,
+    )
+    try:
+        output_text = await _invoke_opencode(
+            prompt,
+            effective_timeout,
+            log_path=log_path,
+            on_line=on_output,
+            cancel_event=cancel_event,
+            directory=project_dir or workspace,
+            model_capability=getattr(checker_entry, "model_capability", "any"),
+            on_invocation_metadata=capture_source,
+            task_name=f"敏感信息清理审计 {candidate.function}",
+            task_metadata=_candidate_task_context(candidate, "sensitive_clear"),
+            output_schema=_SENSITIVE_CLEAR_RESULT_JSON_SCHEMA,
         )
-        if attempt > 1:
-            prompt += _json_result_retry_message()
-        log_path = workspace / f"opencode_attempt_{attempt_id}.log"
-        if on_output:
-            on_output(f"[{tool}] 初始提示词:\n{prompt}")
-        logger.info(
-            "Running %s sensitive_clear function audit: %s timeout=%ds attempt=%d/%d",
-            tool, candidate.file, effective_timeout, attempt, max_retries + 1,
-        )
-
-        try:
-            output_text = await _invoke_opencode(
-                workspace,
-                prompt,
-                effective_timeout,
-                log_path=log_path,
-                on_line=on_output,
-                cancel_event=cancel_event,
-                project_dir=project_dir,
-                model_capability=getattr(checker_entry, "model_capability", "any"),
-                stats_scope_id=project_id,
-                task_context=_candidate_task_context(candidate, "sensitive_clear"),
-                attempt=attempt,
-                on_invocation_metadata=capture_source,
-                task_name=f"敏感信息清理审计 {candidate.function}",
-                skills=[skill_name],
-                output_schema=VULNERABILITY_RESULT_JSON_SCHEMA,
-            )
-        except asyncio.TimeoutError:
-            logger.error("%s sensitive_clear audit timed out for %s", tool, candidate.file)
-            return SensitiveClearAuditResult(
-                vulnerabilities=[
-                    Vulnerability(
-                        file=candidate.file,
-                        line=candidate.line,
-                        function=candidate.function,
-                        vuln_type=candidate.vuln_type,
-                        severity="unknown",
-                        description=candidate.description,
-                        ai_analysis="Analysis timed out",
-                        confirmed=False,
-                        ai_verdict="timeout",
-                        failure_reason=_failure_reason(log_path, f"{tool} timed out after {effective_timeout} seconds"),
-                        output_source=attempt_source or OutputSource(),
-                    )
-                ],
-                reports=[],
-                complete=False,
-            )
-        except asyncio.CancelledError:
-            raise
-        except NoAvailableModelError:
-            raise
-        except Exception as exc:
-            logger.exception("%s sensitive_clear audit failed for %s (attempt %d)", tool, candidate.file, attempt)
-            if attempt <= max_retries:
-                if on_output:
-                    on_output(f"[retry {attempt}/{max_retries}] {tool} error: {exc}")
-                continue
-            return SensitiveClearAuditResult(
-                vulnerabilities=_apply_output_source_to_list(
-                    [_failed_result(candidate, _failure_reason(log_path, f"{tool} error: {exc}"))],
-                    attempt_source,
-                ),
-                reports=[],
-                complete=False,
-            )
-
-        parsed = _parse_sensitive_clear_audit_result(output_text, candidate)
-        if parsed is not None:
-            _apply_output_source_to_list(parsed.vulnerabilities, attempt_source)
-            return parsed
-        if attempt <= max_retries:
-            logger.warning("%s sensitive_clear audit produced invalid/incomplete JSON result; retrying", tool)
-            if on_output:
-                on_output(f"[retry {attempt}/{max_retries}] Incomplete sensitive_clear JSON result, retrying...")
-            continue
+    except asyncio.TimeoutError:
+        logger.error("%s sensitive_clear audit timed out for %s", tool, candidate.file)
         return SensitiveClearAuditResult(
-            vulnerabilities=[
-                Vulnerability(
-                    file=candidate.file,
-                    line=candidate.line,
-                    function=candidate.function,
-                    vuln_type=candidate.vuln_type,
-                    severity="unknown",
-                    description=candidate.description,
-                    ai_analysis="No complete function-level JSON result returned",
-                    confirmed=False,
-                    ai_verdict="failed",
-                    failure_reason=_failure_reason(log_path, "No complete function-level JSON result returned"),
-                    output_source=attempt_source or OutputSource(),
-                )
-            ],
+            vulnerabilities=[Vulnerability(
+                file=candidate.file,
+                line=candidate.line,
+                function=candidate.function,
+                vuln_type=candidate.vuln_type,
+                severity="unknown",
+                description=candidate.description,
+                ai_analysis="Analysis timed out",
+                confirmed=False,
+                ai_verdict="timeout",
+                failure_reason=_failure_reason(log_path, f"{tool} timed out after {effective_timeout} seconds"),
+                output_source=output_source or OutputSource(),
+            )],
+            reports=[],
+            complete=False,
+        )
+    except asyncio.CancelledError:
+        raise
+    except NoAvailableModelError:
+        raise
+    except Exception as exc:
+        logger.exception("%s sensitive_clear audit failed for %s", tool, candidate.file)
+        return SensitiveClearAuditResult(
+            vulnerabilities=_apply_output_source_to_list(
+                [_failed_result(candidate, _failure_reason(log_path, f"{tool} error: {exc}"))],
+                output_source,
+            ),
             reports=[],
             complete=False,
         )
 
+    parsed = _parse_sensitive_clear_audit_result(output_text, candidate)
+    if parsed is not None:
+        _apply_output_source_to_list(parsed.vulnerabilities, output_source)
+        return parsed
     return SensitiveClearAuditResult(
-        vulnerabilities=_apply_output_source_to_list(
-            [_failed_result(candidate, "OpenCode did not return a result")],
-            last_source,
-        ),
+        vulnerabilities=[Vulnerability(
+            file=candidate.file,
+            line=candidate.line,
+            function=candidate.function,
+            vuln_type=candidate.vuln_type,
+            severity="unknown",
+            description=candidate.description,
+            ai_analysis="No complete function-level JSON result returned",
+            confirmed=False,
+            ai_verdict="failed",
+            failure_reason=_failure_reason(log_path, "No complete function-level JSON result returned"),
+            output_source=output_source or OutputSource(),
+        )],
         reports=[],
         complete=False,
     )
@@ -771,102 +701,82 @@ async def run_project_report_audit(
         if checker_entry and checker_entry.skill_name
         else candidate.vuln_type
     )
-    max_retries = config.opencode.max_retries
     report_dir.mkdir(parents=True, exist_ok=True)
+    output_source: OutputSource | None = None
 
-    for attempt in range(1, max_retries + 2):
-        attempt_source: OutputSource | None = None
-        attempt_id = uuid4().hex
+    def capture_source(source: OutputSource) -> None:
+        nonlocal output_source
+        output_source = source
 
-        def capture_source(source: OutputSource) -> None:
-            nonlocal attempt_source
-            attempt_source = source
-
-        for old_report in report_dir.glob("*.md"):
-            try:
-                old_report.unlink()
-            except OSError:
-                pass
-        prompt = (
-            f"使用 `{skill_name}` 技能，审计代码扫描路径 `{candidate.file}` 对应的目标代码。"
-            f"project_id 为 `{project_id}`。"
-            f"这是用户创建的 Markdown 报告型项目级审计任务。"
-            "请在最终 JSON 的 reports 数组返回一个或多个 Markdown 报告；"
-            "filename 必须使用 .md 扩展名，title 为报告标题，content 为完整 Markdown。"
-            "如果没有发现问题，也要返回一个报告说明审计范围和未发现问题的原因。"
-        ).replace("\n", " ")
-        log_path = workspace / f"opencode_attempt_{attempt_id}.log"
-
-        if on_output:
-            on_output(f"[{tool}] 初始提示词:\n{prompt}")
-
-        logger.info(
-            "Running %s report audit: %s (%s) timeout=%ds attempt=%d/%d report_dir=%s",
-            tool, candidate.file, candidate.vuln_type, effective_timeout,
-            attempt, max_retries + 1, report_dir,
+    for old_report in report_dir.glob("*.md"):
+        try:
+            old_report.unlink()
+        except OSError:
+            pass
+    prompt = (
+        f"使用 `{skill_name}` 技能，审计代码扫描路径 `{candidate.file}` 对应的目标代码。"
+        f"project_id 为 `{project_id}`。"
+        "这是用户创建的 Markdown 报告型项目级审计任务。"
+        "请在最终 JSON 的 reports 数组返回一个或多个 Markdown 报告；"
+        "filename 必须使用 .md 扩展名，title 为报告标题，content 为完整 Markdown。"
+        "如果没有发现问题，也要返回一个报告说明审计范围和未发现问题的原因。"
+    ).replace("\n", " ")
+    log_path = _scan_task_log_path(project_id, f"report-audit-{uuid4().hex}.log")
+    if on_output:
+        on_output(f"[{tool}] 初始提示词:\n{prompt}")
+    logger.info(
+        "Running %s report audit: %s (%s) timeout=%ds report_dir=%s",
+        tool,
+        candidate.file,
+        candidate.vuln_type,
+        effective_timeout,
+        report_dir,
+    )
+    try:
+        output_text = await _invoke_opencode(
+            prompt,
+            effective_timeout,
+            log_path=log_path,
+            on_line=on_output,
+            cancel_event=cancel_event,
+            directory=project_dir or workspace,
+            model_capability=getattr(checker_entry, "model_capability", "any"),
+            on_invocation_metadata=capture_source,
+            task_name=f"报告审计 {candidate.vuln_type}",
+            task_metadata=_candidate_task_context(candidate, "report_audit"),
+            output_schema=_MARKDOWN_REPORTS_JSON_SCHEMA,
         )
+    except asyncio.TimeoutError:
+        logger.error(
+            "%s report audit timed out for %s (timeout=%ds)",
+            tool,
+            candidate.vuln_type,
+            effective_timeout,
+        )
+        return _collect_markdown_reports(report_dir, candidate.vuln_type, output_source)
+    except asyncio.CancelledError:
+        raise
+    except NoAvailableModelError:
+        raise
+    except Exception:
+        logger.exception("%s report audit failed for %s", tool, candidate.vuln_type)
+        return _collect_markdown_reports(report_dir, candidate.vuln_type, output_source)
 
-        try:
-            output_text = await _invoke_opencode(
-                workspace,
-                prompt,
-                effective_timeout,
-                log_path=log_path,
-                on_line=on_output,
-                cancel_event=cancel_event,
-                project_dir=project_dir,
-                model_capability=getattr(checker_entry, "model_capability", "any"),
-                stats_scope_id=project_id,
-                task_context=_candidate_task_context(candidate, "report_audit"),
-                attempt=attempt,
-                on_invocation_metadata=capture_source,
-                task_name=f"报告审计 {candidate.vuln_type}",
-                skills=[skill_name],
-                output_schema=_MARKDOWN_REPORTS_JSON_SCHEMA,
-            )
-        except asyncio.TimeoutError:
-            logger.error(
-                "%s report audit timed out for %s (timeout=%ds)",
-                tool, candidate.vuln_type, effective_timeout,
-            )
-            return _collect_markdown_reports(report_dir, candidate.vuln_type, attempt_source)
-        except asyncio.CancelledError:
-            raise
-        except NoAvailableModelError:
-            raise
-        except Exception as exc:
-            logger.exception("%s report audit failed for %s (attempt %d)", tool, candidate.vuln_type, attempt)
-            if attempt <= max_retries:
-                if on_output:
-                    on_output(f"[retry {attempt}/{max_retries}] {tool} error: {exc}")
-                continue
-            return _collect_markdown_reports(report_dir, candidate.vuln_type, attempt_source)
-
-        try:
-            report_payload = json.loads(output_text)
-        except Exception:
-            report_payload = {}
-        for index, item in enumerate(report_payload.get("reports") or [], start=1):
-            if not isinstance(item, dict):
-                continue
-            raw_name = Path(str(item.get("filename") or f"report-{index}.md")).name
-            safe_name = re.sub(r"[^A-Za-z0-9_.-]+", "_", raw_name).strip("._")
-            if not safe_name.lower().endswith(".md"):
-                safe_name = f"{safe_name or f'report-{index}'}.md"
-            content = str(item.get("content") or "")
-            if content.strip():
-                (report_dir / safe_name).write_text(content, encoding="utf-8")
-        reports = _collect_markdown_reports(report_dir, candidate.vuln_type, attempt_source)
-        if reports:
-            return reports
-        if attempt <= max_retries:
-            logger.warning("%s report audit produced no Markdown files for %s; retrying", tool, candidate.vuln_type)
-            if on_output:
-                on_output(f"[retry {attempt}/{max_retries}] No Markdown report written, retrying...")
+    try:
+        report_payload = json.loads(output_text)
+    except Exception:
+        report_payload = {}
+    for index, item in enumerate(report_payload.get("reports") or [], start=1):
+        if not isinstance(item, dict):
             continue
-        return []
-
-    return []
+        raw_name = Path(str(item.get("filename") or f"report-{index}.md")).name
+        safe_name = re.sub(r"[^A-Za-z0-9_.-]+", "_", raw_name).strip("._")
+        if not safe_name.lower().endswith(".md"):
+            safe_name = f"{safe_name or f'report-{index}'}.md"
+        content = str(item.get("content") or "")
+        if content.strip():
+            (report_dir / safe_name).write_text(content, encoding="utf-8")
+    return _collect_markdown_reports(report_dir, candidate.vuln_type, output_source)
 
 
 def _threat_audit_result_defaults(task: ThreatAuditTask) -> _VulnerabilityResultDefaults:
@@ -941,8 +851,13 @@ async def run_threat_audit(
             scan_path_label = project_dir.resolve().as_posix()
         if not scan_path_label:
             scan_path_label = "当前扫描目录"
+        code_paths_label = ", ".join(
+            item.path for item in task.code_paths if item.path
+        ) or task.code_path or "威胁分析未定位明确代码路径"
         prompt = (
             f"审计代码仓{scan_path_label}中{surface_label}的实现是否存在漏洞，导致{method_label}。"
+            f"威胁分析给出的相关代码路径为：{code_paths_label}。"
+            f"攻击路径上下文：{task.description or '未提供'}。"
         ).replace("\n", " ")
         if attempt > 1:
             prompt += _json_result_retry_message(multiple=True)
@@ -957,7 +872,7 @@ async def run_threat_audit(
             tool, task.task_id, task.code_path, effective_timeout, attempt, max_retries + 1,
         )
 
-        task_context = {
+        task_metadata = {
             "task_type": "threat_audit",
             "checker": "threat_audit",
             "file": task.code_path,
@@ -966,27 +881,26 @@ async def run_threat_audit(
             "threat_method_node_id": task.method_node_id,
             "threat_attack_path_id": task.attack_path_id,
             "threat_attack_path_fingerprint": task.attack_path_fingerprint,
+            "stats_scope_id": project_id,
+            "audit_attempt": attempt,
         }
         if planned_task_id:
-            task_context["planned_task_id"] = planned_task_id
+            task_metadata["planned_task_id"] = planned_task_id
 
         try:
             output_text = await _invoke_opencode(
-                workspace,
                 prompt,
                 effective_timeout,
                 log_path=log_path,
                 on_line=on_output,
                 cancel_event=cancel_event,
-                project_dir=project_dir,
+                directory=project_dir or workspace,
                 model_capability="high",
                 prefer_high_model=True,
-                stats_scope_id=project_id,
-                task_context=task_context,
-                attempt=attempt,
                 on_invocation_metadata=capture_source,
                 task_name=f"威胁审计 {task.task_id}",
-                output_schema=VULNERABILITY_RESULTS_JSON_SCHEMA,
+                task_metadata=task_metadata,
+                attempt=0,
             )
         except asyncio.TimeoutError:
             logger.error("%s threat audit timed out for %s", tool, task.task_id)
@@ -1001,7 +915,10 @@ async def run_threat_audit(
                     ai_analysis="Threat audit timed out",
                     confirmed=False,
                     ai_verdict="timeout",
-                    failure_reason=_failure_reason(log_path, f"{tool} timed out after {effective_timeout} seconds"),
+                    failure_reason=_failure_reason(
+                        log_path,
+                        f"{tool} timed out after {effective_timeout} seconds",
+                    ),
                     output_source=attempt_source or OutputSource(),
                 )
             ], task)
@@ -1010,14 +927,22 @@ async def run_threat_audit(
         except NoAvailableModelError:
             raise
         except Exception as exc:
-            logger.exception("%s threat audit failed for %s (attempt %d)", tool, task.task_id, attempt)
+            logger.exception(
+                "%s threat audit failed for %s (attempt %d)",
+                tool,
+                task.task_id,
+                attempt,
+            )
             if attempt <= max_retries:
                 if on_output:
                     on_output(f"[retry {attempt}/{max_retries}] {tool} error: {exc}")
                 continue
             return _annotate_threat_audit_results(
                 _apply_output_source_to_list([
-                    _failed_result_from_defaults(defaults, _failure_reason(log_path, f"{tool} error: {exc}"))
+                    _failed_result_from_defaults(
+                        defaults,
+                        _failure_reason(log_path, f"{tool} error: {exc}"),
+                    )
                 ], attempt_source),
                 task,
             )
@@ -1029,23 +954,39 @@ async def run_threat_audit(
                 task,
             )
         if attempt <= max_retries:
-            logger.warning("%s threat audit did not return valid JSON results for %s (attempt %d)", tool, task.task_id, attempt)
+            logger.warning(
+                "%s threat audit did not return valid JSON results for %s (attempt %d)",
+                tool,
+                task.task_id,
+                attempt,
+            )
             if on_output:
-                on_output(f"[retry {attempt}/{max_retries}] No valid JSON results returned, retrying...")
+                on_output(
+                    f"[retry {attempt}/{max_retries}] "
+                    "No valid JSON results returned, retrying..."
+                )
             continue
         return _annotate_threat_audit_results(
             _apply_output_source_to_list([
                 _failed_result_from_defaults(
                     defaults,
-                    _failure_reason(log_path, f"{tool} completed but did not return valid JSON threat audit results"),
-                    analysis="OpenCode completed without returning valid JSON threat audit results",
+                    _failure_reason(
+                        log_path,
+                        f"{tool} completed but did not return valid JSON threat audit results",
+                    ),
+                    analysis=(
+                        "OpenCode completed without returning valid JSON threat audit results"
+                    ),
                 )
             ], attempt_source),
             task,
         )
 
     return _annotate_threat_audit_results([
-        _apply_output_source(_failed_result_from_defaults(defaults, "OpenCode did not return a result"), last_source)
+        _apply_output_source(
+            _failed_result_from_defaults(defaults, "OpenCode did not return a result"),
+            last_source,
+        )
     ], task)
 
 
@@ -1217,6 +1158,26 @@ def _failure_reason(log_path: Path | None, fallback: str) -> str:
                 text = text[-4000:]
             return f"{fallback}\n\nLast output:\n{text}"
     return fallback
+
+
+def _scan_task_log_path(scan_id: str, filename: str) -> Path:
+    from backend.opencode.task_service import get_opencode_execution_context
+
+    context = get_opencode_execution_context()
+    if context.scan_work_dir is not None and (
+        not scan_id or not context.scan_id or context.scan_id == scan_id
+    ):
+        root = context.scan_work_dir / "logs"
+    else:
+        configured = _cfg_value(_cfg_value(get_config(), "storage", None), "scans_dir", "")
+        if configured:
+            scans_root = Path(str(configured))
+            scan_root = scans_root if scans_root.name == scan_id else scans_root / scan_id
+            root = scan_root / "logs"
+        else:
+            root = Path(tempfile.gettempdir()) / "opendeephole" / "scans" / str(scan_id or "unscoped") / "logs"
+    root.mkdir(parents=True, exist_ok=True)
+    return root / filename
 
 
 def _effective_cli_config(cli_config, model_option) -> dict:
@@ -2140,54 +2101,34 @@ async def _wait_for_stream_exit_after_termination(
         )
 
 
-
-
-def _infer_task_skills(workspace: Path, prompt: str) -> list[str]:
-    """Resolve only skill names explicitly mentioned by an existing prompt."""
-    skill_root = workspace / ".opencode" / "skills"
-    if not skill_root.is_dir():
-        return []
-    mentioned: list[str] = []
-    candidates = set(re.findall(r"`([A-Za-z0-9_.-]+)`", prompt or ""))
-    candidates.update(
-        match.group(1)
-        for match in re.finditer(r"使用\s+([A-Za-z0-9_.-]+)\s+技能", prompt or "")
-    )
-    for name in sorted(candidates):
-        if (skill_root / name / "SKILL.md").is_file():
-            mentioned.append(name)
-    return mentioned
-
-
 async def _invoke_opencode(
-    workspace: Path,
     prompt: str,
     timeout: int,
     log_path: Path | None = None,
     on_line=None,
     cancel_event=None,
-    cli_config=None,
-    project_dir: Path | None = None,
+    directory: Path | None = None,
     writable_paths: list[Path] | None = None,
     model_capability: str = "any",
     prefer_high_model: bool = False,
-    stats_scope_id: str = "",
-    task_context: dict | None = None,
-    attempt: int = 0,
     on_invocation_metadata=None,
     *,
     task_name: str = "",
     priority: int = 50,
-    mcp_tools: list[str] | None = None,
-    skills: list[str | Path] | None = None,
     output_schema: dict | None = None,
-    permissions: list[dict[str, str]] | None = None,
+    output_retry_count: int = 2,
+    attempt: int | None = None,
     session_id: str | None = None,
+    task_metadata: dict | None = None,
 ) -> str:
-    """Compatibility facade backed exclusively by ``OpenCodeTaskService``."""
-    from backend.opencode.task_service import OpenCodeTaskSpec, get_opencode_task_service
+    """Internal prompt facade backed exclusively by ``OpenCodeTaskService``."""
+    from backend.opencode.task_service import (
+        OpenCodeTaskSpec,
+        bind_opencode_execution_context,
+        get_opencode_task_service,
+    )
 
-    context = dict(task_context or {})
+    context = dict(task_metadata or {})
     inferred_task_name = (
         str(task_name or "").strip()
         or str(context.get("task_name") or "").strip()
@@ -2197,29 +2138,23 @@ async def _invoke_opencode(
     required_capability = model_capability
     if prefer_high_model and str(model_capability or "").strip().lower() in {"", "any", "low"}:
         required_capability = "high"
-    selected_skills = list(skills) if skills is not None else _infer_task_skills(workspace, prompt)
-    result = await get_opencode_task_service().run_task(OpenCodeTaskSpec(
-        task_name=inferred_task_name,
-        prompt=prompt,
-        directory=project_dir or workspace,
-        workspace=workspace,
-        required_capability=required_capability,
-        scope_id=stats_scope_id,
-        task_context=context,
-        mcp_tools=mcp_tools,
-        skills=selected_skills,
-        timeout_seconds=timeout,
-        priority=priority,
-        output_schema=output_schema,
-        permissions=permissions,
-        session_id=session_id,
-        writable_paths=list(writable_paths or []),
-        cli_config=cli_config,
-        attempt=attempt,
-        on_output=on_line,
-        on_invocation_metadata=on_invocation_metadata,
-        cancel_event=cancel_event,
-    ))
+    with bind_opencode_execution_context(task_metadata=context):
+        result = await get_opencode_task_service().run_task(OpenCodeTaskSpec(
+            task_name=inferred_task_name,
+            prompt=prompt,
+            directory=(directory or Path.cwd()).resolve(),
+            required_capability=required_capability,
+            timeout_seconds=timeout,
+            priority=priority,
+            output_schema=output_schema,
+            output_retry_count=output_retry_count,
+            session_id=session_id,
+            writable_paths=list(writable_paths or []),
+            attempt=attempt,
+            on_output=on_line,
+            on_invocation_metadata=on_invocation_metadata,
+            cancel_event=cancel_event,
+        ))
     output_text = (
         json.dumps(result.structured, ensure_ascii=False)
         if output_schema is not None and result.structured is not None
@@ -2230,6 +2165,11 @@ async def _invoke_opencode(
             log_path.write_text(output_text, encoding="utf-8")
         except Exception:
             pass
+    if result.status == "failure":
+        from backend.opencode.model_pool import NO_AVAILABLE_MODEL_MESSAGE
+
+        if result.error == NO_AVAILABLE_MODEL_MESSAGE:
+            raise NoAvailableModelError()
     result.raise_for_status()
     return output_text
 

@@ -178,11 +178,12 @@ def test_threat_analysis_result_uses_project_root(tmp_path: Path) -> None:
         )
         captured: dict[str, object] = {}
 
-        async def fake_invoke(call_workspace: Path, prompt: str, *args, **kwargs) -> None:
-            captured["workspace"] = call_workspace
+        async def fake_invoke(prompt: str, *args, **kwargs) -> None:
             captured["prompt"] = prompt
-            captured["project_dir"] = kwargs["project_dir"]
+            captured["directory"] = kwargs["directory"]
             captured["writable_paths"] = kwargs["writable_paths"]
+            captured["task_metadata"] = kwargs["task_metadata"]
+            captured["attempt"] = kwargs["attempt"]
             match = re.search(r"将阶段结果写入输出 JSON 文件：`([^`]+)`", prompt)
             assert match is not None
             Path(match.group(1)).write_text("{}", encoding="utf-8")
@@ -205,9 +206,10 @@ def test_threat_analysis_result_uses_project_root(tmp_path: Path) -> None:
         assert result_path.is_file()
         assert (project / "res.json").is_file()
         assert str(project.resolve()) in str(captured["prompt"])
-        assert captured["workspace"] == workspace
-        assert captured["project_dir"] == project.resolve()
+        assert captured["directory"] == project.resolve()
+        assert captured["task_metadata"]["task_type"] == "threat_analysis"
         assert captured["writable_paths"] == [project.resolve() / "runs" / "scan-1"]
+        assert captured["attempt"] == 0
 
     asyncio.run(run())
 
@@ -263,7 +265,7 @@ def test_attack_tree_threat_analysis_prioritizes_one_tree_pipeline(tmp_path: Pat
             assert match is not None
             return json.loads(Path(match.group(1)).read_text(encoding="utf-8"))
 
-        async def fake_invoke(call_workspace: Path, prompt: str, *args, **kwargs) -> None:
+        async def fake_invoke(prompt: str, *args, **kwargs) -> None:
             output_path = output_path_from_prompt(prompt)
             if "threat-base-model-shard-planner" in prompt:
                 output_path.write_text(
@@ -425,7 +427,7 @@ def test_attack_tree_threat_analysis_prioritizes_one_tree_pipeline(tmp_path: Pat
     asyncio.run(run())
 
 
-def test_threat_audit_prompt_uses_only_surface_and_method(tmp_path: Path) -> None:
+def test_threat_audit_prompt_preserves_remote_path_context(tmp_path: Path) -> None:
     async def run() -> None:
         cfg = SimpleNamespace(
             opencode=SimpleNamespace(
@@ -456,7 +458,7 @@ def test_threat_audit_prompt_uses_only_surface_and_method(tmp_path: Path) -> Non
         scan_root = tmp_path / "project" / "src"
         captured: dict[str, str] = {}
 
-        async def fake_invoke(call_workspace: Path, prompt: str, *args, **kwargs) -> None:
+        async def fake_invoke(prompt: str, *args, **kwargs) -> None:
             captured["prompt"] = prompt
 
         with (
@@ -479,6 +481,8 @@ def test_threat_audit_prompt_uses_only_surface_and_method(tmp_path: Path) -> Non
             f"审计代码仓{scan_root.resolve().as_posix()}中管理接口的实现是否存在漏洞，导致认证绕过。"
             in prompt
         )
+        assert "威胁分析给出的相关代码路径为：src/api。" in prompt
+        assert "攻击路径上下文：旧描述不应进入 prompt。" in prompt
         assert "每个真实问题使用一个 results 元素" in prompt
         assert "真实项目根目录" not in prompt
         assert "submit_result MCP 工具" not in prompt
@@ -489,13 +493,10 @@ def test_threat_audit_prompt_uses_only_surface_and_method(tmp_path: Path) -> Non
             "价值资产/风险",
             "攻击面节点",
             "攻击方式",
-            "代码路径",
             "路径说明",
             "任务描述",
             "threat-audit-1",
             "获取管理员权限",
-            "src/api",
-            "旧描述不应进入 prompt",
         ):
             assert removed not in prompt
 

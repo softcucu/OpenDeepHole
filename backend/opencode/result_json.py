@@ -43,6 +43,7 @@ VULNERABILITY_RESULTS_JSON_SCHEMA: dict[str, Any] = {
     "properties": {
         "results": {
             "type": "array",
+            "minItems": 1,
             "items": VULNERABILITY_RESULT_JSON_SCHEMA,
         }
     },

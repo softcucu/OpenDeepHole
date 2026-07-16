@@ -227,9 +227,9 @@ class ThreatAnalysisParserTests(unittest.TestCase):
                 self.gap_calls = 0
 
             async def _invoke_opencode(self, *args, **kwargs) -> str:
-                stage = kwargs["task_context"]["stage"]
+                stage = kwargs["task_metadata"]["stage"]
                 self.stages.append(stage)
-                prompt = str(args[1])
+                prompt = str(args[0])
                 self.prompts.append(prompt)
                 output_match = re.search(r"将阶段结果写入输出 JSON 文件：`([^`]+)`", prompt)
                 assert output_match is not None

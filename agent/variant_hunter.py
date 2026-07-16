@@ -46,15 +46,6 @@ _VARIANT_FINDINGS_JSON_SCHEMA = {
 }
 
 
-def _ensure_skill(workspace: Path) -> None:
-    skill_src = Path(__file__).parent / "skills" / "variant_hunt.md"
-    skill_dir = workspace / ".opencode" / "skills" / "variant-hunt"
-    skill_dir.mkdir(parents=True, exist_ok=True)
-    (skill_dir / "SKILL.md").write_text(
-        skill_src.read_text(encoding="utf-8"), encoding="utf-8"
-    )
-
-
 def _build_prompt(
     pattern: HistoryPattern,
     checker_types: list[str],
@@ -86,12 +77,10 @@ async def hunt_variants(
     patterns: list[HistoryPattern],
     project_path: Path,
     code_scan_path: Path,
-    workspace: Path,
     scan_id: str,
     checker_types: list[str],
     cancel_event: Optional[threading.Event],
     emit: EmitFn,
-    cli_config,
 ) -> list[Candidate]:
     """对每条历史问题模式做全仓同类变体排查，返回命中候选列表。"""
     from backend.opencode.runner import _invoke_opencode, _result_payloads
@@ -101,17 +90,18 @@ async def hunt_variants(
         return []
 
     await emit("variant_hunt", f"开始对 {len(patterns)} 条历史问题模式做同类变体排查...")
-    _ensure_skill(workspace)
-
     found: list[Candidate] = []
     seen: set[tuple[str, int, str]] = set()
     lock = asyncio.Lock()
     processed = 0
     valid_types = set(checker_types)
-    scan_dir = workspace.parent
+    scan_dir = Path.home() / ".opendeephole" / "scans" / scan_id / "logs"
+    scan_dir.mkdir(parents=True, exist_ok=True)
 
     capacity = total_model_capacity(
-        cli_config, global_concurrency=config.opencode_concurrency, required_capability="any"
+        config.opencode,
+        global_concurrency=config.opencode_concurrency,
+        required_capability="any",
     )
     concurrency = max(1, min(capacity, len(patterns)))
 
@@ -129,21 +119,21 @@ async def hunt_variants(
 
         try:
             output_text = await _invoke_opencode(
-                workspace,
                 prompt,
-                int(getattr(cli_config, "timeout", 1200) or 1200),
+                int(getattr(config.opencode, "timeout", 1200) or 1200),
                 log_path=log_path,
                 on_line=lambda line: print(
                     with_local_timestamp(line, prefix="[variant_hunt]"),
                     flush=True,
                 ),
                 cancel_event=cancel_event,
-                cli_config=cli_config,
-                project_dir=project_path,
+                directory=project_path,
                 model_capability="any",
-                stats_scope_id=scan_id,
                 task_name=f"同类变体排查 {pattern.source or pattern.pattern[:30]}",
-                skills=["variant-hunt"],
+                task_metadata={
+                    "task_type": "variant_hunt",
+                    "pattern_source": pattern.source,
+                },
                 output_schema=_VARIANT_FINDINGS_JSON_SCHEMA,
             )
         except asyncio.CancelledError:

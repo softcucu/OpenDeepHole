@@ -512,6 +512,56 @@ def test_model_pool_snapshot_persists_completed_task_prompt_for_all_outcomes() -
     asyncio.run(run())
 
 
+def test_fresh_session_retry_records_only_one_terminal_completion() -> None:
+    async def run() -> None:
+        cfg = SimpleNamespace(
+            models=[{
+                "id": "retry-model",
+                "model": "provider/retry-model",
+                "capability": "low",
+                "max_concurrency": 1,
+            }],
+        )
+        scope = "scan-retry-history"
+        task_id = "logical-task"
+        first = await acquire_model_lease(
+            cfg,
+            global_concurrency=1,
+            stats_scope_id=scope,
+            task_id=task_id,
+            task_context={"task_type": "audit", "session_attempt": 1},
+        )
+        await release_model_lease(
+            first,
+            duration_seconds=1.0,
+            record_completion=False,
+        )
+        between = model_pool_snapshot(scope)
+        assert between["completed_task_count"] == 0
+
+        second = await acquire_model_lease(
+            cfg,
+            global_concurrency=1,
+            stats_scope_id=scope,
+            task_id=task_id,
+            task_context={"task_type": "audit", "session_attempt": 2},
+        )
+        await release_model_lease(
+            second,
+            outcome="success",
+            duration_seconds=2.0,
+        )
+        final = model_pool_snapshot(scope)
+        assert final["total_tasks"] == 1
+        assert final["models"][0]["total"] == 2
+        assert final["completed_task_count"] == 1
+        assert final["completed_tasks"][0]["task_id"] == task_id
+        assert final["completed_tasks"][0]["session_attempt"] == 2
+        assert final["completed_tasks"][0]["outcome"] == "success"
+
+    asyncio.run(run())
+
+
 def test_waiting_lease_does_not_refresh_snapshot_timestamp() -> None:
     async def run():
         cfg = SimpleNamespace(
