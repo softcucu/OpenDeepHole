@@ -358,6 +358,12 @@ export interface ScanEvent {
   candidate_index: number | null;
 }
 
+export interface AgentModelTimeWindow {
+  weekdays: number[];
+  start: string;
+  end: string;
+}
+
 export interface OpenCodePoolModelStats {
   id: string;
   model: string;
@@ -367,7 +373,7 @@ export interface OpenCodePoolModelStats {
   max_concurrency: number;
   enabled: boolean;
   available: boolean;
-  time_windows: { start: string; end: string }[];
+  time_windows: AgentModelTimeWindow[];
   queued: number;
   running: number;
   total: number;
@@ -536,7 +542,7 @@ export interface AgentOpenCodeModelConfig {
   executable?: string;
   timeout?: number | null;
   max_retries?: number | null;
-  time_windows?: { start: string; end: string }[];
+  time_windows?: AgentModelTimeWindow[];
 }
 
 export interface AgentBaseConfig {

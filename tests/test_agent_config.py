@@ -369,7 +369,7 @@ class AgentConfigTests(unittest.TestCase):
                             "weight": 3,
                             "max_concurrency": 2,
                             "enabled": True,
-                            "time_windows": [{"start": "09:00", "end": "18:00"}],
+                            "time_windows": [{"weekdays": [1, 3, 5], "start": "09:00", "end": "18:00"}],
                         },
                         {
                             "id": "deep",
@@ -401,7 +401,11 @@ class AgentConfigTests(unittest.TestCase):
         self.assertTrue(cfg.opencode.models[0].use_default_model)
         self.assertEqual(cfg.opencode.models[0].capability, "low")
         self.assertEqual(cfg.opencode.models[0].weight, 3)
-        self.assertEqual(cfg.opencode.models[0].time_windows, [{"start": "09:00", "end": "18:00"}])
+        self.assertEqual(cfg.opencode.models[0].time_windows, [{
+            "weekdays": [1, 3, 5],
+            "start": "09:00",
+            "end": "18:00",
+        }])
         self.assertIsNotNone(cfg.fp_review_cli)
         self.assertEqual(cfg.fp_review_cli.models[0].id, "judge")
 
@@ -409,10 +413,62 @@ class AgentConfigTests(unittest.TestCase):
         self.assertEqual(remote["model_pool"]["global_concurrency"], 4)
         self.assertFalse(remote["model_pool"]["models"][0]["enabled"])
         self.assertNotIn("use_default_model", remote["model_pool"]["models"][0])
+        self.assertEqual(remote["model_pool"]["models"][0]["time_windows"][0]["weekdays"], [1, 3, 5])
         self.assertEqual(remote["model_pool"]["models"][0]["time_windows"][0]["start"], "09:00")
         self.assertEqual(remote["model_pool"]["models"][1]["model"], "deep-model")
         self.assertEqual(remote["model_pool"]["models"][2]["capability"], "high")
         self.assertEqual(remote["model_pool"]["models"][2]["id"], "judge")
+
+    def test_legacy_time_window_without_weekdays_defaults_to_every_day(self) -> None:
+        config = AgentRemoteConfig.model_validate({
+            "schema_version": 2,
+            "model_pool": {
+                "global_concurrency": 1,
+                "models": [{
+                    "id": "legacy",
+                    "model": "provider/model",
+                    "time_windows": [{"start": "09:00", "end": "18:00"}],
+                }],
+            },
+        })
+
+        window = config.model_pool.models[0].time_windows[0]
+        self.assertEqual(window.weekdays, [1, 2, 3, 4, 5, 6, 7])
+
+        agent_config = AgentConfig()
+        apply_remote_config(agent_config, config.model_dump(mode="json"))
+        self.assertEqual(
+            agent_config.opencode.models[0].time_windows[0]["weekdays"],
+            [1, 2, 3, 4, 5, 6, 7],
+        )
+
+    def test_managed_config_rejects_invalid_time_windows(self) -> None:
+        from fastapi import HTTPException
+
+        from backend.api.agent import _validate_managed_config
+
+        invalid_windows = [
+            ({"weekdays": [], "start": "09:00", "end": "18:00"}, "至少要选择一天"),
+            ({"weekdays": [0], "start": "09:00", "end": "18:00"}, "星期配置"),
+            ({"weekdays": [1, 1], "start": "09:00", "end": "18:00"}, "星期配置"),
+            ({"weekdays": [1], "start": "25:00", "end": "18:00"}, "必须为 HH:MM-HH:MM"),
+            ({"weekdays": [1], "start": "09:00", "end": "09:00"}, "起止时间不能相同"),
+        ]
+        for window, error_text in invalid_windows:
+            with self.subTest(window=window):
+                config = AgentRemoteConfig.model_validate({
+                    "schema_version": 2,
+                    "base": {"tool": "nga", "executable": "nga", "no_proxy": ""},
+                    "model_pool": {
+                        "models": [{
+                            "id": "scheduled",
+                            "model": "provider/model",
+                            "time_windows": [window],
+                        }],
+                    },
+                })
+                with self.assertRaisesRegex(HTTPException, error_text):
+                    _validate_managed_config(config)
 
     def test_legacy_remote_payload_migrates_to_v2_and_disables_default_model(self) -> None:
         config = AgentRemoteConfig.model_validate({

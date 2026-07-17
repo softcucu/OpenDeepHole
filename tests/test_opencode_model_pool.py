@@ -1,4 +1,5 @@
 import asyncio
+from datetime import datetime
 from types import SimpleNamespace
 
 import pytest
@@ -115,7 +116,75 @@ def test_model_options_normalizes_enabled_models() -> None:
     assert options[0].capability == "low"
     assert options[0].weight == 2
     assert options[0].max_concurrency == 2
-    assert options[0].time_windows == ((540, 1080),)
+    assert len(options[0].time_windows) == 1
+    assert options[0].time_windows[0].weekdays == (1, 2, 3, 4, 5, 6, 7)
+    assert options[0].time_windows[0].start == 540
+    assert options[0].time_windows[0].end == 1080
+
+
+def _scheduled_option(time_windows: list[dict]) -> model_pool_module.ModelOption:
+    cfg = SimpleNamespace(models=[{
+        "id": "scheduled",
+        "model": "scheduled-model",
+        "time_windows": time_windows,
+    }])
+    return model_options(cfg, global_concurrency=1)[0]
+
+
+def test_time_window_honors_selected_weekday_and_boundaries() -> None:
+    option = _scheduled_option([{
+        "weekdays": [1],
+        "start": "09:00",
+        "end": "18:00",
+    }])
+
+    assert model_pool_module._option_available_now(option, datetime(2024, 1, 1, 9, 0))
+    assert model_pool_module._option_available_now(option, datetime(2024, 1, 1, 17, 59))
+    assert not model_pool_module._option_available_now(option, datetime(2024, 1, 1, 18, 0))
+    assert not model_pool_module._option_available_now(option, datetime(2024, 1, 2, 10, 0))
+
+
+def test_overnight_time_window_uses_current_weekday() -> None:
+    option = _scheduled_option([{
+        "weekdays": [1, 2, 3, 4, 5, 6],
+        "start": "22:00",
+        "end": "06:00",
+    }])
+
+    # Monday early morning and late evening are both inside Monday's window.
+    assert model_pool_module._option_available_now(option, datetime(2024, 1, 1, 1, 0))
+    assert model_pool_module._option_available_now(option, datetime(2024, 1, 1, 23, 0))
+    # Sunday is not selected, even though Saturday's configured range crosses midnight.
+    assert not model_pool_module._option_available_now(option, datetime(2024, 1, 7, 1, 0))
+
+
+def test_multiple_time_windows_are_combined_as_union() -> None:
+    option = _scheduled_option([
+        {"weekdays": [1], "start": "09:00", "end": "12:00"},
+        {"weekdays": [7], "start": "14:00", "end": "18:00"},
+    ])
+
+    assert model_pool_module._option_available_now(option, datetime(2024, 1, 1, 10, 0))
+    assert model_pool_module._option_available_now(option, datetime(2024, 1, 7, 16, 0))
+    assert not model_pool_module._option_available_now(option, datetime(2024, 1, 1, 13, 0))
+
+
+def test_model_pool_snapshot_includes_time_window_weekdays() -> None:
+    async def run() -> None:
+        cfg = SimpleNamespace(models=[{
+            "id": "scheduled",
+            "model": "scheduled-model",
+            "time_windows": [{"weekdays": [1, 3, 5], "start": "09:00", "end": "18:00"}],
+        }])
+
+        await refresh_configured_model_pool(cfg, global_concurrency=1)
+        assert model_pool_snapshot()["models"][0]["time_windows"] == [{
+            "weekdays": [1, 3, 5],
+            "start": "09:00",
+            "end": "18:00",
+        }]
+
+    asyncio.run(run())
 
 
 def test_wait_for_model_pool_update_follows_scope_marker() -> None:

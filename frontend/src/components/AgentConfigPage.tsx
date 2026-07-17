@@ -15,6 +15,7 @@ import type {
   AgentMcpStatusResponse,
   AgentMcpTarget,
   AgentMcpTargetStatus,
+  AgentModelTimeWindow,
   AgentModelTaskPolicy,
   AgentOpenCodeModelConfig,
   AgentOpenCodePoolStatus,
@@ -70,6 +71,32 @@ const parsePairs = (text: string) => Object.fromEntries(text.split(/\r?\n/).map(
   return index < 0 ? [line, ""] : [line.slice(0, index).trim(), line.slice(index + 1).trim()];
 }));
 const pairsText = (value: Record<string, string>) => Object.entries(value).map(([key, item]) => `${key}=${item}`).join("\n");
+const weekdays = [
+  { value: 1, label: "周一" },
+  { value: 2, label: "周二" },
+  { value: 3, label: "周三" },
+  { value: 4, label: "周四" },
+  { value: 5, label: "周五" },
+  { value: 6, label: "周六" },
+  { value: 7, label: "周日" },
+];
+const allWeekdays = weekdays.map((item) => item.value);
+const timePattern = /^([01]\d|2[0-3]):[0-5]\d$/;
+
+function configuredWeekdays(window: AgentModelTimeWindow): number[] {
+  return Array.isArray(window.weekdays) ? window.weekdays : allWeekdays;
+}
+
+function validateModelTimeWindows(config: AgentRemoteConfig): string {
+  for (const model of config.model_pool.models) {
+    for (const window of model.time_windows || []) {
+      if (configuredWeekdays(window).length === 0) return `模型 ${model.id || "未命名"} 的每个使用时间段至少要选择一天`;
+      if (!timePattern.test(window.start) || !timePattern.test(window.end)) return `模型 ${model.id || "未命名"} 的使用时间必须为 HH:MM-HH:MM`;
+      if (window.start === window.end) return `模型 ${model.id || "未命名"} 的使用时间起止不能相同`;
+    }
+  }
+  return "";
+}
 
 function PolicyEditor({ value, onChange }: { value: AgentModelTaskPolicy; onChange: (value: AgentModelTaskPolicy) => void }) {
   return <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
@@ -238,6 +265,8 @@ export default function AgentConfigPage({ onBack }: Props) {
   };
   const save = async () => {
     if (!agentKey) return;
+    const timeWindowError = validateModelTimeWindows(config);
+    if (timeWindowError) { setMessage(timeWindowError); return; }
     setSaving(true); setMessage("");
     try {
       await updateAgentConfig(agentKey, config);
@@ -351,6 +380,78 @@ function ModelEditor({ config, setCfg, online, onImport, pool }: { config: Agent
   const models = config.model_pool.models;
   const update = (index: number, patch: Partial<AgentOpenCodeModelConfig>) => setCfg({ ...config, model_pool: { ...config.model_pool, models: models.map((item, current) => current === index ? { ...item, ...patch } : item) } });
   const add = () => setCfg({ ...config, model_pool: { ...config.model_pool, models: [...models, { id: `model-${models.length + 1}`, model: "", capability: "high", weight: 1, max_concurrency: 1, enabled: true, tool: "", executable: "", timeout: null, max_retries: null, time_windows: [] }] } });
+  const addWindow = (modelIndex: number) => update(modelIndex, {
+    time_windows: [...(models[modelIndex].time_windows || []), { weekdays: [...allWeekdays], start: "09:00", end: "18:00" }],
+  });
+  const updateWindow = (modelIndex: number, windowIndex: number, next: AgentModelTimeWindow) => update(modelIndex, {
+    time_windows: (models[modelIndex].time_windows || []).map((window, current) => current === windowIndex ? next : window),
+  });
+  const removeWindow = (modelIndex: number, windowIndex: number) => update(modelIndex, {
+    time_windows: (models[modelIndex].time_windows || []).filter((_, current) => current !== windowIndex),
+  });
   const ready = models.some((item) => item.enabled && item.model.trim());
-  return <div className="space-y-5"><div className="flex flex-wrap items-end gap-3"><Field label="模型池总并发"><input className={`${input} w-32`} type="number" min={1} value={config.model_pool.global_concurrency} onChange={(e) => setCfg({ ...config, model_pool: { ...config.model_pool, global_concurrency: Number(e.target.value) } })} /></Field><button onClick={onImport} disabled={!online} className="rounded bg-slate-700 px-3 py-2 text-sm disabled:opacity-40">从 serve 读取</button><button onClick={add} className="rounded bg-blue-600 px-3 py-2 text-sm">添加模型</button>{pool && <span className="pb-2 text-xs text-slate-400">运行 {pool.global_running} / 排队 {pool.global_queued}</span>}</div>{!ready && <div className="rounded border border-amber-500/30 bg-amber-500/10 p-3 text-sm text-amber-200">必须手动配置并启用至少一个有明确模型名的模型，才能启动或恢复扫描。</div>}<div className="space-y-4">{models.map((model, index) => <div key={index} className="rounded-xl border border-slate-700 p-4"><div className="grid gap-3 md:grid-cols-6"><label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={model.enabled} onChange={(e) => update(index, { enabled: e.target.checked })} />启用</label><input className={input} value={model.id} placeholder="唯一 ID" onChange={(e) => update(index, { id: e.target.value })} /><input className={`${input} md:col-span-2`} value={model.model} placeholder="provider/model" onChange={(e) => update(index, { model: e.target.value })} /><select className={input} value={model.capability} onChange={(e) => update(index, { capability: e.target.value })}><option value="low">低能力</option><option value="medium">中能力</option><option value="high">高能力</option></select><button onClick={() => setCfg({ ...config, model_pool: { ...config.model_pool, models: models.filter((_, current) => current !== index) } })} className="rounded border border-red-500/30 text-sm text-red-300">删除</button></div><div className="mt-3 grid gap-3 md:grid-cols-6"><input className={input} type="number" min={0.1} step={0.1} value={model.weight} title="权重" onChange={(e) => update(index, { weight: Number(e.target.value) })} /><input className={input} type="number" min={1} value={model.max_concurrency} title="单模型并发" onChange={(e) => update(index, { max_concurrency: Number(e.target.value) })} /><select className={input} value={model.tool || ""} onChange={(e) => update(index, { tool: e.target.value })}><option value="">继承工具</option><option value="nga">nga</option><option value="opencode">opencode</option></select><input className={input} value={model.executable || ""} placeholder="可执行文件覆盖" onChange={(e) => update(index, { executable: e.target.value })} /><input className={input} type="number" min={1} value={model.timeout ?? ""} placeholder="超时覆盖" onChange={(e) => update(index, { timeout: e.target.value ? Number(e.target.value) : null })} /><input className={input} type="number" min={0} value={model.max_retries ?? ""} placeholder="重试覆盖" onChange={(e) => update(index, { max_retries: e.target.value ? Number(e.target.value) : null })} /></div><Field label="使用时间窗口" hint="每行 HH:MM-HH:MM"><textarea className={`${input} mt-3`} rows={2} value={(model.time_windows || []).map((item) => `${item.start}-${item.end}`).join("\n")} onChange={(e) => update(index, { time_windows: e.target.value.split(/\r?\n/).map((line) => line.trim()).filter(Boolean).map((line) => ({ start: line.slice(0, 5), end: line.slice(6, 11) })) })} /></Field></div>)}</div></div>;
+  return <div className="space-y-5">
+    <div className="flex flex-wrap items-end gap-3">
+      <Field label="模型池总并发"><input className={`${input} w-32`} type="number" min={1} value={config.model_pool.global_concurrency} onChange={(e) => setCfg({ ...config, model_pool: { ...config.model_pool, global_concurrency: Number(e.target.value) } })} /></Field>
+      <button onClick={onImport} disabled={!online} className="rounded bg-slate-700 px-3 py-2 text-sm disabled:opacity-40">从 serve 读取</button>
+      <button onClick={add} className="rounded bg-blue-600 px-3 py-2 text-sm">添加模型</button>
+      {pool && <span className="pb-2 text-xs text-slate-400">运行 {pool.global_running} / 排队 {pool.global_queued}</span>}
+    </div>
+    {!ready && <div className="rounded border border-amber-500/30 bg-amber-500/10 p-3 text-sm text-amber-200">必须手动配置并启用至少一个有明确模型名的模型，才能启动或恢复扫描。</div>}
+    <div className="space-y-4">{models.map((model, index) => <div key={index} className="rounded-xl border border-slate-700 p-4">
+      <div className="grid gap-3 md:grid-cols-6">
+        <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={model.enabled} onChange={(e) => update(index, { enabled: e.target.checked })} />启用</label>
+        <input className={input} value={model.id} placeholder="唯一 ID" onChange={(e) => update(index, { id: e.target.value })} />
+        <input className={`${input} md:col-span-2`} value={model.model} placeholder="provider/model" onChange={(e) => update(index, { model: e.target.value })} />
+        <select className={input} value={model.capability} onChange={(e) => update(index, { capability: e.target.value })}><option value="low">低能力</option><option value="medium">中能力</option><option value="high">高能力</option></select>
+        <button onClick={() => setCfg({ ...config, model_pool: { ...config.model_pool, models: models.filter((_, current) => current !== index) } })} className="rounded border border-red-500/30 text-sm text-red-300">删除</button>
+      </div>
+      <div className="mt-3 grid gap-3 md:grid-cols-6">
+        <input className={input} type="number" min={0.1} step={0.1} value={model.weight} title="权重" onChange={(e) => update(index, { weight: Number(e.target.value) })} />
+        <input className={input} type="number" min={1} value={model.max_concurrency} title="单模型并发" onChange={(e) => update(index, { max_concurrency: Number(e.target.value) })} />
+        <select className={input} value={model.tool || ""} onChange={(e) => update(index, { tool: e.target.value })}><option value="">继承工具</option><option value="nga">nga</option><option value="opencode">opencode</option></select>
+        <input className={input} value={model.executable || ""} placeholder="可执行文件覆盖" onChange={(e) => update(index, { executable: e.target.value })} />
+        <input className={input} type="number" min={1} value={model.timeout ?? ""} placeholder="超时覆盖" onChange={(e) => update(index, { timeout: e.target.value ? Number(e.target.value) : null })} />
+        <input className={input} type="number" min={0} value={model.max_retries ?? ""} placeholder="重试覆盖" onChange={(e) => update(index, { max_retries: e.target.value ? Number(e.target.value) : null })} />
+      </div>
+      <div className="mt-4 space-y-3">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <p className="text-xs font-medium text-slate-300">使用时间</p>
+            <p className="mt-1 text-xs text-slate-500">按 Agent 本地时间；跨夜时间按当前星期判断</p>
+          </div>
+          <button type="button" onClick={() => addWindow(index)} className="rounded-md bg-slate-700 px-2.5 py-1.5 text-xs text-slate-100 hover:bg-slate-600">添加时间段</button>
+        </div>
+        {(model.time_windows || []).length === 0 ? <p className="text-xs text-slate-500">全天可用</p> : <div className="space-y-3">
+          {(model.time_windows || []).map((window, windowIndex) => {
+            const selectedWeekdays = configuredWeekdays(window);
+            return <div key={windowIndex} className="space-y-3 rounded-lg border border-slate-700 bg-slate-900/50 p-3">
+              <div className="flex flex-wrap gap-2">{weekdays.map((day) => {
+                const selected = selectedWeekdays.includes(day.value);
+                return <button
+                  key={day.value}
+                  type="button"
+                  aria-pressed={selected}
+                  onClick={() => updateWindow(index, windowIndex, {
+                    ...window,
+                    weekdays: selected
+                      ? selectedWeekdays.filter((value) => value !== day.value)
+                      : [...selectedWeekdays, day.value].sort((left, right) => left - right),
+                  })}
+                  className={`rounded-md border px-2.5 py-1.5 text-xs transition-colors ${selected ? "border-blue-500 bg-blue-600 text-white" : "border-slate-600 bg-slate-800 text-slate-300 hover:bg-slate-700"}`}
+                >{day.label}</button>;
+              })}</div>
+              {selectedWeekdays.length === 0 && <p className="text-xs text-red-300">请至少选择一天，或删除该时间段。</p>}
+              <div className="flex flex-wrap items-center gap-2">
+                <input type="time" className={`${input} w-auto min-w-36`} value={window.start} onChange={(e) => updateWindow(index, windowIndex, { ...window, weekdays: selectedWeekdays, start: e.target.value })} />
+                <span className="text-xs text-slate-500">至</span>
+                <input type="time" className={`${input} w-auto min-w-36`} value={window.end} onChange={(e) => updateWindow(index, windowIndex, { ...window, weekdays: selectedWeekdays, end: e.target.value })} />
+                <button type="button" onClick={() => removeWindow(index, windowIndex)} className="rounded-md border border-red-500/30 bg-red-500/10 px-2.5 py-2 text-xs text-red-200 hover:bg-red-500/20">删除</button>
+              </div>
+            </div>;
+          })}
+        </div>}
+      </div>
+    </div>)}</div>
+  </div>;
 }

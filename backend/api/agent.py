@@ -248,15 +248,31 @@ def _validate_managed_config(
         if model.max_retries is not None and model.max_retries < 0:
             raise HTTPException(status_code=422, detail=f"模型 {model_id} 的重试次数不能小于 0")
         for window in model.time_windows:
+            weekdays = window.weekdays
+            if not weekdays:
+                raise HTTPException(
+                    status_code=422,
+                    detail=f"模型 {model_id} 的每个使用时间段至少要选择一天",
+                )
+            if len(set(weekdays)) != len(weekdays) or any(day < 1 or day > 7 for day in weekdays):
+                raise HTTPException(
+                    status_code=422,
+                    detail=f"模型 {model_id} 的星期配置必须为不重复的 1 到 7",
+                )
             try:
-                start = str(window.get("start") or "")
-                end = str(window.get("end") or "")
+                start = str(window.start or "")
+                end = str(window.end or "")
                 datetime.strptime(start, "%H:%M")
                 datetime.strptime(end, "%H:%M")
-            except (AttributeError, TypeError, ValueError):
+            except (TypeError, ValueError):
                 raise HTTPException(
                     status_code=422,
                     detail=f"模型 {model_id} 的使用时间窗口必须为 HH:MM-HH:MM",
+                )
+            if start == end:
+                raise HTTPException(
+                    status_code=422,
+                    detail=f"模型 {model_id} 的使用时间窗口起止时间不能相同",
                 )
     policies = {
         "威胁分析": config.threat_analysis.model_policy,

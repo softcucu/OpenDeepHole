@@ -25,6 +25,13 @@ class NoAvailableModelError(RuntimeError):
 
 
 @dataclass(frozen=True)
+class ModelTimeWindow:
+    weekdays: tuple[int, ...]
+    start: int
+    end: int
+
+
+@dataclass(frozen=True)
 class ModelOption:
     id: str
     model: str
@@ -36,7 +43,7 @@ class ModelOption:
     executable: str = ""
     timeout: int | None = None
     max_retries: int | None = None
-    time_windows: tuple[tuple[int, int], ...] = ()
+    time_windows: tuple[ModelTimeWindow, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -208,18 +215,35 @@ def _parse_minutes(value: object) -> int | None:
     return hour * 60 + minute
 
 
-def _parse_time_windows(value: object) -> tuple[tuple[int, int], ...]:
+def _parse_time_windows(value: object) -> tuple[ModelTimeWindow, ...]:
     if not isinstance(value, list):
         return ()
-    windows: list[tuple[int, int]] = []
+    windows: list[ModelTimeWindow] = []
     for item in value:
-        if not isinstance(item, dict):
+        if not isinstance(item, dict) and not hasattr(item, "start"):
             continue
-        start = _parse_minutes(item.get("start"))
-        end = _parse_minutes(item.get("end"))
+        start = _parse_minutes(_cfg_value(item, "start"))
+        end = _parse_minutes(_cfg_value(item, "end"))
         if start is None or end is None or start == end:
             continue
-        windows.append((start, end))
+        raw_weekdays = _cfg_value(item, "weekdays", None)
+        if raw_weekdays is None:
+            weekdays = tuple(range(1, 8))
+        elif isinstance(raw_weekdays, (list, tuple, set)):
+            parsed_weekdays: set[int] = set()
+            for raw_day in raw_weekdays:
+                try:
+                    day = int(raw_day)
+                except (TypeError, ValueError):
+                    continue
+                if 1 <= day <= 7:
+                    parsed_weekdays.add(day)
+            weekdays = tuple(sorted(parsed_weekdays))
+        else:
+            weekdays = ()
+        if not weekdays:
+            continue
+        windows.append(ModelTimeWindow(weekdays=weekdays, start=start, end=end))
     return tuple(windows)
 
 
@@ -228,11 +252,14 @@ def _option_available_now(option: ModelOption, now: datetime | None = None) -> b
         return True
     local_now = now or datetime.now().astimezone()
     current = local_now.hour * 60 + local_now.minute
-    for start, end in option.time_windows:
-        if start < end:
-            if start <= current < end:
+    current_weekday = local_now.isoweekday()
+    for window in option.time_windows:
+        if current_weekday not in window.weekdays:
+            continue
+        if window.start < window.end:
+            if window.start <= current < window.end:
                 return True
-        elif current >= start or current < end:
+        elif current >= window.start or current < window.end:
             return True
     return False
 
@@ -979,13 +1006,14 @@ def _completed_count(item: ModelRuntimeStats) -> int:
     return item.success + item.failure + item.timeout + item.cancelled
 
 
-def _format_time_windows(windows: tuple[tuple[int, int], ...]) -> list[dict[str, str]]:
+def _format_time_windows(windows: tuple[ModelTimeWindow, ...]) -> list[dict[str, object]]:
     return [
         {
-            "start": f"{start // 60:02d}:{start % 60:02d}",
-            "end": f"{end // 60:02d}:{end % 60:02d}",
+            "weekdays": list(window.weekdays),
+            "start": f"{window.start // 60:02d}:{window.start % 60:02d}",
+            "end": f"{window.end // 60:02d}:{window.end % 60:02d}",
         }
-        for start, end in windows
+        for window in windows
     ]
 
 

@@ -31,7 +31,7 @@ class OpenCodeModelConfig:
     executable: str = ""           # optional per-model override
     timeout: int | None = None
     max_retries: int | None = None
-    time_windows: list[dict[str, str]] = field(default_factory=list)
+    time_windows: list[dict[str, object]] = field(default_factory=list)
 
 
 @dataclass
@@ -199,6 +199,7 @@ def normalize_cli_config(config: OpenCodeConfig) -> OpenCodeConfig:
             model_cfg.time_windows = []
         model_cfg.time_windows = [
             {
+                "weekdays": _normalize_weekdays(item.get("weekdays")),
                 "start": str(item.get("start", "")).strip(),
                 "end": str(item.get("end", "")).strip(),
             }
@@ -208,6 +209,23 @@ def normalize_cli_config(config: OpenCodeConfig) -> OpenCodeConfig:
         normalized_models.append(model_cfg)
     config.models = normalized_models
     return config
+
+
+def _normalize_weekdays(value: object) -> list[int]:
+    """Normalize ISO weekdays, treating the legacy missing field as every day."""
+    if value is None:
+        return list(range(1, 8))
+    if not isinstance(value, (list, tuple, set)):
+        return []
+    weekdays: set[int] = set()
+    for item in value:
+        try:
+            day = int(item)
+        except (TypeError, ValueError):
+            continue
+        if 1 <= day <= 7:
+            weekdays.add(day)
+    return sorted(weekdays)
 
 
 def effective_fp_review_cli_config(config: "AgentConfig") -> OpenCodeConfig:

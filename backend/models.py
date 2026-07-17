@@ -497,6 +497,14 @@ class VulnerabilityValidation(BaseModel):
     updated_at: str = ""
 
 
+class AgentModelTimeWindow(BaseModel):
+    """One model availability window in the Agent's local timezone."""
+
+    weekdays: list[int] = Field(default_factory=lambda: list(range(1, 8)))
+    start: str = ""
+    end: str = ""
+
+
 class OpenCodePoolModelStats(BaseModel):
     id: str
     model: str = ""
@@ -506,7 +514,7 @@ class OpenCodePoolModelStats(BaseModel):
     max_concurrency: int = 1
     enabled: bool = True
     available: bool = True
-    time_windows: list[dict[str, str]] = []
+    time_windows: list[dict[str, object]] = []
     queued: int = 0
     running: int = 0
     total: int = 0
@@ -653,7 +661,7 @@ class AgentOpenCodeModelConfig(BaseModel):
     executable: str = ""
     timeout: int | None = None
     max_retries: int | None = None
-    time_windows: list[dict[str, str]] = []
+    time_windows: list[AgentModelTimeWindow] = []
 
 
 class AgentOpenCodeConfig(BaseModel):

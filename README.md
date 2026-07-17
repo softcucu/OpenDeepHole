@@ -533,10 +533,21 @@ base:
   no_proxy: "10.0.0.0/8"
 model_pool:
   global_concurrency: 4
-  models: []
+  models:
+    - id: "night-model"
+      model: "provider/model"
+      capability: "high"
+      max_concurrency: 1
+      enabled: true
+      time_windows:
+        - weekdays: [1, 2, 3, 4, 5, 6]  # 周一至周六
+          start: "22:00"
+          end: "06:00"
 ```
 
 `server_url`、`agent_name`、`owner_token` 和 `checkers` 是本机启动字段；其余 v2 字段由 Web **「Agent 配置」** 页面管理并写回。完整模板见仓库根目录的 `agent.yaml`。配置以 `IP + machine_name` 形成稳定 Agent 身份，Agent 离线或重连后仍使用同一份服务端配置。
+
+模型的 `time_windows` 可配置多段，每段用 ISO 星期 `1..7` 表示周一至周日，并按 Agent 本地时间判断；各段取并集，未配置任何时间段表示全天可用。跨夜时间按当前星期判断，例如周一至周六 `22:00-06:00` 表示这些日期的 `00:00-06:00` 与 `22:00-24:00` 可用，周日不可用。旧配置未填写 `weekdays` 时继续按每天处理。
 
 管理配置热更新时会重写 `~/.opendeephole/opencode_workspace/opencode.json` 并将 OpenCode serve 标记为待重载。serve 空闲时由下一次模型任务自动加载；存在活动 Session 时延迟到空闲边界，因此无需重启 Agent，也不会为应用 MCP 配置强制终止正在运行的 Session。
 
@@ -584,6 +595,7 @@ OpenCode 模型池统计：
 - 威胁分析、候选点审计、威胁审计、去误报、历史分析、变体排查、SKILL 创建和漏洞验证全部通过 `OpenCodeTaskService`，统一创建/续写 session 并累计模型池统计。
 - 模型必须在 `model_pool.models[]` 中填写明确模型名并启用；不再接受默认模型行。没有显式模型时不能创建或恢复扫描。
 - `model_pool.global_concurrency` 是所有模型合计运行数的硬上限；每个模型还会受自己的 `max_concurrency` 和 `time_windows` 限制。
+- 配置页的每个模型可添加多段使用时间，每段独立选择周一至周日及起止时间；时间窗口只限制新取得的模型 Lease，不会中断已经运行的任务。
 - 任务优先级范围为 `1..100`，数值越大越先运行，同优先级按 FIFO；低/中能力任务优先用最低足够能力模型，在其不可用时可升级，高能力任务不会降级。
 - 任务超时只计算每条模型消息的执行阶段，不包含排队时间。新 session 重试保持同一 task ID、释放并重新申请模型 Lease；模型池 completed-task 历史只记录一次最终状态。排队中的任务修改能力、优先级或其它参数时保留 task ID、增加 revision 并重新入队。
 - 扫描详情页点击「模型看板」可以查看每个模型的累计任务、成功/失败/超时/取消计数、平均耗时、当前运行数和当前排队数。

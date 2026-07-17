@@ -6,7 +6,7 @@ import warnings
 from pathlib import Path
 
 import yaml
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 _DEFAULT_DATA_ROOT = _REPO_ROOT.parent / "OpenDeepHoleData"
@@ -30,6 +30,12 @@ class MCPServerConfig(BaseModel):
     port: int = 8100
 
 
+class OpenCodeModelTimeWindow(BaseModel):
+    weekdays: list[int] = Field(default_factory=lambda: list(range(1, 8)))
+    start: str = ""
+    end: str = ""
+
+
 class OpenCodeModelConfig(BaseModel):
     id: str = ""
     model: str = ""
@@ -42,7 +48,7 @@ class OpenCodeModelConfig(BaseModel):
     executable: str = ""
     timeout: int | None = None
     max_retries: int | None = None
-    time_windows: list[dict[str, str]] = []
+    time_windows: list[OpenCodeModelTimeWindow] = []
 
 
 class OpenCodeConfig(BaseModel):
