@@ -1766,6 +1766,13 @@ async def run_scan(
                 return
             if not (vuln.confirmed or vuln.ai_verdict == "confirmed"):
                 return
+            if not str(product or "").strip() or not str(validation_environment or "").strip():
+                await emit(
+                    "validation",
+                    f"[{candidate_index + 1}] Validation skipped: no product/environment target configured",
+                    candidate_index=candidate_index,
+                )
+                return
             if not response or response.get("index") is None:
                 await emit(
                     "validation",

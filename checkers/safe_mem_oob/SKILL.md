@@ -28,10 +28,6 @@ description: 判断安全内存函数调用是否存在真实的越界写风险
 - 如果 `dst` 的申请长度和 `dstsz` 一致，通常不构成问题，不要仅凭表达式外观下结论
 - 如果 `dstsz` 与目标缓冲区真实大小一致，或与偏移后真实剩余可写空间一致，不需要继续看 `count` 来确认 OOB；安全函数会用正确的容量参数拦住超长写入
 
-## 可用工具
-
-- `submit_result(confirmed, severity, description, ai_analysis)` - 审计完成后必须调用
-
 ## 标准流程
 
 ### Step 1 - 先确认调用语义
@@ -278,9 +274,9 @@ description: 判断安全内存函数调用是否存在真实的越界写风险
 - `medium`：需要特定内部状态、配置或调用顺序，但真实越界写路径成立
 - `low`：触发条件苛刻，或者接近边界，但仍能证明真实越界路径存在
 
-## 提交结果
+## 结论内容
 
-分析完成后必须调用 `submit_result`：
+分析完成后按以下字段给出结论：
 
 - `confirmed`: `true` 表示确认漏洞，`false` 表示误报
 - `severity`: `"high"` / `"medium"` / `"low"`
@@ -319,11 +315,3 @@ dstsz：N/A
 判定：该调用未能证明存在可达的越界写风险。
 修复建议：N/A
 ```
-
-## OpenDeepHole 当前运行时结果规则
-
-当前运行时不再通过 `submit_result` 返回漏洞审计结论。若上文仍要求调用 `submit_result`、或要求不要输出 JSON，以本节和本次任务初始提示词为准：
-
-- 不要调用 `submit_result`。
-- 最终回复必须输出符合本次任务初始提示词中“最终结果返回规则”的 JSON。
-- `ai_analysis` 字段仍可包含人类可读 Markdown 分析。

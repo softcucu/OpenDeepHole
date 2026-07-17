@@ -15,10 +15,6 @@ description: 验证双重释放候选漏洞（CWE-415），判断同一资源是
 
 候选线索只来自语法层面的初筛，无法感知：跨函数的所有权转移语义、释放包装函数内部是否真的释放、release 后但 goto 之前是否 `p = NULL`、refcount get 实际调用次数、宏内的 NULL 置位、跨编译单元的析构语义。你需要做语义层面的验证。
 
-## 可用工具
-
-- `submit_result(confirmed, severity, description, ai_analysis)` — 提交分析结论（必须调用）
-
 ## 分析步骤
 
 ### Step 1 — 读取完整函数体
@@ -114,9 +110,9 @@ Rule of Five 告警的真假取决于：
 - **medium**：需要特定错误路径或失败分支才触发，但路径在异常输入下可达
 - **low**：触发条件极为苛刻（仅在 OOM、罕见 syscall 失败等场景），或资源不受攻击者影响
 
-## 提交结果
+## 结论内容
 
-分析完成后**必须**调用 `submit_result` 提交结论：
+分析完成后按以下字段给出结论：
 
 - `confirmed`：true 表示确认漏洞，false 表示误报
 - `severity`：`"high"` / `"medium"` / `"low"`
@@ -128,11 +124,3 @@ Rule of Five 告警的真假取决于：
   4. 对 Template D：`$TAKE` 的所有权契约结论；对 Template G：拷贝可达性结论
   5. 调用链可达性：触发该路径的输入条件是否现实
   6. 最终判定理由
-
-## OpenDeepHole 当前运行时结果规则
-
-当前运行时不再通过 `submit_result` 返回漏洞审计结论。若上文仍要求调用 `submit_result`、或要求不要输出 JSON，以本节和本次任务初始提示词为准：
-
-- 不要调用 `submit_result`。
-- 最终回复必须输出符合本次任务初始提示词中“最终结果返回规则”的 JSON。
-- `ai_analysis` 字段仍可包含人类可读 Markdown 分析。

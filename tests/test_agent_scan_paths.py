@@ -572,7 +572,7 @@ class AgentScanPathTests(unittest.TestCase):
 
         events, reporter, auditor = asyncio.run(run())
 
-        self.assertEqual(reporter.pushed[0][1]["analysis_id"], "streamed-threat")
+        self.assertEqual(reporter.pushed[-1][1]["analysis_id"], "streamed-threat")
         self.assertEqual(auditor.await_count, 2)
         first_kwargs = auditor.await_args_list[0].kwargs
         final_kwargs = auditor.await_args_list[1].kwargs
@@ -1073,15 +1073,15 @@ class ScanStoreCodeScanPathTests(unittest.TestCase):
             )
 
             store.save_scan(scan, meta)
-            store.update_scan_product("scan-1", "5G")
+            store.update_scan_validation_target("scan-1", "5G", "实验室环境")
 
             loaded = store.load_scan("scan-1")
             self.assertIsNotNone(loaded)
             loaded_scan, loaded_meta = loaded
             self.assertEqual(loaded_scan.product, "5G")
             self.assertEqual(loaded_meta.product, "5G")
-            self.assertEqual(loaded_scan.validation_environment, "仿真UBBPi板环境")
-            self.assertEqual(loaded_meta.validation_environment, "仿真UBBPi板环境")
+            self.assertEqual(loaded_scan.validation_environment, "实验室环境")
+            self.assertEqual(loaded_meta.validation_environment, "实验室环境")
 
     def test_create_threat_analysis_only_scan_allows_empty_checkers(self) -> None:
         class Request:

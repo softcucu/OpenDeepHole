@@ -1,0 +1,4 @@
+schema_version: 1
+product: LTE
+validation_environment: 仿真UBBPi板环境
+timeout_seconds: 7200

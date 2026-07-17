@@ -98,10 +98,12 @@ class Vulnerability(BaseModel):
     file: str
     line: int
     function: str
+    call_chain: list[str] = []
     vuln_type: str
     severity: str        # "high", "medium", "low"
     description: str
     ai_analysis: str
+    vulnerability_report: str = ""            # Markdown report emitted by the audit
     confirmed: bool
     ai_verdict: str = ""                     # "confirmed" | "not_confirmed" | "timeout" | "no_result" | "failed" | "filtered_same_pattern"
     failure_reason: str = ""                 # OpenCode/runner output for retryable failures
@@ -476,7 +478,7 @@ class VulnerabilityValidation(BaseModel):
     """Runtime validation status and artifacts for one vulnerability."""
     scan_id: str = ""
     vuln_index: int
-    status: str = "pending"              # pending | running | verified | failed | error | timeout | skipped
+    status: str = "pending"              # pending | queued | running | verified | failed | error | timeout | skipped | cancelled
     running: bool = False
     product: str = ""
     validation_environment: str = ""
@@ -692,8 +694,6 @@ class AgentPatternFilterConfig(BaseModel):
 
 class AgentVulnerabilityValidationConfig(BaseModel):
     enabled: bool = True
-    script_path: str = ""
-    command: str = ""
     timeout_seconds: int = 7200
 
 
@@ -724,16 +724,20 @@ class CreateScanRequest(BaseModel):
     feedback_ids: list[str] = []
 
 
-class ScanProductList(BaseModel):
-    products: list[str]
+class ValidationTarget(BaseModel):
+    validator_id: str
+    product: str
+    validation_environment: str
+    timeout_seconds: int | None = None
 
 
-class ScanValidationEnvironmentList(BaseModel):
-    validation_environments: list[str]
+class ScanValidationTargetList(BaseModel):
+    targets: list[ValidationTarget]
 
 
-class UpdateScanProductRequest(BaseModel):
+class UpdateScanValidationTargetRequest(BaseModel):
     product: str = ""
+    validation_environment: str = ""
 
 
 class ScanMeta(BaseModel):

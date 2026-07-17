@@ -14,10 +14,6 @@ pointer variable involved) that may contain an NPD. Treat it only as a lead — 
 independently determine whether this is a **real vulnerability** or a **false positive**
 by analyzing the code in depth.
 
-## Available Tools
-
-- `submit_result(confirmed, severity, description, ai_analysis)` — **Submit your final result (required)**
-
 ## Analysis Steps
 
 1. **Read the dereference location**: Examine the code around the candidate line.
@@ -46,7 +42,7 @@ by analyzing the code in depth.
 
 ## Output
 
-When you have completed your analysis, you **MUST** call the `submit_result` tool with:
+When you have completed your analysis, provide these result fields:
 
 - `confirmed`: `true` if this is a real vulnerability, `false` if it is a false positive
 - `severity`: `"high"`, `"medium"`, or `"low"` (only meaningful when confirmed is true)
@@ -56,13 +52,3 @@ When you have completed your analysis, you **MUST** call the `submit_result` too
   1. **【赋值点】** 空指针被赋值的确切位置（文件:行号）及为何可能为 NULL；
   2. **【无判空路径】** 从赋值点到解引用点的每条可达路径上均无有效判空的证明；
   3. **【调用链/调用过程】** 从赋值点到解引用点的调用链或执行路径（跨函数时给出 `caller → callee`），并标注关键行号。
-
-Do not output any JSON block — call `submit_result` as your final action.
-
-## OpenDeepHole 当前运行时结果规则
-
-当前运行时不再通过 `submit_result` 返回漏洞审计结论。若上文仍要求调用 `submit_result`、或要求不要输出 JSON，以本节和本次任务初始提示词为准：
-
-- 不要调用 `submit_result`。
-- 最终回复必须输出符合本次任务初始提示词中“最终结果返回规则”的 JSON。
-- `ai_analysis` 字段仍可包含人类可读 Markdown 分析。

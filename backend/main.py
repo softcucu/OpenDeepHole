@@ -57,6 +57,10 @@ async def lifespan(app: FastAPI):
     registry = get_registry()
     logger.info("Loaded %d checkers: %s", len(registry), list(registry.keys()))
 
+    from backend.validation_catalog import refresh_validation_catalog
+
+    refresh_validation_catalog()
+
     logger.info("OpenDeepHole backend started on port %d", config.server.port)
     yield
     store.close()

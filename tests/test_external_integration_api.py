@@ -93,6 +93,7 @@ class ExternalIntegrationApiTests(unittest.TestCase):
                             agent_name="reverse-linux-agent",
                             project_path="/repo/project",
                             scan_name="project",
+                            product="LTE",
                             validation_environment="仿真UBBPi板环境",
                             agent_config=AgentRemoteConfig(
                                 opencode={"tool": "opencode", "executable": "opencode", "model": "model"},

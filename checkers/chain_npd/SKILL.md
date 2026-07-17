@@ -24,9 +24,7 @@ description: 验证链式指针空指针解引用候选漏洞
 3. **给出调用链/调用过程**：当赋值与解引用跨函数时，还原 `caller → callee` 调用过程，
    给出从“赋值点 → 解引用点”的完整调用链 / 执行路径并标注关键行号。
 
-# 提交结果
-
-分析完成后，**必须**调用 `submit_result` 工具提交结论：
+# 结论内容
 
 - `confirmed`：true 表示确认漏洞，false 表示误报
 - `severity`：置信程度 "high" / "medium" / "low"
@@ -66,11 +64,3 @@ void handle(Context *ctx) {
 ```
 <结构体定义、初始化路径、是否保证非空的关键代码片段及说明>
 ```
-
-## OpenDeepHole 当前运行时结果规则
-
-当前运行时不再通过 `submit_result` 返回漏洞审计结论。若上文仍要求调用 `submit_result`、或要求不要输出 JSON，以本节和本次任务初始提示词为准：
-
-- 不要调用 `submit_result`。
-- 最终回复必须输出符合本次任务初始提示词中“最终结果返回规则”的 JSON。
-- `ai_analysis` 字段仍可包含人类可读 Markdown 分析。

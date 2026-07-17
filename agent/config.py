@@ -83,8 +83,6 @@ class PatternFilterConfig:
 @dataclass
 class VulnerabilityValidationConfig:
     enabled: bool = True
-    script_path: str = ""
-    command: str = ""
     timeout_seconds: int = 7200
 
 

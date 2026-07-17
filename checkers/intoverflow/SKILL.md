@@ -16,10 +16,6 @@ description: 验证整数溢出/翻转候选漏洞
 - `count * sizeof(T)` 等 size 计算进入 allocation/copy size，可能出现乘法溢出。
 - 算术结果被窄化为 `uint8_t`、`uint16_t`、`short` 等小类型后进入危险 sink。
 
-## 可用工具
-
-- `submit_result(confirmed, severity, description, ai_analysis)` - 提交结论，必须调用
-
 ## 分析方法
 
 1. 先查看 candidate 所在函数的完整源码。候选描述中的少量上下文不足以判断真实风险。
@@ -59,19 +55,11 @@ description: 验证整数溢出/翻转候选漏洞
 - `medium`: 外部可控但影响主要是循环边界、拒绝服务、异常返回或需要额外条件才能触发内存破坏。
 - `low`: 风险理论存在但触发条件弱、影响有限，或需要非常强的环境假设。
 
-## 提交结果
+## 结论内容
 
-调用 `submit_result` 提交结论。`ai_analysis` 中需要说明：
+`ai_analysis` 中需要说明：
 
 - 你确认或否定的输入来源和值域。
 - 整数运算是否会在目标类型下溢出/下溢/截断。
 - 关键防护是否存在且有效。
 - 溢出结果是否可达危险 sink，以及最终判定理由。
-
-## OpenDeepHole 当前运行时结果规则
-
-当前运行时不再通过 `submit_result` 返回漏洞审计结论。若上文仍要求调用 `submit_result`、或要求不要输出 JSON，以本节和本次任务初始提示词为准：
-
-- 不要调用 `submit_result`。
-- 最终回复必须输出符合本次任务初始提示词中“最终结果返回规则”的 JSON。
-- `ai_analysis` 字段仍可包含人类可读 Markdown 分析。

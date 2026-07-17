@@ -9,10 +9,6 @@ description: 验证循环中变化索引、循环累加指针或 copy_from_user 
 
 该线索只来自语法层面的初筛，而且故意偏宽以提高候选召回。你的任务不是确认“代码看起来可疑”，也不是因为循环条件没有直接写 `$IDX` 就确认漏洞，而是判断是否存在真实、可达的越界读写风险。只有能证明 `$IDX`、`$DST` 或 `$LEN` 的组合可能越过被访问对象的真实边界，并能说明漏洞如何被触发时，才确认漏洞。
 
-## 可用工具
-
-- `submit_result(confirmed, severity, description, ai_analysis)` - 审计完成后必须调用
-
 ## 审计流程
 
 ### Step 1 - 读取完整函数
@@ -118,19 +114,11 @@ description: 验证循环中变化索引、循环累加指针或 copy_from_user 
 - `medium`：真实可达，但主要来自内部状态、错误路径或攻击者控制较弱的路径。
 - `low`：确认存在越界，但触发条件苛刻、影响范围小或仅低频路径。
 
-## 提交结果
+## 结论内容
 
-分析完成后必须调用 `submit_result`：
+分析完成后按以下字段给出结论：
 
 - `confirmed`：只有确认真实越界时为 `true`
 - `severity`：`high` / `medium` / `low`
 - `description`：一句话说明真实问题或误报原因
 - `ai_analysis`：写清 `$IDX`/`$DST`/`$LEN` 的变化、循环条件、目标对象边界、已有校验、可达性、漏洞触发方式和最终判断
-
-## OpenDeepHole 当前运行时结果规则
-
-当前运行时不再通过 `submit_result` 返回漏洞审计结论。若上文仍要求调用 `submit_result`、或要求不要输出 JSON，以本节和本次任务初始提示词为准：
-
-- 不要调用 `submit_result`。
-- 最终回复必须输出符合本次任务初始提示词中“最终结果返回规则”的 JSON。
-- `ai_analysis` 字段仍可包含人类可读 Markdown 分析。

@@ -49,6 +49,16 @@ def _json_dict(value: str | None) -> dict[str, str]:
     return {str(k): str(v) for k, v in data.items()}
 
 
+def _json_string_list(value: str | None) -> list[str]:
+    try:
+        data = json.loads(value or "[]")
+    except Exception:
+        return []
+    if not isinstance(data, list):
+        return []
+    return [str(item).strip() for item in data if str(item).strip()]
+
+
 def _output_source(value: str | None) -> OutputSource:
     try:
         data = json.loads(value or "{}")
@@ -121,10 +131,12 @@ CREATE TABLE IF NOT EXISTS vulnerabilities (
     file                TEXT NOT NULL,
     line                INTEGER NOT NULL,
     function            TEXT NOT NULL,
+    call_chain          TEXT NOT NULL DEFAULT '[]',
     vuln_type           TEXT NOT NULL,
     severity            TEXT NOT NULL,
     description         TEXT NOT NULL,
     ai_analysis         TEXT NOT NULL,
+    vulnerability_report TEXT NOT NULL DEFAULT '',
     confirmed           INTEGER NOT NULL,
     ai_verdict          TEXT NOT NULL DEFAULT '',
     failure_reason      TEXT NOT NULL DEFAULT '',
@@ -487,6 +499,14 @@ class SqliteScanStore(ScanStoreBase):
         if "threat_code_path" not in vuln_cols:
             self._conn.execute(
                 "ALTER TABLE vulnerabilities ADD COLUMN threat_code_path TEXT NOT NULL DEFAULT ''"
+            )
+        if "call_chain" not in vuln_cols:
+            self._conn.execute(
+                "ALTER TABLE vulnerabilities ADD COLUMN call_chain TEXT NOT NULL DEFAULT '[]'"
+            )
+        if "vulnerability_report" not in vuln_cols:
+            self._conn.execute(
+                "ALTER TABLE vulnerabilities ADD COLUMN vulnerability_report TEXT NOT NULL DEFAULT ''"
             )
 
         self._conn.executescript("""\
@@ -950,11 +970,16 @@ class SqliteScanStore(ScanStoreBase):
         )
         return [self._row_to_scan_summary(row) for row in cur.fetchall()]
 
-    def update_scan_product(self, scan_id: str, product: str) -> None:
+    def update_scan_validation_target(
+        self,
+        scan_id: str,
+        product: str,
+        validation_environment: str,
+    ) -> None:
         with self._lock:
             self._conn.execute(
-                "UPDATE scans SET product = ? WHERE scan_id = ?",
-                (product, scan_id),
+                "UPDATE scans SET product = ?, validation_environment = ? WHERE scan_id = ?",
+                (product, validation_environment, scan_id),
             )
             self._conn.commit()
 
@@ -1392,14 +1417,14 @@ class SqliteScanStore(ScanStoreBase):
             self._conn.execute(
                 """\
                 INSERT INTO vulnerabilities
-                    (scan_id, idx, audit_index, file, line, function, vuln_type,
-                     severity, description, ai_analysis, confirmed,
+                    (scan_id, idx, audit_index, file, line, function, call_chain, vuln_type,
+                     severity, description, ai_analysis, vulnerability_report, confirmed,
                      ai_verdict, failure_reason, user_verdict, user_verdict_reason,
                      ticket_submitted, ticket_id,
                      function_source, function_start_line, variant_of,
                      analysis_source, source_task_id, threat_surface_node_id,
                      threat_method_node_id, threat_code_path, output_source)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     scan_id,
@@ -1408,10 +1433,12 @@ class SqliteScanStore(ScanStoreBase):
                     vuln.file,
                     vuln.line,
                     vuln.function,
+                    json.dumps(vuln.call_chain, ensure_ascii=False),
                     vuln.vuln_type,
                     vuln.severity,
                     vuln.description,
                     vuln.ai_analysis,
+                    vuln.vulnerability_report,
                     1 if vuln.confirmed else 0,
                     vuln.ai_verdict,
                     vuln.failure_reason,
@@ -1459,9 +1486,11 @@ class SqliteScanStore(ScanStoreBase):
                     """\
                     UPDATE vulnerabilities
                     SET audit_index = ?,
+                        call_chain = ?,
                         severity = ?,
                         description = ?,
                         ai_analysis = ?,
+                        vulnerability_report = ?,
                         confirmed = ?,
                         ai_verdict = ?,
                         failure_reason = ?,
@@ -1482,9 +1511,11 @@ class SqliteScanStore(ScanStoreBase):
                     """,
                     (
                         vuln.audit_index,
+                        json.dumps(vuln.call_chain, ensure_ascii=False),
                         vuln.severity,
                         vuln.description,
                         vuln.ai_analysis,
+                        vuln.vulnerability_report,
                         1 if vuln.confirmed else 0,
                         vuln.ai_verdict,
                         vuln.failure_reason,
@@ -1512,14 +1543,14 @@ class SqliteScanStore(ScanStoreBase):
             self._conn.execute(
                 """\
                 INSERT INTO vulnerabilities
-                    (scan_id, idx, audit_index, file, line, function, vuln_type,
-                     severity, description, ai_analysis, confirmed,
+                    (scan_id, idx, audit_index, file, line, function, call_chain, vuln_type,
+                     severity, description, ai_analysis, vulnerability_report, confirmed,
                      ai_verdict, failure_reason, user_verdict, user_verdict_reason,
                      ticket_submitted, ticket_id,
                      function_source, function_start_line, variant_of,
                      analysis_source, source_task_id, threat_surface_node_id,
                      threat_method_node_id, threat_code_path, output_source)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     scan_id,
@@ -1528,10 +1559,12 @@ class SqliteScanStore(ScanStoreBase):
                     vuln.file,
                     vuln.line,
                     vuln.function,
+                    json.dumps(vuln.call_chain, ensure_ascii=False),
                     vuln.vuln_type,
                     vuln.severity,
                     vuln.description,
                     vuln.ai_analysis,
+                    vuln.vulnerability_report,
                     1 if vuln.confirmed else 0,
                     vuln.ai_verdict,
                     vuln.failure_reason,
@@ -1657,10 +1690,20 @@ class SqliteScanStore(ScanStoreBase):
                 file=r["file"],
                 line=r["line"],
                 function=r["function"],
+                call_chain=(
+                    _json_string_list(r["call_chain"])
+                    if "call_chain" in r.keys()
+                    else []
+                ) or [r["function"]],
                 vuln_type=r["vuln_type"],
                 severity=r["severity"],
                 description=r["description"],
                 ai_analysis=r["ai_analysis"],
+                vulnerability_report=(
+                    r["vulnerability_report"]
+                    if "vulnerability_report" in r.keys()
+                    else ""
+                ) or "",
                 confirmed=bool(r["confirmed"]),
                 ai_verdict=r["ai_verdict"] or "",
                 failure_reason=(r["failure_reason"] if "failure_reason" in r.keys() else "") or "",
@@ -1798,7 +1841,7 @@ class SqliteScanStore(ScanStoreBase):
                 placeholders = ",".join("?" * len(chunk))
                 cur = self._conn.execute(
                     f"""\
-                    SELECT scan_id, vuln_type, ai_verdict, confirmed, user_verdict
+                    SELECT scan_id, vuln_type, ai_verdict, confirmed, user_verdict, analysis_source
                     FROM vulnerabilities
                     WHERE scan_id IN ({placeholders})
                     ORDER BY scan_id, idx
@@ -1812,6 +1855,7 @@ class SqliteScanStore(ScanStoreBase):
                             ai_verdict=r["ai_verdict"] or "",
                             confirmed=bool(r["confirmed"]),
                             user_verdict=r["user_verdict"],
+                            analysis_source=r["analysis_source"] or "static_candidate",
                         )
                     )
         return out

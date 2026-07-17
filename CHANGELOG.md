@@ -1,5 +1,14 @@
 # 更新日志
 
+## 2026-07-17
+
+- **变更** 产品漏洞验证改为 `validator.yaml + validator.py` 的独立方法目录，manifest 严格声明唯一的产品/验证环境对及可选超时；后端目录、创建扫描和历史编辑均只允许选择有效配对，产品与环境也可同时留空以关闭验证
+- **变更** 验证方法不再热加载或运行于独立 worker 子进程，统一在 Agent 主进程事件循环中执行严格的 `async def validate(ctx) -> ValidationResult`；同一扫描按 FIFO 串行、不同扫描可并发，普通编译/PoC 命令仍由 `ctx.run_command(...)` 托管并支持进程树取消
+- **变更** validator 直接通过 `get_opencode_task_service().run_task(OpenCodeTaskSpec(...))` 复用威胁分析和候选审计的模型池、Session 与 MCP 上下文；两个独立模型任务可通过 `asyncio.gather(...)` 并发提交，同一 Session 的续写保持串行
+- **新增** 验证上下文直接提供漏洞文件、验证入口函数、漏洞函数、函数调用链、漏洞类型、Markdown 报告、项目根目录、扫描路径和默认可写工作目录；显式中间输出与产物继续沿用原验证页面，OpenCode 流和普通 `print(...)` 仅输出到 Agent/调试控制台
+- **新增** `python -m agent.validation_debug` 支持在不启动 Web 后端的情况下加载真实 manifest、Agent 配置和 debug case 单独运行验证方法；开发指南补齐并发 OpenCode、Session、取消、产物和部署约定
+- **变更** `agent/product_validators/` 纳入任务前强制 Agent runtime 同步并移除手动同步 API/按钮和旧脚本命令配置；候选点/项目/威胁审计 JSON 新增 `vuln_type`、入口到漏洞函数的 `call_chain` 与 Markdown `vulnerability_report` 持久化，所有生效 SKILL 和运行时提示词清除废弃的结果提交工具说明
+
 ## 2026-07-16
 
 - **变更** `OpenCodeTaskSpec` 收敛为任务名、prompt、真实 `directory`、能力/超时/优先级、JSON Schema、双层重试、Session、`writable_paths` 和回调；移除调用方传入的 `workspace`、`scope_id`、`task_context`、MCP/SKILL 选择、权限、CLI 配置及全局并发覆盖，扫描作用域和任务元数据改由 Agent 执行入口自动绑定

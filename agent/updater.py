@@ -32,7 +32,6 @@ SKIP_DIRS = {
     "static",
     "system_skills",
     "vulnerability_validation",
-    "product_validators",
 }
 SKIP_SUFFIXES = {".pyc", ".pyo"}
 PENDING_COMMANDS_FILE = Path.home() / ".opendeephole" / "pending_commands.json"
@@ -163,8 +162,7 @@ async def ensure_runtime_updated(update: dict[str, Any] | None, command: dict[st
     try:
         archive = await _download_update(update)
     except Exception as e:
-        print(f"Warning: runtime update download failed ({e}), continuing with current runtime")
-        return False
+        raise RuntimeError(f"runtime update download failed: {e}") from e
 
     save_pending_command(command)
     _install_update_archive(archive, expected_hash, update.get("manifest"))

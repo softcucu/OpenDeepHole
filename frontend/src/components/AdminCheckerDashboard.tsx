@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import type { ReactNode } from "react";
-import { getCheckerDashboard, getScanProducts } from "../api/client";
+import { getCheckerDashboard, getValidationTargets } from "../api/client";
 import type { CheckerDashboardResponse, CheckerDashboardStats, CheckerScanDashboardStats, ScanItemStatus } from "../types";
 
 interface Props {
@@ -42,7 +42,9 @@ export default function AdminCheckerDashboard({ onBack, onViewScan }: Props) {
   };
 
   useEffect(() => {
-    getScanProducts().then(setProducts).catch(() => {});
+    getValidationTargets()
+      .then((targets) => setProducts(Array.from(new Set(targets.map((target) => target.product))).sort()))
+      .catch(() => {});
     refresh("");
   }, []);
 

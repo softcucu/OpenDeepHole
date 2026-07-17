@@ -27,7 +27,7 @@ flowchart LR
 - `backend/opencode/model_pool.py`：全局队列、能力匹配、并发、优先级和统计。
 - `backend/opencode/serve_client.py`：serve 进程、Session API、消息与事件流。
 - `backend/opencode/config.py`：Agent 全局 OpenCode workspace 和全量 SKILL 注册。
-- `agent/vulnerability_validation.py`：验证 worker 到 Agent 父进程的同步 RPC 门面。
+- `agent/vulnerability_validation.py`：Agent 主进程内的异步验证器运行时与上下文绑定。
 
 所有任务共享一个固定 workspace：
 
@@ -280,27 +280,32 @@ result = (await handle.result()).raise_for_status()
 
 全局并发始终来自 `opencode_concurrency`；模型能力、单模型 `max_concurrency`、权重和时间窗由模型池统一处理，单任务不能覆盖全局并发。
 
-## 10. 漏洞验证 worker
+## 10. 漏洞验证方法
 
-validator 子进程使用同步接口：
+validator 与其它 Agent 业务位于同一进程和事件循环，直接调用公共异步接口：
 
 ```python
-result = ctx.run_opencode_task(
-    task_name="validation poc analysis",
-    prompt="使用 `validation-poc` 技能分析报告并只输出 JSON。",
-    required_capability="high",
-    directory=ctx.project_path,
-    timeout_seconds=ctx.timeout_seconds,
-    priority=80,
-    output_schema=RESULT_SCHEMA,
-    output_retry_count=2,
-    attempt=2,
-    session_id=None,
-    writable_paths=[],
+result = await get_opencode_task_service().run_task(
+    OpenCodeTaskSpec(
+        task_name="validation poc analysis",
+        prompt="分析漏洞报告并只输出 JSON。",
+        required_capability="high",
+        directory=ctx.project_path,
+        timeout_seconds=ctx.timeout_seconds,
+        priority=80,
+        output_schema=RESULT_SCHEMA,
+        output_retry_count=2,
+        attempt=2,
+        writable_paths=[ctx.work_dir],
+        on_output=ctx.opencode_output,
+        cancel_event=ctx.cancel_event,
+    )
 )
 ```
 
-validator 不传 MCP、SKILL 或权限列表。父进程自动绑定当前 `scan_id`、注册共享 MCP 网关、补充 `project_id`，并由统一任务服务执行。`attempt` 与后端接口含义相同：它是新 Session 重试次数。
+validator 不传 MCP、SKILL 或权限列表。运行时自动绑定当前 `scan_id`、当前漏洞工作目录和验证任务元数据，并复用共享 MCP 网关。`attempt` 与后端接口含义相同：它是新 Session 重试次数。
+
+两个独立任务可以用 `asyncio.gather()` 并发调用 `run_task()`；它们各自创建 Session，并受同一个全局模型池调度。带相同 `session_id` 的续写任务必须串行执行，避免破坏同一会话的消息顺序。
 
 验证页面的 `intermediate_output` 仍只接收显式 `ctx.emit_stdout(...)` 和 `ctx.run_command(...)` 输出；OpenCode 内部流只打印到 Agent 控制台。
 

@@ -20,10 +20,6 @@ description: 验证多层指针成员资源泄露候选漏洞（CWE-401 / CWE-77
 
 候选线索只来自语法层面的初筛，无法感知：所有权是否转移到外部对象（典型场景：把资源挂到 `ctx->session->buf`，由 owner 的析构/销毁函数统一释放）、宏内的释放、跨函数的 cleanup、跨编译单元的析构合约。多层指针成员资源管理本身**所有权链复杂、误报率高**，必须做语义层面的验证。
 
-## 可用工具
-
-- `submit_result(confirmed, severity, description, ai_analysis)` — 提交分析结论（必须调用）
-
 ## 分析步骤
 
 ### Step 1 — 读取完整函数体
@@ -127,9 +123,9 @@ ctx ─owns─► session ─owns─► buf
 - **medium**：仅在错误路径 / 异常路径下泄露、或 caller 已经通过 destroy 部分释放但留下细节缺口
 - **low**：仅进程启动 / 一次性路径上的小量泄露，对服务运行影响极小
 
-## 提交结果
+## 结论内容
 
-分析完成后**必须**调用 `submit_result` 提交结论：
+分析完成后按以下字段给出结论：
 
 - `confirmed`：true 表示确认漏洞，false 表示误报
 - `severity`：`"high"` / `"medium"` / `"low"`
@@ -141,11 +137,3 @@ ctx ─owns─► session ─owns─► buf
   4. caller 端的销毁责任（来自调用方分析的结论）
   5. 是否存在通过宏 / wrapper 完成的隐式释放
   6. 最终判定理由
-
-## OpenDeepHole 当前运行时结果规则
-
-当前运行时不再通过 `submit_result` 返回漏洞审计结论。若上文仍要求调用 `submit_result`、或要求不要输出 JSON，以本节和本次任务初始提示词为准：
-
-- 不要调用 `submit_result`。
-- 最终回复必须输出符合本次任务初始提示词中“最终结果返回规则”的 JSON。
-- `ai_analysis` 字段仍可包含人类可读 Markdown 分析。

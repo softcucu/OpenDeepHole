@@ -62,11 +62,9 @@ pattern_filter:
   enabled: true
   scope: "directory"  # directory | file | repo
 
-# 漏洞验证脚本配置。脚本在 Agent 本机运行，脚本文件不会随远端 runtime/checker 同步。
+# 漏洞验证配置。验证方法目录随任务前的 Agent runtime 更新强制同步。
 vulnerability_validation:
   enabled: true
-  script_path: ""      # 留空时使用 ~/.opendeephole/vulnerability_validation/validator.py
-  command: ""          # 可选自定义命令；会追加 --report <file> --output <file>
   timeout_seconds: 7200
 
 # AI 去误报 OpenCode 配置（可选）

@@ -1,5 +1,5 @@
 import axios from "axios";
-import type { AgentInfo, AgentOpenCodeModelsResult, AgentOpenCodePoolStatus, AgentRemoteConfig, CheckerCatalogItem, CheckerDashboardResponse, CheckerInfo, FeedbackEntry, FpReviewJob, HistoryPattern, IndexStatus, ScanStatus, ScanStartResponse, ScanSummary, SkillCreateJob, SkillImportFile, SkillReport, TokenResponse, User, UserFeedbackVerdict } from "../types";
+import type { AgentInfo, AgentOpenCodeModelsResult, AgentOpenCodePoolStatus, AgentRemoteConfig, CheckerCatalogItem, CheckerDashboardResponse, CheckerInfo, FeedbackEntry, FpReviewJob, HistoryPattern, IndexStatus, ScanStatus, ScanStartResponse, ScanSummary, SkillCreateJob, SkillImportFile, SkillReport, TokenResponse, User, UserFeedbackVerdict, ValidationTarget } from "../types";
 
 export const api = axios.create({ baseURL: "/" });
 
@@ -234,18 +234,20 @@ export async function getScanStatus(scanId: string): Promise<ScanStatus> {
   return data;
 }
 
-export async function getScanProducts(): Promise<string[]> {
-  const { data } = await api.get<{ products: string[] }>("/api/scan/products");
-  return data.products;
+export async function getValidationTargets(): Promise<ValidationTarget[]> {
+  const { data } = await api.get<{ targets: ValidationTarget[] }>("/api/scan/validation-targets");
+  return data.targets;
 }
 
-export async function getScanValidationEnvironments(): Promise<string[]> {
-  const { data } = await api.get<{ validation_environments: string[] }>("/api/scan/validation-environments");
-  return data.validation_environments;
-}
-
-export async function updateScanProduct(scanId: string, product: string): Promise<void> {
-  await api.put(`/api/scan/${scanId}/product`, { product });
+export async function updateScanValidationTarget(
+  scanId: string,
+  product: string,
+  validationEnvironment: string,
+): Promise<void> {
+  await api.put(`/api/scan/${scanId}/validation-target`, {
+    product,
+    validation_environment: validationEnvironment,
+  });
 }
 
 export async function stopScan(scanId: string): Promise<void> {
@@ -558,13 +560,6 @@ export async function getAgentOpenCodeModels(agentId: string, refresh = false): 
 
 export async function updateAgentConfig(agentId: string, config: AgentRemoteConfig): Promise<void> {
   await api.put(`/api/agent/${agentId}/config`, config);
-}
-
-export async function syncProductValidators(agentId: string): Promise<{ ok: boolean; message: string; installed: string[] }> {
-  const { data } = await api.post<{ ok: boolean; message: string; installed: string[] }>(
-    `/api/agent/${agentId}/product-validators/sync`,
-  );
-  return data;
 }
 
 // --- FP Review ---

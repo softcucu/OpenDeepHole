@@ -17,6 +17,7 @@ class VulnLike(Protocol):
     ai_verdict: str | None
     confirmed: bool
     user_verdict: str | None
+    analysis_source: str
 
 
 @dataclass(frozen=True)
@@ -27,6 +28,7 @@ class VulnStat:
     ai_verdict: str | None
     confirmed: bool
     user_verdict: str | None
+    analysis_source: str = "static_candidate"
 
 
 @dataclass(frozen=True)

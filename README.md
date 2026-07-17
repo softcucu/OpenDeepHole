@@ -163,8 +163,7 @@ opencode:
 # 同时受单模型 max_concurrency 和每日使用时间限制。
 opencode_concurrency: 3
 
-# 漏洞验证默认整体超时为 2 小时；产品验证器可通过
-# registry.register("LTE", validate_demo, validation_environment="仿真UBBPi板环境", timeout_seconds=7200) 覆盖。
+# 漏洞验证默认整体超时为 2 小时；验证方法可在 validator.yaml 中覆盖。
 vulnerability_validation:
   enabled: true
   timeout_seconds: 7200
@@ -228,7 +227,9 @@ OpenDeepHole Agent
 ```
 
 Agent 通过 WebSocket 保持长连接，等待服务器推送任务。
-启动后的 Agent 支持扫描前自动更新运行时代码。服务端更新 `agent/`、`backend/`、`code_parser/`、`mcp_server/`、包内 Windows ctags 目录或 `requirements-agent.txt` 后，旧 Agent 会在下次启动扫描前下载最新 runtime 并重启继续执行该扫描；runtime 更新包会携带快照 manifest，用于校验下载 zip 的文件集合和逐文件 hash；`checkers/` 更新会在创建或恢复扫描时按选中检查项同步到 Agent，不会触发 Agent 重启；漏洞验证不会触发 runtime 下载，修改 `agent/product_validators/` 后在客户端页面点击「同步验证方法」推送到在线 Agent；如果更新了 `run_agent.sh` 或 `run_agent.bat`，需要重新下载 Agent 包。
+启动后的 Agent 支持任务执行前自动更新运行时代码。服务端更新 `agent/`（包含 `agent/product_validators/`）、`backend/`、`code_parser/`、`mcp_server/`、包内 Windows ctags 目录或 `requirements-agent.txt` 后，旧 Agent 会在下次启动扫描、恢复扫描、去误报或漏洞验证任务前下载最新 runtime 并重启后继续执行；runtime 更新包会携带快照 manifest，用于校验下载 zip 的文件集合和逐文件 hash；`checkers/` 更新仍在创建或恢复扫描时按选中检查项同步，不单独触发 runtime 重启；如果更新了 `run_agent.sh` 或 `run_agent.bat`，需要重新下载 Agent 包。
+
+外部验证方法开发、Context 契约、并发 OpenCode 调用和无后端单独调试方式见 [`agent/product_validators/README.md`](agent/product_validators/README.md)。
 
 **第 4 步：在 Web UI 创建扫描任务**
 
@@ -632,8 +633,6 @@ pattern_filter:
 # 漏洞验证脚本配置；默认整体超时 2 小时。
 vulnerability_validation:
   enabled: true
-  script_path: ""
-  command: ""
   timeout_seconds: 7200
 
 # Git 历史安全问题挖掘配置；默认关闭，设为 true 后会在静态分析后、
@@ -669,7 +668,7 @@ OpenCode 调用约定：
 - `output_schema` 使用普通文本 JSON 约束，不发送 OpenCode 原生 `format`。JSON 不合规时默认在原 session 追加 2 次纠正；`attempt` 表示纠正仍失败或普通执行错误后重新排队并创建新 session 的次数，未传时使用 `opencode.max_retries`。
 - OpenCode/nga serve 会话会保留在真实项目目录下，便于用 `opencode session list` 查看历史；Agent 只在取消或超时时 abort session，不在正常完成后删除 session。
 - Agent 进程内只有一个共享 deephole-code MCP 网关；各扫描用 `project_id` 注册自己的 `code_index.db` 路由，不再为每个扫描启动独立 MCP 服务。
-- 漏洞验证 worker 通过父进程 RPC 调用同一个 OpenCode 任务组件；父进程按需复用共享 MCP 网关、注册项目索引路由并向 prompt 补充 `project_id`；验证脚本直接执行 `nga`、`opencode`、`hac` 或 `claude` 会被拒绝。
+- 漏洞验证方法在 Agent 主进程中异步执行，直接调用同一个 `OpenCodeTaskService`，复用共享 MCP 网关和项目索引路由；验证方法直接执行 `nga`、`opencode`、`hac` 或 `claude` 会被拒绝。
 
 内部 Python 调用统一使用 `backend.opencode.task_service`：
 
@@ -731,7 +730,7 @@ npm run build
 tail -f logs/opendeephole.log
 ```
 
-> **注意：** Agent 需要运行支持 checker 同步的新版本。之后新增或修改 checker 时，只要点击开始扫描，后端会把本次选中的 checker 同步到 Agent，无需重启后端或 Agent，也不会触发 Agent runtime 自更新重启。修改产品验证器时，点击客户端页面的「同步验证方法」即可；重新点击漏洞验证只会执行 Agent 当前安装的验证器，不会下载 runtime。
+> **注意：** Agent 需要运行支持 checker 同步的新版本。之后新增或修改 checker 时，只要点击开始扫描，后端会把本次选中的 checker 同步到 Agent。新增或修改产品验证方法时，上传到服务端并重启服务端；启动下一个任务时会先强制同步 Agent runtime，再执行验证。
 
 ## 数据存储位置
 

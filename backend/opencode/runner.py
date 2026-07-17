@@ -27,12 +27,12 @@ from backend.opencode.model_pool import (
 )
 from backend.opencode.output_format import with_local_timestamp
 from backend.opencode.result_json import (
-    VULNERABILITY_RESULT_JSON_INSTRUCTION,
-    VULNERABILITY_RESULT_JSON_SCHEMA,
-    VULNERABILITY_RESULTS_JSON_INSTRUCTION,
-    VULNERABILITY_RESULTS_JSON_SCHEMA,
-    parse_vulnerability_result,
-    parse_vulnerability_results,
+    AUDITED_VULNERABILITY_RESULT_JSON_INSTRUCTION,
+    AUDITED_VULNERABILITY_RESULT_JSON_SCHEMA,
+    AUDITED_VULNERABILITY_RESULTS_JSON_INSTRUCTION,
+    AUDITED_VULNERABILITY_RESULTS_JSON_SCHEMA,
+    parse_audited_vulnerability_result,
+    parse_audited_vulnerability_results,
 )
 from backend.threat_analysis import (
     apply_threat_analysis_scan_scope,
@@ -109,9 +109,9 @@ _MARKDOWN_REPORTS_JSON_SCHEMA = {
 }
 
 _SENSITIVE_CLEAR_RESULT_JSON_SCHEMA = {
-    **VULNERABILITY_RESULT_JSON_SCHEMA,
+    **AUDITED_VULNERABILITY_RESULT_JSON_SCHEMA,
     "properties": {
-        **VULNERABILITY_RESULT_JSON_SCHEMA["properties"],
+        **AUDITED_VULNERABILITY_RESULT_JSON_SCHEMA["properties"],
         "ai_analysis": {"type": "string", "minLength": 1},
     },
 }
@@ -260,7 +260,7 @@ async def _run_audit_via_opencode(
             on_invocation_metadata=capture_source,
             task_name=f"候选点审计 {candidate.vuln_type}",
             task_metadata=_candidate_task_context(candidate),
-            output_schema=VULNERABILITY_RESULT_JSON_SCHEMA,
+            output_schema=AUDITED_VULNERABILITY_RESULT_JSON_SCHEMA,
         )
     except asyncio.TimeoutError:
         logger.error(
@@ -316,7 +316,7 @@ async def run_project_audit(
     timeout: int | None = None,
     project_dir: Path | None = None,
 ) -> list[Vulnerability]:
-    """Run a SKILL-only checker once and collect all submitted results."""
+    """Run a SKILL-only checker once and collect all returned results."""
     config = get_config()
     if config.opencode.mock:
         await _clear_candidate_planned_task(candidate)
@@ -365,7 +365,7 @@ async def run_project_audit(
             on_invocation_metadata=capture_source,
             task_name=f"项目审计 {candidate.vuln_type}",
             task_metadata=_candidate_task_context(candidate, "project_audit"),
-            output_schema=VULNERABILITY_RESULTS_JSON_SCHEMA,
+            output_schema=AUDITED_VULNERABILITY_RESULTS_JSON_SCHEMA,
         )
     except asyncio.TimeoutError:
         logger.error(
@@ -481,12 +481,15 @@ def _sensitive_clear_audit_result_from_payload(
     description = str(payload.get("description") or "")
     file_path = str(payload.get("file") or metadata.get("file") or candidate.file)
     line = _safe_int(payload.get("line"), _safe_int(metadata.get("start_line"), candidate.line))
+    vuln_type = str(payload.get("vuln_type") or candidate.vuln_type).strip() or candidate.vuln_type
+    call_chain = _normalize_call_chain(payload.get("call_chain"), function_name)
     vulnerabilities = [
         Vulnerability(
             file=file_path,
             line=line,
             function=function_name,
-            vuln_type=candidate.vuln_type,
+            call_chain=call_chain,
+            vuln_type=vuln_type,
             severity=severity or ("high" if confirmed else "low"),
             description=description or (
                 f"{function_name} 中存在敏感信息生命周期结束后未清零问题"
@@ -494,6 +497,7 @@ def _sensitive_clear_audit_result_from_payload(
                 else f"{function_name} 未确认敏感信息生命周期结束后未清零问题"
             ),
             ai_analysis=markdown,
+            vulnerability_report=str(payload.get("vulnerability_report") or ""),
             confirmed=confirmed,
             ai_verdict="confirmed" if confirmed else "not_confirmed",
         )
@@ -504,7 +508,7 @@ def _sensitive_clear_audit_result_from_payload(
 
 def _parse_sensitive_clear_audit_result(text: str, candidate: Candidate) -> SensitiveClearAuditResult | None:
     try:
-        payload = parse_vulnerability_result(text)
+        payload = parse_audited_vulnerability_result(text)
     except Exception as exc:
         logger.warning(
             "Failed to parse sensitive_clear JSON result for %s:%d: %s",
@@ -820,7 +824,7 @@ async def run_threat_audit(
     planned_task_id: str = "",
     scan_path: Path | str | None = None,
 ) -> list[Vulnerability]:
-    """Run one attack-tree-derived audit task and collect submitted results."""
+    """Run one attack-tree-derived audit task and collect returned results."""
     config = get_config()
     defaults = _threat_audit_result_defaults(task)
     if config.opencode.mock:
@@ -901,6 +905,7 @@ async def run_threat_audit(
                 task_name=f"威胁审计 {task.task_id}",
                 task_metadata=task_metadata,
                 attempt=0,
+                output_schema=AUDITED_VULNERABILITY_RESULTS_JSON_SCHEMA,
             )
         except asyncio.TimeoutError:
             logger.error("%s threat audit timed out for %s", tool, task.task_id)
@@ -1723,38 +1728,6 @@ def _copy_skill_tree(src_root: Path, dst_root: Path) -> None:
         elif dst.is_dir():
             shutil.rmtree(dst)
         shutil.copytree(src, dst, symlinks=True)
-        _append_submit_result_runtime_override(dst / "SKILL.md")
-
-
-_SUBMIT_RESULT_RUNTIME_OVERRIDE_MARKER = "<!-- opendeephole-json-result-override -->"
-_SUBMIT_RESULT_RUNTIME_OVERRIDE = f"""
-
-{_SUBMIT_RESULT_RUNTIME_OVERRIDE_MARKER}
-
-## OpenDeepHole Runtime Result Rule
-
-当前运行时不再通过 `submit_result` 返回漏洞审计结论。若上文仍要求调用
-`submit_result`、或要求不要输出 JSON，以本节和本次任务初始提示词为准：
-
-- 不要调用 `submit_result`。
-- 最终回复必须输出符合本次任务初始提示词中“最终结果返回规则”的 JSON。
-- `ai_analysis` 字段仍可包含人类可读 Markdown 分析。
-"""
-
-
-def _append_submit_result_runtime_override(skill_path: Path) -> None:
-    if not skill_path.is_file():
-        return
-    try:
-        text = skill_path.read_text(encoding="utf-8")
-    except Exception:
-        return
-    if "submit_result" not in text or _SUBMIT_RESULT_RUNTIME_OVERRIDE_MARKER in text:
-        return
-    try:
-        skill_path.write_text(text.rstrip() + _SUBMIT_RESULT_RUNTIME_OVERRIDE + "\n", encoding="utf-8")
-    except Exception as exc:
-        logger.warning("Failed to append JSON result override to %s: %s", skill_path, exc)
 
 
 def _merge_json_file(path: Path, data: dict) -> None:
@@ -1923,9 +1896,9 @@ def _invocation_model_label(option, model: str) -> str:
 
 def _with_json_result_instruction(prompt: str, *, multiple: bool = False) -> str:
     instruction = (
-        VULNERABILITY_RESULTS_JSON_INSTRUCTION
+        AUDITED_VULNERABILITY_RESULTS_JSON_INSTRUCTION
         if multiple
-        else VULNERABILITY_RESULT_JSON_INSTRUCTION
+        else AUDITED_VULNERABILITY_RESULT_JSON_INSTRUCTION
     )
     if instruction in prompt:
         return prompt
@@ -1936,7 +1909,7 @@ def _json_result_retry_message(*, multiple: bool = False) -> str:
     shape = "`{\"results\": [...]}` JSON 对象" if multiple else "单个 JSON 对象"
     return (
         f"上一次尝试没有输出符合 schema 的{shape}。"
-        "请重新完成分析，最终只输出符合要求的 JSON，不要调用 submit_result。"
+        "请重新完成分析，最终只输出符合要求的 JSON。"
     )
 
 
@@ -2177,7 +2150,7 @@ async def _invoke_opencode(
 def _parse_result_from_text(text: str, candidate: Candidate) -> Vulnerability | None:
     defaults = _candidate_result_defaults(candidate)
     try:
-        payload = parse_vulnerability_result(text)
+        payload = parse_audited_vulnerability_result(text)
     except Exception as exc:
         logger.warning(
             "Failed to parse JSON result for %s:%d: %s",
@@ -2196,10 +2169,10 @@ def _parse_results_from_text_with_defaults(
     defaults: _VulnerabilityResultDefaults,
 ) -> list[Vulnerability]:
     try:
-        payloads = parse_vulnerability_results(text)
+        payloads = parse_audited_vulnerability_results(text)
     except Exception as multi_exc:
         try:
-            payloads = [parse_vulnerability_result(text)]
+            payloads = [parse_audited_vulnerability_result(text)]
         except Exception as single_exc:
             logger.warning(
                 "Failed to parse JSON results for %s:%d: multi=%s single=%s",
@@ -2230,6 +2203,8 @@ def _vulnerability_from_payload_with_defaults(
     confirmed = data.get("confirmed", False)
     file_value = str(data.get("file") or defaults.file)
     function_value = str(data.get("function") or defaults.function)
+    vuln_type_value = str(data.get("vuln_type") or defaults.vuln_type).strip() or defaults.vuln_type
+    call_chain = _normalize_call_chain(data.get("call_chain"), function_value)
     try:
         line_value = int(data.get("line") or defaults.line)
     except (TypeError, ValueError):
@@ -2240,13 +2215,29 @@ def _vulnerability_from_payload_with_defaults(
         file=file_value,
         line=line_value,
         function=function_value,
-        vuln_type=defaults.vuln_type,
+        call_chain=call_chain,
+        vuln_type=vuln_type_value,
         severity=data.get("severity", "unknown"),
         description=data.get("description", defaults.description),
         ai_analysis=data.get("ai_analysis", ""),
+        vulnerability_report=str(data.get("vulnerability_report") or ""),
         confirmed=confirmed,
         ai_verdict="confirmed" if confirmed else "not_confirmed",
     )
+
+
+def _normalize_call_chain(value: object, vulnerable_function: str) -> list[str]:
+    chain = [
+        str(item).strip()
+        for item in (value if isinstance(value, list) else [])
+        if str(item).strip()
+    ]
+    function_name = str(vulnerable_function or "").strip()
+    if not chain and function_name:
+        chain.append(function_name)
+    elif function_name and chain[-1] != function_name:
+        chain.append(function_name)
+    return chain
 
 
 def _session_id_from_output_source(source: OutputSource | None) -> str:

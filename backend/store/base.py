@@ -51,8 +51,13 @@ class ScanStoreBase(ABC):
         """Load only a scan's metadata (no vulnerabilities/reports/events)."""
 
     @abstractmethod
-    def update_scan_product(self, scan_id: str, product: str) -> None:
-        """Update the product associated with a scan."""
+    def update_scan_validation_target(
+        self,
+        scan_id: str,
+        product: str,
+        validation_environment: str,
+    ) -> None:
+        """Update the complete product/environment validation target for a scan."""
 
     @abstractmethod
     def update_opencode_pool_status(self, scan_id: str, status: OpenCodePoolStatus) -> None:

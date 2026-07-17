@@ -93,8 +93,6 @@ class PatternFilterConfig(BaseModel):
 
 class VulnerabilityValidationConfig(BaseModel):
     enabled: bool = True
-    script_path: str = ""
-    command: str = ""
     timeout_seconds: int = 7200
 
 
@@ -103,21 +101,6 @@ class StorageConfig(BaseModel):
     scans_dir: str = str(_DEFAULT_DATA_ROOT / "scans")
     user_skills_dir: str = str(_DEFAULT_DATA_ROOT / "user_skills")
     max_upload_size_mb: int = 2048
-
-
-class ScanConfig(BaseModel):
-    products: list[str] = [
-        "LTE",
-        "5G",
-        "MAE",
-        "微波RTN",
-        "RuralCOW",
-        "eMRU200",
-        "Lampsite",
-    ]
-    validation_environments: list[str] = [
-        "仿真UBBPi板环境",
-    ]
 
 
 class LoggingConfig(BaseModel):
@@ -148,7 +131,6 @@ class AppConfig(BaseModel):
     pattern_filter: PatternFilterConfig = PatternFilterConfig()
     vulnerability_validation: VulnerabilityValidationConfig = VulnerabilityValidationConfig()
     storage: StorageConfig = StorageConfig()
-    scan: ScanConfig = ScanConfig()
     logging: LoggingConfig = LoggingConfig()
     auth: AuthConfig = AuthConfig()
 

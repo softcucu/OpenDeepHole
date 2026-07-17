@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { getAgentOpenCodeModels, getAgentOpenCodePool, getAgents, getAgentConfig, syncProductValidators, updateAgentConfig } from "../api/client";
+import { getAgentOpenCodeModels, getAgentOpenCodePool, getAgents, getAgentConfig, updateAgentConfig } from "../api/client";
 import type {
   AgentGitHistoryConfig,
   AgentInfo,
@@ -40,8 +40,6 @@ const DEFAULT_THREAT_ANALYSIS: AgentThreatAnalysisConfig = {
 
 const DEFAULT_VULNERABILITY_VALIDATION = {
   enabled: true,
-  script_path: "",
-  command: "",
   timeout_seconds: 7200,
 };
 
@@ -237,9 +235,6 @@ interface AgentConfigPanelProps {
   agent: AgentInfo;
 }
 
-const PRODUCT_VALIDATOR_SYNC_WARNING =
-  "警告：同步会使用服务端内容完整替换 Agent 上的同名验证方法目录；同名目录内的本地文件可能被覆盖或删除，Agent 独有目录会保留。";
-
 function AgentConfigPanel({ agent }: AgentConfigPanelProps) {
   const [open, setOpen] = useState(false);
   const [pool, setPool] = useState<AgentOpenCodePoolStatus | null>(null);
@@ -247,9 +242,6 @@ function AgentConfigPanel({ agent }: AgentConfigPanelProps) {
   const [cfg, setCfg] = useState<AgentRemoteConfig>(deepClone(DEFAULT_CONFIG));
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
-  const [syncingValidators, setSyncingValidators] = useState(false);
-  const [validatorSyncConfirmOpen, setValidatorSyncConfirmOpen] = useState(false);
-  const [validatorSyncResult, setValidatorSyncResult] = useState<{ ok: boolean; message: string; installed: string[] } | null>(null);
   const [saved, setSaved] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [modelPicker, setModelPicker] = useState<{
@@ -315,30 +307,6 @@ function AgentConfigPanel({ agent }: AgentConfigPanelProps) {
       setError("保存失败，请重试");
     } finally {
       setSaving(false);
-    }
-  };
-
-  const handleSyncValidators = () => {
-    if (!agent.online || syncingValidators) return;
-    setValidatorSyncConfirmOpen(true);
-  };
-
-  const handleConfirmSyncValidators = async () => {
-    if (!agent.online || syncingValidators) {
-      setValidatorSyncConfirmOpen(false);
-      return;
-    }
-    setValidatorSyncConfirmOpen(false);
-    setSyncingValidators(true);
-    setError(null);
-    setValidatorSyncResult(null);
-    try {
-      const result = await syncProductValidators(agent.agent_id);
-      setValidatorSyncResult(result);
-    } catch {
-      setError("验证方法同步失败，请确认 Agent 在线并重试");
-    } finally {
-      setSyncingValidators(false);
     }
   };
 
@@ -488,44 +456,6 @@ function AgentConfigPanel({ agent }: AgentConfigPanelProps) {
 
   return (
     <>
-      {validatorSyncConfirmOpen && (
-        <div
-          className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm"
-          role="dialog"
-          aria-modal="true"
-          aria-labelledby={`validator-sync-confirm-${agent.agent_id}`}
-        >
-          <div className="w-full max-w-md rounded-xl border border-red-500/30 bg-slate-800 p-6 shadow-2xl">
-            <h3
-              id={`validator-sync-confirm-${agent.agent_id}`}
-              className="mb-2 text-base font-semibold text-white"
-            >
-              确认同步验证方法
-            </h3>
-            <p className="text-sm leading-6 text-slate-300">
-              即将同步 Agent <span className="font-medium text-white">{agent.name}</span>。
-              {PRODUCT_VALIDATOR_SYNC_WARNING}
-            </p>
-            <div className="mt-5 flex justify-end gap-2">
-              <button
-                type="button"
-                onClick={() => setValidatorSyncConfirmOpen(false)}
-                className="rounded-lg bg-slate-700 px-4 py-1.5 text-sm text-slate-300 transition-colors hover:bg-slate-600 hover:text-white"
-              >
-                取消
-              </button>
-              <button
-                type="button"
-                onClick={() => void handleConfirmSyncValidators()}
-                disabled={!agent.online || syncingValidators}
-                className="rounded-lg bg-red-600 px-4 py-1.5 text-sm font-medium text-white transition-colors hover:bg-red-500 disabled:cursor-not-allowed disabled:bg-slate-700 disabled:text-slate-500"
-              >
-                确认同步
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
       <div className="bg-slate-800/60 border border-slate-700 rounded-xl overflow-hidden">
       {/* Agent row */}
       <div className="flex items-center gap-3 px-4 py-3">
@@ -552,30 +482,7 @@ function AgentConfigPanel({ agent }: AgentConfigPanelProps) {
           </svg>
           配置
         </button>
-        <span className="inline-flex" title={PRODUCT_VALIDATOR_SYNC_WARNING}>
-          <button
-            type="button"
-            onClick={handleSyncValidators}
-            disabled={!agent.online || syncingValidators}
-            className="px-3 py-1.5 text-xs font-medium bg-slate-700 hover:bg-slate-600 disabled:bg-slate-800 disabled:text-slate-500 disabled:cursor-not-allowed text-slate-100 rounded-lg transition-colors"
-          >
-            {syncingValidators ? "同步中" : "同步验证方法"}
-          </button>
-        </span>
       </div>
-
-      {validatorSyncResult && (
-        <div className={`border-t px-4 py-2 text-xs ${
-          validatorSyncResult.ok
-            ? "border-green-500/20 bg-green-500/10 text-green-300"
-            : "border-red-500/20 bg-red-500/10 text-red-300"
-        }`}>
-          {validatorSyncResult.message || (validatorSyncResult.ok ? "验证方法已同步" : "验证方法同步失败")}
-          {validatorSyncResult.installed.length > 0 && (
-            <span className="ml-2 text-slate-400">{validatorSyncResult.installed.join(", ")}</span>
-          )}
-        </div>
-      )}
 
       <AgentModelUsage pool={pool} />
 

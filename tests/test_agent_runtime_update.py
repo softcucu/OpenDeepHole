@@ -36,7 +36,8 @@ class AgentRuntimePackageTests(unittest.TestCase):
         self.assertFalse(any(name.startswith("backend/static/") for name in names))
         self.assertFalse(any(name.startswith("backend/system_skills/") for name in names))
         self.assertFalse(any("/vulnerability_validation/" in name for name in names))
-        self.assertFalse(any(name.startswith("agent/product_validators/") for name in names))
+        self.assertIn("agent/product_validators/demo/validator.yaml", names)
+        self.assertIn("agent/product_validators/demo/validator.py", names)
 
     def test_agent_download_zip_includes_launchers_config_and_bundled_ctags(self) -> None:
         data = agent_api._build_agent_zip("http://server.example", "owner-token")
@@ -51,44 +52,11 @@ class AgentRuntimePackageTests(unittest.TestCase):
         self.assertIn("attack-method-reference-catalog.md", names)
         self.assertTrue(any(name.startswith("checkers/") for name in names))
         self.assertIn("ctags-p6.2.20260517.0-x64/ctags.exe", names)
-        self.assertIn("agent/product_validators/demo/__init__.py", names)
+        self.assertIn("agent/product_validators/demo/validator.yaml", names)
+        self.assertIn("agent/product_validators/demo/validator.py", names)
         self.assertIn('server_url: "http://server.example"', agent_yaml)
         self.assertIn('owner_token: "owner-token"', agent_yaml)
         self.assertFalse(yaml.safe_load(agent_yaml)["git_history"]["enabled"])
-
-    def test_product_validator_sync_package_contains_method_resources_only(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            demo = root / "demo"
-            (demo / "prompts").mkdir(parents=True)
-            (demo / "__pycache__").mkdir()
-            (demo / "__init__.py").write_text("def register(registry):\n    pass\n", encoding="utf-8")
-            (demo / "helper.py").write_text("VALUE = 1\n", encoding="utf-8")
-            (demo / "prompts" / "reproduce.md").write_text("prompt\n", encoding="utf-8")
-            (demo / "settings.json").write_text("{}\n", encoding="utf-8")
-            (demo / "__pycache__" / "helper.pyc").write_bytes(b"cache")
-            (root / "legacy.py").write_text("# ignored\n", encoding="utf-8")
-            (root / "missing_entry").mkdir()
-            (root / "missing_entry" / "helper.py").write_text("# ignored\n", encoding="utf-8")
-
-            with patch.object(agent_api, "_PRODUCT_VALIDATORS_DIR", root):
-                package = agent_api._build_product_validators_package()
-
-            self.assertEqual(package["name"], "product_validators_v2")
-            self.assertEqual(package["version"], 2)
-            self.assertEqual(package["directories"], ["demo"])
-            self.assertEqual(
-                package["files"],
-                [
-                    "demo/__init__.py",
-                    "demo/helper.py",
-                    "demo/prompts/reproduce.md",
-                    "demo/settings.json",
-                ],
-            )
-            archive = base64.b64decode(package["archive_b64"])
-            with zipfile.ZipFile(_bytes_path(archive)) as zf:
-                self.assertEqual(sorted(zf.namelist()), package["files"])
 
     def test_launchers_do_not_auto_install_ctags_system_packages(self) -> None:
         root = Path(__file__).resolve().parent.parent
@@ -192,7 +160,7 @@ class AgentRuntimePackageTests(unittest.TestCase):
 
             self.assertEqual(before, compute_runtime_hash(root))
 
-    def test_runtime_hash_ignores_product_validator_changes(self) -> None:
+    def test_runtime_hash_includes_product_validator_changes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             (root / "agent" / "product_validators").mkdir(parents=True)
@@ -204,7 +172,7 @@ class AgentRuntimePackageTests(unittest.TestCase):
             before = compute_runtime_hash(root)
             validator.write_text("print('v2')\n", encoding="utf-8")
 
-            self.assertEqual(before, compute_runtime_hash(root))
+            self.assertNotEqual(before, compute_runtime_hash(root))
 
     def test_runtime_download_serves_payload_snapshot(self) -> None:
         agent_api._runtime_download_tokens.clear()
@@ -243,9 +211,11 @@ class AgentRuntimePackageTests(unittest.TestCase):
                 "print('server snapshot')\n",
             )
 
-    def test_runtime_install_preserves_skipped_validator_dirs(self) -> None:
+    def test_runtime_install_replaces_product_validators_but_preserves_local_validation_dir(self) -> None:
         files = [
             ("agent/main.py", b"print('server snapshot')\n"),
+            ("agent/product_validators/demo/validator.py", b"async def validate(ctx):\n    pass\n"),
+            ("agent/product_validators/demo/validator.yaml", b"schema_version: 1\nproduct: LTE\nvalidation_environment: lab\n"),
             ("agent/server.py", b"# server\n"),
             ("backend/api.py", b"# api\n"),
             ("requirements-agent.txt", b"requests\n"),
@@ -257,8 +227,8 @@ class AgentRuntimePackageTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             (root / "agent" / "product_validators" / "custom").mkdir(parents=True)
-            (root / "agent" / "product_validators" / "custom" / "__init__.py").write_text(
-                "def register(registry):\n    pass\n",
+            (root / "agent" / "product_validators" / "custom" / "validator.py").write_text(
+                "async def validate(ctx):\n    pass\n",
                 encoding="utf-8",
             )
             (root / "agent" / "vulnerability_validation").mkdir(parents=True)
@@ -275,10 +245,8 @@ class AgentRuntimePackageTests(unittest.TestCase):
             with patch("agent.updater.runtime_root", return_value=root):
                 updater._install_update_archive(archive, expected_hash, manifest)
 
-            self.assertEqual(
-                (root / "agent" / "product_validators" / "custom" / "__init__.py").read_text(encoding="utf-8"),
-                "def register(registry):\n    pass\n",
-            )
+            self.assertFalse((root / "agent" / "product_validators" / "custom").exists())
+            self.assertTrue((root / "agent" / "product_validators" / "demo" / "validator.yaml").is_file())
             self.assertEqual(
                 (root / "agent" / "vulnerability_validation" / "validator.py").read_text(encoding="utf-8"),
                 "print('local validator')\n",
@@ -396,109 +364,6 @@ class AgentRuntimePackageTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             with self.assertRaisesRegex(RuntimeError, "package hash mismatch"):
                 agent_server._write_skill_creator_package(package, Path(tmp))
-
-    def test_product_validator_package_writer_replaces_dispatched_directories_only(self) -> None:
-        package = _product_validators_package({
-            "demo/__init__.py": "def register(registry):\n    pass\n",
-            "demo/helper.py": "VALUE = 'server'\n",
-            "demo/prompts/reproduce.md": "server prompt\n",
-        })
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp) / "product_validators"
-            (root / "demo").mkdir(parents=True)
-            (root / "demo" / "stale.py").write_text("stale\n", encoding="utf-8")
-            (root / "local").mkdir()
-            (root / "local" / "__init__.py").write_text("# local\n", encoding="utf-8")
-            (root / "legacy.py").write_text("# legacy\n", encoding="utf-8")
-
-            installed = agent_server._write_product_validators_package(package, root)
-
-            self.assertEqual(installed, ["demo"])
-            self.assertEqual(
-                (root / "demo" / "__init__.py").read_text(encoding="utf-8"),
-                "def register(registry):\n    pass\n",
-            )
-            self.assertEqual(
-                (root / "demo" / "prompts" / "reproduce.md").read_text(encoding="utf-8"),
-                "server prompt\n",
-            )
-            self.assertFalse((root / "demo" / "stale.py").exists())
-            self.assertTrue((root / "local" / "__init__.py").exists())
-            self.assertTrue((root / "legacy.py").exists())
-
-    def test_product_validator_empty_package_preserves_agent_directories(self) -> None:
-        package = _product_validators_package({})
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp) / "product_validators"
-            (root / "local").mkdir(parents=True)
-            (root / "local" / "__init__.py").write_text("# local\n", encoding="utf-8")
-
-            installed = agent_server._write_product_validators_package(package, root)
-
-            self.assertEqual(installed, [])
-            self.assertTrue((root / "local" / "__init__.py").exists())
-
-    def test_product_validator_package_writer_rolls_back_all_directories(self) -> None:
-        package = _product_validators_package({
-            "alpha/__init__.py": "# server alpha\n",
-            "beta/__init__.py": "# server beta\n",
-        })
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp) / "product_validators"
-            for name in ("alpha", "beta"):
-                (root / name).mkdir(parents=True)
-                (root / name / "__init__.py").write_text(f"# local {name}\n", encoding="utf-8")
-
-            original_rename = Path.rename
-
-            def fail_second_staged_rename(path: Path, target: Path) -> Path:
-                if path.name == "beta" and path.parent.name.startswith(".product_validators-sync-"):
-                    raise OSError("simulated install failure")
-                return original_rename(path, target)
-
-            with patch.object(Path, "rename", new=fail_second_staged_rename):
-                with self.assertRaisesRegex(OSError, "simulated install failure"):
-                    agent_server._write_product_validators_package(package, root)
-
-            self.assertEqual(
-                (root / "alpha" / "__init__.py").read_text(encoding="utf-8"),
-                "# local alpha\n",
-            )
-            self.assertEqual(
-                (root / "beta" / "__init__.py").read_text(encoding="utf-8"),
-                "# local beta\n",
-            )
-
-    def test_product_validator_package_writer_rejects_path_traversal(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            with self.assertRaisesRegex(RuntimeError, "Unsafe product validators package path"):
-                agent_server._write_product_validators_package(
-                    _product_validators_package(
-                        {"demo/../bad.py": "bad"},
-                        directories=["demo"],
-                    ),
-                    Path(tmp) / "product_validators",
-                )
-
-    def test_product_validator_package_writer_rejects_hash_mismatch(self) -> None:
-        package = _product_validators_package({"demo/__init__.py": ""})
-        package["sha256"] = "0" * 64
-        with tempfile.TemporaryDirectory() as tmp:
-            with self.assertRaisesRegex(RuntimeError, "hash mismatch"):
-                agent_server._write_product_validators_package(package, Path(tmp) / "product_validators")
-
-    def test_product_validator_package_writer_rejects_legacy_package_name(self) -> None:
-        package = _product_validators_package({"demo/__init__.py": ""})
-        package["name"] = "product_validators"
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp) / "product_validators"
-            (root / "local").mkdir(parents=True)
-            (root / "local" / "__init__.py").write_text("# local\n", encoding="utf-8")
-
-            with self.assertRaisesRegex(RuntimeError, "package name"):
-                agent_server._write_product_validators_package(package, root)
-
-            self.assertTrue((root / "local" / "__init__.py").exists())
 
     def test_runtime_update_only_task_runs_post_update_skill_create(self) -> None:
         update = AsyncMock(return_value=False)
@@ -644,7 +509,7 @@ class AgentRuntimePackageTests(unittest.TestCase):
         expected_command.pop("agent_runtime_update")
         self.assertEqual(pending_commands, [expected_command])
 
-    def test_vulnerability_validation_command_skips_runtime_update(self) -> None:
+    def test_vulnerability_validation_command_checks_runtime_update_before_validation(self) -> None:
         update = AsyncMock(return_value=False)
         handler = AsyncMock()
 
@@ -660,6 +525,7 @@ class AgentRuntimePackageTests(unittest.TestCase):
                     "project_path": "/repo/project",
                     "code_scan_path": "/repo/project",
                     "product": "LTE",
+                    "validation_environment": "lab",
                     "vulnerability": {"file": "src/a.c", "line": 1},
                     "report_markdown": "# report\n",
                     "agent_runtime_update": {"hash": "new-runtime"},
@@ -669,8 +535,42 @@ class AgentRuntimePackageTests(unittest.TestCase):
                 None,
             ))
 
-        update.assert_not_awaited()
+        update.assert_awaited_once()
         handler.assert_awaited_once()
+
+    def test_vulnerability_validation_stops_when_forced_runtime_update_fails(self) -> None:
+        update = AsyncMock(side_effect=RuntimeError("download unavailable"))
+        handler = AsyncMock()
+        reporter = AsyncMock()
+
+        with (
+            patch("agent.updater.ensure_runtime_updated", new=update),
+            patch("agent.server.handle_vulnerability_validation", new=handler),
+        ):
+            asyncio.run(agent_main._handle_command(
+                {
+                    "type": "vulnerability_validation",
+                    "scan_id": "scan-1",
+                    "vuln_index": 0,
+                    "project_path": "/repo/project",
+                    "code_scan_path": "/repo/project",
+                    "product": "LTE",
+                    "validation_environment": "lab",
+                    "vulnerability": {"file": "src/a.c", "line": 1},
+                    "report_markdown": "# report\n",
+                    "agent_runtime_update": {"hash": "new-runtime"},
+                },
+                None,
+                None,
+                reporter,
+            ))
+
+        update.assert_awaited_once()
+        handler.assert_not_awaited()
+        reported = reporter.report_vulnerability_validation.await_args.args[1]
+        self.assertEqual(reported.status, "error")
+        self.assertFalse(reported.running)
+        self.assertIn("download unavailable", reported.final_output)
 
 
 def _bytes_path(data: bytes):
@@ -689,28 +589,6 @@ def _skill_creator_package(files: dict[str, str]) -> dict[str, str]:
         "name": "deephole-skill-creator",
         "sha256": hashlib.sha256(data).hexdigest(),
         "archive_b64": base64.b64encode(data).decode("ascii"),
-    }
-
-
-def _product_validators_package(
-    files: dict[str, str],
-    *,
-    directories: list[str] | None = None,
-) -> dict:
-    archive = io.BytesIO()
-    with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_DEFLATED) as zf:
-        for name, content in files.items():
-            zf.writestr(name, content)
-    data = archive.getvalue()
-    if directories is None:
-        directories = sorted({name.split("/", 1)[0] for name in files if "/" in name})
-    return {
-        "name": "product_validators_v2",
-        "version": 2,
-        "sha256": hashlib.sha256(data).hexdigest(),
-        "archive_b64": base64.b64encode(data).decode("ascii"),
-        "directories": directories,
-        "files": sorted(files),
     }
 
 

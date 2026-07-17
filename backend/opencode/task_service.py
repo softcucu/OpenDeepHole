@@ -915,8 +915,7 @@ def _json_result_rule(schema: dict[str, Any]) -> str:
         "Return the final result as plain JSON text matching the JSON Schema below. "
         "The final assistant message must contain only that JSON value, without a "
         "Markdown code fence or surrounding explanation. The application parses the "
-        "assistant text itself; do not call submit_result or any other result-submission "
-        "MCP tool.\nJSON Schema:\n"
+        "assistant text itself.\nJSON Schema:\n"
         + json.dumps(schema, ensure_ascii=False, indent=2)
     )
 

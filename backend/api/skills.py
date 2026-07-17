@@ -90,7 +90,7 @@ def _fixed_skill_rules() -> str:
 
 ### Markdown 报告保存规则
 
-- 本 SKILL 只输出 Markdown 报告，不调用 `submit_result`，不生成结构化漏洞结果。
+- 本 SKILL 只输出 Markdown 报告，不生成结构化漏洞结果。
 - 运行提示词会提供 `REPORT_DIR`，所有报告必须写入该目录。
 - 每个报告必须是独立 `.md` 文件，文件名只能表达报告主题，不要包含路径穿越字符。
 - 可以生成多个报告；未发现问题时也应生成一个 Markdown 报告说明检查范围和结论。

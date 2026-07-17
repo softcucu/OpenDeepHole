@@ -39,8 +39,7 @@ from backend.models import (
     MarkRequest,
     ScanItemStatus,
     ScanMeta,
-    ScanProductList,
-    ScanValidationEnvironmentList,
+    ScanValidationTargetList,
     ScanStartResponse,
     ScanStatus,
     ScanSummary,
@@ -48,7 +47,7 @@ from backend.models import (
     ThreatAnalysis,
     ThreatAuditTask,
     UnmarkRequest,
-    UpdateScanProductRequest,
+    UpdateScanValidationTargetRequest,
     User,
     VulnerabilityValidation,
 )
@@ -108,50 +107,27 @@ def _is_agent_disconnect_error(error_message: str | None) -> bool:
     return error_message == AGENT_DISCONNECT_ERROR
 
 
-def _configured_products() -> list[str]:
-    products: list[str] = []
-    seen: set[str] = set()
-    for product in get_config().scan.products:
-        normalized = str(product).strip()
-        if normalized and normalized not in seen:
-            products.append(normalized)
-            seen.add(normalized)
-    return products
+def _validate_validation_target(product: str, validation_environment: str) -> tuple[str, str]:
+    normalized_product = str(product or "").strip()
+    normalized_environment = str(validation_environment or "").strip()
+    if not normalized_product and not normalized_environment:
+        return "", ""
+    if not normalized_product or not normalized_environment:
+        raise HTTPException(
+            status_code=400,
+            detail="product and validation_environment must both be set or both be empty",
+        )
+    from backend.validation_catalog import find_validation_target
 
-
-def _validate_product(product: str) -> str:
-    normalized = product.strip()
-    if not normalized:
-        return ""
-    if normalized not in _configured_products():
-        raise HTTPException(status_code=400, detail=f"Unknown product: {normalized}")
-    return normalized
-
-
-def _configured_validation_environments() -> list[str]:
-    environments: list[str] = []
-    seen: set[str] = set()
-    for environment in get_config().scan.validation_environments:
-        normalized = str(environment).strip()
-        if normalized and normalized not in seen:
-            environments.append(normalized)
-            seen.add(normalized)
-    return environments
-
-
-def _default_validation_environment() -> str:
-    environments = _configured_validation_environments()
-    return environments[0] if environments else ""
-
-
-def _validate_validation_environment(validation_environment: str) -> str:
-    normalized = validation_environment.strip()
-    environments = _configured_validation_environments()
-    if not normalized:
-        return environments[0] if environments else ""
-    if normalized not in environments:
-        raise HTTPException(status_code=400, detail=f"Unknown validation environment: {normalized}")
-    return normalized
+    if find_validation_target(normalized_product, normalized_environment) is None:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Unknown validation target: "
+                f"{normalized_product}/{normalized_environment}"
+            ),
+        )
+    return normalized_product, normalized_environment
 
 
 def _check_scan_owner(scan_id: str, user: User) -> None:
@@ -386,16 +362,6 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _validation_output_sections(content: str, *, updated_at: str | None = None) -> list[dict]:
-    if not content:
-        return []
-    return [{
-        "title": "中间产出",
-        "content": content,
-        "updated_at": updated_at or _now_iso(),
-    }]
-
-
 def _publish_validation(scan_id: str, validation: VulnerabilityValidation) -> None:
     from backend.sse import publish
 
@@ -465,8 +431,6 @@ def _is_retryable_vuln(vuln) -> bool:
 
 def _is_static_candidate_vulnerability(vuln) -> bool:
     """Return whether a result belongs to the static-candidate audit pipeline."""
-    if str(getattr(vuln, "vuln_type", "") or "").strip().lower() == "threat_audit":
-        return False
     source = str(getattr(vuln, "analysis_source", "") or "static_candidate").strip()
     return source == "static_candidate"
 
@@ -628,8 +592,10 @@ async def create_agent_scan(
         raise HTTPException(status_code=400, detail="project_path is required")
     code_scan_path = body.code_scan_path.strip() or project_path
     scan_name = body.scan_name or project_path.split("/")[-1] or scan_id
-    product = _validate_product(body.product)
-    validation_environment = _validate_validation_environment(body.validation_environment)
+    product, validation_environment = _validate_validation_target(
+        body.product,
+        body.validation_environment,
+    )
 
     scan = ScanStatus(
         scan_id=scan_id,
@@ -770,22 +736,14 @@ async def list_scans(current_user: User = Depends(get_current_user)) -> list[Sca
     return summaries
 
 
-@router.get("/api/scan/products", response_model=ScanProductList)
-async def list_scan_products(
+@router.get("/api/scan/validation-targets", response_model=ScanValidationTargetList)
+async def list_scan_validation_targets(
     _current_user: User = Depends(get_current_user),
-) -> ScanProductList:
-    """Return configured scan product options."""
-    return ScanProductList(products=_configured_products())
+) -> ScanValidationTargetList:
+    """Return valid product/environment pairs from server validator manifests."""
+    from backend.validation_catalog import get_validation_catalog
 
-
-@router.get("/api/scan/validation-environments", response_model=ScanValidationEnvironmentList)
-async def list_scan_validation_environments(
-    _current_user: User = Depends(get_current_user),
-) -> ScanValidationEnvironmentList:
-    """Return configured vulnerability validation environment options."""
-    return ScanValidationEnvironmentList(
-        validation_environments=_configured_validation_environments()
-    )
+    return ScanValidationTargetList(targets=get_validation_catalog())
 
 
 @router.get("/api/scan/{scan_id}", response_model=ScanStatus)
@@ -819,21 +777,25 @@ async def get_scan_status(
     return scan
 
 
-@router.put("/api/scan/{scan_id}/product")
-async def update_scan_product(
+@router.put("/api/scan/{scan_id}/validation-target")
+async def update_scan_validation_target(
     scan_id: str,
-    body: UpdateScanProductRequest,
+    body: UpdateScanValidationTargetRequest,
     current_user: User = Depends(get_current_user),
 ) -> dict:
-    """Update the product associated with an existing scan."""
+    """Update the complete validation target associated with an existing scan."""
     _check_scan_owner(scan_id, current_user)
-    product = _validate_product(body.product)
+    product, validation_environment = _validate_validation_target(
+        body.product,
+        body.validation_environment,
+    )
     store = get_scan_store()
     if store.get_scan_meta(scan_id) is None:
         raise HTTPException(status_code=404, detail="Scan not found")
     if scan_id in _running_scans:
         _running_scans[scan_id].product = product
-    store.update_scan_product(scan_id, product)
+        _running_scans[scan_id].validation_environment = validation_environment
+    store.update_scan_validation_target(scan_id, product, validation_environment)
     return {"ok": True}
 
 
@@ -989,7 +951,7 @@ async def _continue_scan(
         "scan_mode": meta.scan_mode,
         "scan_name": meta.scan_name,
         "product": meta.product,
-        "validation_environment": meta.validation_environment or _default_validation_environment(),
+        "validation_environment": meta.validation_environment,
         "feedback_entries": feedback_entries,
         "checker_packages": (
             []
@@ -1273,6 +1235,11 @@ def _vuln_report_markdown(
     lines.append(f"| 文件 | {vuln.file} |")
     lines.append(f"| 行号 | {vuln.line} |")
     lines.append(f"| 函数 | {vuln.function} |")
+    call_chain = [str(item).strip() for item in (getattr(vuln, "call_chain", None) or []) if str(item).strip()]
+    if not call_chain and vuln.function:
+        call_chain = [vuln.function]
+    if call_chain:
+        lines.append(f"| 验证入口函数 | {call_chain[0]} |")
     lines.append(f"| 类型 | {vuln.vuln_type} |")
     lines.append(f"| 严重级别 | {vuln.severity} |")
     lines.append(f"| AI 判定 | {vuln.ai_verdict or ('confirmed' if vuln.confirmed else '')} |")
@@ -1288,6 +1255,18 @@ def _vuln_report_markdown(
     lines.append("")
     lines.append(vuln.description or "（无）")
     lines.append("")
+    if call_chain:
+        lines.append("## 函数调用链")
+        lines.append("")
+        for position, function_name in enumerate(call_chain, start=1):
+            lines.append(f"{position}. `{function_name}`")
+        lines.append("")
+    vulnerability_report = str(getattr(vuln, "vulnerability_report", "") or "").strip()
+    if vulnerability_report:
+        lines.append("## 模型漏洞报告")
+        lines.append("")
+        lines.append(vulnerability_report)
+        lines.append("")
     if vuln.user_verdict_reason:
         lines.append("## 用户判定理由")
         lines.append("")
@@ -1364,7 +1343,7 @@ async def _trigger_vulnerability_validation(
     _server_url: str,
 ) -> dict:
     """Start Agent-side local validation for one AI-confirmed vulnerability."""
-    from backend.api.agent import send_agent_command
+    from backend.api.agent import create_agent_runtime_update_payload, send_agent_command
 
     store = get_scan_store()
     loaded = store.load_scan(scan_id)
@@ -1377,6 +1356,15 @@ async def _trigger_vulnerability_validation(
     vuln = scan.vulnerabilities[idx]
     if not (vuln.confirmed or vuln.ai_verdict == "confirmed"):
         raise HTTPException(status_code=400, detail="Only AI-confirmed vulnerabilities can be validated")
+    product, validation_environment = _validate_validation_target(
+        meta.product,
+        meta.validation_environment,
+    )
+    if not product:
+        raise HTTPException(
+            status_code=400,
+            detail="Scan has no configured product validation target",
+        )
 
     existing = next((item for item in scan.validations if item.vuln_index == idx), None)
     if existing is not None and existing.running:
@@ -1394,7 +1382,6 @@ async def _trigger_vulnerability_validation(
         store.update_scan_agent(scan_id, agent_id, meta.agent_name)
 
     now = _now_iso()
-    queued_output = "验证任务已提交到 Agent，等待本地脚本启动。"
     validation = store.upsert_vulnerability_validation(
         scan_id,
         VulnerabilityValidation(
@@ -1402,10 +1389,8 @@ async def _trigger_vulnerability_validation(
             vuln_index=idx,
             status="queued",
             running=True,
-            product=meta.product,
-            validation_environment=meta.validation_environment or _default_validation_environment(),
-            intermediate_output=queued_output,
-            output_sections=_validation_output_sections(queued_output, updated_at=now),
+            product=product,
+            validation_environment=validation_environment,
             started_at=now,
             updated_at=now,
         ),
@@ -1420,10 +1405,11 @@ async def _trigger_vulnerability_validation(
         "vuln_index": idx,
         "project_path": meta.project_path,
         "code_scan_path": meta.code_scan_path or meta.project_path,
-        "product": meta.product,
-        "validation_environment": meta.validation_environment or _default_validation_environment(),
+        "product": product,
+        "validation_environment": validation_environment,
         "vulnerability": vuln.model_dump(),
         "report_markdown": _vuln_report_markdown(idx, vuln, fp_map.get(idx)),
+        "agent_runtime_update": create_agent_runtime_update_payload(_server_url),
     })
     if not ok:
         failed = store.upsert_vulnerability_validation(

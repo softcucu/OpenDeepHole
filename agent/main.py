@@ -111,6 +111,32 @@ async def _handle_command(msg: dict, config, task_manager, reporter) -> dict | N
             processed_offset=int(msg.get("processed_offset") or 0),
         )
     elif cmd_type == "vulnerability_validation":
+        from agent.updater import ensure_runtime_updated
+        try:
+            await ensure_runtime_updated(msg.get("agent_runtime_update"), msg)
+        except Exception as exc:
+            from backend.models import VulnerabilityValidation
+            from datetime import datetime, timezone
+
+            now = datetime.now(timezone.utc).isoformat()
+            await reporter.report_vulnerability_validation(
+                msg["scan_id"],
+                VulnerabilityValidation(
+                    scan_id=msg["scan_id"],
+                    vuln_index=int(msg["vuln_index"]),
+                    status="error",
+                    running=False,
+                    product=msg.get("product", ""),
+                    validation_environment=msg.get("validation_environment", ""),
+                    validation_success=False,
+                    requires_human_intervention=True,
+                    validation_output=f"Agent runtime update failed: {exc}",
+                    final_output=f"Agent runtime update failed: {exc}",
+                    finished_at=now,
+                    updated_at=now,
+                ),
+            )
+            return None
         await agent_server.handle_vulnerability_validation(
             scan_id=msg["scan_id"],
             vuln_index=int(msg["vuln_index"]),
@@ -125,11 +151,6 @@ async def _handle_command(msg: dict, config, task_manager, reporter) -> dict | N
         await agent_server.handle_vulnerability_validation_stop(
             scan_id=msg["scan_id"],
             vuln_index=int(msg["vuln_index"]),
-        )
-    elif cmd_type == "product_validators_sync":
-        return await agent_server.handle_product_validators_sync(
-            request_id=msg.get("request_id", ""),
-            package=msg.get("package") or {},
         )
     elif cmd_type == "fp_review_stop":
         await agent_server.handle_fp_review_stop(

@@ -37,16 +37,12 @@ class ConfigPathTests(unittest.TestCase):
                 str((root / "OpenDeepHoleData" / "scans").resolve()),
             )
 
-    def test_default_scan_products_are_configured(self) -> None:
+    def test_scan_catalog_is_not_part_of_global_config(self) -> None:
         config = load_config("/path/that/does/not/exist.yaml")
 
-        self.assertEqual(
-            config.scan.products,
-            ["LTE", "5G", "MAE", "微波RTN", "RuralCOW", "eMRU200", "Lampsite"],
-        )
-        self.assertEqual(config.scan.validation_environments, ["仿真UBBPi板环境"])
+        self.assertFalse(hasattr(config, "scan"))
 
-    def test_scan_products_can_be_overridden_from_yaml(self) -> None:
+    def test_legacy_scan_catalog_yaml_is_ignored(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             cfg = Path(tmp) / "config.yaml"
             cfg.write_text(
@@ -62,8 +58,7 @@ class ConfigPathTests(unittest.TestCase):
 
             config = load_config(str(cfg))
 
-        self.assertEqual(config.scan.products, ["LTE", "Custom"])
-        self.assertEqual(config.scan.validation_environments, ["仿真UBBPi板环境", "实验室环境"])
+        self.assertFalse(hasattr(config, "scan"))
 
 
 if __name__ == "__main__":

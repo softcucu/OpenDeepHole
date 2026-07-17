@@ -43,7 +43,7 @@ class SkillMarketTests(unittest.TestCase):
                     skills.import_skill(
                         "job-1",
                         SkillImportRequest(
-                            skill_md="# Custom Audit\n\n审计目标代码并调用 submit_result。",
+                            skill_md="# Custom Audit\n\n审计目标代码并返回约定 JSON。",
                             scenarios_md="# 适用场景\n\n自定义审计。",
                             timeout_seconds=2400,
                             files=[

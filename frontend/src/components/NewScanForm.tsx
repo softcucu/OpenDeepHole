@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
-import { getAgents, getCheckers, getScanProducts, getScanValidationEnvironments, createScan } from "../api/client";
-import type { AgentInfo, CheckerInfo } from "../types";
+import { getAgents, getCheckers, getValidationTargets, createScan } from "../api/client";
+import type { AgentInfo, CheckerInfo, ValidationTarget } from "../types";
 
 interface Props {
   onScanStarted: (scanId: string) => void;
@@ -13,8 +13,7 @@ const SCAN_MODE_THREAT_ANALYSIS_ONLY = "threat_analysis_only";
 export default function NewScanForm({ onScanStarted, onBack }: Props) {
   const [agents, setAgents] = useState<AgentInfo[]>([]);
   const [checkers, setCheckers] = useState<CheckerInfo[]>([]);
-  const [products, setProducts] = useState<string[]>([]);
-  const [validationEnvironments, setValidationEnvironments] = useState<string[]>([]);
+  const [validationTargets, setValidationTargets] = useState<ValidationTarget[]>([]);
   const [loading, setLoading] = useState(true);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -30,23 +29,22 @@ export default function NewScanForm({ onScanStarted, onBack }: Props) {
   const builtinCheckers = checkers.filter((checker) => !checker.user_created);
   const userCheckers = checkers.filter((checker) => checker.user_created);
   const threatAnalysisOnly = selectedScanMode === SCAN_MODE_THREAT_ANALYSIS_ONLY;
+  const products = Array.from(new Set(validationTargets.map((target) => target.product))).sort();
+  const validationEnvironments = validationTargets
+    .filter((target) => target.product === selectedProduct)
+    .map((target) => target.validation_environment);
 
   useEffect(() => {
     const load = async () => {
       try {
-        const [agentList, checkerList, productList, validationEnvironmentList] = await Promise.all([
+        const [agentList, checkerList, targets] = await Promise.all([
           getAgents(),
           getCheckers(),
-          getScanProducts(),
-          getScanValidationEnvironments(),
+          getValidationTargets(),
         ]);
         setAgents(agentList);
         setCheckers(checkerList);
-        setProducts(productList);
-        setValidationEnvironments(validationEnvironmentList);
-        if (validationEnvironmentList.length > 0) {
-          setSelectedValidationEnvironment(validationEnvironmentList[0]);
-        }
+        setValidationTargets(targets);
         // Pre-select all checkers
         setSelectedCheckers(new Set(checkerList.filter((c) => !c.user_created).map((c) => c.name)));
         // Pre-select first online agent
@@ -312,7 +310,13 @@ export default function NewScanForm({ onScanStarted, onBack }: Props) {
               </label>
               <select
                 value={selectedProduct}
-                onChange={(e) => setSelectedProduct(e.target.value)}
+                onChange={(e) => {
+                  const product = e.target.value;
+                  setSelectedProduct(product);
+                  setSelectedValidationEnvironment(
+                    validationTargets.find((target) => target.product === product)?.validation_environment || "",
+                  );
+                }}
                 className="w-full bg-slate-900 border border-slate-600 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-blue-500 transition-colors"
               >
                 <option value="">未配置</option>
@@ -332,9 +336,10 @@ export default function NewScanForm({ onScanStarted, onBack }: Props) {
               <select
                 value={selectedValidationEnvironment}
                 onChange={(e) => setSelectedValidationEnvironment(e.target.value)}
+                disabled={!selectedProduct}
                 className="w-full bg-slate-900 border border-slate-600 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-blue-500 transition-colors"
               >
-                {validationEnvironments.length === 0 ? (
+                {!selectedProduct || validationEnvironments.length === 0 ? (
                   <option value="">未配置</option>
                 ) : (
                   validationEnvironments.map((environment) => (

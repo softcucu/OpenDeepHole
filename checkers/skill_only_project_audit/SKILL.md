@@ -1,6 +1,6 @@
 ---
 name: skill_only_project_audit
-description: 管理员测试用项目级 SKILL-only checker，用于验证无 analyzer.py 的 checker 可直接审计代码扫描路径并多次提交结果
+description: 管理员测试用项目级 SKILL-only checker，用于验证无 analyzer.py 的 checker 可直接审计代码扫描路径并返回多个结果
 ---
 
 # SKILL-only 项目级审计测试
@@ -9,20 +9,16 @@ description: 管理员测试用项目级 SKILL-only checker，用于验证无 an
 
 ## 目标
 
-验证你可以在目标代码目录中完成项目级审计，并通过 MCP 工具提交真实结果。
+验证你可以在目标代码目录中完成项目级审计并返回真实结果。
 
-重点不是复核某个候选线索，而是主动阅读代码，寻找可能存在的真实安全问题。发现一个问题就提交一个结果。
-
-## 可用工具
-
-- `submit_result(confirmed, severity, description, ai_analysis, file="", line=0, function="")` - 提交审计结果
+重点不是复核某个候选线索，而是主动阅读代码，寻找可能存在的真实安全问题。每个问题对应一个独立结果。
 
 ## 审计要求
 
 1. 先理解代码扫描路径对应的代码范围。提示词中会给出代码扫描路径和 `project_id`。
 2. 选择若干关键函数阅读源码，优先关注入口函数、解析函数、认证/权限判断函数、内存拷贝函数、资源释放函数。
-3. 如果发现真实问题，每个问题都必须单独调用一次 `submit_result`。
-4. 每次提交真实问题时必须填写：
+3. 如果发现真实问题，每个问题都必须形成一个独立结果。
+4. 每个真实问题必须填写：
    - `confirmed=true`
    - `severity` 为 `high` / `medium` / `low`
    - `description` 用一句话说明问题
@@ -30,7 +26,7 @@ description: 管理员测试用项目级 SKILL-only checker，用于验证无 an
    - `file` 为真实问题所在文件路径
    - `line` 为真实问题所在行号
    - `function` 为真实问题所在函数名
-5. 如果没有发现真实问题，也必须调用一次 `submit_result`，提交：
+5. 如果没有发现真实问题，也必须返回一个结果：
    - `confirmed=false`
    - `severity="low"`
    - `description` 说明没有发现可确认问题
@@ -52,15 +48,3 @@ description: 管理员测试用项目级 SKILL-only checker，用于验证无 an
 - 缺少可达路径或触发条件
 - 已有边界检查、权限检查或错误处理覆盖该路径
 - 位于测试、mock、stub 或不可达代码中
-
-## 输出约束
-
-不要只在文字回复中列出问题。审计完成后必须调用 `submit_result`。如果发现多个问题，必须多次调用 `submit_result`，一次只提交一个问题。
-
-## OpenDeepHole 当前运行时结果规则
-
-当前运行时不再通过 `submit_result` 返回漏洞审计结论。若上文仍要求调用 `submit_result`、或要求不要输出 JSON，以本节和本次任务初始提示词为准：
-
-- 不要调用 `submit_result`。
-- 最终回复必须输出符合本次任务初始提示词中“最终结果返回规则”的 JSON。
-- `ai_analysis` 字段仍可包含人类可读 Markdown 分析。

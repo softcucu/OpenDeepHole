@@ -24,7 +24,6 @@ Other:
 from __future__ import annotations
 
 import asyncio
-import base64
 import hashlib
 import io
 import secrets
@@ -100,7 +99,6 @@ class _RuntimeDownload:
 # Short-lived tokens used by online agents to fetch runtime update archives.
 _runtime_download_tokens: dict[str, _RuntimeDownload] = {}
 _opencode_model_waiters: dict[str, asyncio.Future] = {}
-_product_validator_sync_waiters: dict[str, asyncio.Future] = {}
 
 # In-memory index progress store: scan_id → {status, parsed_files, total_files}
 _scan_index_statuses: dict[str, dict] = {}
@@ -667,12 +665,6 @@ async def agent_websocket(websocket: WebSocket) -> None:
                 if waiter is not None and not waiter.done():
                     waiter.set_result(incoming)
                 continue
-            if isinstance(incoming, dict) and incoming.get("type") == "product_validators_sync_result":
-                request_id = str(incoming.get("request_id") or "")
-                waiter = _product_validator_sync_waiters.pop(request_id, None)
-                if waiter is not None and not waiter.done():
-                    waiter.set_result(incoming)
-                continue
             if isinstance(incoming, dict) and incoming.get("type") == "skill_create_result":
                 from backend.api.skills import handle_skill_create_result
 
@@ -725,12 +717,6 @@ async def send_agent_command(agent_id: str, command: dict) -> bool:
 class _AgentRegisterBody(BaseModel):
     port: int
     name: str = ""
-
-
-class _ProductValidatorsSyncResponse(BaseModel):
-    ok: bool
-    message: str = ""
-    installed: list[str] = []
 
 
 class _AgentOpenCodeModelInfo(BaseModel):
@@ -961,44 +947,6 @@ async def update_agent_config(
     # Push update to agent immediately if connected via WebSocket
     await send_agent_command(agent_id, {"type": "config", "config": body.model_dump()})
     return {"ok": True}
-
-
-@router.post("/{agent_id}/product-validators/sync", response_model=_ProductValidatorsSyncResponse)
-async def sync_agent_product_validators(
-    agent_id: str,
-    current_user: User = Depends(get_current_user),
-) -> _ProductValidatorsSyncResponse:
-    """Manually push repo-managed product validators to an online Agent."""
-    agent = _registered_agents.get(agent_id)
-    if agent is None:
-        raise HTTPException(status_code=404, detail="Agent not found")
-    if current_user.role != "admin" and agent.user_id != current_user.user_id:
-        raise HTTPException(status_code=403, detail="Access denied")
-    if agent_id not in _agent_ws:
-        raise HTTPException(status_code=400, detail="Agent is offline")
-
-    request_id = uuid.uuid4().hex
-    loop = asyncio.get_running_loop()
-    waiter = loop.create_future()
-    _product_validator_sync_waiters[request_id] = waiter
-    ok = await send_agent_command(agent_id, {
-        "type": "product_validators_sync",
-        "request_id": request_id,
-        "package": _build_product_validators_package(),
-    })
-    if not ok:
-        _product_validator_sync_waiters.pop(request_id, None)
-        raise HTTPException(status_code=502, detail="Agent not connected")
-    try:
-        result = await asyncio.wait_for(waiter, timeout=30.0)
-    except asyncio.TimeoutError:
-        _product_validator_sync_waiters.pop(request_id, None)
-        raise HTTPException(status_code=504, detail="Product validator sync timed out")
-    return _ProductValidatorsSyncResponse(
-        ok=bool(result.get("ok")),
-        message=str(result.get("message") or ""),
-        installed=[str(item) for item in (result.get("installed") or [])],
-    )
 
 
 @router.get("/agents")
@@ -1736,18 +1684,8 @@ _AGENT_DOWNLOAD_SKIP_DIRS = {
     "system_skills",
     "vulnerability_validation",
 }
-_AGENT_RUNTIME_SKIP_DIRS = {*_AGENT_DOWNLOAD_SKIP_DIRS, "product_validators"}
+_AGENT_RUNTIME_SKIP_DIRS = set(_AGENT_DOWNLOAD_SKIP_DIRS)
 _AGENT_SKIP_SUFFIXES = {".pyc", ".pyo"}
-_PRODUCT_VALIDATORS_DIR = _PROJECT_ROOT / "agent" / "product_validators"
-_PRODUCT_VALIDATORS_PACKAGE_NAME = "product_validators_v2"
-_PRODUCT_VALIDATORS_PACKAGE_VERSION = 2
-_PRODUCT_VALIDATORS_SYNC_SKIP_DIRS = {
-    "__pycache__",
-    ".git",
-    ".mypy_cache",
-    ".pytest_cache",
-    ".ruff_cache",
-}
 
 
 def _agent_runtime_hash_scope() -> dict:
@@ -1848,66 +1786,6 @@ def _build_agent_runtime_download() -> _RuntimeDownload:
         data=data,
         expires_at=time.time() + _RUNTIME_DOWNLOAD_TOKEN_TTL_SECONDS,
     )
-
-
-def _iter_product_validator_directories() -> list[tuple[str, Path]]:
-    if not _PRODUCT_VALIDATORS_DIR.is_dir():
-        return []
-    directories: list[tuple[str, Path]] = []
-    for method_dir in _PRODUCT_VALIDATORS_DIR.iterdir():
-        entry_path = method_dir / "__init__.py"
-        if (
-            not method_dir.is_dir()
-            or method_dir.is_symlink()
-            or method_dir.name.startswith((".", "_"))
-            or not entry_path.is_file()
-            or entry_path.is_symlink()
-        ):
-            continue
-        directories.append((method_dir.name, method_dir))
-    directories.sort(key=lambda item: item[0])
-    return directories
-
-
-def _iter_product_validator_files(
-    directories: list[tuple[str, Path]] | None = None,
-) -> list[tuple[str, Path]]:
-    entries: list[tuple[str, Path]] = []
-    for _method_name, method_dir in (
-        directories if directories is not None else _iter_product_validator_directories()
-    ):
-        for file_path in method_dir.rglob("*"):
-            if not file_path.is_file() or file_path.is_symlink():
-                continue
-            relative_path = file_path.relative_to(method_dir)
-            if (
-                file_path.suffix in _AGENT_SKIP_SUFFIXES
-                or any(part in _PRODUCT_VALIDATORS_SYNC_SKIP_DIRS for part in relative_path.parts)
-            ):
-                continue
-            arcname = file_path.relative_to(_PRODUCT_VALIDATORS_DIR).as_posix()
-            entries.append((arcname, file_path))
-    entries.sort(key=lambda item: item[0])
-    return entries
-
-
-def _build_product_validators_package() -> dict:
-    buf = io.BytesIO()
-    directory_entries = _iter_product_validator_directories()
-    directories = [name for name, _method_dir in directory_entries]
-    files = _iter_product_validator_files(directory_entries)
-    with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as zf:
-        for arcname, file_path in files:
-            zf.write(file_path, arcname)
-    archive = buf.getvalue()
-    return {
-        "name": _PRODUCT_VALIDATORS_PACKAGE_NAME,
-        "version": _PRODUCT_VALIDATORS_PACKAGE_VERSION,
-        "archive_b64": base64.b64encode(archive).decode("ascii"),
-        "sha256": hashlib.sha256(archive).hexdigest(),
-        "directories": directories,
-        "files": [arcname for arcname, _file_path in files],
-    }
 
 
 def create_agent_runtime_update_payload(server_url: str) -> dict:

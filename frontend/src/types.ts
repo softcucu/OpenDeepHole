@@ -119,10 +119,12 @@ export interface Vulnerability {
   file: string;
   line: number;
   function: string;
+  call_chain?: string[];
   vuln_type: string;
   severity: string;
   description: string;
   ai_analysis: string;
+  vulnerability_report?: string;
   confirmed: boolean;
   ai_verdict?: "confirmed" | "not_confirmed" | "timeout" | "no_result" | "failed" | "filtered_same_pattern" | "";
   failure_reason?: string;
@@ -400,6 +402,13 @@ export interface AgentOpenCodePoolStatus extends OpenCodePoolStatus {
   online: boolean;
 }
 
+export interface ValidationTarget {
+  validator_id: string;
+  product: string;
+  validation_environment: string;
+  timeout_seconds?: number | null;
+}
+
 export interface ScanStatus {
   scan_id: string;
   project_id: string;
@@ -571,8 +580,6 @@ export interface AgentPatternFilterConfig {
 
 export interface AgentVulnerabilityValidationConfig {
   enabled: boolean;
-  script_path: string;
-  command: string;
   timeout_seconds: number;
 }
 

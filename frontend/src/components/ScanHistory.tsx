@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { getScanProducts, getScans, resumeScan, stopScan, deleteScan, updateScanProduct } from "../api/client";
-import type { ScanSummary, ScanItemStatus, User } from "../types";
+import { getValidationTargets, getScans, resumeScan, stopScan, deleteScan, updateScanValidationTarget } from "../api/client";
+import type { ScanSummary, ScanItemStatus, User, ValidationTarget } from "../types";
 
 interface Props {
   onViewScan: (scanId: string) => void;
@@ -46,6 +46,10 @@ function productFilterValue(scan: ScanSummary) {
 
 function productFilterLabel(value: string) {
   return value === UNCONFIGURED_PRODUCT_FILTER ? "未配置" : value;
+}
+
+function validationTargetValue(product: string, environment: string) {
+  return product && environment ? JSON.stringify([product, environment]) : "";
 }
 
 function isThreatAnalysisOnlyScan(scan: ScanSummary) {
@@ -204,7 +208,7 @@ function NavButton({
 
 export default function ScanHistory({ onViewScan, onDownloadAgent, onNewScan, user, onLogout, onManageUsers, onCheckerDashboard, onCheckerCatalog }: Props) {
   const [scans, setScans] = useState<ScanSummary[]>([]);
-  const [products, setProducts] = useState<string[]>([]);
+  const [validationTargets, setValidationTargets] = useState<ValidationTarget[]>([]);
   const [loading, setLoading] = useState(true);
   const [actionLoading, setActionLoading] = useState<string | null>(null);
   const [productSavingId, setProductSavingId] = useState<string | null>(null);
@@ -233,7 +237,7 @@ export default function ScanHistory({ onViewScan, onDownloadAgent, onNewScan, us
 
   useEffect(() => {
     fetchScans();
-    getScanProducts().then(setProducts).catch(() => {});
+    getValidationTargets().then(setValidationTargets).catch(() => {});
 
     let lastFetch = Date.now();
     const timer = setInterval(() => {
@@ -297,12 +301,17 @@ export default function ScanHistory({ onViewScan, onDownloadAgent, onNewScan, us
     }
   };
 
-  const handleProductChange = async (scanId: string, product: string) => {
+  const handleValidationTargetChange = async (scanId: string, value: string) => {
+    const [product, validationEnvironment] = value
+      ? (JSON.parse(value) as [string, string])
+      : ["", ""];
     setProductSavingId(scanId);
     try {
-      await updateScanProduct(scanId, product);
+      await updateScanValidationTarget(scanId, product, validationEnvironment);
       setScans((prev) => prev.map((scan) => (
-        scan.scan_id === scanId ? { ...scan, product } : scan
+        scan.scan_id === scanId
+          ? { ...scan, product, validation_environment: validationEnvironment }
+          : scan
       )));
     } catch {
       // silently fail
@@ -527,15 +536,18 @@ export default function ScanHistory({ onViewScan, onDownloadAgent, onNewScan, us
                     >
                       <td className="px-4 py-3">
                         <select
-                          value={scan.product || ""}
-                          onChange={(e) => handleProductChange(scan.scan_id, e.target.value)}
+                          value={validationTargetValue(scan.product || "", scan.validation_environment || "")}
+                          onChange={(e) => handleValidationTargetChange(scan.scan_id, e.target.value)}
                           disabled={isProductSaving}
                           className="max-w-[9rem] bg-slate-900 border border-slate-600 rounded-lg px-2 py-1.5 text-xs text-slate-200 focus:outline-none focus:border-blue-500 disabled:opacity-60"
                         >
                           <option value="">未配置</option>
-                          {products.map((product) => (
-                            <option key={product} value={product}>
-                              {product}
+                          {validationTargets.map((target) => (
+                            <option
+                              key={target.validator_id}
+                              value={validationTargetValue(target.product, target.validation_environment)}
+                            >
+                              {target.product} / {target.validation_environment}
                             </option>
                           ))}
                         </select>

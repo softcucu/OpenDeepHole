@@ -90,8 +90,7 @@ function isAiConfirmed(vuln: { ai_verdict?: string; confirmed?: boolean }): bool
 }
 
 function isStaticCandidateVulnerability(vuln: Vulnerability): boolean {
-  return (vuln.analysis_source || "static_candidate") === "static_candidate"
-    && vuln.vuln_type.toLowerCase() !== "threat_audit";
+  return (vuln.analysis_source || "static_candidate") === "static_candidate";
 }
 
 function isStaticCandidate(item: Candidate): boolean {

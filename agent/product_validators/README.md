@@ -1,285 +1,262 @@
-# 产品漏洞验证脚本编写指南
+# 产品漏洞验证方法开发指南
 
-`agent/product_validators/` 用于放置 Agent 本地执行的产品漏洞验证方法。每个验证方法必须使用一个独立的一级目录，Agent 会把该目录作为 Python 包导入，并调用目录入口 `__init__.py` 里的 `register(registry)` 注册产品和验证环境。根目录下的单个 `*.py` 文件不会作为验证方法加载。
+`agent/product_validators/` 是服务端和 Agent 共用的漏洞验证方法目录。每个验证方法占一个一级目录，由 `validator.yaml` 描述适用的产品与验证环境，由 `validator.py` 提供唯一异步入口。
 
-修改本目录后，需要在客户端页面点击“同步验证方法”并确认，才能推送到在线 Agent。同步会完整替换 Agent 上与服务端同名的方法目录，因此同名目录中的 Agent 本地修改或额外文件会被覆盖或删除；仅存在于 Agent、服务端没有的其它方法目录会保留。重新点击漏洞验证只会执行 Agent 当前已安装的验证器，不会自动下载或覆盖本目录。
+验证方法在 Agent 主进程内执行，不使用验证 worker 子进程，不热加载，也不提供手动同步。开发完成并上传到服务端后，重启服务端刷新产品/环境目录；下次启动扫描、恢复扫描、去误报或漏洞验证任务时，Agent 会先强制同步整个 runtime 并在必要时重启，再执行任务。不要直接修改 Agent 上已安装的副本。
 
-## 基本结构
-
-推荐目录结构如下。目录中可以包含任意数量的 Python 模块、子包、JSON、Markdown、提示词和其它运行资源：
+## 1. 目录与 manifest
 
 ```text
 agent/product_validators/
 ├── README.md
 └── lte_lab/
-    ├── __init__.py
+    ├── validator.yaml
     ├── validator.py
     ├── helpers.py
     └── prompts/
         └── reproduce.md
 ```
 
-每个方法目录的 `__init__.py` 需要提供 `register(registry)`，并注册一个同步验证函数。验证函数只接收一个参数 `ctx`，返回 `ValidationResult`。包内代码使用相对导入，避免不同方法目录中的同名模块互相冲突：
+`validator.yaml`：
 
-```python
-from .validator import validate_lte
-
-
-def register(registry) -> None:
-    registry.register(
-        "LTE",
-        validate_lte,
-        validation_environment="仿真UBBPi板环境",
-        timeout_seconds=7200,
-    )
+```yaml
+schema_version: 1
+product: LTE
+validation_environment: 仿真UBBPi板环境
+timeout_seconds: 7200
 ```
 
-`validator.py` 示例：
+- `schema_version`：必填，当前只能为 `1`。
+- `product`：必填，后端页面展示的产品名。
+- `validation_environment`：必填，只能与本 manifest 的产品成对选择。
+- `timeout_seconds`：可选，范围 `1..86400`；不填时使用 Agent 全局验证超时。
+- 不接受未知字段。
+
+目录名只能包含字母、数字、点、下划线和连字符。缺文件、manifest 非法，或两个目录声明了相同的产品/环境对时，相关方法会被隔离并从后端目录中排除，不影响其它方法。`validator.py` 导入失败或入口不符合约定时，Agent 会跳过该方法并在控制台记录原因，因此上传前必须完成独立调试。
+
+页面允许产品和验证环境同时留空，表示该扫描不启用漏洞验证；不允许只填写其中一个。服务端启动后读取 manifest，因此新增或修改目录后必须重启服务端。
+
+## 2. 唯一入口与返回值
+
+`validator.py` 必须定义：
 
 ```python
-from pathlib import Path
+async def validate(ctx) -> ValidationResult:
+    ...
+```
 
+不需要 `__init__.py`、`register(...)` 或注册表调用。不支持同步函数，也不兼容字典、元组等旧返回值。辅助模块应使用相对导入，例如 `from .helpers import build_prompt`。
+
+最小示例：
+
+```python
 from agent.vulnerability_validation import ValidationResult
-from .helpers import describe_vulnerability
 
 
-def validate_lte(ctx) -> ValidationResult:
-    report = ctx.get_report_markdown()
-    info = ctx.get_validation_info()
-    vuln = info["vulnerability"]
-
-    ctx.emit_stdout(
+async def validate(ctx) -> ValidationResult:
+    await ctx.emit_stdout(
         "验证过程",
-        describe_vulnerability(vuln),
+        f"从 {ctx.validation_entry_function} 验证到 {ctx.vulnerable_function}",
     )
-
-    artifact_path = Path(ctx.work_dir) / "validation-notes.md"
-    artifact_path.write_text(report, encoding="utf-8")
-    ctx.publish_artifact("validation-notes.md", path=artifact_path, title="验证报告", kind="report")
-
     return ValidationResult(
         validation_success=True,
         is_problem=True,
-        requires_human_intervention=False,
         status="verified",
-        summary="验证完成，问题可复现。",
+        requires_human_intervention=False,
+        summary="验证完成，问题可触发。",
     )
 ```
 
-`helpers.py` 示例：
+`ValidationResult` 字段：
+
+- `validation_success`：流程是否完整执行成功。
+- `is_problem`：最终是否认为漏洞真实存在。
+- `summary`：页面最终结论。
+- `status`：通常为 `verified`、`failed` 或 `cancelled`。
+- `requires_human_intervention`：是否仍需人工处理。
+- `artifacts`：可选的最终产物列表；实时产物优先用 `ctx.publish_artifact(...)`。
+- `validation_code`：可选的验证代码文本。
+
+## 3. `ctx` 输入契约
+
+验证器可以直接读取以下字段：
+
+| 字段 | 含义 |
+| --- | --- |
+| `ctx.vulnerability_file` | 漏洞源码文件的绝对路径 |
+| `ctx.validation_entry_function` | 验证入口函数，即调用链第一个函数 |
+| `ctx.vulnerable_function` | 漏洞函数名 |
+| `ctx.call_chain` | 从入口到漏洞函数的只读函数名元组 |
+| `ctx.vulnerability_type` | 审计过程输出的漏洞类型 |
+| `ctx.report_markdown` | 完整 Markdown 漏洞报告 |
+| `ctx.project_path` | 项目总目录的绝对路径 |
+| `ctx.code_scan_path` | 本次扫描代码路径的绝对路径 |
+| `ctx.work_dir` | 当前漏洞的隔离工作目录，OpenCode 文件工具默认可写 |
+| `ctx.validator_dir` | 当前验证方法目录 |
+| `ctx.report_path` | `report_markdown` 已落盘的路径 |
+| `ctx.product` / `ctx.validation_environment` | 当前成对验证目标 |
+| `ctx.scan_id` / `ctx.vuln_index` | 扫描与漏洞索引 |
+| `ctx.timeout_seconds` | 本次验证整体超时 |
+| `ctx.vulnerability` | 完整 `Vulnerability` 模型 |
+
+也可使用：
+
+- `ctx.get_report_markdown()`：返回 Markdown 报告。
+- `ctx.get_validation_info()`：返回以上字段及漏洞字典的可序列化快照。
+- `ctx.cancelled()`：检查用户是否已经停止验证；纯 Python 长循环必须定期检查。
+
+候选点审计和威胁审计必须输出 `vuln_type`、非空 `call_chain` 和 Markdown `vulnerability_report`。运行时保证调用链至少包含漏洞函数，并把第一个函数作为验证入口。
+
+## 4. OpenCode 调用
+
+验证器与威胁分析、候选点审计使用同一个任务服务，直接调用 `get_opencode_task_service().run_task()`：
 
 ```python
-def describe_vulnerability(vuln: dict) -> str:
-    return (
-        f"validating {vuln.get('vuln_type')} at "
-        f"{vuln.get('file')}:{vuln.get('line')}"
+from backend.opencode.task_service import OpenCodeTaskSpec, get_opencode_task_service
+
+
+result = await get_opencode_task_service().run_task(
+    OpenCodeTaskSpec(
+        task_name="PoC 设计",
+        prompt=ctx.report_markdown,
+        directory=ctx.project_path,
+        required_capability="high",
+        timeout_seconds=ctx.timeout_seconds,
+        priority=80,
+        output_schema=RESULT_SCHEMA,
+        writable_paths=[ctx.work_dir],
+        on_output=ctx.opencode_output,
+        cancel_event=ctx.cancel_event,
     )
+)
+result.raise_for_status()
+payload = result.structured
+session_id = result.session_id
 ```
 
-`registry.register(product, func, validation_environment="仿真UBBPi板环境", timeout_seconds=None)` 参数说明：
+当前验证执行上下文会自动绑定 `scan_id`、验证元数据、共享 MCP 网关和 `ctx.work_dir` 写权限。验证器不要自行创建 OpenCode workspace、MCP Server 或 CLI 子进程，也不要直接执行 `nga`、`opencode`、`hac` 或 `claude`。
 
-- `product`：扫描任务选择的产品名，必须和扫描元数据里的产品名一致。
-- `func`：同步验证函数，不支持 `async def`。
-- `validation_environment`：扫描任务选择的验证环境，必须和扫描元数据里的验证环境一致。旧脚本不传该参数时，会按当前扫描的默认验证环境注册。
-- `timeout_seconds`：该产品验证器的整体超时，范围是 1 到 86400 秒。未设置时使用 Agent 全局漏洞验证超时。
+### 同时创建两个任务
 
-## ctx 基础字段
-
-验证函数运行时，`ctx` 会提供当前单个漏洞的上下文。
-
-- `ctx.scan_id`：扫描 ID。
-- `ctx.vuln_index`：漏洞在扫描结果中的索引。
-- `ctx.product`：当前扫描产品。
-- `ctx.validation_environment`：当前扫描选择的验证环境。
-- `ctx.vulnerability`：当前漏洞对象。需要字典时优先使用 `ctx.get_validation_info()["vulnerability"]`。
-- `ctx.report_markdown`：后端下发的单漏洞 Markdown 报告原文，推荐通过 `ctx.get_report_markdown()` 读取。
-- `ctx.work_dir`：该漏洞验证任务的工作目录，通常位于扫描目录下的 `validation/vuln-{idx}`。
-- `ctx.validator_dir`：当前验证方法包的一级目录。即使验证函数定义在嵌套子模块中，运行时当前目录也固定为这个方法根目录。
-- `ctx.report_path`：Agent 已写入的单漏洞 Markdown 报告路径。
-- `ctx.project_path`：项目根目录。可能为空，使用前需要判断。
-- `ctx.code_scan_path`：本次代码扫描范围。可能为空，使用前需要判断。
-- `ctx.timeout_seconds`：本次验证实际生效的整体超时。
-
-## ctx 方法
-
-### `ctx.get_report_markdown()`
-
-返回后端生成的单漏洞 Markdown 报告。这是验证脚本的主输入，内容和页面下载的单漏洞报告保持一致。需要传给外部工具或 OpenCode 任务时，建议先写入一个明确的文件路径。
+两个独立任务使用两个不带 `session_id` 的 `OpenCodeTaskSpec`，通过 `asyncio.gather` 并发提交；实际并发仍受全局模型池和单模型并发限制：
 
 ```python
-report_path = Path(ctx.work_dir) / "vulnerability.md"
-report_path.write_text(ctx.get_report_markdown(), encoding="utf-8")
-ctx.publish_artifact("vulnerability.md", path=report_path, title="输入报告", kind="report")
+import asyncio
+
+service = get_opencode_task_service()
+code_result, exploit_result = await asyncio.gather(
+    service.run_task(OpenCodeTaskSpec(
+        task_name="代码可达性分析",
+        prompt=code_prompt,
+        directory=ctx.project_path,
+        output_schema=CODE_SCHEMA,
+        cancel_event=ctx.cancel_event,
+    )),
+    service.run_task(OpenCodeTaskSpec(
+        task_name="利用条件分析",
+        prompt=exploit_prompt,
+        directory=ctx.project_path,
+        output_schema=EXPLOIT_SCHEMA,
+        cancel_event=ctx.cancel_event,
+    )),
+)
+code_result.raise_for_status()
+exploit_result.raise_for_status()
 ```
 
-### `ctx.get_validation_info()`
-
-返回当前验证任务的结构化信息，适合读取路径、产品、超时和漏洞字段。
-
-返回字段包括：
-
-- `scan_id`
-- `vuln_index`
-- `product`
-- `validation_environment`
-- `work_dir`
-- `validator_dir`
-- `report_path`
-- `project_path`
-- `code_scan_path`
-- `timeout_seconds`
-- `vulnerability`
-
-`vulnerability` 是漏洞对象的字典形式，常用字段包括 `file`、`line`、`function`、`vuln_type`、`severity`、`description`、`ai_analysis`、`confirmed`、`ai_verdict`。
-
-### `ctx.emit_stdout(title, content)` / `ctx.emit_stdout(text)`
-
-把阶段性输出同步到漏洞验证页面。推荐传入标题和内容：同标题的输出会追加到同一个栏位，不存在的标题会自动创建新栏。旧的单参数写法仍兼容，会写入默认的“中间产出”栏。
-
-验证函数执行期间，脚本自身以及运行期导入的同目录 helper 中的 `print(...)` 只会保留在 Agent 控制台输出，不会同步到漏洞验证页面。需要页面展示的进度必须显式调用 `ctx.emit_stdout(...)`，或者通过 `ctx.run_command(...)` 执行外部命令。
+同一个 `session_id` 表示续写同一会话。不要并发续写同一 session；应按顺序 `await`，因为会话消息具有严格先后关系：
 
 ```python
-ctx.emit_stdout("验证过程", "STEP 1 running poc generation")
-ctx.emit_stdout("验证过程", f"artifact will be saved to {artifact_path}")
-ctx.emit_stdout("调试信息", "extra diagnostic text")
-```
-
-每个输出栏会被截断保留尾部内容，不要依赖它作为唯一持久化结果。需要页面长期展示的文件或代码应使用 `ctx.publish_artifact(...)`。
-
-### `ctx.publish_artifact(name, content=None, *, title="产物", path=None, kind="artifact")`
-
-发布中间产物或最终产物到漏洞验证页面。同 `title` 的产物会在页面和导出报告中归为一栏。
-
-- `title`：页面展示的产物栏标题。
-- `name`：页面展示的产物名。
-- `content`：直接发布的文本内容。
-- `path`：产物文件路径。未传 `content` 时，运行器会尝试读取该文件内容。
-- `kind`：产物类型，常用值是 `artifact`、`report`、`code`、`validation_code`。
-
-当 `kind` 为 `code` 或 `validation_code` 时，内容会同步到页面的验证代码展示区。
-
-```python
-ctx.publish_artifact("poc.py", "print('poc')", title="PoC", kind="code")
-ctx.publish_artifact("step-1.md", path=step_1_artifact, title="阶段产物", kind="artifact")
-```
-
-同 `title`、同名且同 `kind` 的产物会被新内容替换。产物内容会被截断保留尾部内容，超大文件应保存摘要或关键片段。
-
-### `ctx.run_command(command, *, cwd=None, timeout=None, output_title=None)`
-
-执行外部命令，并把 stdout 和 stderr 合并同步到 `ctx.emit_stdout(...)`。`output_title` 可指定命令输出进入哪个页面栏，不传时进入默认“中间产出”栏。返回进程退出码。
-
-`run_command` 仅用于编译器、测试程序、PoC 等普通外部命令。不得用它启动 `nga`、`opencode`、`claude` 或 `hac`；这类命令返回 `126`，模型任务必须使用下面的 `ctx.run_opencode_task(...)`。
-
-注意事项：
-
-- `command` 使用参数列表，不要拼接成单个 shell 字符串。
-- `cwd` 未传时默认使用 `ctx.validator_dir`，也就是当前验证脚本所在目录。
-- `output_title` 未传时会使用默认“中间产出”栏；建议长流程显式传入“命令输出”或阶段名称。
-- 运行器会给子进程合并当前 PATH、Windows 用户/系统 PATH 和常见工具目录，例如 `%APPDATA%\npm`、`%LOCALAPPDATA%\pnpm`、`%LOCALAPPDATA%\Volta\bin`、`%USERPROFILE%\scoop\shims`、`%ProgramData%\chocolatey\bin`。
-- `timeout` 是单条命令超时。整体验证仍受 `ctx.timeout_seconds` 限制。
-- 命令超时时返回 `124`。
-- 直接执行 AI CLI 时返回 `126`，并提示改用统一 OpenCode 任务接口。
-- 用户停止验证时，运行器会终止正在执行的命令进程树，并返回负数退出码或已结束进程的退出码。
-
-### `ctx.run_opencode_task(...)`
-
-通过 Agent 父进程的统一 OpenCode 队列执行模型任务。验证 worker 不创建 CLI 子进程；模型选择、优先级、执行超时、权限、MCP、SKILL、JSON Schema、重试和 session 都由公共组件管理。
-
-```python
-result = ctx.run_opencode_task(
-    task_name="PoC 设计",
-    prompt="根据漏洞报告设计验证步骤，最终只返回 JSON。",
-    required_capability="high",       # low | medium | high
+first = (await service.run_task(first_spec)).raise_for_status()
+second = await service.run_task(OpenCodeTaskSpec(
+    task_name="生成 PoC",
+    prompt="根据上一轮结论生成 PoC。",
     directory=ctx.project_path,
-    timeout_seconds=ctx.timeout_seconds,
-    priority=80,                       # 1..100，数值越大越优先
-    output_schema={
-        "type": "object",
-        "properties": {"content": {"type": "string"}},
-        "required": ["content"],
-        "additionalProperties": False,
-    },
-    output_retry_count=2,               # 同 session JSON 纠正次数
-    attempt=2,                          # 全新 session 重试次数
-    session_id=None,
-    writable_paths=[],
-)
-session_id = result["session_id"]
-# structured 是父进程从普通回复文本中本地提取的便利值。
-content = result["structured"]["content"]
+    session_id=first.session_id,
+    cancel_event=ctx.cancel_event,
+))
 ```
 
-后续阶段把返回的 `session_id` 再传入，即可在同一 OpenCode session 中追加 prompt。session 的运行目录固定不能更换；每次追加可独立指定模型能力、输出 Schema 和双层重试。任务超时只从真正获得模型并开始执行时计算，排队时间不计入单次 OpenCode 执行超时，但仍受验证流程的整体超时约束。
+`ctx.opencode_output` 只把模型流打印到 Agent/调试控制台，不进入后端漏洞验证页面。需要页面展示时，由验证器提取阶段性结论后显式调用 `await ctx.emit_stdout(...)`。
 
-验证父进程会按需把当前扫描的 `code_index.db` 注册到共享 MCP 网关，并自动在 prompt 前补充 deephole-code 所需的 `project_id`。验证器不传 MCP、SKILL 或权限选择：全部 MCP 工具默认可用，内置 SKILL 位于 Agent 全局 workspace，任务 prompt 直接点名要使用的 SKILL；项目标准 SKILL 目录继续由 OpenCode 自动发现。默认仅当前扫描目录可由文件编辑工具写入，额外路径通过 `writable_paths` 明确增加；`bash` 按全局约定保持允许。
+## 5. 页面输出、产物和命令
 
-### `ctx.cancelled()`
+后端页面布局不变，只有以下内容进入中间输出：
 
-判断用户是否停止了当前漏洞验证。纯 Python 长循环必须周期性检查它，并尽快返回 `status="cancelled"`。
+- `await ctx.emit_stdout(title, content)` 或单参数形式；
+- `await ctx.run_command(...)` 的 stdout/stderr。
 
-```python
-for item in work_items:
-    if ctx.cancelled():
-        return ValidationResult(
-            validation_success=False,
-            is_problem=True,
-            requires_human_intervention=True,
-            status="cancelled",
-            summary="validation cancelled",
-        )
-    run_one_step(item)
-```
+普通 `print(...)` 和 OpenCode 输出只进入 Agent 控制台；独立调试时也会显示在当前终端。
 
-外部命令优先通过 `ctx.run_command(...)` 执行，因为它已经处理了停止和超时。整体验证运行在独立 worker 进程中；用户点击停止或整体验证超时时，Agent 会在 Linux 上终止 worker 进程组，在 Windows 上通过 `taskkill /T /F` 终止 worker 进程树，覆盖验证函数直接启动的普通子进程。脚本如果主动 daemonize、脱离当前进程树或复用外部既有服务，运行器只做 best-effort，不会按进程名清理可能属于其它任务的无关进程。
-
-## 返回结果
-
-新脚本应优先返回 `ValidationResult`。
+发布产物：
 
 ```python
-ValidationResult(
-    validation_success=True,
-    is_problem=True,
-    summary="验证成功，PoC 能触发目标问题。",
-    status="verified",
-    requires_human_intervention=False,
-    artifacts=[],
-    validation_code="",
+artifact_path = ctx.work_dir / "poc.py"
+artifact_path.write_text(poc, encoding="utf-8")
+await ctx.publish_artifact(
+    "poc.py",
+    path=artifact_path,
+    title="PoC",
+    kind="code",
 )
 ```
 
-字段含义：
+执行编译器、测试程序或 PoC：
 
-- `validation_success`：验证流程是否成功完成。工具缺失、超时、步骤失败时应为 `False`。
-- `is_problem`：验证结论是否认为原漏洞是真问题。
-- `summary`：最终结论，会展示在验证输出区域。
-- `status`：最终状态，常用值是 `verified`、`failed`、`timeout`、`cancelled`。
-- `requires_human_intervention`：是否需要人工继续判断或操作。
-- `artifacts`：一次性附加的产物列表。长流程中更推荐用 `ctx.publish_artifact(...)` 实时发布。
-- `validation_code`：验证代码内容，会展示在验证代码区域。
+```python
+exit_code = await ctx.run_command(
+    ["python3", str(artifact_path)],
+    cwd=ctx.work_dir,
+    timeout=60,
+    output_title="PoC 输出",
+)
+```
 
-运行器也兼容字典、元组和带同名属性的对象返回值，但这只是兼容旧脚本。新脚本不要依赖这些兼容形态。
+`run_command` 不经过 shell，返回退出码；命令超时返回 `124`。用户取消或验证整体结束时会终止该命令的进程树。验证器自行创建的后台进程不受可靠托管，因此不要 daemonize，也不要绕过 `ctx.run_command(...)`。
 
-## 路径和产物建议
+## 6. 无后端独立调试
 
-- 验证函数运行时当前目录是 `ctx.validator_dir`。脚本目录下的 `input/input.json` 可直接用 `open("input/input.json", encoding="utf-8")` 读取。
-- 方法目录是独立 Python 包；同目录辅助文件使用 `from . import helper`，子模块使用 `from .helpers import name`，嵌套子包继续使用包内相对导入。
-- 普通中间文件优先写入 `ctx.work_dir`，它是当前漏洞验证任务的隔离工作目录。
-- OpenCode 任务需要读取项目源码时，可以使用 `ctx.project_path` 作为 `directory`，但必须先判断它是否为空。
-- 如果验证只针对本次扫描范围，优先参考 `ctx.code_scan_path`。
-- 传给外部工具的漏洞输入建议来自 `ctx.get_report_markdown()`，不要重新拼一个第二格式。
-- 每个重要阶段都用 `print(...)` 写 Agent 控制台诊断；需要漏洞验证页面可见的开始、结束、失败和重试信息必须调用 `ctx.emit_stdout("标题", "内容")`。
-- 每个需要页面保留的报告、PoC、日志摘要或验证代码都用 `ctx.publish_artifact(..., title="标题")` 发布。
+独立调试不需要启动 Web 后端，但需要可用的 Agent 配置、OpenCode serve 依赖以及目标项目源码：
 
-## OpenCode 多阶段验证建议
+```bash
+python -m agent.validation_debug \
+  --validator agent/product_validators/demo \
+  --case agent/product_validators/debug-case.example.json \
+  --config agent.yaml
+```
 
-`demo/__init__.py` 展示了一个四阶段 OpenCode 验证模板：读取漏洞 Markdown，按 STEP 1 到 STEP 4 通过 `ctx.run_opencode_task(...)` 串行执行，并复用同一个 session。模型按 JSON Schema 约束回复普通 JSON 文本，父进程本地提取后由 Python 写入 `.opendeephole/vulnerability_validation/{scan_id}/vuln-{idx}/`，避免依赖模型直接写文件。
+调试 case：
 
-多阶段流程建议遵守以下规则：
+```json
+{
+  "project_path": "/absolute/path/to/project",
+  "code_scan_path": "/absolute/path/to/project/src",
+  "vulnerability": {
+    "file": "src/parser.c",
+    "line": 120,
+    "function": "parse_payload",
+    "call_chain": ["handle_packet", "parse_message", "parse_payload"],
+    "vuln_type": "oob",
+    "severity": "high",
+    "description": "长度字段可导致越界读取",
+    "ai_analysis": "完整分析",
+    "vulnerability_report": "# 漏洞报告\n\n验证该越界路径。",
+    "confirmed": true,
+    "ai_verdict": "confirmed"
+  },
+  "report_markdown": "# 漏洞报告\n\n可选；不填时由漏洞对象生成。"
+}
+```
 
-- 每个 STEP 开始前调用 `ctx.cancelled()`。
-- 每个 STEP 开始、失败重试、成功完成都调用 `ctx.emit_stdout("验证过程", ...)`。
-- 每个 STEP 产物生成后调用 `ctx.publish_artifact(..., title="阶段产物")`。
-- 模型阶段统一用 `ctx.run_opencode_task(...)`；编译、运行 PoC 等非模型命令才使用 `ctx.run_command(...)`。
-- 某个必需 STEP 没有产物时，应返回 `validation_success=False`，`requires_human_intervention=True`，并在 `summary` 写清楚缺失的 STEP 和产物路径。
+默认运行目录为 `~/.opendeephole/vulnerability_validation/debug/<validator>/<run-id>/`。终端显示 `print(...)`、OpenCode 输出、显式中间输出和产物通知，最终结果写入 `validation/vuln-0/result.json`。进程退出码 `0` 表示验证流程成功，`1` 表示流程失败。`Ctrl-C` 会设置与线上相同的取消信号。
+
+## 7. 提交前检查
+
+1. `validator.yaml` 的产品/环境对唯一且字段合法。
+2. `validator.py` 只暴露异步 `validate(ctx)`，返回严格 `ValidationResult`。
+3. 所有临时文件写入 `ctx.work_dir`，方法自带只读资源放在 `ctx.validator_dir`。
+4. 模型调用直接使用共享 `OpenCodeTaskService`；并发独立任务用 `asyncio.gather`，同 session 串行。
+5. 页面进度显式 `await ctx.emit_stdout(...)`，产物显式 `await ctx.publish_artifact(...)`。
+6. 外部进程只通过 `await ctx.run_command(...)`。
+7. 本地 debug case 能完整跑通停止、失败和成功路径。
+8. 上传服务端、重启服务端，然后从页面启动任务；Agent runtime 会在任务执行前强制同步。

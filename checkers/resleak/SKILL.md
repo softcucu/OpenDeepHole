@@ -32,10 +32,6 @@ description: 验证各类资源泄露候选漏洞（文件/套接字/锁/内存/
 | 共享内存 | shm_open | close() + shm_unlink() |
 | 自定义资源 | *alloc/*create/*init/*open/*get | 对应的 *free/*destroy/*close/*release/*put |
 
-## 可用工具
-
-- `submit_result(confirmed, severity, description, ai_analysis)` — 提交分析结论（**必须调用**）
-
 ## 分析步骤
 
 ```
@@ -44,7 +40,7 @@ description: 验证各类资源泄露候选漏洞（文件/套接字/锁/内存/
 第 3 步  追踪每个退出路径（return / goto / continue）上的释放行为
 第 4 步  检查自定义释放函数的语义
 第 5 步  判断是否存在所有权转移或其他释放机制
-第 6 步  调用 submit_result 提交结论
+第 6 步  汇总并形成结论
 ```
 
 ## 判定标准
@@ -70,9 +66,9 @@ description: 验证各类资源泄露候选漏洞（文件/套接字/锁/内存/
 - 函数其他路径存在明确的释放操作可对比
 - 泄露会在实际运行中重复触发（非一次性或可忽略）
 
-## 提交结果
+## 结论内容
 
-分析完成后，**必须**调用 `submit_result`：
+分析完成后按以下字段给出结论：
 
 | 参数 | 规则 |
 |------|------|
@@ -80,13 +76,3 @@ description: 验证各类资源泄露候选漏洞（文件/套接字/锁/内存/
 | `severity` | high：文件描述符/套接字/锁持有必定泄露；medium：内存或条件性泄露；low：边缘情况 |
 | `description` | 一句话摘要，注明资源类型和函数名，例："函数 process_conn 的错误路径未关闭套接字 sock_fd" |
 | `ai_analysis` | 详细推理：资源获取位置→泄露路径描述→排除/确认理由 |
-
-`submit_result` 调用后**立即结束**，不要再输出任何文字。
-
-## OpenDeepHole 当前运行时结果规则
-
-当前运行时不再通过 `submit_result` 返回漏洞审计结论。若上文仍要求调用 `submit_result`、或要求不要输出 JSON，以本节和本次任务初始提示词为准：
-
-- 不要调用 `submit_result`。
-- 最终回复必须输出符合本次任务初始提示词中“最终结果返回规则”的 JSON。
-- `ai_analysis` 字段仍可包含人类可读 Markdown 分析。

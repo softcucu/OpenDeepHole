@@ -71,13 +71,18 @@ class VulnerabilityStoreTests(unittest.TestCase):
             )
             store.add_vulnerability("scan-1", timeout)
 
-            replacement = _make_vuln(2, audit_index=3)
+            replacement = _make_vuln(2, audit_index=3).model_copy(update={
+                "call_chain": ["entry_fn", "fn2"],
+                "vulnerability_report": "# Vulnerability\n\nStored report.",
+            })
             index = store.upsert_incomplete_vulnerability("scan-1", replacement)
 
             self.assertEqual(index, 1)
             stored = store.get_vulnerabilities("scan-1")
             self.assertEqual([v.audit_index for v in stored], [7, 3])
             self.assertEqual(stored[1].ai_verdict, "confirmed")
+            self.assertEqual(stored[1].call_chain, ["entry_fn", "fn2"])
+            self.assertEqual(stored[1].vulnerability_report, "# Vulnerability\n\nStored report.")
 
     def test_migrates_vulnerability_audit_index_column(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -118,6 +123,8 @@ class VulnerabilityStoreTests(unittest.TestCase):
             migrated = SqliteScanStore(db_path)
             cols = {row[1] for row in migrated._conn.execute("PRAGMA table_info(vulnerabilities)").fetchall()}
             self.assertIn("audit_index", cols)
+            self.assertIn("call_chain", cols)
+            self.assertIn("vulnerability_report", cols)
             migrated.save_scan(*_make_scan("scan-1"))
             migrated.add_vulnerability("scan-1", _make_vuln(1, audit_index=5))
             self.assertEqual(migrated.get_vulnerabilities("scan-1")[0].audit_index, 5)

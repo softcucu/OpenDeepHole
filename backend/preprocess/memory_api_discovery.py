@@ -505,7 +505,6 @@ def _build_batch_prompt(
     payload = [candidate.to_prompt_dict() for candidate in batch]
     return (
         "这是扫描前的内存申请/释放 API 识别任务，不是漏洞审计。"
-        "不要调用 submit_result 或任何结果提交 MCP 工具。"
         f"project_id 为 `{project_id}`。"
         f"当前是第 {batch_index}/{batch_count} 批。"
         "请判断每个候选是否是真正的底层通用堆内存申请/释放 API 或薄 wrapper。"

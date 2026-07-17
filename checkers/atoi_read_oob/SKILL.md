@@ -11,7 +11,7 @@ description: 判断 atoi 调用点是否存在参数读越界风险
 
 ## 输出要求
 
-审计完成后必须调用一次 `submit_result`，参数规则：
+按以下规则给出审计结论：
 
 - `confirmed`: 存在可达读越界路径时为 `true`，否则为 `false`
 - `severity`: 外部输入可触发且可能跨对象读取为 `"high"`；内部数据流但可达为 `"medium"`；边界依赖较弱为 `"low"`
@@ -29,12 +29,3 @@ description: 判断 atoi 调用点是否存在参数读越界风险
 判定：<为什么确认读越界或为什么安全>
 修复建议：<如改用 strtol 并先做长度内 NUL 检查/复制到带终止符缓冲区/补零>
 ```
-
-
-## OpenDeepHole 当前运行时结果规则
-
-当前运行时不再通过 `submit_result` 返回漏洞审计结论。若上文仍要求调用 `submit_result`、或要求不要输出 JSON，以本节和本次任务初始提示词为准：
-
-- 不要调用 `submit_result`。
-- 最终回复必须输出符合本次任务初始提示词中“最终结果返回规则”的 JSON。
-- `ai_analysis` 字段仍可包含人类可读 Markdown 分析。

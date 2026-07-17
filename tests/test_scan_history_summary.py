@@ -41,6 +41,7 @@ class FakeScanStore:
                     ai_verdict=v.ai_verdict,
                     confirmed=v.confirmed,
                     user_verdict=v.user_verdict,
+                    analysis_source=v.analysis_source,
                 )
                 for v in self.scan.vulnerabilities
             ]
