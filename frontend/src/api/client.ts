@@ -576,6 +576,10 @@ export async function probeAgentMcp(agentKey: string, target: AgentMcpTarget): P
   return data;
 }
 
+export async function reloadAgentMcp(agentKey: string, target: AgentMcpTarget): Promise<void> {
+  await api.post(`/api/agent-configs/${agentKey}/mcp-reload/${target}`);
+}
+
 export async function getAgentValidatorCatalog(agentKey: string, product = ""): Promise<AgentValidatorCatalog> {
   const { data } = await api.get<AgentValidatorCatalog>(
     `/api/agent-configs/${agentKey}/validator-catalog`,

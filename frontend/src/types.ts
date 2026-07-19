@@ -633,6 +633,15 @@ export interface AgentRemoteConfig {
 export type AgentMcpTarget = "code_graph" | "product_info";
 export type AgentMcpRuntimeState = "active" | "reload_pending" | "next_task";
 
+export interface AgentMcpLiveRuntimeStatus {
+  state: "connected" | "applying" | "failed" | "needs_auth" | "needs_client_registration" | "disabled" | "next_session" | "offline" | "unknown" | string;
+  config_fingerprint: string;
+  updated_at: string;
+  error: string;
+  loaded_directories: number;
+  total_directories: number;
+}
+
 export interface AgentMcpProbeResult {
   target: AgentMcpTarget;
   config_fingerprint: string;
@@ -652,6 +661,7 @@ export interface AgentMcpTargetStatus {
   enabled: boolean;
   stale: boolean;
   last_probe: AgentMcpProbeResult | null;
+  runtime: AgentMcpLiveRuntimeStatus;
 }
 
 export interface AgentMcpStatusResponse {

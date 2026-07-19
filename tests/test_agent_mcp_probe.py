@@ -266,6 +266,101 @@ def test_agent_probe_wait_timeout_cleans_up_waiter(monkeypatch) -> None:
     assert agent_api._mcp_probe_waiters == {}
 
 
+def test_agent_mcp_status_reports_live_hot_load_state(monkeypatch) -> None:
+    config = AgentRemoteConfig()
+    config.product_info.enabled = True
+    config.product_info.transport = "remote"
+    config.product_info.remote.url = "http://product.test/mcp"
+    record = {
+        "agent_key": "stable-agent",
+        "user_id": "user-1",
+        "config_json": config.model_dump_json(),
+        "mcp_probe_json": "{}",
+    }
+
+    class Store:
+        def get_agent_record(self, _agent_key):
+            return record
+
+    live_agent = AgentInfo(
+        agent_id="session-1",
+        agent_key="stable-agent",
+        name="agent",
+        ip="10.0.0.8",
+        last_seen="2026-07-17T01:00:00+00:00",
+        user_id="user-1",
+    )
+
+    async def send_result(_agent_id: str, command: dict) -> bool:
+        assert command["type"] == "mcp_status"
+        agent_api._mcp_status_waiters[command["request_id"]].set_result({
+            "targets": {
+                "product_info": {
+                    "state": "connected",
+                    "config_fingerprint": agent_api._mcp_config_fingerprint(config.product_info),
+                    "updated_at": "2026-07-19T00:00:00+00:00",
+                    "error": "",
+                    "loaded_directories": 2,
+                    "total_directories": 2,
+                },
+            },
+        })
+        return True
+
+    monkeypatch.setattr(agent_api, "get_scan_store", lambda: Store())
+    monkeypatch.setattr(agent_api, "_live_agent_for_key", lambda _key: ("session-1", live_agent))
+    monkeypatch.setattr(agent_api, "send_agent_command", send_result)
+    user = User(user_id="user-1", username="owner", role="user")
+
+    status = asyncio.run(agent_api.get_stable_agent_mcp_status("stable-agent", user))
+
+    assert status.product_info.runtime.state == "connected"
+    assert status.product_info.runtime.loaded_directories == 2
+    assert status.product_info.runtime.total_directories == 2
+    assert status.code_graph.runtime.state == "unknown"
+    assert agent_api._mcp_status_waiters == {}
+
+
+def test_agent_mcp_reload_sends_target_and_cleans_up_waiter(monkeypatch) -> None:
+    config = AgentRemoteConfig()
+    config.code_graph.enabled = True
+    config.code_graph.local.executable = sys.executable
+    record = {
+        "agent_key": "stable-agent",
+        "user_id": "user-1",
+        "config_json": config.model_dump_json(),
+    }
+
+    class Store:
+        def get_agent_record(self, _agent_key):
+            return record
+
+    live_agent = AgentInfo(
+        agent_id="session-1",
+        agent_key="stable-agent",
+        name="agent",
+        ip="10.0.0.8",
+        last_seen="2026-07-17T01:00:00+00:00",
+        user_id="user-1",
+    )
+
+    async def send_result(_agent_id: str, command: dict) -> bool:
+        assert command["type"] == "mcp_reload"
+        assert command["target"] == "code_graph"
+        agent_api._mcp_reload_waiters[command["request_id"]].set_result({"ok": True})
+        return True
+
+    monkeypatch.setattr(agent_api, "get_scan_store", lambda: Store())
+    monkeypatch.setattr(agent_api, "_live_agent_for_key", lambda _key: ("session-1", live_agent))
+    monkeypatch.setattr(agent_api, "send_agent_command", send_result)
+    user = User(user_id="user-1", username="owner", role="user")
+
+    result = asyncio.run(agent_api.reload_stable_agent_mcp("stable-agent", "code_graph", user))
+
+    assert result == {"ok": True}
+    assert agent_api._mcp_reload_waiters == {}
+
+
 def test_agent_mcp_probe_column_is_added_to_legacy_agents_table(tmp_path: Path) -> None:
     db_path = tmp_path / "legacy.db"
     connection = sqlite3.connect(db_path)

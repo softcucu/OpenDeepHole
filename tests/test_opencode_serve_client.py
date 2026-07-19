@@ -187,6 +187,7 @@ def test_run_prompt_uses_project_directory_and_default_tools(monkeypatch, tmp_pa
         manager = OpenCodeServeManager()
         manager._port = 12345
         manager._acquire_session = AsyncMock()
+        manager.ensure_managed_mcp = AsyncMock()
         project = tmp_path / "project"
         config_workspace = tmp_path / "runtime"
         project.mkdir()
@@ -221,6 +222,11 @@ def test_run_prompt_uses_project_directory_and_default_tools(monkeypatch, tmp_pa
             env_overrides={"HTTPS_PROXY": "http://127.0.0.1:3131"},
         )
         assert sessions == ["session-1"]
+        assert manager.ensure_managed_mcp.await_count == 2
+        assert all(
+            awaited.args == (project,)
+            for awaited in manager.ensure_managed_mcp.await_args_list
+        )
         session_client = _FakeAsyncClient.instances[0]
         message = next(
             item for item in session_client.posts
@@ -3105,5 +3111,469 @@ def test_config_hash_change_reuses_active_serve_process_without_waiting() -> Non
         manager._stop_locked.assert_not_awaited()
         manager._start_locked.assert_not_awaited()
         assert manager._port == 12345
+
+    asyncio.run(run())
+
+
+def test_managed_mcp_hot_loads_live_directory_with_auth_headers(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    async def run() -> None:
+        class FakeProc:
+            def poll(self):
+                return None
+
+        calls: list[dict] = []
+
+        class McpClient:
+            def __init__(self, *args, **kwargs) -> None:
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc, tb) -> None:
+                return None
+
+            async def post(self, path: str, **kwargs):
+                calls.append({"path": path, **kwargs})
+                name = str((kwargs.get("json") or {}).get("name") or "")
+                return _FakeResponse({name: {"status": "connected"}})
+
+        monkeypatch.setattr("backend.opencode.serve_client.httpx.AsyncClient", McpClient)
+        manager = OpenCodeServeManager()
+        manager._proc = FakeProc()
+        manager._port = 12345
+        manager._active_sessions = 1
+        manager.update_managed_mcp_configs({
+            "product_info": {
+                "target": "product_info",
+                "enabled": True,
+                "name": "product-info",
+                "fingerprint": "auth-v1",
+                "error": "",
+                "config": {
+                    "type": "remote",
+                    "url": "http://10.0.0.8:9000/mcp",
+                    "enabled": True,
+                    "timeout": 1000,
+                    "oauth": False,
+                    "headers": {"Authorization": "Bearer test-secret-123"},
+                },
+            },
+        })
+        project = tmp_path / "project"
+        project.mkdir()
+
+        await manager.ensure_managed_mcp(project)
+
+        assert manager._active_sessions == 1
+        assert calls[0]["path"] == "/mcp"
+        assert calls[0]["params"]["directory"] == str(project.resolve())
+        assert calls[0]["json"]["config"]["headers"] == {
+            "Authorization": "Bearer test-secret-123",
+        }
+        assert manager.managed_mcp_runtime_status()["product_info"] == {
+            "state": "connected",
+            "config_fingerprint": "auth-v1",
+            "updated_at": manager.managed_mcp_runtime_status()["product_info"]["updated_at"],
+            "error": "",
+            "loaded_directories": 1,
+            "total_directories": 1,
+        }
+
+    asyncio.run(run())
+
+
+def test_managed_mcp_rename_connects_new_name_and_disconnects_old(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    async def run() -> None:
+        class FakeProc:
+            def poll(self):
+                return None
+
+        calls: list[str] = []
+
+        class McpClient:
+            def __init__(self, *args, **kwargs) -> None:
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc, tb) -> None:
+                return None
+
+            async def post(self, path: str, **kwargs):
+                calls.append(path)
+                if path == "/mcp":
+                    name = str((kwargs.get("json") or {}).get("name") or "")
+                    return _FakeResponse({name: {"status": "connected"}})
+                return _FakeResponse(True)
+
+        monkeypatch.setattr("backend.opencode.serve_client.httpx.AsyncClient", McpClient)
+        manager = OpenCodeServeManager()
+        manager._proc = FakeProc()
+        manager._port = 12345
+        manager._active_sessions = 1
+        project = tmp_path / "project"
+        project.mkdir()
+        first = {
+            "target": "product_info",
+            "enabled": True,
+            "name": "product-v1",
+            "fingerprint": "v1",
+            "error": "",
+            "config": {"type": "remote", "url": "http://old/mcp", "enabled": True, "timeout": 1000},
+        }
+        manager.update_managed_mcp_configs({"product_info": first})
+        await manager.ensure_managed_mcp(project)
+        calls.clear()
+
+        manager.update_managed_mcp_configs({
+            "product_info": {
+                **first,
+                "name": "product-v2",
+                "fingerprint": "v2",
+                "config": {"type": "remote", "url": "http://new/mcp", "enabled": True, "timeout": 1000},
+            },
+        })
+        await asyncio.gather(*list(manager._managed_mcp_tasks.values()))
+
+        assert calls == ["/mcp", "/mcp/product-v1/disconnect"]
+        status = manager.managed_mcp_runtime_status()["product_info"]
+        assert status["state"] == "connected"
+        assert status["config_fingerprint"] == "v2"
+        assert manager._active_sessions == 1
+
+    asyncio.run(run())
+
+
+def test_managed_mcp_config_change_during_connect_cleans_up_stale_server(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    async def run() -> None:
+        class FakeProc:
+            def poll(self):
+                return None
+
+        connect_started = asyncio.Event()
+        release_connect = asyncio.Event()
+        calls: list[str] = []
+
+        class McpClient:
+            def __init__(self, *args, **kwargs) -> None:
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc, tb) -> None:
+                return None
+
+            async def post(self, path: str, **kwargs):
+                calls.append(path)
+                if path == "/mcp":
+                    connect_started.set()
+                    await release_connect.wait()
+                    name = str((kwargs.get("json") or {}).get("name") or "")
+                    return _FakeResponse({name: {"status": "connected"}})
+                return _FakeResponse(True)
+
+        monkeypatch.setattr("backend.opencode.serve_client.httpx.AsyncClient", McpClient)
+        manager = OpenCodeServeManager()
+        manager._proc = FakeProc()
+        manager._port = 12345
+        first = {
+            "target": "product_info",
+            "enabled": True,
+            "name": "product-v1",
+            "fingerprint": "v1",
+            "error": "",
+            "config": {"type": "remote", "url": "http://old/mcp", "enabled": True, "timeout": 1000},
+        }
+        manager.update_managed_mcp_configs({"product_info": first})
+        project = tmp_path / "project"
+        project.mkdir()
+        initial_sync = asyncio.create_task(manager.ensure_managed_mcp(project))
+        await connect_started.wait()
+
+        manager.update_managed_mcp_configs({
+            "product_info": {
+                **first,
+                "enabled": False,
+                "fingerprint": "disabled-v2",
+                "config": None,
+            },
+        })
+        release_connect.set()
+        await initial_sync
+        while manager._managed_mcp_tasks:
+            await asyncio.gather(*list(manager._managed_mcp_tasks.values()))
+            await asyncio.sleep(0)
+
+        assert calls == ["/mcp", "/mcp/product-v1/disconnect"]
+        status = manager.managed_mcp_runtime_status()["product_info"]
+        assert status["state"] == "disabled"
+        assert status["config_fingerprint"] == "disabled-v2"
+
+    asyncio.run(run())
+
+
+def test_managed_mcp_reload_queues_forced_retry_while_sync_is_running(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    async def run() -> None:
+        class FakeProc:
+            def poll(self):
+                return None
+
+        first_started = asyncio.Event()
+        release_first = asyncio.Event()
+        calls = 0
+
+        class McpClient:
+            def __init__(self, *args, **kwargs) -> None:
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc, tb) -> None:
+                return None
+
+            async def post(self, path: str, **kwargs):
+                nonlocal calls
+                if path == "/mcp":
+                    calls += 1
+                    if calls == 1:
+                        first_started.set()
+                        await release_first.wait()
+                    name = str((kwargs.get("json") or {}).get("name") or "")
+                    return _FakeResponse({name: {"status": "connected"}})
+                return _FakeResponse(True)
+
+        monkeypatch.setattr("backend.opencode.serve_client.httpx.AsyncClient", McpClient)
+        manager = OpenCodeServeManager()
+        manager._proc = FakeProc()
+        manager._port = 12345
+        manager.update_managed_mcp_configs({
+            "product_info": {
+                "target": "product_info",
+                "enabled": True,
+                "name": "product-info",
+                "fingerprint": "v1",
+                "error": "",
+                "config": {"type": "remote", "url": "http://product/mcp", "enabled": True, "timeout": 1000},
+            },
+        })
+        project = tmp_path / "project"
+        project.mkdir()
+        initial_sync = asyncio.create_task(manager.ensure_managed_mcp(project))
+        await first_started.wait()
+
+        manager.retry_managed_mcp("product_info")
+        release_first.set()
+        await initial_sync
+        while manager._managed_mcp_tasks:
+            await asyncio.gather(*list(manager._managed_mcp_tasks.values()))
+            await asyncio.sleep(0)
+
+        assert calls == 2
+        assert manager.managed_mcp_runtime_status()["product_info"]["state"] == "connected"
+
+    asyncio.run(run())
+
+
+def test_managed_mcp_failure_redacts_authorization_value(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    async def run() -> None:
+        class FakeProc:
+            def poll(self):
+                return None
+
+        class McpClient:
+            def __init__(self, *args, **kwargs) -> None:
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc, tb) -> None:
+                return None
+
+            async def post(self, path: str, **kwargs):
+                return _FakeResponse(
+                    {},
+                    error=RuntimeError("authentication failed for test-secret-123"),
+                )
+
+        monkeypatch.setattr("backend.opencode.serve_client.httpx.AsyncClient", McpClient)
+        manager = OpenCodeServeManager()
+        manager._proc = FakeProc()
+        manager._port = 12345
+        manager.update_managed_mcp_configs({
+            "product_info": {
+                "target": "product_info",
+                "enabled": True,
+                "name": "product-info",
+                "fingerprint": "secret-v1",
+                "error": "",
+                "config": {
+                    "type": "remote",
+                    "url": "http://product/mcp",
+                    "enabled": True,
+                    "timeout": 1000,
+                    "headers": {"Authorization": "Bearer test-secret-123"},
+                },
+            },
+        })
+        project = tmp_path / "project"
+        project.mkdir()
+
+        await manager.ensure_managed_mcp(project)
+
+        status = manager.managed_mcp_runtime_status()["product_info"]
+        assert status["state"] == "failed"
+        assert "test-secret-123" not in status["error"]
+        assert "***" in status["error"]
+
+    asyncio.run(run())
+
+
+def test_managed_mcp_failed_disconnect_is_not_reported_as_disabled(tmp_path: Path) -> None:
+    class FakeProc:
+        def poll(self):
+            return None
+
+    manager = OpenCodeServeManager()
+    manager._proc = FakeProc()
+    manager._port = 12345
+    directory = str((tmp_path / "project").resolve())
+    manager._managed_mcp_directories[directory] = Path(directory)
+    manager._managed_mcp_specs["product_info"] = {
+        "enabled": False,
+        "fingerprint": "disabled-v2",
+    }
+    manager._managed_mcp_status[directory] = {
+        "product_info": {
+            "state": "failed",
+            "fingerprint": "disabled-v2",
+            "updated_at": "2026-07-19T00:00:00+00:00",
+            "error": "disconnect failed",
+        },
+    }
+
+    status = manager.managed_mcp_runtime_status()["product_info"]
+
+    assert status["state"] == "failed"
+    assert status["error"] == "disconnect failed"
+
+
+def test_managed_mcp_invalid_config_is_failed_before_first_session() -> None:
+    manager = OpenCodeServeManager()
+    manager._managed_mcp_specs["code_graph"] = {
+        "enabled": True,
+        "fingerprint": "missing-binary",
+        "error": "CodeGraph executable not found: codegraph",
+    }
+
+    status = manager.managed_mcp_runtime_status()["code_graph"]
+
+    assert status["state"] == "failed"
+    assert status["error"] == "CodeGraph executable not found: codegraph"
+    assert status["total_directories"] == 0
+
+
+def test_managed_mcp_live_status_refresh_aggregates_directories_and_redacts_auth(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    async def run() -> None:
+        class FakeProc:
+            def poll(self):
+                return None
+
+        class McpClient:
+            def __init__(self, *args, **kwargs) -> None:
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc, tb) -> None:
+                return None
+
+            async def get(self, _path: str, **kwargs):
+                directory = str((kwargs.get("params") or {}).get("directory") or "")
+                if directory.endswith("project-a"):
+                    state = {"status": "connected"}
+                else:
+                    state = {
+                        "status": "needs_auth",
+                        "error": "rejected Authorization Bearer test-secret-123",
+                    }
+                return _FakeResponse({"product-info": state})
+
+        monkeypatch.setattr("backend.opencode.serve_client.httpx.AsyncClient", McpClient)
+        manager = OpenCodeServeManager()
+        manager._proc = FakeProc()
+        manager._port = 12345
+        manager._managed_mcp_specs["product_info"] = {
+            "enabled": True,
+            "name": "product-info",
+            "fingerprint": "auth-v1",
+            "error": "",
+            "config": {
+                "type": "remote",
+                "url": "http://product/mcp",
+                "headers": {"Authorization": "Bearer test-secret-123"},
+            },
+        }
+        for name in ("project-a", "project-b"):
+            directory = (tmp_path / name).resolve()
+            manager._managed_mcp_directories[str(directory)] = directory
+
+        status = (await manager.refresh_managed_mcp_runtime_status())["product_info"]
+
+        assert status["state"] == "needs_auth"
+        assert status["loaded_directories"] == 1
+        assert status["total_directories"] == 2
+        assert "test-secret-123" not in status["error"]
+        assert "***" in status["error"]
+
+    asyncio.run(run())
+
+
+def test_managed_mcp_reset_does_not_respawn_cancelled_sync(tmp_path: Path) -> None:
+    async def run() -> None:
+        manager = OpenCodeServeManager()
+        directory = str((tmp_path / "project").resolve())
+        manager._managed_mcp_directories[directory] = Path(directory)
+        manager._managed_mcp_specs["product_info"] = {
+            "enabled": True,
+            "fingerprint": "pending-v1",
+        }
+
+        async def pending_sync(*_args, **_kwargs) -> None:
+            await asyncio.Future()
+
+        manager._sync_managed_mcp_target = pending_sync
+        task = manager._spawn_managed_mcp_sync(directory, "product_info")
+        await asyncio.sleep(0)
+
+        await manager._reset_managed_mcp_process_state()
+        await asyncio.sleep(0)
+
+        assert task.cancelled()
+        assert manager._managed_mcp_tasks == {}
+        assert manager._managed_mcp_directories == {}
 
     asyncio.run(run())

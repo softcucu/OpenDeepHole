@@ -191,6 +191,15 @@ async def _handle_command(msg: dict, config, task_manager, reporter) -> dict | N
             target=str(msg.get("target") or ""),
             mcp_config=msg.get("mcp_config") if isinstance(msg.get("mcp_config"), dict) else {},
         )
+    elif cmd_type == "mcp_status":
+        return await agent_server.handle_mcp_status(
+            request_id=str(msg.get("request_id") or ""),
+        )
+    elif cmd_type == "mcp_reload":
+        return await agent_server.handle_mcp_reload(
+            request_id=str(msg.get("request_id") or ""),
+            target=str(msg.get("target") or ""),
+        )
     elif cmd_type == "skill_create":
         from agent.updater import ensure_runtime_updated
         await ensure_runtime_updated(msg.get("agent_runtime_update"), msg)
@@ -218,12 +227,18 @@ async def _apply_live_config_update(config) -> None:
         notify_model_pool_config_changed,
         refresh_configured_model_pool,
     )
-    from backend.opencode.serve_client import mark_serve_config_dirty
+    from backend.opencode.serve_client import get_serve_manager, mark_serve_config_dirty
 
     apply_network_env(config)
     refresh_backend_runtime_config(config)
-    from backend.opencode.config import refresh_global_opencode_config
+    from backend.opencode.config import (
+        build_managed_mcp_runtime_specs,
+        refresh_global_opencode_config,
+    )
     refresh_global_opencode_config()
+    get_serve_manager().update_managed_mcp_configs(
+        build_managed_mcp_runtime_specs(config)
+    )
     mark_serve_config_dirty()
     await refresh_configured_model_pool(
         config.opencode,

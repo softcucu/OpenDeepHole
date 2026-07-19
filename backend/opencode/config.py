@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import shutil
@@ -187,56 +188,119 @@ def build_opencode_config(
             "edit": edit_permissions,
         },
     }
-    runtime_config = get_config()
-    code_graph_config = getattr(runtime_config, "code_graph", None)
-    for managed in (
-        code_graph_config,
-        getattr(runtime_config, "product_info", None),
-    ):
-        if managed is None or not bool(getattr(managed, "enabled", False)):
-            continue
-        name = str(getattr(managed, "name", "") or "").strip()
-        if not name or name == "deephole-code":
-            continue
-        timeout_ms = max(1, int(getattr(managed, "timeout_seconds", 300))) * 1000
-        if str(getattr(managed, "transport", "local")) == "remote":
-            remote = getattr(managed, "remote", None)
-            url = str(getattr(remote, "url", "") or "").strip()
-            if not url:
-                continue
-            entry = {
-                "type": "remote",
-                "url": url,
-                "enabled": True,
-                "timeout": timeout_ms,
-            }
-            headers = dict(getattr(remote, "headers", {}) or {})
-            if headers:
-                entry["headers"] = headers
-        else:
-            local = getattr(managed, "local", None)
-            executable = str(getattr(local, "executable", "") or "").strip()
-            if not executable:
-                continue
-            if managed is code_graph_config and not (
-                shutil.which(executable) or Path(executable).is_file()
-            ):
-                # CodeGraph is optional.  If its local executable is absent,
-                # omit the broken MCP process and leave deephole-code active.
-                continue
-            entry = {
-                "type": "local",
-                "command": [executable, *[str(item) for item in (getattr(local, "args", []) or [])]],
-                "enabled": True,
-                "timeout": timeout_ms,
-            }
-            environment = dict(getattr(local, "environment", {}) or {})
-            if environment:
-                entry["environment"] = environment
-        data["mcp"][name] = entry
+    for spec in build_managed_mcp_runtime_specs(get_config()).values():
+        entry = spec.get("config")
+        if spec.get("enabled") and isinstance(entry, dict) and not spec.get("error"):
+            data["mcp"][str(spec["name"])] = entry
     if skills_paths:
         data["skills"] = {"paths": skills_paths}
     return data
+
+
+def _managed_mcp_value(value, name: str, default=None):
+    if isinstance(value, dict):
+        return value.get(name, default)
+    return getattr(value, name, default)
+
+
+def normalized_managed_mcp_config(managed) -> dict:
+    """Return one stable managed-MCP payload for hashing and runtime sync."""
+    local = _managed_mcp_value(managed, "local", {}) or {}
+    remote = _managed_mcp_value(managed, "remote", {}) or {}
+    return {
+        "enabled": bool(_managed_mcp_value(managed, "enabled", False)),
+        "name": str(_managed_mcp_value(managed, "name", "") or "").strip(),
+        "transport": str(_managed_mcp_value(managed, "transport", "local") or "local"),
+        "timeout_seconds": max(1, int(_managed_mcp_value(managed, "timeout_seconds", 300) or 300)),
+        "local": {
+            "executable": str(_managed_mcp_value(local, "executable", "") or "").strip(),
+            "args": [str(item) for item in (_managed_mcp_value(local, "args", []) or [])],
+            "environment": {
+                str(key): str(value)
+                for key, value in dict(_managed_mcp_value(local, "environment", {}) or {}).items()
+            },
+        },
+        "remote": {
+            "url": str(_managed_mcp_value(remote, "url", "") or "").strip(),
+            "headers": {
+                str(key): str(value)
+                for key, value in dict(_managed_mcp_value(remote, "headers", {}) or {}).items()
+            },
+        },
+    }
+
+
+def managed_mcp_config_fingerprint(managed) -> str:
+    payload = json.dumps(
+        normalized_managed_mcp_config(managed),
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def build_managed_mcp_runtime_specs(runtime_config=None) -> dict[str, dict]:
+    """Build the two server-managed MCP entries used by config and hot reload."""
+    runtime_config = runtime_config or get_config()
+    result: dict[str, dict] = {}
+    for target, managed in (
+        ("code_graph", getattr(runtime_config, "code_graph", None)),
+        ("product_info", getattr(runtime_config, "product_info", None)),
+    ):
+        normalized = normalized_managed_mcp_config(managed or {})
+        enabled = normalized["enabled"]
+        name = normalized["name"]
+        transport = normalized["transport"]
+        error = ""
+        entry: dict | None = None
+        if enabled and (not name or name == "deephole-code"):
+            error = "MCP name is empty or reserved"
+        elif enabled and transport == "remote":
+            url = normalized["remote"]["url"]
+            if not url:
+                error = "Remote MCP URL is empty"
+            else:
+                entry = {
+                    "type": "remote",
+                    "url": url,
+                    "enabled": True,
+                    "timeout": normalized["timeout_seconds"] * 1000,
+                    # OpenDeepHole currently supports static request-header auth.
+                    # Disable OpenCode's interactive OAuth auto-discovery so a bad
+                    # Bearer token is reported as a connection failure instead.
+                    "oauth": False,
+                }
+                if normalized["remote"]["headers"]:
+                    entry["headers"] = dict(normalized["remote"]["headers"])
+        elif enabled and transport == "local":
+            executable = normalized["local"]["executable"]
+            if not executable:
+                error = "Local MCP executable is empty"
+            elif target == "code_graph" and not (
+                shutil.which(executable) or Path(executable).is_file()
+            ):
+                error = f"CodeGraph executable not found: {executable}"
+            else:
+                entry = {
+                    "type": "local",
+                    "command": [executable, *normalized["local"]["args"]],
+                    "enabled": True,
+                    "timeout": normalized["timeout_seconds"] * 1000,
+                }
+                if normalized["local"]["environment"]:
+                    entry["environment"] = dict(normalized["local"]["environment"])
+        elif enabled:
+            error = f"Unsupported MCP transport: {transport}"
+        result[target] = {
+            "target": target,
+            "enabled": enabled,
+            "name": name,
+            "fingerprint": managed_mcp_config_fingerprint(normalized),
+            "config": entry,
+            "error": error,
+        }
+    return result
 
 
 def _write_opencode_config(workspace: Path, mcp_port: int | None = None) -> None:

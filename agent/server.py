@@ -812,6 +812,37 @@ async def handle_mcp_probe(request_id: str, target: str, mcp_config: dict) -> di
     return result
 
 
+async def handle_mcp_status(request_id: str) -> dict:
+    """Return the actual managed-MCP state of the current OpenCode serve."""
+    from backend.opencode.serve_client import get_serve_manager
+
+    return {
+        "type": "mcp_status_result",
+        "request_id": request_id,
+        "targets": await get_serve_manager().refresh_managed_mcp_runtime_status(),
+    }
+
+
+async def handle_mcp_reload(request_id: str, target: str) -> dict:
+    """Schedule a retry of one saved managed MCP without restarting serve."""
+    from backend.opencode.serve_client import get_serve_manager
+
+    try:
+        get_serve_manager().retry_managed_mcp(target)
+        return {
+            "type": "mcp_reload_result",
+            "request_id": request_id,
+            "ok": True,
+        }
+    except Exception as exc:
+        return {
+            "type": "mcp_reload_result",
+            "request_id": request_id,
+            "ok": False,
+            "error": str(exc),
+        }
+
+
 async def handle_skill_create(
     request_id: str,
     name: str,

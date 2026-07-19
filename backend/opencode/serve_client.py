@@ -17,6 +17,7 @@ import sys
 import tempfile
 import time
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 from urllib.parse import quote
@@ -1663,6 +1664,13 @@ class OpenCodeServeManager:
             tuple[tuple[OpenCodeServeKey, str], bool],
             asyncio.Task[OpenCodeModelListResult],
         ] = {}
+        self._managed_mcp_specs: dict[str, dict[str, Any]] = {}
+        self._managed_mcp_directories: dict[str, Path] = {}
+        self._managed_mcp_status: dict[str, dict[str, dict[str, Any]]] = {}
+        self._managed_mcp_applied: dict[str, dict[str, dict[str, Any]]] = {}
+        self._managed_mcp_tasks: dict[tuple[str, str], asyncio.Task] = {}
+        self._managed_mcp_locks: dict[tuple[str, str], asyncio.Lock] = {}
+        self._managed_mcp_force_pending: set[tuple[str, str]] = set()
 
     @property
     def base_url(self) -> str:
@@ -1696,6 +1704,413 @@ class OpenCodeServeManager:
             "runtime_state": state,
             "active_sessions": self._active_sessions,
         }
+
+    def update_managed_mcp_configs(self, specs: dict[str, dict[str, Any]]) -> None:
+        """Install the desired managed MCP set and hot-apply it to live directories."""
+        normalized = {
+            str(target): dict(spec)
+            for target, spec in specs.items()
+            if str(target) in {"code_graph", "product_info"} and isinstance(spec, dict)
+        }
+        changed = {
+            target
+            for target in set(self._managed_mcp_specs) | set(normalized)
+            if self._managed_mcp_specs.get(target) != normalized.get(target)
+        }
+        self._managed_mcp_specs = normalized
+        if not changed:
+            return
+        for directory_key in self._managed_mcp_directories:
+            for target in changed:
+                self._managed_mcp_status.setdefault(directory_key, {}).pop(target, None)
+                self._spawn_managed_mcp_sync(directory_key, target)
+
+    def retry_managed_mcp(self, target: str) -> None:
+        target = str(target or "").strip()
+        if target not in self._managed_mcp_specs:
+            raise ValueError(f"Unknown managed MCP target: {target}")
+        for directory_key in self._managed_mcp_directories:
+            self._managed_mcp_status.setdefault(directory_key, {}).pop(target, None)
+            self._spawn_managed_mcp_sync(directory_key, target, force=True)
+
+    async def ensure_managed_mcp(self, directory: Path) -> None:
+        """Ensure this OpenCode request directory sees the latest managed MCPs."""
+        directory = Path(directory).resolve()
+        directory_key = self._event_directory_key(directory)
+        self._managed_mcp_directories[directory_key] = directory
+        tasks = [
+            self._spawn_managed_mcp_sync(directory_key, target)
+            for target in self._managed_mcp_specs
+        ]
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+    def _spawn_managed_mcp_sync(
+        self,
+        directory_key: str,
+        target: str,
+        *,
+        force: bool = False,
+    ) -> asyncio.Task:
+        key = (directory_key, target)
+        existing = self._managed_mcp_tasks.get(key)
+        if existing is not None and not existing.done():
+            if force:
+                self._managed_mcp_force_pending.add(key)
+            return existing
+        self._managed_mcp_force_pending.discard(key)
+        task = asyncio.create_task(
+            self._sync_managed_mcp_target(directory_key, target, force=force)
+        )
+        self._managed_mcp_tasks[key] = task
+
+        def done(completed: asyncio.Task) -> None:
+            if self._managed_mcp_tasks.get(key) is completed:
+                self._managed_mcp_tasks.pop(key, None)
+            with contextlib.suppress(BaseException):
+                completed.result()
+            force_retry = key in self._managed_mcp_force_pending
+            self._managed_mcp_force_pending.discard(key)
+            spec = self._managed_mcp_specs.get(target)
+            current = self._managed_mcp_status.get(directory_key, {}).get(target)
+            if (
+                spec is not None
+                and directory_key in self._managed_mcp_directories
+                and (
+                    force_retry
+                    or not isinstance(current, dict)
+                    or current.get("fingerprint") != spec.get("fingerprint")
+                )
+            ):
+                self._spawn_managed_mcp_sync(
+                    directory_key,
+                    target,
+                    force=force_retry,
+                )
+
+        task.add_done_callback(done)
+        return task
+
+    @staticmethod
+    def _mcp_status_map(value: Any) -> dict[str, Any]:
+        if not isinstance(value, dict):
+            return {}
+        nested = value.get("status")
+        return nested if isinstance(nested, dict) else value
+
+    @staticmethod
+    def _mcp_native_status(value: Any) -> tuple[str, str]:
+        if not isinstance(value, dict):
+            return "failed", "OpenCode returned no MCP status"
+        status = str(value.get("status") or "failed")
+        error = str(value.get("error") or "")
+        if status not in {
+            "connected",
+            "disabled",
+            "failed",
+            "needs_auth",
+            "needs_client_registration",
+        }:
+            return "failed", error or f"Unknown OpenCode MCP status: {status}"
+        return status, error
+
+    @staticmethod
+    def _redact_managed_mcp_error(value: object, spec: dict[str, Any]) -> str:
+        text = _one_line_preview(value, 2000)
+        config = spec.get("config")
+        secrets: set[str] = set()
+        for mapping_name in ("headers", "environment"):
+            mapping = config.get(mapping_name) if isinstance(config, dict) else None
+            if not isinstance(mapping, dict):
+                continue
+            secrets.update(str(item) for item in mapping.values() if str(item))
+            for name, item in mapping.items():
+                parts = str(item).split(None, 1)
+                if _SENSITIVE_CONFIG_KEY_RE.search(str(name)) and len(parts) == 2:
+                    secrets.add(parts[1])
+        if secrets:
+            for secret in sorted(
+                secrets,
+                key=len,
+                reverse=True,
+            ):
+                text = text.replace(secret, "***")
+        return text
+
+    def _record_managed_mcp_status(
+        self,
+        directory_key: str,
+        target: str,
+        spec: dict[str, Any],
+        state: str,
+        *,
+        error: str = "",
+    ) -> None:
+        self._managed_mcp_status.setdefault(directory_key, {})[target] = {
+            "state": state,
+            "fingerprint": str(spec.get("fingerprint") or ""),
+            "error": self._redact_managed_mcp_error(error, spec) if error else "",
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }
+
+    async def _disconnect_managed_mcp(
+        self,
+        client: httpx.AsyncClient,
+        directory: Path,
+        applied: dict[str, Any],
+    ) -> None:
+        name = str(applied.get("name") or "").strip()
+        if not name:
+            return
+        response = await client.post(
+            f"/mcp/{quote(name, safe='')}/disconnect",
+            params=_serve_context_params(directory),
+            headers=_serve_context_headers(directory),
+        )
+        if response.status_code == 404:
+            config = applied.get("config")
+            if isinstance(config, dict):
+                disabled = {**config, "enabled": False}
+                response = await client.post(
+                    "/mcp",
+                    params=_serve_context_params(directory),
+                    headers=_serve_context_headers(directory),
+                    json={"name": name, "config": disabled},
+                )
+        response.raise_for_status()
+
+    async def _sync_managed_mcp_target(
+        self,
+        directory_key: str,
+        target: str,
+        *,
+        force: bool = False,
+    ) -> None:
+        lock = self._managed_mcp_locks.setdefault((directory_key, target), asyncio.Lock())
+        async with lock:
+            spec = self._managed_mcp_specs.get(target)
+            directory = self._managed_mcp_directories.get(directory_key)
+            if spec is None or directory is None:
+                return
+            current = self._managed_mcp_status.get(directory_key, {}).get(target)
+            if (
+                not force
+                and isinstance(current, dict)
+                and current.get("fingerprint") == spec.get("fingerprint")
+                and current.get("state") in {"connected", "disabled"}
+            ):
+                return
+            if self._proc is None or self._proc.poll() is not None or self._port is None:
+                self._record_managed_mcp_status(
+                    directory_key,
+                    target,
+                    spec,
+                    "disabled" if not spec.get("enabled") else "next_session",
+                )
+                return
+
+            self._record_managed_mcp_status(directory_key, target, spec, "applying")
+            applied = self._managed_mcp_applied.get(directory_key, {}).get(target)
+            timeout_ms = 0
+            config = spec.get("config")
+            if isinstance(config, dict):
+                timeout_ms = int(config.get("timeout") or 0)
+            request_timeout = max(
+                _SERVE_REQUEST_TIMEOUT_SECONDS,
+                (timeout_ms / 1000.0) + 5.0 if timeout_ms else 0,
+            )
+            try:
+                async with httpx.AsyncClient(
+                    base_url=self.base_url,
+                    timeout=request_timeout,
+                    trust_env=False,
+                ) as client:
+                    state = "disabled"
+                    error = ""
+                    if spec.get("enabled"):
+                        if spec.get("error") or not isinstance(config, dict):
+                            if applied:
+                                await self._disconnect_managed_mcp(client, directory, applied)
+                            raise RuntimeError(spec.get("error") or "Invalid managed MCP config")
+                        response = await client.post(
+                            "/mcp",
+                            params=_serve_context_params(directory),
+                            headers=_serve_context_headers(directory),
+                            json={"name": str(spec.get("name") or ""), "config": config},
+                        )
+                        response.raise_for_status()
+                        statuses = self._mcp_status_map(response.json())
+                        state, error = self._mcp_native_status(
+                            statuses.get(str(spec.get("name") or ""))
+                        )
+                        if state == "disabled":
+                            state = "failed"
+                            error = error or "OpenCode reported the enabled MCP as disabled"
+
+                    if applied and (
+                        not spec.get("enabled")
+                        or str(applied.get("name") or "") != str(spec.get("name") or "")
+                    ):
+                        await self._disconnect_managed_mcp(client, directory, applied)
+
+                    # Record what OpenCode actually accepted before checking for
+                    # a newer desired fingerprint. The follow-up sync then knows
+                    # which just-connected stale name/config must be replaced or
+                    # disconnected.
+                    if state == "connected":
+                        self._managed_mcp_applied.setdefault(directory_key, {})[target] = dict(spec)
+                    else:
+                        self._managed_mcp_applied.setdefault(directory_key, {}).pop(target, None)
+                    latest = self._managed_mcp_specs.get(target)
+                    if latest is None or latest.get("fingerprint") != spec.get("fingerprint"):
+                        self._spawn_managed_mcp_sync(directory_key, target)
+                        return
+                    self._record_managed_mcp_status(
+                        directory_key,
+                        target,
+                        spec,
+                        state,
+                        error=error,
+                    )
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                self._managed_mcp_applied.setdefault(directory_key, {}).pop(target, None)
+                self._record_managed_mcp_status(
+                    directory_key,
+                    target,
+                    spec,
+                    "failed",
+                    error=str(exc),
+                )
+                logger.warning(
+                    "Failed to hot-load managed MCP %s for %s: %s",
+                    target,
+                    directory,
+                    self._redact_managed_mcp_error(exc, spec),
+                )
+
+    def managed_mcp_runtime_status(self) -> dict[str, dict[str, Any]]:
+        running = self._proc is not None and self._proc.poll() is None
+        result: dict[str, dict[str, Any]] = {}
+        total = len(self._managed_mcp_directories)
+        for target in ("code_graph", "product_info"):
+            spec = self._managed_mcp_specs.get(target) or {
+                "enabled": False,
+                "fingerprint": "",
+            }
+            records = [
+                statuses.get(target)
+                for statuses in self._managed_mcp_status.values()
+                if isinstance(statuses.get(target), dict)
+                and statuses[target].get("fingerprint") == spec.get("fingerprint")
+            ]
+            loaded = sum(record.get("state") == "connected" for record in records)
+            applying = any(
+                key[1] == target and not task.done()
+                for key, task in self._managed_mcp_tasks.items()
+            )
+            if not spec.get("enabled"):
+                if applying:
+                    state = "applying"
+                elif any(record.get("state") == "failed" for record in records):
+                    # A failed disconnect means the old MCP may still be live;
+                    # never report that as successfully disabled.
+                    state = "failed"
+                else:
+                    state = "disabled"
+            elif applying:
+                state = "applying"
+            elif spec.get("error"):
+                state = "failed"
+            elif not running or total == 0:
+                state = "next_session"
+            elif len(records) < total:
+                state = "applying"
+            elif any(record.get("state") == "needs_auth" for record in records):
+                state = "needs_auth"
+            elif any(record.get("state") == "needs_client_registration" for record in records):
+                state = "needs_client_registration"
+            elif any(record.get("state") == "failed" for record in records):
+                state = "failed"
+            elif loaded == total:
+                state = "connected"
+            else:
+                state = "failed"
+            errors = [str(record.get("error") or "") for record in records if record.get("error")]
+            spec_error = self._redact_managed_mcp_error(spec.get("error"), spec) if spec.get("error") else ""
+            updated = [str(record.get("updated_at") or "") for record in records if record.get("updated_at")]
+            result[target] = {
+                "state": state,
+                "config_fingerprint": str(spec.get("fingerprint") or ""),
+                "updated_at": max(updated, default=""),
+                "error": errors[0] if errors else spec_error,
+                "loaded_directories": loaded,
+                "total_directories": total,
+            }
+        return result
+
+    async def refresh_managed_mcp_runtime_status(self) -> dict[str, dict[str, Any]]:
+        """Refresh cached states from OpenCode's live /mcp endpoint."""
+        if self._proc is None or self._proc.poll() is not None or self._port is None:
+            return self.managed_mcp_runtime_status()
+
+        async def refresh_directory(
+            client: httpx.AsyncClient,
+            directory_key: str,
+            directory: Path,
+        ) -> None:
+            try:
+                response = await client.get(
+                    "/mcp",
+                    params=_serve_context_params(directory),
+                    headers=_serve_context_headers(directory),
+                )
+                response.raise_for_status()
+                statuses = self._mcp_status_map(response.json())
+            except Exception:
+                return
+            for target, spec in self._managed_mcp_specs.items():
+                task = self._managed_mcp_tasks.get((directory_key, target))
+                if task is not None and not task.done():
+                    continue
+                name = str(spec.get("name") or "")
+                native = statuses.get(name)
+                if isinstance(native, dict):
+                    state, error = self._mcp_native_status(native)
+                    if spec.get("enabled") and state == "disabled":
+                        state = "failed"
+                        error = error or "OpenCode reported the enabled MCP as disabled"
+                elif not spec.get("enabled"):
+                    state, error = "disabled", ""
+                else:
+                    state = "failed"
+                    error = f"OpenCode MCP status does not contain {name or target}"
+                self._record_managed_mcp_status(
+                    directory_key,
+                    target,
+                    spec,
+                    state,
+                    error=error,
+                )
+                if state == "connected":
+                    self._managed_mcp_applied.setdefault(directory_key, {})[target] = dict(spec)
+                else:
+                    self._managed_mcp_applied.setdefault(directory_key, {}).pop(target, None)
+
+        directories = list(self._managed_mcp_directories.items())
+        if not directories:
+            return self.managed_mcp_runtime_status()
+        async with httpx.AsyncClient(
+            base_url=self.base_url,
+            timeout=2.0,
+            trust_env=False,
+        ) as client:
+            await asyncio.gather(*(
+                refresh_directory(client, directory_key, directory)
+                for directory_key, directory in directories
+            ))
+        return self.managed_mcp_runtime_status()
 
     async def run_prompt(
         self,
@@ -1740,6 +2155,7 @@ class OpenCodeServeManager:
         params = _serve_context_params(directory)
         headers = _serve_context_headers(directory)
         try:
+            await self.ensure_managed_mcp(directory)
             async with httpx.AsyncClient(
                 base_url=self.base_url,
                 timeout=_SERVE_REQUEST_TIMEOUT_SECONDS,
@@ -1922,6 +2338,7 @@ class OpenCodeServeManager:
         )
         await self._acquire_session(key, startup_cwd=config_workspace)
         try:
+            await self.ensure_managed_mcp(directory)
             async with httpx.AsyncClient(
                 base_url=self.base_url,
                 timeout=_SERVE_REQUEST_TIMEOUT_SECONDS,
@@ -2574,6 +2991,7 @@ class OpenCodeServeManager:
         """Acquire a short-lived serve operation and report a deferred reload."""
         async with self._lock:
             if self._proc is not None and self._proc.poll() is not None:
+                await self._reset_managed_mcp_process_state()
                 await self._stop_event_hub()
                 self._proc = None
                 self._key = None
@@ -2659,6 +3077,7 @@ class OpenCodeServeManager:
 
     async def _ensure_started_locked(self, key: OpenCodeServeKey, startup_cwd: Path | None = None) -> None:
         if self._proc is not None and self._proc.poll() is not None:
+            await self._reset_managed_mcp_process_state()
             await self._stop_event_hub()
             self._proc = None
             self._key = None
@@ -2880,7 +3299,24 @@ class OpenCodeServeManager:
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
 
+    async def _reset_managed_mcp_process_state(self) -> None:
+        tasks = [task for task in self._managed_mcp_tasks.values() if not task.done()]
+        self._managed_mcp_tasks.clear()
+        # Clear directory ownership before cancellation callbacks run. Otherwise
+        # a cancelled sync with no recorded status can schedule a replacement
+        # task against the serve process that is currently being stopped.
+        self._managed_mcp_directories.clear()
+        self._managed_mcp_status.clear()
+        self._managed_mcp_applied.clear()
+        self._managed_mcp_locks.clear()
+        self._managed_mcp_force_pending.clear()
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+
     async def _stop_locked(self) -> None:
+        await self._reset_managed_mcp_process_state()
         await self._stop_event_hub()
         proc = self._proc
         port = self._port

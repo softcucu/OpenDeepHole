@@ -90,6 +90,11 @@ class OpencodeWorkspaceTests(unittest.TestCase):
         )
         self.assertEqual(config["mcp"]["product-info"]["type"], "remote")
         self.assertEqual(config["mcp"]["product-info"]["timeout"], 12_000)
+        self.assertEqual(
+            config["mcp"]["product-info"]["headers"]["Authorization"],
+            "Bearer token",
+        )
+        self.assertIs(config["mcp"]["product-info"]["oauth"], False)
 
     def test_codegraph_readiness_survives_restart_and_applies_to_subdirectories(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -236,7 +236,10 @@ class AgentConfigTests(unittest.TestCase):
                         "name": "codegraph",
                         "transport": "remote",
                         "timeout_seconds": 30,
-                        "remote": {"url": "http://graph.test/mcp", "headers": {}},
+                        "remote": {
+                            "url": "http://graph.test/mcp",
+                            "headers": {"Authorization": "Bearer test-secret-123"},
+                        },
                     },
                     "vulnerability_mining": {
                         "required_capability": "any",
@@ -279,6 +282,10 @@ class AgentConfigTests(unittest.TestCase):
             self.assertNotIn("use_default_model", raw["model_pool"]["models"][0])
             self.assertEqual(raw["threat_analysis"]["model_policy"]["max_retries"], 4)
             self.assertEqual(raw["code_graph"]["remote"]["url"], "http://graph.test/mcp")
+            self.assertEqual(
+                raw["code_graph"]["remote"]["headers"]["Authorization"],
+                "Bearer test-secret-123",
+            )
             self.assertEqual(raw["vulnerability_mining"]["timeout_seconds"], 600)
             self.assertEqual(raw["false_positive"]["timeout_seconds"], 700)
             self.assertEqual(raw["vulnerability_validation"]["environments"]["lab"]["concurrency"], 2)
@@ -467,6 +474,44 @@ class AgentConfigTests(unittest.TestCase):
                         }],
                     },
                 })
+                with self.assertRaisesRegex(HTTPException, error_text):
+                    _validate_managed_config(config)
+
+    def test_managed_config_accepts_bearer_authorization_header(self) -> None:
+        from backend.api.agent import _validate_managed_config
+        from backend.opencode.config import managed_mcp_config_fingerprint
+
+        config = AgentRemoteConfig()
+        config.product_info.enabled = True
+        config.product_info.transport = "remote"
+        config.product_info.remote.url = "http://product.test/mcp"
+        config.product_info.remote.headers = {
+            "Authorization": "Bearer test-secret-123",
+        }
+
+        _validate_managed_config(config)
+
+        agent_config = AgentConfig()
+        apply_remote_config(agent_config, config.model_dump(mode="json"))
+        self.assertEqual(
+            managed_mcp_config_fingerprint(config.product_info),
+            managed_mcp_config_fingerprint(agent_config.product_info),
+        )
+
+    def test_managed_config_rejects_invalid_or_duplicate_header_names(self) -> None:
+        from fastapi import HTTPException
+
+        from backend.api.agent import _validate_managed_config
+
+        for headers, error_text in (
+            ({"Bad Header": "value"}, "请求头名称无效"),
+            ({" Authorization ": "Bearer value"}, "请求头名称无效"),
+            ({"Authorization": "a", "authorization": "b"}, "请求头名称重复"),
+            ({"Authorization": "Bearer value\r\ninjected: true"}, "不能包含换行"),
+        ):
+            with self.subTest(headers=headers):
+                config = AgentRemoteConfig()
+                config.product_info.remote.headers = headers
                 with self.assertRaisesRegex(HTTPException, error_text):
                     _validate_managed_config(config)
 

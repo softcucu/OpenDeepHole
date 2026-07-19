@@ -27,6 +27,7 @@ import asyncio
 import hashlib
 import io
 import json
+import re
 import secrets
 import socket
 import time
@@ -49,6 +50,7 @@ from backend.models import (
     AgentGitHistory,
     AgentMcpConfig,
     AgentMcpProbeResult,
+    AgentMcpRuntimeStatus,
     AgentMcpStatusResponse,
     AgentMcpTargetStatus,
     AgentOpenCodePoolStatus,
@@ -76,6 +78,7 @@ from backend.threat_analysis import parse_threat_analysis_data
 router = APIRouter(prefix="/api/agent")
 public_router = APIRouter()  # Routes not under /api/agent prefix
 logger = get_logger(__name__)
+_HTTP_HEADER_NAME_RE = re.compile(r"^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$")
 
 # Root of the project (two levels up from this file: backend/api/ → backend/ → project root)
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -139,13 +142,9 @@ def _stored_mcp_probes(record: dict | None) -> dict[str, AgentMcpProbeResult]:
 
 
 def _mcp_config_fingerprint(config: AgentMcpConfig) -> str:
-    payload = json.dumps(
-        config.model_dump(mode="json"),
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-    )
-    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+    from backend.opencode.config import managed_mcp_config_fingerprint
+
+    return managed_mcp_config_fingerprint(config)
 
 
 def _mcp_target_config(config: AgentRemoteConfig, target: str) -> AgentMcpConfig:
@@ -159,6 +158,7 @@ def _mcp_target_config(config: AgentRemoteConfig, target: str) -> AgentMcpConfig
 def _mcp_target_status(
     config: AgentMcpConfig,
     last_probe: AgentMcpProbeResult | None,
+    runtime: AgentMcpRuntimeStatus | None = None,
 ) -> AgentMcpTargetStatus:
     return AgentMcpTargetStatus(
         enabled=config.enabled,
@@ -167,6 +167,7 @@ def _mcp_target_status(
             and last_probe.config_fingerprint != _mcp_config_fingerprint(config)
         ),
         last_probe=last_probe,
+        runtime=runtime or AgentMcpRuntimeStatus(),
     )
 
 
@@ -311,6 +312,22 @@ def _validate_managed_config(
             raise HTTPException(status_code=422, detail=f"{label} MCP 可执行文件不能为空")
         if mcp.enabled and mcp.transport == "remote" and not mcp.remote.url.strip():
             raise HTTPException(status_code=422, detail=f"{label} MCP 远端 URL 不能为空")
+        seen_headers: set[str] = set()
+        for raw_name, raw_value in mcp.remote.headers.items():
+            raw_name_text = str(raw_name or "")
+            name = raw_name_text.strip()
+            lowered = name.lower()
+            if (
+                not name
+                or name != raw_name_text
+                or not _HTTP_HEADER_NAME_RE.fullmatch(name)
+            ):
+                raise HTTPException(status_code=422, detail=f"{label} MCP 请求头名称无效：{name or '(空)'}")
+            if lowered in seen_headers:
+                raise HTTPException(status_code=422, detail=f"{label} MCP 请求头名称重复：{name}")
+            seen_headers.add(lowered)
+            if "\r" in str(raw_value) or "\n" in str(raw_value):
+                raise HTTPException(status_code=422, detail=f"{label} MCP 请求头 {name} 的值不能包含换行")
     if (
         config.code_graph.enabled
         and config.product_info.enabled
@@ -387,6 +404,8 @@ class _RuntimeDownload:
 _runtime_download_tokens: dict[str, _RuntimeDownload] = {}
 _opencode_model_waiters: dict[str, asyncio.Future] = {}
 _mcp_probe_waiters: dict[str, asyncio.Future] = {}
+_mcp_status_waiters: dict[str, asyncio.Future] = {}
+_mcp_reload_waiters: dict[str, asyncio.Future] = {}
 _mcp_probe_persist_locks: dict[str, asyncio.Lock] = {}
 
 # In-memory index progress store: scan_id → {status, parsed_files, total_files}
@@ -995,6 +1014,18 @@ async def agent_websocket(websocket: WebSocket) -> None:
                 if waiter is not None and not waiter.done():
                     waiter.set_result(incoming)
                 continue
+            if isinstance(incoming, dict) and incoming.get("type") == "mcp_status_result":
+                request_id = str(incoming.get("request_id") or "")
+                waiter = _mcp_status_waiters.pop(request_id, None)
+                if waiter is not None and not waiter.done():
+                    waiter.set_result(incoming)
+                continue
+            if isinstance(incoming, dict) and incoming.get("type") == "mcp_reload_result":
+                request_id = str(incoming.get("request_id") or "")
+                waiter = _mcp_reload_waiters.pop(request_id, None)
+                if waiter is not None and not waiter.done():
+                    waiter.set_result(incoming)
+                continue
             if isinstance(incoming, dict) and incoming.get("type") == "skill_create_result":
                 from backend.api.skills import handle_skill_create_result
 
@@ -1332,6 +1363,79 @@ async def _persist_mcp_probe(agent_key: str, result: AgentMcpProbeResult) -> Non
         )
 
 
+_MCP_RUNTIME_STATES = {
+    "connected",
+    "applying",
+    "failed",
+    "needs_auth",
+    "needs_client_registration",
+    "disabled",
+    "next_session",
+    "offline",
+    "unknown",
+}
+
+
+def _agent_mcp_runtime(
+    config: AgentMcpConfig,
+    raw: object,
+    *,
+    online: bool,
+) -> AgentMcpRuntimeStatus:
+    expected = _mcp_config_fingerprint(config)
+    if not online:
+        return AgentMcpRuntimeStatus(
+            state="offline",
+            config_fingerprint=expected,
+        )
+    if not isinstance(raw, dict):
+        return AgentMcpRuntimeStatus(
+            state="unknown",
+            config_fingerprint=expected,
+            error="未能读取 Agent 上的 MCP 运行状态",
+        )
+    fingerprint = str(raw.get("config_fingerprint") or "")
+    state = str(raw.get("state") or "unknown")
+    if fingerprint != expected:
+        state = "applying"
+    elif state not in _MCP_RUNTIME_STATES:
+        state = "unknown"
+    return AgentMcpRuntimeStatus(
+        state=state,
+        config_fingerprint=fingerprint or expected,
+        updated_at=str(raw.get("updated_at") or ""),
+        error=str(raw.get("error") or "")[:2000],
+        loaded_directories=_nonnegative_int(raw.get("loaded_directories")),
+        total_directories=_nonnegative_int(raw.get("total_directories")),
+    )
+
+
+async def _request_agent_mcp_runtime(agent_key: str) -> dict[str, object] | None:
+    live = _live_agent_for_key(agent_key)
+    if live is None:
+        return None
+    request_id = uuid.uuid4().hex
+    waiter = asyncio.get_running_loop().create_future()
+    _mcp_status_waiters[request_id] = waiter
+    try:
+        sent = await send_agent_command(live[0], {
+            "type": "mcp_status",
+            "request_id": request_id,
+        })
+        if not sent:
+            return None
+        incoming = await asyncio.wait_for(waiter, timeout=5.0)
+        targets = incoming.get("targets") if isinstance(incoming, dict) else None
+        return targets if isinstance(targets, dict) else None
+    except asyncio.TimeoutError:
+        return None
+    except Exception as exc:
+        logger.debug("Unable to query live MCP runtime for %s: %s", agent_key, exc)
+        return None
+    finally:
+        _mcp_status_waiters.pop(request_id, None)
+
+
 @public_router.get(
     "/api/agent-configs/{agent_key}/mcp-status",
     response_model=AgentMcpStatusResponse,
@@ -1343,12 +1447,65 @@ async def get_stable_agent_mcp_status(
     record = _authorize_agent_record(get_scan_store().get_agent_record(agent_key), current_user)
     config = _stored_agent_config(record)
     probes = _stored_mcp_probes(record)
+    online = _live_agent_for_key(agent_key) is not None
+    live_runtime = await _request_agent_mcp_runtime(agent_key) if online else None
     return AgentMcpStatusResponse(
         agent_key=agent_key,
-        online=_live_agent_for_key(agent_key) is not None,
-        code_graph=_mcp_target_status(config.code_graph, probes.get("code_graph")),
-        product_info=_mcp_target_status(config.product_info, probes.get("product_info")),
+        online=online,
+        code_graph=_mcp_target_status(
+            config.code_graph,
+            probes.get("code_graph"),
+            _agent_mcp_runtime(
+                config.code_graph,
+                live_runtime.get("code_graph") if live_runtime else None,
+                online=online,
+            ),
+        ),
+        product_info=_mcp_target_status(
+            config.product_info,
+            probes.get("product_info"),
+            _agent_mcp_runtime(
+                config.product_info,
+                live_runtime.get("product_info") if live_runtime else None,
+                online=online,
+            ),
+        ),
     )
+
+
+@public_router.post("/api/agent-configs/{agent_key}/mcp-reload/{target}")
+async def reload_stable_agent_mcp(
+    agent_key: str,
+    target: str,
+    current_user: User = Depends(get_current_user),
+) -> dict:
+    record = _authorize_agent_record(get_scan_store().get_agent_record(agent_key), current_user)
+    config = _stored_agent_config(record)
+    mcp_config = _mcp_target_config(config, target)
+    if not mcp_config.enabled:
+        raise HTTPException(status_code=400, detail="请先启用并保存该 MCP 配置")
+    live = _live_agent_for_key(agent_key)
+    if live is None:
+        raise HTTPException(status_code=409, detail="Agent 离线，无法重新加载 MCP")
+    request_id = uuid.uuid4().hex
+    waiter = asyncio.get_running_loop().create_future()
+    _mcp_reload_waiters[request_id] = waiter
+    try:
+        sent = await send_agent_command(live[0], {
+            "type": "mcp_reload",
+            "request_id": request_id,
+            "target": target,
+        })
+        if not sent:
+            raise HTTPException(status_code=502, detail="Agent 连接已断开")
+        incoming = await asyncio.wait_for(waiter, timeout=5.0)
+    except asyncio.TimeoutError:
+        raise HTTPException(status_code=504, detail="等待 Agent 接受 MCP 重载请求超时")
+    finally:
+        _mcp_reload_waiters.pop(request_id, None)
+    if not bool(incoming.get("ok")):
+        raise HTTPException(status_code=422, detail=str(incoming.get("error") or "MCP 重载失败"))
+    return {"ok": True}
 
 
 @public_router.post(

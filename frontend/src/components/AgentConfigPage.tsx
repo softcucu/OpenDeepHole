@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   getAgentConfig,
   getAgentMcpStatus,
@@ -7,6 +7,7 @@ import {
   getAgents,
   getAgentValidatorCatalog,
   probeAgentMcp,
+  reloadAgentMcp,
   updateAgentConfig,
 } from "../api/client";
 import type {
@@ -47,6 +48,10 @@ const mcp = (name: string): AgentMcpConfig => ({
   enabled: false, name, transport: "local", timeout_seconds: 300,
   local: { executable: name, args: [], environment: {} },
   remote: { url: "", headers: {} },
+});
+const emptyMcpRuntime = () => ({
+  state: "unknown", config_fingerprint: "", updated_at: "", error: "",
+  loaded_directories: 0, total_directories: 0,
 });
 const defaultConfig = (): AgentRemoteConfig => ({
   schema_version: 2,
@@ -120,6 +125,82 @@ function StatusBadge({ label, tone = "slate" }: { label: string; tone?: "slate" 
   return <span className={`rounded-full border px-2.5 py-1 text-xs ${colors[tone]}`}>{label}</span>;
 }
 
+interface HeaderRow { id: number; name: string; value: string }
+let headerRowId = 0;
+const newHeaderRow = (name = "", value = ""): HeaderRow => ({ id: ++headerRowId, name, value });
+const sensitiveHeader = (name: string) => /(authorization|token|secret|api[-_]?key|cookie)/i.test(name);
+
+function HeaderEditor({ value, onChange }: { value: Record<string, string>; onChange: (value: Record<string, string>) => void }) {
+  const [rows, setRows] = useState<HeaderRow[]>(() => Object.entries(value).map(([name, item]) => newHeaderRow(name, item)));
+  const [revealed, setRevealed] = useState<Set<number>>(new Set());
+  const committed = useRef(JSON.stringify(value));
+  const serialized = JSON.stringify(value);
+
+  useEffect(() => {
+    if (serialized === committed.current) return;
+    committed.current = serialized;
+    setRows(Object.entries(value).map(([name, item]) => newHeaderRow(name, item)));
+    setRevealed(new Set());
+  }, [serialized, value]);
+
+  const commit = (next: HeaderRow[]) => {
+    setRows(next);
+    const headers: Record<string, string> = {};
+    const canonicalNames = new Map<string, string>();
+    for (const row of next) {
+      const name = row.name.trim();
+      if (!name) continue;
+      const lowered = name.toLowerCase();
+      const previous = canonicalNames.get(lowered);
+      if (previous) delete headers[previous];
+      headers[name] = row.value;
+      canonicalNames.set(lowered, name);
+    }
+    committed.current = JSON.stringify(headers);
+    onChange(headers);
+  };
+  const normalizedNames = rows.map((row) => row.name.trim().toLowerCase()).filter(Boolean);
+  const hasDuplicates = new Set(normalizedNames).size !== normalizedNames.length;
+
+  return <div className="space-y-3">
+    {rows.map((row) => {
+      const hidden = sensitiveHeader(row.name) && !revealed.has(row.id);
+      return <div key={row.id} className="grid gap-2 sm:grid-cols-[minmax(0,0.8fr)_minmax(0,1.4fr)_auto_auto]">
+        <input
+          className={input}
+          placeholder="Authorization"
+          value={row.name}
+          onChange={(e) => commit(rows.map((item) => item.id === row.id ? { ...item, name: e.target.value } : item))}
+        />
+        <input
+          className={input}
+          type={hidden ? "password" : "text"}
+          placeholder={row.name.toLowerCase() === "authorization" ? "Bearer test-secret-123" : "请求头值"}
+          value={row.value}
+          onChange={(e) => commit(rows.map((item) => item.id === row.id ? { ...item, value: e.target.value } : item))}
+        />
+        {sensitiveHeader(row.name) && <button
+          type="button"
+          className="rounded-lg border border-slate-600 px-3 py-2 text-xs text-slate-300"
+          onClick={() => setRevealed((current) => {
+            const next = new Set(current);
+            if (next.has(row.id)) next.delete(row.id); else next.add(row.id);
+            return next;
+          })}
+        >{hidden ? "显示" : "隐藏"}</button>}
+        <button
+          type="button"
+          className="rounded-lg border border-red-500/40 px-3 py-2 text-xs text-red-300"
+          onClick={() => commit(rows.filter((item) => item.id !== row.id))}
+        >删除</button>
+      </div>;
+    })}
+    <button type="button" className="rounded-lg border border-slate-600 px-3 py-2 text-xs text-slate-300" onClick={() => setRows([...rows, newHeaderRow()])}>添加请求头</button>
+    {hasDuplicates && <p className="text-xs text-red-300">请求头名称重复（不区分大小写）；保存时同名项只会保留最后一个，请删除或改名。</p>}
+    <p className="text-xs text-slate-500">目前支持静态请求头认证。例如：名称填写 Authorization，值填写 Bearer test-secret-123。敏感值默认隐藏。</p>
+  </div>;
+}
+
 function probeTime(value: string): string {
   if (!value) return "";
   const parsed = new Date(value);
@@ -127,7 +208,7 @@ function probeTime(value: string): string {
 }
 
 function McpEditor({
-  value, onChange, status, online, unsaved, probing, probeBusy, onProbe,
+  value, onChange, status, online, unsaved, probing, reloading, busy, onProbe, onReload,
 }: {
   value: AgentMcpConfig;
   onChange: (value: AgentMcpConfig) => void;
@@ -135,8 +216,10 @@ function McpEditor({
   online: boolean;
   unsaved: boolean;
   probing: boolean;
-  probeBusy: boolean;
+  reloading: boolean;
+  busy: boolean;
   onProbe: () => void;
+  onReload: () => void;
 }) {
   const lastProbe = status?.last_probe;
   const connectivity = probing
@@ -148,19 +231,27 @@ function McpEditor({
         : lastProbe.success
           ? { label: "可用", tone: "green" as const }
           : { label: "不可用", tone: "red" as const };
-  const runtimeLabels = {
-    active: "OpenCode 已加载",
-    reload_pending: "OpenCode 待重载",
-    next_task: "下次任务加载",
+  const runtime = status?.runtime;
+  const runtimeDisplay: Record<string, { label: string; tone: "slate" | "green" | "red" | "amber" | "blue" }> = {
+    connected: { label: "OpenCode 已连接", tone: "green" },
+    applying: { label: "正在热加载", tone: "blue" },
+    failed: { label: "热加载失败", tone: "red" },
+    needs_auth: { label: "需要认证", tone: "red" },
+    needs_client_registration: { label: "需要 OAuth 客户端", tone: "red" },
+    disabled: { label: "OpenCode 已停用", tone: "slate" },
+    next_session: { label: "下个 Session 加载", tone: "amber" },
+    offline: { label: "Agent 离线", tone: "amber" },
+    unknown: { label: "运行状态未知", tone: "slate" },
   };
+  const runtimeBadge = runtimeDisplay[runtime?.state || "unknown"] || runtimeDisplay.unknown;
   const disabledReason = !online
     ? "Agent 离线"
     : !value.enabled
       ? "请先启用并保存 MCP"
       : unsaved
         ? "当前 MCP 配置有未保存修改"
-        : probeBusy
-          ? "正在检测"
+        : busy
+          ? "正在处理 MCP"
           : "";
   return <div className="space-y-5">
     <div className="space-y-4 rounded-xl border border-slate-700 bg-slate-900/60 p-4">
@@ -168,31 +259,41 @@ function McpEditor({
         <StatusBadge label={value.enabled ? "配置已启用" : "配置已禁用"} tone={value.enabled ? "green" : "slate"} />
         <StatusBadge label={connectivity.label} tone={connectivity.tone} />
         <StatusBadge label={online ? "Agent 在线" : "Agent 离线"} tone={online ? "green" : "amber"} />
-        {lastProbe && <StatusBadge label={runtimeLabels[lastProbe.runtime_state]} tone={lastProbe.runtime_state === "active" ? "green" : "amber"} />}
+        <StatusBadge label={runtimeBadge.label} tone={runtimeBadge.tone} />
         {!online && lastProbe && <StatusBadge label="历史结果" tone="amber" />}
       </div>
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div className="space-y-1 text-xs text-slate-400">
           <p>检测只执行 MCP 握手和工具发现，不会调用业务工具。</p>
           {lastProbe && <p>最近检测：{probeTime(lastProbe.checked_at)} · {lastProbe.duration_ms} ms{lastProbe.protocol ? ` · ${lastProbe.protocol}` : ""}</p>}
-          {lastProbe?.runtime_state === "reload_pending" && lastProbe.active_sessions > 0 && <p>当前有 {lastProbe.active_sessions} 个活动 Session；不会中断，空闲后下一任务自动重载。</p>}
-          {lastProbe?.runtime_state === "reload_pending" && lastProbe.active_sessions === 0 && <p>serve 已标记待重载，将在下一次模型任务开始前加载当前配置。</p>}
+          {(runtime?.total_directories || 0) > 0 && <p>已在 {runtime?.loaded_directories || 0}/{runtime?.total_directories || 0} 个 OpenCode 工作目录加载。</p>}
+          {runtime?.state === "next_session" && <p>当前没有可更新的运行目录；下一次新建或续用 Session 会在工具发现前加载。</p>}
           {unsaved && <p className="text-amber-300">当前 MCP 表单有未保存修改，请先保存再检测。</p>}
           {!unsaved && status?.stale && <p className="text-amber-300">已保存的 MCP 配置已变更，上次结果仅供参考，请重新检测。</p>}
         </div>
-        <button
-          type="button"
-          onClick={onProbe}
-          disabled={Boolean(disabledReason)}
-          title={disabledReason}
-          className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium disabled:cursor-not-allowed disabled:bg-slate-700 disabled:text-slate-400"
-        >{probing ? "检测中…" : lastProbe ? "重新检测 MCP" : "检测 MCP"}</button>
+        <div className="flex gap-2">
+          <button
+            type="button"
+            onClick={onProbe}
+            disabled={Boolean(disabledReason)}
+            title={disabledReason}
+            className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium disabled:cursor-not-allowed disabled:bg-slate-700 disabled:text-slate-400"
+          >{probing ? "检测中…" : lastProbe ? "重新检测" : "检测连接"}</button>
+          <button
+            type="button"
+            onClick={onReload}
+            disabled={Boolean(disabledReason)}
+            title={disabledReason}
+            className="rounded-lg border border-blue-500/50 px-4 py-2 text-sm font-medium text-blue-200 disabled:cursor-not-allowed disabled:border-slate-700 disabled:text-slate-500"
+          >{reloading ? "重载中…" : "重新加载"}</button>
+        </div>
       </div>
       {lastProbe && lastProbe.tool_count > 0 && <div className="text-xs text-slate-300">
         <span className="font-medium text-slate-200">发现 {lastProbe.tool_count} 个工具：</span>
         <span className="break-words">{lastProbe.tool_names.join("、")}</span>
       </div>}
       {lastProbe?.error && <div className="break-words rounded-lg border border-red-500/30 bg-red-500/10 p-3 text-xs text-red-200">{lastProbe.error}</div>}
+      {runtime?.error && <div className="break-words rounded-lg border border-red-500/30 bg-red-500/10 p-3 text-xs text-red-200">OpenCode：{runtime.error}</div>}
     </div>
     <label className="flex items-center gap-2 text-sm text-slate-200"><input type="checkbox" checked={value.enabled} onChange={(e) => onChange({ ...value, enabled: e.target.checked })} />启用 MCP</label>
     <div className="grid gap-4 md:grid-cols-3">
@@ -206,7 +307,7 @@ function McpEditor({
       <Field label="环境变量（KEY=VALUE）"><textarea className={input} rows={5} value={pairsText(value.local.environment)} onChange={(e) => onChange({ ...value, local: { ...value.local, environment: parsePairs(e.target.value) } })} /></Field>
     </div> : <div className="grid gap-4 md:grid-cols-2">
       <Field label="远端 URL（支持 IP/主机名）"><input className={input} value={value.remote.url} placeholder="http://10.0.0.8:9000/mcp" onChange={(e) => onChange({ ...value, remote: { ...value.remote, url: e.target.value } })} /></Field>
-      <Field label="请求头（KEY=VALUE）"><textarea className={input} rows={5} value={pairsText(value.remote.headers)} onChange={(e) => onChange({ ...value, remote: { ...value.remote, headers: parsePairs(e.target.value) } })} /></Field>
+      <Field label="请求头与认证"><HeaderEditor value={value.remote.headers} onChange={(headers) => onChange({ ...value, remote: { ...value.remote, headers } })} /></Field>
     </div>}
   </div>;
 }
@@ -232,6 +333,7 @@ export default function AgentConfigPage({ onBack }: Props) {
   const [pool, setPool] = useState<AgentOpenCodePoolStatus | null>(null);
   const [mcpStatus, setMcpStatus] = useState<AgentMcpStatusResponse | null>(null);
   const [probingTarget, setProbingTarget] = useState<AgentMcpTarget | null>(null);
+  const [reloadingTarget, setReloadingTarget] = useState<AgentMcpTarget | null>(null);
   const [dirty, setDirty] = useState(false);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -268,6 +370,22 @@ export default function AgentConfigPage({ onBack }: Props) {
     }).catch(() => setMessage("加载 Agent 配置失败")).finally(() => setLoading(false));
   }, [agentKey, agents]);
 
+  useEffect(() => {
+    if (!agentKey || !selectedAgent?.online || !["codegraph", "product"].includes(section)) return;
+    let disposed = false;
+    let timer = 0;
+    const refresh = async () => {
+      try {
+        const next = await getAgentMcpStatus(agentKey);
+        if (!disposed) setMcpStatus(next);
+      }
+      catch { /* Keep the last observable state during a transient disconnect. */ }
+      if (!disposed) timer = window.setTimeout(refresh, 3000);
+    };
+    timer = window.setTimeout(refresh, 3000);
+    return () => { disposed = true; window.clearTimeout(timer); };
+  }, [agentKey, section, selectedAgent?.online]);
+
   const switchAgent = (next: string) => {
     if (dirty && !window.confirm("当前 Agent 的修改尚未保存，确定切换吗？")) return;
     setAgentKey(next);
@@ -278,10 +396,14 @@ export default function AgentConfigPage({ onBack }: Props) {
     if (timeWindowError) { setMessage(timeWindowError); return; }
     setSaving(true); setMessage("");
     try {
+      const mcpChanged = JSON.stringify(config.code_graph) !== JSON.stringify(savedConfig.code_graph)
+        || JSON.stringify(config.product_info) !== JSON.stringify(savedConfig.product_info);
       await updateAgentConfig(agentKey, config);
       setSavedConfig(config); setDirty(false);
       getAgentMcpStatus(agentKey).then(setMcpStatus).catch(() => undefined);
-      setMessage(selectedAgent?.online ? "配置已保存并推送到 Agent" : "配置已保存，将在 Agent 重连后生效");
+      setMessage(selectedAgent?.online
+        ? (mcpChanged ? "配置已保存，Agent 正在热加载 MCP" : "配置已保存并推送到 Agent")
+        : "配置已保存，将在 Agent 重连后生效");
     }
     catch (error: any) { setMessage(error?.response?.data?.detail || "保存失败"); }
     finally { setSaving(false); }
@@ -296,10 +418,11 @@ export default function AgentConfigPage({ onBack }: Props) {
         const base = current || {
           agent_key: agentKey,
           online: true,
-          code_graph: { enabled: savedConfig.code_graph.enabled, stale: false, last_probe: null },
-          product_info: { enabled: savedConfig.product_info.enabled, stale: false, last_probe: null },
+          code_graph: { enabled: savedConfig.code_graph.enabled, stale: false, last_probe: null, runtime: emptyMcpRuntime() },
+          product_info: { enabled: savedConfig.product_info.enabled, stale: false, last_probe: null, runtime: emptyMcpRuntime() },
         };
-        const targetStatus = { enabled: target === "code_graph" ? savedConfig.code_graph.enabled : savedConfig.product_info.enabled, stale: false, last_probe: result };
+        const existing = target === "code_graph" ? base.code_graph : base.product_info;
+        const targetStatus = { enabled: target === "code_graph" ? savedConfig.code_graph.enabled : savedConfig.product_info.enabled, stale: false, last_probe: result, runtime: existing.runtime };
         return target === "code_graph"
           ? { ...base, online: true, code_graph: targetStatus }
           : { ...base, online: true, product_info: targetStatus };
@@ -309,6 +432,20 @@ export default function AgentConfigPage({ onBack }: Props) {
       setMessage(error?.response?.data?.detail || "MCP 检测请求失败");
     } finally {
       setProbingTarget(null);
+    }
+  };
+
+  const reloadMcp = async (target: AgentMcpTarget) => {
+    if (!agentKey || probingTarget || reloadingTarget) return;
+    setReloadingTarget(target); setMessage("");
+    try {
+      await reloadAgentMcp(agentKey, target);
+      setMessage("已提交 MCP 重新加载请求");
+      window.setTimeout(() => getAgentMcpStatus(agentKey).then(setMcpStatus).catch(() => undefined), 500);
+    } catch (error: any) {
+      setMessage(error?.response?.data?.detail || "MCP 重新加载失败");
+    } finally {
+      setReloadingTarget(null);
     }
   };
 
@@ -401,11 +538,11 @@ export default function AgentConfigPage({ onBack }: Props) {
       <div className="mx-auto flex max-w-7xl flex-wrap items-center gap-4">
         <button onClick={onBack} className="text-sm text-slate-400 hover:text-white">← 返回</button>
         <h1 className="text-lg font-bold">Agent 配置</h1>
-        <select disabled={probingTarget !== null} className={`${input} ml-auto max-w-md disabled:cursor-not-allowed disabled:opacity-60`} value={agentKey} onChange={(e) => switchAgent(e.target.value)}>
+        <select disabled={probingTarget !== null || reloadingTarget !== null} className={`${input} ml-auto max-w-md disabled:cursor-not-allowed disabled:opacity-60`} value={agentKey} onChange={(e) => switchAgent(e.target.value)}>
           {!agents.length && <option value="">暂无 Agent</option>}
           {agents.map((agent) => <option key={agent.agent_key} value={agent.agent_key}>{agent.machine_name || agent.name} / {agent.ip} / {agent.online ? "在线" : "离线"}</option>)}
         </select>
-        <button disabled={!dirty || saving || probingTarget !== null} onClick={save} className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium disabled:bg-slate-700">{saving ? "保存中…" : "保存配置"}</button>
+        <button disabled={!dirty || saving || probingTarget !== null || reloadingTarget !== null} onClick={save} className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium disabled:bg-slate-700">{saving ? "保存中…" : "保存配置"}</button>
       </div>
       {message && <p className="mx-auto mt-3 max-w-7xl text-sm text-amber-300">{message}</p>}
     </header>
@@ -421,8 +558,8 @@ export default function AgentConfigPage({ onBack }: Props) {
           </div>}
           {section === "models" && <ModelEditor config={config} setCfg={setCfg} online={Boolean(selectedAgent?.online)} onImport={() => void openModelPicker()} pool={pool} />}
           {section === "threat" && <div className="space-y-5"><label className="flex gap-2 text-sm"><input type="checkbox" checked={config.threat_analysis.enabled} onChange={(e) => setCfg({ ...config, threat_analysis: { ...config.threat_analysis, enabled: e.target.checked } })} />启用威胁分析</label><Field label="攻击路径审计模式"><select className={input} value={config.threat_analysis.attack_path_audit_mode} onChange={(e) => setCfg({ ...config, threat_analysis: { ...config.threat_analysis, attack_path_audit_mode: e.target.value } })}><option value="after_analysis">分析完成后审计</option><option value="immediate">生成后立即审计</option></select></Field><PolicyEditor value={config.threat_analysis.model_policy} onChange={(value) => setCfg({ ...config, threat_analysis: { ...config.threat_analysis, model_policy: value } })} /></div>}
-          {section === "codegraph" && <McpEditor value={config.code_graph} onChange={(value) => setCfg({ ...config, code_graph: value })} status={mcpStatus?.code_graph || null} online={Boolean(mcpStatus?.online)} unsaved={JSON.stringify(config.code_graph) !== JSON.stringify(savedConfig.code_graph)} probing={probingTarget === "code_graph"} probeBusy={probingTarget !== null} onProbe={() => probeMcp("code_graph")} />}
-          {section === "product" && <McpEditor value={config.product_info} onChange={(value) => setCfg({ ...config, product_info: value })} status={mcpStatus?.product_info || null} online={Boolean(mcpStatus?.online)} unsaved={JSON.stringify(config.product_info) !== JSON.stringify(savedConfig.product_info)} probing={probingTarget === "product_info"} probeBusy={probingTarget !== null} onProbe={() => probeMcp("product_info")} />}
+          {section === "codegraph" && <McpEditor value={config.code_graph} onChange={(value) => setCfg({ ...config, code_graph: value })} status={mcpStatus?.code_graph || null} online={Boolean(mcpStatus?.online)} unsaved={JSON.stringify(config.code_graph) !== JSON.stringify(savedConfig.code_graph)} probing={probingTarget === "code_graph"} reloading={reloadingTarget === "code_graph"} busy={probingTarget !== null || reloadingTarget !== null} onProbe={() => probeMcp("code_graph")} onReload={() => reloadMcp("code_graph")} />}
+          {section === "product" && <McpEditor value={config.product_info} onChange={(value) => setCfg({ ...config, product_info: value })} status={mcpStatus?.product_info || null} online={Boolean(mcpStatus?.online)} unsaved={JSON.stringify(config.product_info) !== JSON.stringify(savedConfig.product_info)} probing={probingTarget === "product_info"} reloading={reloadingTarget === "product_info"} busy={probingTarget !== null || reloadingTarget !== null} onProbe={() => probeMcp("product_info")} onReload={() => reloadMcp("product_info")} />}
           {section === "mining" && <PolicyEditor value={config.vulnerability_mining} onChange={(value) => setCfg({ ...config, vulnerability_mining: value })} />}
           {section === "fp" && <PolicyEditor value={config.false_positive} onChange={(value) => setCfg({ ...config, false_positive: value })} />}
           {section === "validation" && <div className="space-y-6">{catalog.errors.length > 0 && <div className="rounded border border-red-500/30 bg-red-500/10 p-3 text-sm text-red-200">{catalog.errors.join("；")}</div>}{environments.length === 0 ? <p className="text-sm text-slate-400">该 Agent 未安装有效的 validator.yaml。</p> : environments.map((name) => {

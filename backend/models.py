@@ -728,10 +728,20 @@ class AgentMcpProbeResult(BaseModel):
     active_sessions: int = 0
 
 
+class AgentMcpRuntimeStatus(BaseModel):
+    state: str = "unknown"
+    config_fingerprint: str = ""
+    updated_at: str = ""
+    error: str = ""
+    loaded_directories: int = 0
+    total_directories: int = 0
+
+
 class AgentMcpTargetStatus(BaseModel):
     enabled: bool = False
     stale: bool = False
     last_probe: AgentMcpProbeResult | None = None
+    runtime: AgentMcpRuntimeStatus = AgentMcpRuntimeStatus()
 
 
 class AgentMcpStatusResponse(BaseModel):
