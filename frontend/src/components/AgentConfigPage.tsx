@@ -18,6 +18,7 @@ import type {
   AgentModelTimeWindow,
   AgentModelTaskPolicy,
   AgentOpenCodeModelConfig,
+  AgentOpenCodeModelListItem,
   AgentOpenCodePoolStatus,
   AgentRemoteConfig,
   AgentValidationEnvironmentConfig,
@@ -235,6 +236,14 @@ export default function AgentConfigPage({ onBack }: Props) {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState("");
+  const [modelPicker, setModelPicker] = useState<{
+    agentId: string;
+    loading: boolean;
+    error: string | null;
+    message: string | null;
+    models: AgentOpenCodeModelListItem[];
+    selected: string[];
+  } | null>(null);
 
   const selectedAgent = agents.find((agent) => agent.agent_key === agentKey);
   const setCfg = (next: AgentRemoteConfig) => { setConfig(next); setDirty(true); setMessage(""); };
@@ -303,26 +312,76 @@ export default function AgentConfigPage({ onBack }: Props) {
     }
   };
 
-  const importModels = async () => {
+  const openModelPicker = async (refresh = false) => {
     if (!selectedAgent?.online) return;
+    const agentId = selectedAgent.agent_id;
+    setModelPicker({
+      agentId,
+      loading: true,
+      error: null,
+      message: null,
+      models: [],
+      selected: [],
+    });
     try {
-      const result = await getAgentOpenCodeModels(selectedAgent.agent_id, true);
-      const existing = new Set(config.model_pool.models.map((item) => item.model));
-      const ids = new Set(config.model_pool.models.map((item) => item.id));
-      const added = result.models.filter((item) => !existing.has(item.model)).map((item, index): AgentOpenCodeModelConfig => {
-        const base = item.id || `serve-${config.model_pool.models.length + index + 1}`;
-        let id = base; let suffix = 2;
-        while (ids.has(id)) { id = `${base}-${suffix}`; suffix += 1; }
-        ids.add(id);
-        return {
-          id, model: item.model, capability: "high", weight: 1,
-          max_concurrency: 1, enabled: true, tool: "", executable: "",
-          timeout: null, max_retries: null, time_windows: [],
-        };
+      const result = await getAgentOpenCodeModels(agentId, refresh);
+      if (!result.ok) throw new Error(result.message || "读取模型失败");
+      setModelPicker((current) => current?.agentId === agentId ? {
+        ...current,
+        loading: false,
+        message: result.message.trim() || null,
+        models: result.models,
+        selected: [],
+      } : current);
+    } catch (error) {
+      setModelPicker((current) => current?.agentId === agentId ? {
+        ...current,
+        loading: false,
+        error: error instanceof Error ? error.message : "读取模型失败",
+      } : current);
+    }
+  };
+
+  const togglePickedModel = (id: string) => {
+    setModelPicker((current) => {
+      if (!current) return current;
+      return {
+        ...current,
+        selected: current.selected.includes(id)
+          ? current.selected.filter((item) => item !== id)
+          : [...current.selected, id],
+      };
+    });
+  };
+
+  const importPickedModels = () => {
+    if (!modelPicker) return;
+    const selected = new Set(modelPicker.selected);
+    const existing = new Set(config.model_pool.models.map((item) => item.model));
+    const ids = new Set(config.model_pool.models.map((item) => item.id));
+    const added: AgentOpenCodeModelConfig[] = [];
+    for (const item of modelPicker.models) {
+      if (!selected.has(item.id)) continue;
+      const model = item.model || item.id;
+      if (!model || existing.has(model)) continue;
+      const base = item.id || `serve-${config.model_pool.models.length + added.length + 1}`;
+      let id = base;
+      let suffix = 2;
+      while (ids.has(id)) {
+        id = `${base}-${suffix}`;
+        suffix += 1;
+      }
+      existing.add(model);
+      ids.add(id);
+      added.push({
+        id, model, capability: "high", weight: 1,
+        max_concurrency: 1, enabled: true, tool: "", executable: "",
+        timeout: null, max_retries: null, time_windows: [],
       });
-      setCfg({ ...config, model_pool: { ...config.model_pool, models: [...config.model_pool.models, ...added] } });
-      setMessage(`从 serve 添加了 ${added.length} 个模型`);
-    } catch { setMessage("从 serve 读取模型失败"); }
+    }
+    setCfg({ ...config, model_pool: { ...config.model_pool, models: [...config.model_pool.models, ...added] } });
+    setMessage(`从 serve 添加了 ${added.length} 个模型`);
+    setModelPicker(null);
   };
 
   const environments = useMemo(() => Array.from(new Set([
@@ -360,7 +419,7 @@ export default function AgentConfigPage({ onBack }: Props) {
             <Field label="工具可执行文件名或完整路径"><input className={input} value={config.base.executable} onChange={(e) => setCfg({ ...config, base: { ...config.base, executable: e.target.value } })} /></Field>
             <Field label="代理跳过列表" hint="逗号分隔"><textarea className={input} rows={4} value={config.base.no_proxy} onChange={(e) => setCfg({ ...config, base: { ...config.base, no_proxy: e.target.value } })} /></Field>
           </div>}
-          {section === "models" && <ModelEditor config={config} setCfg={setCfg} online={Boolean(selectedAgent?.online)} onImport={importModels} pool={pool} />}
+          {section === "models" && <ModelEditor config={config} setCfg={setCfg} online={Boolean(selectedAgent?.online)} onImport={() => void openModelPicker()} pool={pool} />}
           {section === "threat" && <div className="space-y-5"><label className="flex gap-2 text-sm"><input type="checkbox" checked={config.threat_analysis.enabled} onChange={(e) => setCfg({ ...config, threat_analysis: { ...config.threat_analysis, enabled: e.target.checked } })} />启用威胁分析</label><Field label="攻击路径审计模式"><select className={input} value={config.threat_analysis.attack_path_audit_mode} onChange={(e) => setCfg({ ...config, threat_analysis: { ...config.threat_analysis, attack_path_audit_mode: e.target.value } })}><option value="after_analysis">分析完成后审计</option><option value="immediate">生成后立即审计</option></select></Field><PolicyEditor value={config.threat_analysis.model_policy} onChange={(value) => setCfg({ ...config, threat_analysis: { ...config.threat_analysis, model_policy: value } })} /></div>}
           {section === "codegraph" && <McpEditor value={config.code_graph} onChange={(value) => setCfg({ ...config, code_graph: value })} status={mcpStatus?.code_graph || null} online={Boolean(mcpStatus?.online)} unsaved={JSON.stringify(config.code_graph) !== JSON.stringify(savedConfig.code_graph)} probing={probingTarget === "code_graph"} probeBusy={probingTarget !== null} onProbe={() => probeMcp("code_graph")} />}
           {section === "product" && <McpEditor value={config.product_info} onChange={(value) => setCfg({ ...config, product_info: value })} status={mcpStatus?.product_info || null} online={Boolean(mcpStatus?.online)} unsaved={JSON.stringify(config.product_info) !== JSON.stringify(savedConfig.product_info)} probing={probingTarget === "product_info"} probeBusy={probingTarget !== null} onProbe={() => probeMcp("product_info")} />}
@@ -373,6 +432,34 @@ export default function AgentConfigPage({ onBack }: Props) {
         </>}
       </section>
     </main>
+    {modelPicker && <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 px-4">
+      <div className="w-full max-w-2xl rounded-lg border border-slate-700 bg-slate-900 p-4 shadow-xl">
+        <div className="mb-3 flex items-center justify-between gap-3">
+          <h3 className="text-sm font-semibold text-white">从 serve 导入模型</h3>
+          <button type="button" onClick={() => setModelPicker(null)} className="px-2 py-1 text-xs text-slate-300 hover:text-white">关闭</button>
+        </div>
+        {modelPicker.message && <div className="mb-3 rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-200">{modelPicker.message}</div>}
+        <div className="max-h-[24rem] overflow-y-auto rounded-md border border-slate-700">
+          {modelPicker.loading ? <div className="px-3 py-6 text-center text-sm text-slate-400">读取中…</div>
+            : modelPicker.error ? <div className="px-3 py-6 text-center text-sm text-red-300">{modelPicker.error}</div>
+              : modelPicker.models.length === 0 ? <div className="px-3 py-6 text-center text-sm text-slate-400">serve 未返回可用模型</div>
+                : <div className="divide-y divide-slate-700">{modelPicker.models.map((model) => <label key={model.id} className="flex items-center gap-3 px-3 py-2 text-sm text-slate-200 hover:bg-slate-800">
+                  <input type="checkbox" checked={modelPicker.selected.includes(model.id)} onChange={() => togglePickedModel(model.id)} className="h-4 w-4 rounded border-slate-600 bg-slate-900 text-blue-600 focus:ring-blue-500" />
+                  <span className="min-w-0 flex-1">
+                    <span className="block truncate font-mono text-xs text-slate-100">{model.id}</span>
+                    {model.name && <span className="block truncate text-xs text-slate-500">{model.name}</span>}
+                  </span>
+                </label>)}</div>}
+        </div>
+        <div className="mt-3 flex flex-wrap items-center justify-between gap-2">
+          <span className="text-xs text-slate-500">已选择 {modelPicker.selected.length} 个模型</span>
+          <div className="flex gap-2">
+            <button type="button" onClick={() => void openModelPicker(true)} disabled={modelPicker.loading} className="rounded-md bg-slate-700 px-3 py-1.5 text-xs text-slate-100 transition-colors hover:bg-slate-600 disabled:opacity-50">刷新</button>
+            <button type="button" onClick={importPickedModels} disabled={modelPicker.loading || modelPicker.selected.length === 0} className="rounded-md bg-blue-600 px-3 py-1.5 text-xs text-white transition-colors hover:bg-blue-500 disabled:opacity-50">导入</button>
+          </div>
+        </div>
+      </div>
+    </div>}
   </div>;
 }
 
