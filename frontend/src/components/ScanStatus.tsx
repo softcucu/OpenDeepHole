@@ -1995,6 +1995,8 @@ function ScanTaskQueuePanel({ pool }: { pool: OpenCodePoolStatus | null }) {
                   const blockedReason = typeof task.task.blocked_reason === "string"
                     ? task.task.blocked_reason.trim()
                     : "";
+                  const sessionId = scanQueueTaskSessionId(task.task);
+                  const isTerminal = !["planned", "queued", "running"].includes(task.status);
                   return (
                     <Fragment key={taskKey}>
                       <tr
@@ -2062,6 +2064,25 @@ function ScanTaskQueuePanel({ pool }: { pool: OpenCodePoolStatus | null }) {
                                   </div>
                                 </div>
                               )}
+                              <div>
+                                <div className="mb-2 text-xs font-semibold text-slate-300">
+                                  OpenCode Session ID
+                                </div>
+                                {sessionId ? (
+                                  <div
+                                    className="select-text break-all rounded-md border border-slate-800 bg-slate-900/80 px-3 py-2 font-mono text-xs text-cyan-300"
+                                    title={sessionId}
+                                  >
+                                    {sessionId}
+                                  </div>
+                                ) : (
+                                  <div className="rounded-md border border-slate-800 bg-slate-900/60 px-3 py-2 text-xs text-slate-500">
+                                    {isTerminal
+                                      ? "该任务在 OpenCode Session 创建前结束，或历史记录未保存 Session ID。"
+                                      : "OpenCode Session 尚未创建，创建后会在此显示。"}
+                                  </div>
+                                )}
+                              </div>
                               <div>
                                 <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
                                   <span className="text-xs font-semibold text-slate-300">Prompt</span>
@@ -2237,6 +2258,12 @@ function scanQueueTaskTarget(task: Record<string, unknown>): string {
 
 function scanQueueTaskPrompt(task: Record<string, unknown>): string {
   return typeof task.prompt === "string" ? task.prompt : "";
+}
+
+function scanQueueTaskSessionId(task: Record<string, unknown>): string {
+  if (typeof task.serve_session_id === "string") return task.serve_session_id.trim();
+  if (task.serve_session_id == null) return "";
+  return String(task.serve_session_id).trim();
 }
 
 function scanQueueTaskPromptLength(task: Record<string, unknown>, prompt: string): number {

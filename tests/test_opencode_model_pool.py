@@ -553,6 +553,7 @@ def test_model_pool_snapshot_persists_completed_task_prompt_for_all_outcomes() -
         outcomes = ("success", "failure", "timeout", "cancelled")
         for index, outcome in enumerate(outcomes):
             prompt = f"full {outcome} prompt"
+            session_id = f"ses_{outcome}"
             lease = await acquire_model_lease(
                 cfg,
                 global_concurrency=1,
@@ -563,6 +564,10 @@ def test_model_pool_snapshot_persists_completed_task_prompt_for_all_outcomes() -
                     "file": f"src/{index}.c",
                     "prompt": prompt,
                 },
+            )
+            await update_model_lease_context(
+                lease,
+                {"serve_session_id": session_id},
             )
             await release_model_lease(lease, outcome=outcome, duration_seconds=1.5)
 
@@ -577,6 +582,7 @@ def test_model_pool_snapshot_persists_completed_task_prompt_for_all_outcomes() -
             assert completed["duration_seconds"] == 1.5
             assert completed["prompt"] == prompt
             assert completed["prompt_length"] == len(prompt)
+            assert completed["serve_session_id"] == f"ses_{outcome}"
 
     asyncio.run(run())
 
@@ -1105,6 +1111,8 @@ def test_model_pool_snapshot_includes_active_task_context() -> None:
             assert model["active_tasks"][0]["serve_session_id"] == "ses_test"
         finally:
             await release_model_lease(lease, outcome="success", duration_seconds=1.0)
+        snapshot = model_pool_snapshot("scan-active")
+        assert snapshot["completed_tasks"][0]["serve_session_id"] == "ses_test"
 
     asyncio.run(run())
 

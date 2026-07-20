@@ -2,6 +2,7 @@
 
 ## 2026-07-20
 
+- **新增** 扫描详情首页的 OpenCode 任务队列在展开任务后显示完整 Session ID；成功、失败、超时和取消任务均持久保留最后一个已创建的 Session，即使最终重试在新 Session 创建前失败也不会丢失上一 Session
 - **新增** Agent 配置页增加「OpenCode 配置」页签，可编辑并原样持久化完整 JSONC 用户配置层（支持注释和尾随逗号）；配置按“本机发现配置 < Web JSONC < OpenDeepHole 受管字段”合并，MCP、技能、权限和威胁分析子 Agent 等运行必需字段继续由 Agent 强制管理
 - **变更** OpenCode/nga serve 不再通过 `OPENCODE_CONFIG_CONTENT` 注入配置；Agent 在 Serve 空闲重启边界原子写入 `~/.opendeephole/opencode_workspace/opencode.json`，以 `OPENCODE_CONFIG_DIR` 指向该目录并显式清除旧内容变量，运行时文件权限设为 `0600`
 - **优化** OpenCode 受管配置源与最终运行文件分离，配置删除后不再因读取旧运行文件而残留；活动 Session 不会被配置更新打断，启动日志改为记录配置路径、哈希、字节数和脱敏内容

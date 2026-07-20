@@ -644,6 +644,7 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
                         "task_id": "task-done",
                         "task_type": "threat_analysis",
                         "outcome": "success",
+                        "serve_session_id": "ses_task_done",
                         "prompt": "completed threat prompt",
                         "finished_at": "2026-01-01T00:02:00+00:00",
                     }
@@ -677,6 +678,7 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
             self.assertEqual(pool.total_tasks, 3)
             self.assertEqual(pool.completed_task_count, 1)
             self.assertEqual(pool.completed_tasks[0]["task_id"], "task-done")
+            self.assertEqual(pool.completed_tasks[0]["serve_session_id"], "ses_task_done")
             self.assertEqual(pool.completed_tasks[0]["prompt"], "completed threat prompt")
             summary = store.list_scans()[0]
             self.assertEqual(summary.total_task_count, 3)
@@ -691,7 +693,12 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
                 total_tasks=1,
                 completed_task_count=1,
                 completed_tasks=[
-                    {"task_id": "old", "outcome": "success", "prompt": "old prompt"}
+                    {
+                        "task_id": "old",
+                        "outcome": "success",
+                        "serve_session_id": "ses_old",
+                        "prompt": "old prompt",
+                    }
                 ],
             )
             store.save_scan(scan, _meta())
@@ -701,7 +708,12 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
                 total_tasks=2,
                 completed_task_count=1,
                 completed_tasks=[
-                    {"task_id": "new", "outcome": "timeout", "prompt": "new prompt"}
+                    {
+                        "task_id": "new",
+                        "outcome": "timeout",
+                        "serve_session_id": "ses_new",
+                        "prompt": "new prompt",
+                    }
                 ],
                 queued_tasks=[{"request_id": "queued", "task_type": "fp_review"}],
             )
@@ -715,6 +727,10 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
             self.assertEqual(
                 [task["prompt"] for task in pool.completed_tasks],
                 ["old prompt", "new prompt"],
+            )
+            self.assertEqual(
+                [task["serve_session_id"] for task in pool.completed_tasks],
+                ["ses_old", "ses_new"],
             )
             self.assertEqual(pool.completed_task_count, 2)
             self.assertEqual(pool.total_tasks, 3)

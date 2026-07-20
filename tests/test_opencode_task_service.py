@@ -415,6 +415,52 @@ def test_execution_error_requeues_with_a_fresh_session(tmp_path: Path) -> None:
     asyncio.run(run())
 
 
+def test_failed_fresh_retry_keeps_last_created_session_in_pool_context(tmp_path: Path) -> None:
+    async def run() -> None:
+        service = OpenCodeTaskService()
+        calls = 0
+
+        async def run_prompt(**kwargs):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                callback = kwargs["on_session_id"]("ses_first")
+                if hasattr(callback, "__await__"):
+                    await callback
+                raise RuntimeError("first session failed")
+            raise RuntimeError("final retry failed before session creation")
+
+        manager = SimpleNamespace(run_prompt=run_prompt)
+        service._runtime_for_task = AsyncMock(
+            return_value=(_runtime(tmp_path), "provider/model-low", _source())
+        )
+        patches = _service_patches(manager)
+        with (
+            patches[0],
+            patches[1],
+            patches[2] as release_mock,
+            patches[3] as update_context_mock,
+            patches[4],
+            patches[5],
+        ):
+            result = await service.run_task(OpenCodeTaskSpec(
+                task_name="failed retry session history",
+                prompt="run",
+                directory=tmp_path,
+                attempt=1,
+            ))
+
+        assert result.status == "failure"
+        assert result.session_id == "ses_first"
+        assert release_mock.await_args_list[-1].kwargs["outcome"] == "failure"
+        assert release_mock.await_args_list[-1].kwargs["record_completion"] is True
+        final_context_update = update_context_mock.await_args_list[-1].args[1]
+        assert final_context_update["serve_session_id"] == "ses_first"
+        assert final_context_update["session_attempt"] == 2
+
+    asyncio.run(run())
+
+
 def test_exhausted_json_retries_fail_and_keep_last_text(tmp_path: Path) -> None:
     async def run() -> None:
         service = OpenCodeTaskService()

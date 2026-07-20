@@ -706,6 +706,14 @@ class OpenCodeTaskService:
                 # slot now, but append terminal history/outcome only once.
                 if retry_reason and session_attempt < total_session_attempts:
                     terminal_release = False
+                # Preserve the last session created by this logical task in the
+                # terminal model-pool history. A later retry can fail before it
+                # creates a replacement session, in which case final_session_id
+                # still identifies the most recent usable OpenCode session.
+                await update_model_lease_context(lease, {
+                    "serve_session_id": final_session_id or session_id,
+                    "session_attempt": session_attempt,
+                })
                 await release_model_lease(
                     lease,
                     outcome=attempt_outcome if terminal_release else None,
