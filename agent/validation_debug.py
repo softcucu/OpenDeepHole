@@ -188,7 +188,10 @@ async def prepare_validator_debug(
         text = str(message or "")
         if not text:
             return
-        output(text)
+        if output is print:
+            print(text, flush=True)
+        else:
+            output(text)
         agent_log.write(text.rstrip("\n") + "\n")
         agent_log.flush()
 

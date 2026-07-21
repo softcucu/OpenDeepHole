@@ -13,7 +13,11 @@ import pytest
 
 from backend.models import OutputSource
 from backend.opencode import OpenCodeResult, OpenCodeTaskType, run_opencode_task
-from backend.opencode.model_pool import ModelLease, ModelOption
+from backend.opencode.model_pool import (
+    NO_AVAILABLE_MODEL_MESSAGE,
+    ModelLease,
+    ModelOption,
+)
 from backend.opencode.serve_client import OpenCodePromptResult
 from backend.opencode.task_service import (
     OpenCodeTaskError,
@@ -310,9 +314,11 @@ def test_task_service_parses_json_and_computes_scope_and_permissions(tmp_path: P
         service = OpenCodeTaskService()
         manager = SimpleNamespace()
         captured: dict = {}
+        output: list[str] = []
 
         async def run_prompt(**kwargs):
             captured.update(kwargs)
+            kwargs["on_line"]("[opencode serve llm text] streamed answer")
             callback = kwargs["on_session_id"]("ses_structured")
             if hasattr(callback, "__await__"):
                 await callback
@@ -343,6 +349,7 @@ def test_task_service_parses_json_and_computes_scope_and_permissions(tmp_path: P
                     "checker": "oob",
                     "validation_debug": True,
                 },
+                on_output=output.append,
             ):
                 result = await service.run_task(OpenCodeTaskSpec(
                     task_name="schema task",
@@ -379,6 +386,51 @@ def test_task_service_parses_json_and_computes_scope_and_permissions(tmp_path: P
         assert acquire_kwargs["task_context"]["task_type"] == "audit"
         assert acquire_kwargs["task_context"]["session_attempt"] == 1
         assert callable(acquire_kwargs["global_concurrency"])
+        assert acquire_kwargs["wait_when_unavailable"] is False
+        assert any("[opencode task] queued" in line for line in output)
+        assert any("[opencode task] running" in line for line in output)
+        assert any("streamed answer" in line for line in output)
+        assert any(
+            "[opencode task] finished" in line and "status=success" in line
+            for line in output
+        )
+
+    asyncio.run(run())
+
+
+def test_validation_debug_empty_model_pool_fails_without_starting_serve(tmp_path: Path) -> None:
+    async def run() -> None:
+        service = OpenCodeTaskService()
+        manager = SimpleNamespace(run_prompt=AsyncMock())
+        output: list[str] = []
+
+        with (
+            patch("backend.opencode.task_service.get_config", return_value=_config()),
+            patch("backend.opencode.task_service.get_serve_manager", return_value=manager),
+            bind_opencode_execution_context(
+                scan_id="debug-scan",
+                project_dir=tmp_path,
+                work_dir=tmp_path / "work",
+                task_metadata={"validation_debug": True},
+                on_output=output.append,
+            ),
+        ):
+            result = await service.run_task(OpenCodeTaskSpec(
+                task_name="debug without model",
+                prompt="test",
+                directory=tmp_path,
+            ))
+
+        assert result.status == "failure"
+        assert result.error == NO_AVAILABLE_MODEL_MESSAGE
+        manager.run_prompt.assert_not_awaited()
+        assert any("[opencode task] queued" in line for line in output)
+        assert any(
+            "[opencode task] finished" in line
+            and "status=failure" in line
+            and NO_AVAILABLE_MODEL_MESSAGE in line
+            for line in output
+        )
 
     asyncio.run(run())
 
@@ -436,6 +488,10 @@ def test_phase_policy_controls_timeout_and_retries_but_not_explicit_capability(t
         assert acquire_mock.await_count == 2
         assert all(
             call.kwargs["required_capability"] == "low"
+            for call in acquire_mock.await_args_list
+        )
+        assert all(
+            call.kwargs["wait_when_unavailable"] is True
             for call in acquire_mock.await_args_list
         )
 

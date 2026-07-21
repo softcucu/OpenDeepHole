@@ -346,6 +346,25 @@ class OpenCodeTaskService:
         self._active_session_tasks: dict[str, str] = {}
 
     @staticmethod
+    def _validation_debug_enabled(record: _TaskRecord) -> bool:
+        return record.execution_context.task_metadata.get("validation_debug") is True
+
+    @classmethod
+    def _emit_validation_debug(cls, record: _TaskRecord, message: str) -> None:
+        if not cls._validation_debug_enabled(record):
+            return
+        callback = record.execution_context.on_output
+        if callback is None:
+            return
+        try:
+            callback(message)
+        except Exception:
+            logger.exception(
+                "Failed to emit validation debug output for OpenCode task %s",
+                record.task_id,
+            )
+
+    @staticmethod
     def _normalize_spec(spec: OpenCodeTaskSpec) -> OpenCodeTaskSpec:
         task_name = str(spec.task_name or "").strip()
         prompt = str(spec.prompt or "")
@@ -412,6 +431,11 @@ class OpenCodeTaskService:
                 _required_work_dir(record.execution_context),
             )
         self._records[task_id] = record
+        self._emit_validation_debug(
+            record,
+            f"[opencode task] queued task={task_id} name={normalized.task_name} "
+            f"capability={normalized.required_capability} priority={normalized.priority}",
+        )
         record.worker = asyncio.create_task(
             self._run_record(record),
             name=f"opencode-task-{task_id[:10]}",
@@ -489,6 +513,7 @@ class OpenCodeTaskService:
     async def _run_record(self, record: _TaskRecord) -> None:
         spec = record.spec
         context = record.execution_context
+        validation_debug = self._validation_debug_enabled(record)
         combined_cancel = _CombinedCancelEvent(record.cancel_event, context.cancel_event)
         cli_config_source = lambda: _task_cli_config(record.execution_context)
         global_concurrency = lambda: configured_global_concurrency(get_config())
@@ -542,7 +567,7 @@ class OpenCodeTaskService:
                     revision=record.revision,
                     strict_capability=True,
                     prefer_lowest_capability=True,
-                    wait_when_unavailable=True,
+                    wait_when_unavailable=not validation_debug,
                 )
                 if lease is None:
                     if record.requeue_requested:
@@ -570,6 +595,13 @@ class OpenCodeTaskService:
                 record.status = "running"
                 if not record.started_at:
                     record.started_at = lease.started_at_iso or _now_iso()
+                self._emit_validation_debug(
+                    record,
+                    f"[opencode task] running task={record.task_id} "
+                    f"model_id={lease.option.id} "
+                    f"model={lease.option.model or '<cli-default>'} "
+                    f"capability={lease.option.capability}",
+                )
                 attempt_started = lease.started_at or time.monotonic()
                 runtime, model, source = await self._runtime_for_task(
                     record,
@@ -884,6 +916,19 @@ class OpenCodeTaskService:
             record.session_future.set_result(session_id)
         if record.result_future.done():
             return
+        terminal_parts = [
+            "[opencode task] finished",
+            f"task={record.task_id}",
+            f"status={status}",
+        ]
+        if session_id:
+            terminal_parts.append(f"session={session_id}")
+        resolved_model = model or source.model
+        if resolved_model:
+            terminal_parts.append(f"model={resolved_model}")
+        if error:
+            terminal_parts.append(f"error={re.sub(r'\\s+', ' ', error).strip()}")
+        self._emit_validation_debug(record, " ".join(terminal_parts))
         record.result_future.set_result(OpenCodeTaskResult(
             task_id=record.task_id,
             session_id=session_id,
@@ -891,7 +936,7 @@ class OpenCodeTaskService:
             status=status,
             text=text,
             structured=structured,
-            model=model or source.model,
+            model=resolved_model,
             output_source=source,
             error=error,
             queued_at=record.queued_at,

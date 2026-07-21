@@ -5,6 +5,7 @@
 - **变更** 产品漏洞验证入口由平台上下文对象改为严格的 `async def validate(**kwargs) -> ValidationResult`；漏洞、路径、模型策略、输出/产物/命令函数以及 manifest 动态配置全部按名称平铺注入，旧 `validate(ctx)` 签名会在加载时明确拒绝
 - **新增** 验证方法可自行定义本地 `main()`，通过 `prepare_validator_debug(...)` 复用真实 `agent.yaml` 并准备 OpenCode/MCP 上下文，随后由用户代码直接调用同一个 `validate(**kwargs)`；`output=print` 会同时承接异步 `emit_stdout` 和 OpenCode 流式输出，通用 `run_validator_debug(...)` 命令行入口继续兼容
 - **修复** 独立运行验证方法 `main()` 时会明确显示 OpenCode Serve 的准备、启动/重启/复用、URL、PID、Session 和启动失败信息，并实时打印模型文本、推理、工具调用及重试；同一输出同步保存到本次调试目录的 `agent.log`
+- **修复** 独立验证调试在进入 OpenCode 前新增任务排队、模型选择和最终状态输出；空模型池不再永久等待，而是立即提示必须配置已启用模型，普通 Agent 任务的动态排队策略保持不变
 - **变更** 所有 Agent 组件和 validator 统一改用唯一公共入口 `backend.opencode.run_opencode_task()`；调用参数只保留任务名称、受控任务类型、提示词、低/高能力、输出 Schema、非法 JSON 纠正次数和可选 Session ID，返回只保留 Session ID、`success/failure/timeout`、文本、结构化值和实际模型
 - **变更** OpenCode 的项目目录、工作目录、超时、优先级、模型重试、输出回调和取消信号全部由 Agent 执行上下文及任务策略提供；旧 `any` 任务能力自动迁移为 `low`，旧 `medium` 自动迁移为 `high`，任务策略配置页只保留低/高两档
 - **安全** 每个 OpenCode Session 自动获得项目目录只读权限，并只允许文件工具写当前 `.opendeephole` 工作目录；全局及 Session 级 `bash` 均禁用，主动取消直接传播 `asyncio.CancelledError` 并终止排队、当前请求、JSON 纠正和后续重试，不再暴露公共 `cancelled` 结果
