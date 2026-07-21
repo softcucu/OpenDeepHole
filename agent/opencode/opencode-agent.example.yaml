@@ -1,0 +1,32 @@
+schema_version: 1
+
+context:
+  project_dir: /absolute/path/to/source
+  work_dir: /absolute/path/to/writable-work
+  workspace_dir: /absolute/path/to/opencode-workspace
+
+serve:
+  tool: opencode
+  executable: opencode
+  port: 4096
+  timeout: 1200
+  max_retries: 2
+  environment: {}
+  opencode_config: {}
+
+model_pool:
+  global_concurrency: 1
+  models:
+    - id: deepseek/deepseek-v4-pro
+      model: deepseek/deepseek-v4-pro
+      capability: high
+      weight: 1
+      max_concurrency: 1
+      enabled: true
+
+    - capability: high
+      enabled: true
+      id: deepseek/deepseek-v4-flash
+      max_concurrency: 1
+      model: deepseek/deepseek-v4-flash
+      weight: 1

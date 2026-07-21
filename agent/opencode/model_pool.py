@@ -216,7 +216,7 @@ def _parse_minutes(value: object) -> int | None:
 
 
 def _parse_time_windows(value: object) -> tuple[ModelTimeWindow, ...]:
-    if not isinstance(value, list):
+    if not isinstance(value, (list, tuple)):
         return ()
     windows: list[ModelTimeWindow] = []
     for item in value:

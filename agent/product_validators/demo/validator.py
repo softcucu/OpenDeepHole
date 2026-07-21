@@ -6,7 +6,6 @@ import asyncio
 import json
 from pathlib import Path
 
-from agent.validation_debug import prepare_validator_debug
 from agent.vulnerability_validation import ValidationResult
 from agent.opencode import run_opencode_task
 
@@ -87,34 +86,48 @@ async def validate(**kwargs) -> ValidationResult:
 
 
 async def main() -> None:
-    """Optional local debug entry; edit these values for the target project."""
-    repo_root = Path(__file__).resolve().parents[3]
-    async with prepare_validator_debug(
-        validator_dir=Path(__file__).resolve().parent,
-        config_path=repo_root / "agent.yaml",
-        project_path="/home/raint/workspace/OpenDeepHole",
-        code_scan_path="/home/raint/workspace/OpenDeepHole",
-        product="LTE",
-        validation_environment="仿真UBBPi板环境",
-        vulnerability={
-            "file": "src/parser.c",
-            "line": 120,
-            "function": "parse_payload",
-            "call_chain": ["handle_packet", "parse_message", "parse_payload"],
-            "vuln_type": "oob",
-            "severity": "high",
-            "description": "长度字段可导致越界读取",
-            "ai_analysis": "完整分析",
-            "vulnerability_report": "# 漏洞报告\n\n验证该越界路径。",
-            "confirmed": True,
-            "ai_verdict": "confirmed",
-        },
+    """Run this example with the standalone OpenCode component configuration."""
+    work_dir = (Path.cwd() / ".opendeephole" / "validator-demo").resolve()
+    work_dir.mkdir(parents=True, exist_ok=True)
+
+    async def emit_stdout(title, content=None) -> None:
+        if content is None:
+            print(str(title), flush=True)
+        else:
+            print(f"[{title}] {content}", flush=True)
+
+    async def publish_artifact(
+        name,
+        content=None,
+        *,
+        title="验证产物",
+        path=None,
+        kind="artifact",
+    ) -> dict[str, object]:
+        artifact_path = str(Path(path).resolve()) if path is not None else ""
+        print(f"[{title}] {name} {artifact_path}".rstrip(), flush=True)
+        return {
+            "title": title,
+            "name": name,
+            "kind": kind,
+            "path": artifact_path,
+            "content": "" if content is None else str(content),
+        }
+
+    result = await validate(
+        emit_stdout=emit_stdout,
+        publish_artifact=publish_artifact,
+        validation_entry_function="handle_packet",
+        vulnerable_function="parse_payload",
+        vulnerability_type="oob",
+        call_chain=("handle_packet", "parse_message", "parse_payload"),
         report_markdown="# 漏洞报告\n\n验证该越界路径。",
-        output=print,
-    ) as debug:
-        result = await validate(**debug.kwargs)
-    print(f"[validation-debug] status={result.status}", flush=True)
-    print(f"[validation-debug] conclusion={result.summary}", flush=True)
+        required_capability="high",
+        work_dir=work_dir,
+        target_ip="",
+    )
+    print(f"[validator-demo] status={result.status}", flush=True)
+    print(f"[validator-demo] conclusion={result.summary}", flush=True)
 
 
 if __name__ == "__main__":

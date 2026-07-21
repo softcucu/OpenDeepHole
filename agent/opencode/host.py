@@ -73,14 +73,49 @@ class OpenCodeHostBindings:
 
 
 _bindings: OpenCodeHostBindings | None = None
+_binding_source = ""
+_binding_identity: Path | None = None
+_binding_context: Any = None
+
+
+def _set_opencode_configuration(
+    bindings: OpenCodeHostBindings,
+    *,
+    source: str,
+    identity: Path | None = None,
+    context: Any = None,
+) -> None:
+    if not isinstance(bindings, OpenCodeHostBindings):
+        raise TypeError("bindings must be an OpenCodeHostBindings instance")
+    global _bindings, _binding_source, _binding_identity, _binding_context
+    _bindings = bindings
+    _binding_source = source
+    _binding_identity = identity
+    _binding_context = context
 
 
 def configure_opencode(bindings: OpenCodeHostBindings) -> None:
     """Register host configuration without creating a manager or Serve process."""
-    if not isinstance(bindings, OpenCodeHostBindings):
-        raise TypeError("bindings must be an OpenCodeHostBindings instance")
-    global _bindings
-    _bindings = bindings
+    _set_opencode_configuration(bindings, source="host")
+
+
+def _configure_standalone_opencode(
+    bindings: OpenCodeHostBindings,
+    *,
+    config_path: Path,
+    context: Any,
+) -> None:
+    """Register file-backed bindings owned by the standalone bootstrap."""
+    _set_opencode_configuration(
+        bindings,
+        source="standalone",
+        identity=config_path.resolve(),
+        context=context,
+    )
+
+
+def _get_opencode_configuration_state() -> tuple[str, Path | None, Any]:
+    return _binding_source, _binding_identity, _binding_context
 
 
 def get_host_bindings() -> OpenCodeHostBindings:
@@ -95,5 +130,14 @@ def get_host_bindings() -> OpenCodeHostBindings:
 
 def reset_opencode_configuration() -> None:
     """Clear host bindings for tests or complete host teardown."""
-    global _bindings
+    global _bindings, _binding_source, _binding_identity, _binding_context
     _bindings = None
+    _binding_source = ""
+    _binding_identity = None
+    _binding_context = None
+
+
+def _reset_standalone_opencode_configuration() -> None:
+    """Clear configuration only when it came from the standalone YAML file."""
+    if _binding_source == "standalone":
+        reset_opencode_configuration()

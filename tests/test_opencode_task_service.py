@@ -38,6 +38,16 @@ SCHEMA = {
 }
 
 
+@pytest.fixture(autouse=True)
+def _configured_host_boundary():
+    """Task-service unit tests provide their own config/runtime patches."""
+    with patch(
+        "agent.opencode.standalone.ensure_opencode_configuration",
+        return_value=None,
+    ):
+        yield
+
+
 def _lease(task_id: str = "task-id", *, scope_id: str = "") -> ModelLease:
     return ModelLease(
         option=ModelOption(
@@ -127,6 +137,7 @@ def test_public_contract_contains_only_component_owned_fields() -> None:
         "output_schema",
         "invalid_json_retry_count",
         "session_id",
+        "config_path",
     ]
     assert [item.name for item in dataclasses.fields(OpenCodeResult)] == [
         "session_id",

@@ -15,6 +15,8 @@ async def validate(**kwargs) -> ValidationResult:
     ...
 ```
 
-平台不会调用 `main()`。开发者可以在 `validator.py` 中自行增加 `main()`，通过 `agent.validation_debug.prepare_validator_debug(...)` 复用真实 `agent.yaml` 并准备 OpenCode/MCP 上下文，再直接调用同一个 `validate(**debug.kwargs)`。
+平台只调用 `validate(**kwargs)`。验证方法需要模型时直接调用 `agent.opencode.run_opencode_task()`；平台会提前绑定后端配置、项目目录、漏洞工作目录、MCP、输出回调和取消信号。
 
-完整的 manifest、kwargs、返回值、本地 `main()` 模板和运行命令见 [漏洞验证方法与本地调试](../../docs/vulnerability_validation.md)。
+demo 额外提供一个轻量 `main()`：它手工构造示例实际使用的 kwargs，并由 `run_opencode_task()` 从组件独立 YAML 自举 OpenCode。该入口不依赖已删除的 `agent.validation_debug`，也不会加载完整 manifest 或模拟平台队列。
+
+完整的 manifest、kwargs、返回值和 OpenCode 调用约定见 [漏洞验证方法](../../docs/vulnerability_validation.md)。

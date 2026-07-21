@@ -131,8 +131,13 @@ def split_model_id(model: str) -> tuple[str, str]:
     return provider, model_id
 
 
-def _serve_port() -> int:
-    raw = os.environ.get(_SERVE_PORT_ENV, "").strip()
+def _serve_port(
+    env_overrides: dict[str, str] | tuple[tuple[str, str], ...] | None = None,
+) -> int:
+    overrides = dict(env_overrides or ())
+    raw = str(
+        overrides.get(_SERVE_PORT_ENV, os.environ.get(_SERVE_PORT_ENV, ""))
+    ).strip()
     if raw:
         try:
             port = int(raw)
@@ -2166,7 +2171,8 @@ class OpenCodeServeManager:
         )
         if show_serve_status and on_line:
             on_line(
-                f"[{tool} serve] preparing executable={executable} port={_serve_port()}"
+                f"[{tool} serve] preparing executable={executable} "
+                f"port={_serve_port(normalized_env_overrides)}"
             )
         try:
             serve_mode = await self._acquire_session(
@@ -3169,7 +3175,7 @@ class OpenCodeServeManager:
 
     async def _start_locked(self, key: OpenCodeServeKey, startup_cwd: Path | None = None) -> None:
         executable = _resolve_executable(key.executable)
-        port = _serve_port()
+        port = _serve_port(key.env_overrides)
         await self._stop_owned_serve_on_port(port)
         if _port_is_in_use(port):
             reclaim = await asyncio.to_thread(

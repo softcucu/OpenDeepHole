@@ -2,6 +2,8 @@
 
 ## 2026-07-21
 
+- **重构** `run_opencode_task()` 在没有后端宿主绑定时可从独立 `opencode-agent.yaml` 自举项目/工作上下文、Serve 和模型池配置，后端环境继续以宿主配置为唯一来源；独立配置随单例锁定并在 `shutdown_opencode()` 后才允许切换
+- **变更** 删除 `agent.validation_debug` 和 validator 对 `prepare_validator_debug` 的依赖；demo 保留轻量 `main()`，手工构造示例 kwargs，并让 `run_opencode_task()` 直接从独立组件 YAML 自举 OpenCode
 - **变更** OpenCode 公共接口移除 `OpenCodeTaskType` 枚举，`task_type` 改为文档约束并由运行时白名单校验的字符串；所有 Agent 阶段和 validator 直接传 `audit`、`threat_analysis`、`vulnerability_validation` 等稳定值
 - **重构** OpenCode 的任务队列、模型调度、Session、权限、JSON 纠错和 `opencode/nga serve` 生命周期从后端迁入自包含的 `agent/opencode/` 组件；业务阶段统一只调用 `agent.opencode.run_opencode_task()`，首次任务会惰性创建并启动共享 Serve 单例，后续任务继续复用现有的重启、恢复和 Session 机制，不新增独立 CLI
 - **变更** OpenCode 的 `output_schema` 约束改为以中文自动追加到首次用户提示词末尾，不再放入 system prompt；同 Session JSON 纠错、CodeGraph 项目范围和扫描反馈等任务服务自动提示也统一改为中文，任务队列记录实际发送的完整提示词

@@ -38,6 +38,9 @@ class AgentRuntimePackageTests(unittest.TestCase):
         self.assertFalse(any("/vulnerability_validation/" in name for name in names))
         self.assertIn("agent/product_validators/demo/validator.yaml", names)
         self.assertIn("agent/product_validators/demo/validator.py", names)
+        self.assertIn("agent/opencode/standalone.py", names)
+        self.assertIn("agent/opencode/opencode-agent.example.yaml", names)
+        self.assertNotIn("agent/validation_debug.py", names)
 
     def test_agent_download_zip_includes_launchers_config_and_bundled_ctags(self) -> None:
         data = agent_api._build_agent_zip("http://server.example", "owner-token")
@@ -54,6 +57,9 @@ class AgentRuntimePackageTests(unittest.TestCase):
         self.assertIn("ctags-p6.2.20260517.0-x64/ctags.exe", names)
         self.assertIn("agent/product_validators/demo/validator.yaml", names)
         self.assertIn("agent/product_validators/demo/validator.py", names)
+        self.assertIn("agent/opencode/standalone.py", names)
+        self.assertIn("agent/opencode/opencode-agent.example.yaml", names)
+        self.assertNotIn("agent/validation_debug.py", names)
         self.assertIn('server_url: "http://server.example"', agent_yaml)
         self.assertIn('owner_token: "owner-token"', agent_yaml)
         parsed = yaml.safe_load(agent_yaml)

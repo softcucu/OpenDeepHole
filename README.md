@@ -161,7 +161,7 @@ OpenDeepHole Agent
 Agent 通过 WebSocket 保持长连接，等待服务器推送任务。
 启动后的 Agent 支持任务执行前自动更新运行时代码。服务端更新 `agent/`（包含 `agent/product_validators/`）、`backend/`、`code_parser/`、`mcp_server/`、包内 Windows ctags 目录或 `requirements-agent.txt` 后，旧 Agent 会在下次启动扫描、恢复扫描、去误报或漏洞验证任务前下载最新 runtime 并重启后继续执行；runtime 更新包会携带快照 manifest，用于校验下载 zip 的文件集合和逐文件 hash；`checkers/` 更新仍在创建或恢复扫描时按选中检查项同步，不单独触发 runtime 重启；如果更新了 `run_agent.sh` 或 `run_agent.bat`，需要重新下载 Agent 包。
 
-验证方法的 kwargs 契约、可选 `main()`、Agent 配置复用和无后端单独调试方式见 [`docs/vulnerability_validation.md`](docs/vulnerability_validation.md)。
+验证方法的 manifest、kwargs、返回值和 OpenCode 调用约定见 [`docs/vulnerability_validation.md`](docs/vulnerability_validation.md)。
 
 **第 4 步：在 Web UI 创建扫描任务**
 
@@ -587,6 +587,8 @@ continued = await run_opencode_task(
     session_id=result.session_id,
 )
 ```
+
+`agent.opencode` 目录也可脱离 OpenDeepHole 使用：未注册后端宿主绑定时，`run_opencode_task()` 会从显式 `config_path`、`OPENCODE_TASK_CONFIG` 或当前目录的 `opencode-agent.yaml` 读取固定项目/工作上下文、Serve 参数和模型池，然后惰性启动同一个 Serve 单例。格式模板见 `agent/opencode/opencode-agent.example.yaml`；首次配置在 `shutdown_opencode()` 前不可切换。
 
 OpenCode 模型池统计：
 

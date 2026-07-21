@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from os import PathLike
 from typing import Any, Literal
 
 
@@ -40,8 +41,9 @@ async def run_opencode_task(
     output_schema: dict[str, Any] | None = None,
     invalid_json_retry_count: int = 2,
     session_id: str | None = None,
+    config_path: str | PathLike[str] | None = None,
 ) -> OpenCodeResult:
-    """Run one OpenCode task using Agent-bound project and work directories."""
+    """Run one OpenCode task using host-bound or standalone file configuration."""
     normalized_name = str(task_name or "").strip()
     normalized_prompt = str(prompt or "")
     if not normalized_name:
@@ -60,14 +62,26 @@ async def run_opencode_task(
     if retry_count < 0:
         raise ValueError("OpenCode invalid_json_retry_count cannot be negative")
 
-    from .task_service import _run_component_task
+    from .standalone import ensure_opencode_configuration
+    from .task_service import _run_component_task, bind_opencode_execution_context
 
-    return await _run_component_task(
-        task_name=normalized_name,
-        task_type=normalized_task_type,
-        prompt=normalized_prompt,
-        required_capability=capability,
-        output_schema=output_schema,
-        invalid_json_retry_count=retry_count,
-        session_id=str(session_id or "").strip() or None,
-    )
+    standalone = ensure_opencode_configuration(config_path)
+
+    async def run() -> OpenCodeResult:
+        return await _run_component_task(
+            task_name=normalized_name,
+            task_type=normalized_task_type,
+            prompt=normalized_prompt,
+            required_capability=capability,
+            output_schema=output_schema,
+            invalid_json_retry_count=retry_count,
+            session_id=str(session_id or "").strip() or None,
+        )
+
+    if standalone is None:
+        return await run()
+    with bind_opencode_execution_context(
+        project_dir=standalone.project_dir,
+        work_dir=standalone.work_dir,
+    ):
+        return await run()
