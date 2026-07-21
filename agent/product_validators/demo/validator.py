@@ -6,7 +6,7 @@ import asyncio
 import json
 from pathlib import Path
 
-from agent.validation_debug import run_validator_debug
+from agent.validation_debug import prepare_validator_debug
 from agent.vulnerability_validation import ValidationResult
 from backend.opencode import OpenCodeTaskType, run_opencode_task
 
@@ -89,12 +89,11 @@ async def validate(**kwargs) -> ValidationResult:
 async def main() -> None:
     """Optional local debug entry; edit these values for the target project."""
     repo_root = Path(__file__).resolve().parents[3]
-    await run_validator_debug(
-        validate=validate,
+    async with prepare_validator_debug(
         validator_dir=Path(__file__).resolve().parent,
         config_path=repo_root / "agent.yaml",
-        project_path="/absolute/path/to/project",
-        code_scan_path="/absolute/path/to/project/src",
+        project_path="/home/raint/workspace/OpenDeepHole",
+        code_scan_path="/home/raint/workspace/OpenDeepHole",
         product="LTE",
         validation_environment="仿真UBBPi板环境",
         vulnerability={
@@ -111,7 +110,11 @@ async def main() -> None:
             "ai_verdict": "confirmed",
         },
         report_markdown="# 漏洞报告\n\n验证该越界路径。",
-    )
+        output=print,
+    ) as debug:
+        result = await validate(**debug.kwargs)
+    print(f"[validation-debug] status={result.status}", flush=True)
+    print(f"[validation-debug] conclusion={result.summary}", flush=True)
 
 
 if __name__ == "__main__":

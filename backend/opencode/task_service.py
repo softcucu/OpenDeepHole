@@ -635,6 +635,9 @@ class OpenCodeTaskService:
                                 system_prompt=system_prompt,
                                 permissions=permissions,
                                 return_details=True,
+                                show_serve_status=bool(
+                                    context.task_metadata.get("validation_debug")
+                                ),
                             )
                             assert isinstance(details, OpenCodePromptResult)
                             session_id = details.session_id

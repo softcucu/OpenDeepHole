@@ -275,6 +275,87 @@ def test_run_prompt_uses_project_directory_and_default_tools(monkeypatch, tmp_pa
     asyncio.run(run())
 
 
+@pytest.mark.parametrize("serve_mode", ["started", "restarted", "reused"])
+def test_run_prompt_emits_debug_serve_status(
+    monkeypatch,
+    tmp_path: Path,
+    serve_mode: str,
+) -> None:
+    async def run() -> None:
+        class FakeProc:
+            pid = 24680
+
+        _FakeAsyncClient.instances = []
+        _FakeAsyncClient.init_options = []
+        _FakeAsyncClient.event_lines = []
+        _FakeAsyncClient.tool_ids = ["read"]
+        _FakeAsyncClient.message_info = None
+        monkeypatch.setattr(
+            "backend.opencode.serve_client.httpx.AsyncClient",
+            _FakeAsyncClient,
+        )
+        monkeypatch.setenv("OPENCODE_SERVE_PORT", "12345")
+
+        manager = OpenCodeServeManager()
+        manager._port = 12345
+        manager._proc = FakeProc()
+        manager._acquire_session = AsyncMock(return_value=serve_mode)
+        manager.ensure_managed_mcp = AsyncMock()
+        project = tmp_path / "project"
+        project.mkdir()
+        output: list[str] = []
+
+        await manager.run_prompt(
+            tool="opencode",
+            executable="opencode",
+            directory=project,
+            prompt="hello",
+            model="provider/model",
+            timeout=30,
+            on_line=output.append,
+            show_serve_status=True,
+        )
+
+        assert output[0] == "[opencode serve] preparing executable=opencode port=12345"
+        assert output[1] == (
+            f"[opencode serve] ready mode={serve_mode} "
+            "url=http://127.0.0.1:12345 pid=24680"
+        )
+        assert any("[opencode serve] session=session-1" in line for line in output)
+
+    asyncio.run(run())
+
+
+def test_run_prompt_emits_debug_serve_startup_failure(monkeypatch, tmp_path: Path) -> None:
+    async def run() -> None:
+        manager = OpenCodeServeManager()
+        manager._acquire_session = AsyncMock(
+            side_effect=RuntimeError(
+                "OpenCode serve did not become healthy\n\n"
+                "OpenCode serve startup output:\nprovider failed to load"
+            )
+        )
+        output: list[str] = []
+
+        with pytest.raises(RuntimeError, match="did not become healthy"):
+            await manager.run_prompt(
+                tool="opencode",
+                executable="opencode",
+                directory=tmp_path,
+                prompt="hello",
+                model="provider/model",
+                timeout=30,
+                on_line=output.append,
+                show_serve_status=True,
+            )
+
+        assert output[0].startswith("[opencode serve] preparing")
+        assert output[1].startswith("[opencode serve] startup failed:")
+        assert "provider failed to load" in output[1]
+
+    asyncio.run(run())
+
+
 def test_run_prompt_continues_session_without_native_format_and_with_selected_mcp_tools(
     monkeypatch,
     tmp_path: Path,

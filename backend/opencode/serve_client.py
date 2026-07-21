@@ -2152,6 +2152,7 @@ class OpenCodeServeManager:
         system_prompt: str = "",
         permissions: list[dict[str, str]] | None = None,
         return_details: bool = False,
+        show_serve_status: bool = False,
     ) -> list[str] | OpenCodePromptResult:
         normalized_env_overrides = _normalized_env_overrides(env_overrides)
         key = OpenCodeServeKey(
@@ -2162,7 +2163,22 @@ class OpenCodeServeManager:
             config_content=config_content or "",
             env_overrides=normalized_env_overrides,
         )
-        await self._acquire_session(key, startup_cwd=config_workspace)
+        if show_serve_status and on_line:
+            on_line(
+                f"[{tool} serve] preparing executable={executable} port={_serve_port()}"
+            )
+        try:
+            serve_mode = await self._acquire_session(
+                key,
+                startup_cwd=config_workspace,
+            )
+        except Exception as exc:
+            if show_serve_status and on_line:
+                on_line(
+                    f"[{tool} serve] startup failed: "
+                    f"{_one_line_preview(exc, _SERVE_STARTUP_LOG_TAIL_LIMIT + 500)}"
+                )
+            raise
         active_session_id = str(session_id or "").strip()
         event_state: _ServeEventState | None = None
         event_registered = False
@@ -2171,6 +2187,12 @@ class OpenCodeServeManager:
         params = _serve_context_params(directory)
         headers = _serve_context_headers(directory)
         try:
+            if show_serve_status and on_line:
+                pid = int(getattr(self._proc, "pid", 0) or 0)
+                on_line(
+                    f"[{tool} serve] ready mode={serve_mode} "
+                    f"url={self.base_url} pid={pid}"
+                )
             await self.ensure_managed_mcp(directory)
             async with httpx.AsyncClient(
                 base_url=self.base_url,
@@ -2992,11 +3014,16 @@ class OpenCodeServeManager:
         self._dirty = False
         self._invalidate_model_cache()
 
-    async def _acquire_session(self, key: OpenCodeServeKey, startup_cwd: Path | None = None) -> None:
+    async def _acquire_session(
+        self,
+        key: OpenCodeServeKey,
+        startup_cwd: Path | None = None,
+    ) -> str:
         async with self._lock:
-            await self._ensure_started_locked(key, startup_cwd=startup_cwd)
+            serve_mode = await self._ensure_started_locked(key, startup_cwd=startup_cwd)
             async with self._idle:
                 self._active_sessions += 1
+            return serve_mode
 
     async def _acquire_model_listing(
         self,
@@ -3087,11 +3114,20 @@ class OpenCodeServeManager:
                 raise asyncio.TimeoutError()
             await asyncio.sleep(0.2)
 
-    async def _ensure_started(self, key: OpenCodeServeKey, startup_cwd: Path | None = None) -> None:
+    async def _ensure_started(
+        self,
+        key: OpenCodeServeKey,
+        startup_cwd: Path | None = None,
+    ) -> str:
         async with self._lock:
-            await self._ensure_started_locked(key, startup_cwd=startup_cwd)
+            return await self._ensure_started_locked(key, startup_cwd=startup_cwd)
 
-    async def _ensure_started_locked(self, key: OpenCodeServeKey, startup_cwd: Path | None = None) -> None:
+    async def _ensure_started_locked(
+        self,
+        key: OpenCodeServeKey,
+        startup_cwd: Path | None = None,
+    ) -> str:
+        had_process = self._proc is not None
         if self._proc is not None and self._proc.poll() is not None:
             await self._reset_managed_mcp_process_state()
             await self._stop_event_hub()
@@ -3100,20 +3136,21 @@ class OpenCodeServeManager:
             self._port = None
             self._startup_cwd = None
         if self._proc is not None and self._key == key and not self._dirty:
-            return
+            return "reused"
         if self._proc is not None and self._same_process_key(self._key, key) and self._active_sessions > 0:
             logger.info(
                 "Reusing active %s serve on 127.0.0.1:%s despite pending config change",
                 key.tool,
                 self._port,
             )
-            return
+            return "reused"
         reload_generation = self._serve_config_generation
         await self._wait_until_idle_locked()
         await self._stop_locked()
         await self._start_locked(key, startup_cwd=startup_cwd)
         if self._serve_config_generation == reload_generation:
             self._dirty = False
+        return "restarted" if had_process else "started"
 
     @staticmethod
     def _same_process_key(current: OpenCodeServeKey | None, requested: OpenCodeServeKey) -> bool:

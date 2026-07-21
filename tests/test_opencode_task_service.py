@@ -338,7 +338,11 @@ def test_task_service_parses_json_and_computes_scope_and_permissions(tmp_path: P
                 scan_id="scan-7",
                 project_dir=tmp_path,
                 work_dir=scan_dir,
-                task_metadata={"task_type": "audit", "checker": "oob"},
+                task_metadata={
+                    "task_type": "audit",
+                    "checker": "oob",
+                    "validation_debug": True,
+                },
             ):
                 result = await service.run_task(OpenCodeTaskSpec(
                     task_name="schema task",
@@ -356,6 +360,7 @@ def test_task_service_parses_json_and_computes_scope_and_permissions(tmp_path: P
         assert captured["mcp_tools"] is None
         assert captured["timeout"] == 12
         assert captured["return_details"] is True
+        assert captured["show_serve_status"] is True
         assert "plain JSON text" in captured["system_prompt"]
         assert '"answer"' in captured["system_prompt"]
         permission_tuples = {
