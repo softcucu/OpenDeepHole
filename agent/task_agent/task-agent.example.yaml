@@ -20,7 +20,30 @@ serve:
   #   NO_PROXY: 127.0.0.1,localhost
   #   no_proxy: 127.0.0.1,localhost
   environment: {}
-  opencode_config: {}
+  # OpenCode 的完整配置直接写在这里；MCP 服务名可以自行定义。
+  # 下列远程和本地示例默认关闭。替换占位配置后，将 enabled 改为 true。
+  # timeout 的单位是毫秒。
+  opencode_config:
+    mcp:
+      remote-example:
+        type: remote
+        url: http://127.0.0.1:9123/mcp
+        enabled: false
+        timeout: 30000
+        oauth: false
+        headers:
+          Authorization: "Bearer replace-me"
+
+      local-example:
+        type: local
+        command:
+          - python3
+          - -m
+          - your_mcp_server
+        environment:
+          PROJECT_DIR: /absolute/path/to/source
+        enabled: false
+        timeout: 30000
 
 model_pool:
   global_concurrency: 1

@@ -558,17 +558,17 @@ OpenCode 最终配置按“本机发现及显式指定的配置 < Web `opencode_
 OpenCode 调用约定：
 
 - `nga` / `opencode`：整个 Agent 固定使用 `~/.opendeephole/opencode_workspace`，扫描、复核和验证不再创建各自的配置 workspace，也不再向项目目录镜像运行配置。Agent 根据 Web 管理的基础工具和模型行生成 serve 配置。
-- `nga` / `opencode` 只通过 serve API 调用，默认端口为 `4096`，可用 `OPENCODE_SERVE_PORT` 覆盖。组件只调用 `agent.opencode.run_opencode_task()`；真实项目目录和 `.opendeephole` 工作目录由执行上下文提供，不回退到当前目录，也不允许调用方传 permission。
+- `nga` / `opencode` 只通过 serve API 调用，默认端口为 `4096`，可用 `OPENCODE_SERVE_PORT` 覆盖。组件只调用 `agent.task_agent.run_opencode_task()`；真实项目目录和 `.opendeephole` 工作目录由执行上下文提供，不回退到当前目录，也不允许调用方传 permission。
 - 每个 Session 可读取 `project_dir`，文件编辑工具只能写当前 `work_dir`，`bash` 全面禁用。所有内置/checker SKILL 注册到全局 skill root，由 OpenCode 按 prompt 名称加载。
 - `output_schema` 使用普通文本 JSON 约束，不发送 OpenCode 原生 `format`；中文约束和完整 Schema 自动追加到首次用户 prompt 末尾，不写入 system prompt。JSON 不合规时默认在原 Session 追加 2 次中文纠正；纠正耗尽或普通执行错误后，内部任务策略决定是否重新排队并创建新 Session。
 - OpenCode/nga serve 会话会保留在真实项目目录下，便于用 `opencode session list` 查看历史；Agent 只在取消或超时时 abort session，不在正常完成后删除 session。
 - Agent 进程内只有一个共享 deephole-code MCP 网关；各扫描用 `project_id` 注册自己的 `code_index.db` 路由，不再为每个扫描启动独立 MCP 服务。
 - 漏洞验证方法在 Agent 主进程中异步执行，直接调用同一个公共 OpenCode 接口，复用共享 MCP 网关和项目索引路由；验证方法直接执行 `nga`、`opencode`、`hac` 或 `claude` 会被拒绝。
 
-内部 Python 调用统一使用自包含的 `agent.opencode` 组件。调用方不启动 CLI 或 Serve；首次 `run_opencode_task()` 会惰性创建任务服务和 Serve 管理单例，并在发送任务前完成 Serve 的启动、兼容进程复用或异常恢复：
+内部 Python 调用统一使用自包含的 `agent.task_agent` 组件。调用方不启动 CLI 或 Serve；首次 `run_opencode_task()` 会惰性创建任务服务和 Serve 管理单例，并在发送任务前完成 Serve 的启动、兼容进程复用或异常恢复：
 
 ```python
-from agent.opencode import run_opencode_task
+from agent.task_agent import run_opencode_task
 
 result = await run_opencode_task(
     task_name="candidate audit",
@@ -588,7 +588,7 @@ continued = await run_opencode_task(
 )
 ```
 
-`agent.opencode` 目录也可脱离 OpenDeepHole 使用：未注册后端宿主绑定时，`run_opencode_task()` 会从显式 `config_path`、`OPENCODE_TASK_CONFIG` 或当前目录的 `opencode-agent.yaml` 读取固定项目/工作上下文、Serve 参数和模型池，然后惰性启动同一个 Serve 单例。格式模板见 `agent/opencode/opencode-agent.example.yaml`；首次配置在 `shutdown_opencode()` 前不可切换。
+`agent.task_agent` 目录也可脱离 OpenDeepHole 使用：未注册后端宿主绑定时，`run_opencode_task()` 会从显式 `config_path`、`TASK_AGENT_CONFIG` 或当前目录的 `task-agent.yaml` 读取固定项目/工作上下文、Serve 参数和模型池，然后惰性启动同一个 Serve 单例。格式模板见 `agent/task_agent/task-agent.example.yaml`；首次配置在 `shutdown_opencode()` 前不可切换。
 
 OpenCode 模型池统计：
 
@@ -655,7 +655,7 @@ OpenDeepHole/
 │   ├── scanner.py         # 完整扫描流程（索引→静态分析→AI审计→上报）
 │   ├── reporter.py        # 向服务器上报进度和结果
 │   ├── local_mcp.py       # Agent 进程级共享 MCP 网关
-│   ├── opencode/          # 自包含 OpenCode Agent 管理组件（任务/模型/Session/Serve）
+│   ├── task_agent/        # 自包含任务管理框架（任务/模型/Session/Serve）
 │   ├── opencode_integration.py # OpenDeepHole 配置、workspace、MCP/SKILL 适配
 │   └── opencode_workflows.py   # OpenDeepHole 审计与报告工作流
 ├── checkers/              # 插件目录（每种漏洞类型一个子目录）

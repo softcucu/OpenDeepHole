@@ -4,8 +4,8 @@ from types import SimpleNamespace
 
 import pytest
 
-import agent.opencode.model_pool as model_pool_module
-from agent.opencode.model_pool import (
+import agent.task_agent.model_pool as model_pool_module
+from agent.task_agent.model_pool import (
     NoAvailableModelError,
     acquire_model_lease,
     clear_planned_task,

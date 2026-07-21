@@ -1,4 +1,4 @@
-"""Host configuration boundary for the standalone OpenCode component.
+"""Host configuration boundary for the standalone Task Agent component.
 
 The component owns task scheduling, sessions and the Serve process.  A host
 only supplies configuration data and the small pieces that are inherently

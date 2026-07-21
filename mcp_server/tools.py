@@ -10,7 +10,7 @@ from pathlib import Path
 
 from mcp.server.fastmcp import FastMCP
 
-from agent.opencode.output_format import with_local_timestamp
+from agent.task_agent.output_format import with_local_timestamp
 
 # 按 DB 路径缓存连接，MCP Server 是长驻进程，避免每次重新打开
 _db_cache: dict[str, tuple[object, tuple[int, int, int, int]]] = {}

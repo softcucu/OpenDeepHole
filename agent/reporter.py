@@ -458,8 +458,8 @@ class Reporter:
         unchanged_heartbeat_seconds: float = OPENCODE_POOL_UNCHANGED_HEARTBEAT_SECONDS,
     ) -> None:
         """Publish model-pool stats on state changes, with a low-frequency heartbeat."""
-        from agent.opencode.model_pool import model_pool_snapshot
-        from agent.opencode.model_pool import wait_for_model_pool_update
+        from agent.task_agent.model_pool import model_pool_snapshot
+        from agent.task_agent.model_pool import wait_for_model_pool_update
 
         last_signature: str | None = None
         last_seen_updated_at = ""

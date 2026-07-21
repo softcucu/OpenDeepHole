@@ -1,4 +1,4 @@
-"""Standalone YAML bootstrap for the self-contained OpenCode component."""
+"""Standalone YAML bootstrap for the self-contained Task Agent component."""
 
 from __future__ import annotations
 
@@ -19,8 +19,8 @@ from .host import (
 )
 
 
-CONFIG_ENV = "OPENCODE_TASK_CONFIG"
-DEFAULT_CONFIG_FILENAME = "opencode-agent.yaml"
+CONFIG_ENV = "TASK_AGENT_CONFIG"
+DEFAULT_CONFIG_FILENAME = "task-agent.yaml"
 _SCHEMA_VERSION = 1
 _BOOTSTRAP_LOCK = threading.RLock()
 _MISSING = object()

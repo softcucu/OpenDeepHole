@@ -20,8 +20,8 @@ from backend.models import (
     ThreatAuditTask,
     Vulnerability,
 )
-from agent.opencode.model_pool import NoAvailableModelError
-from agent.opencode.output_format import with_local_timestamp
+from agent.task_agent.model_pool import NoAvailableModelError
+from agent.task_agent.output_format import with_local_timestamp
 
 
 COMPLETED_THREAT_AUDIT_STATUS = "completed"
@@ -319,7 +319,7 @@ async def run_threat_audit_tasks(
     if not pending:
         return
 
-    from agent.opencode.model_pool import total_model_capacity
+    from agent.task_agent.model_pool import total_model_capacity
     from agent.opencode_workflows import run_threat_audit
 
     scan_path = _scan_path_from_analysis(analysis, project_path)

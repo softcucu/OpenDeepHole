@@ -16,7 +16,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
-from agent.opencode.output_format import with_local_timestamp
+from agent.task_agent.output_format import with_local_timestamp
 
 # Module-level globals injected by agent/main.py before connection starts
 _config = None       # AgentConfig
@@ -346,7 +346,7 @@ async def _run_fp_review_worker(review_id: str) -> None:
             try:
                 if item.cancel_event.is_set():
                     if item.planned_task_id:
-                        from agent.opencode.model_pool import clear_planned_task
+                        from agent.task_agent.model_pool import clear_planned_task
                         await clear_planned_task(item.planned_task_id)
                     terminal_status = "cancelled"
                     terminal_error = "用户手动停止"
@@ -370,7 +370,7 @@ async def _run_fp_review_worker(review_id: str) -> None:
                     pass
                 if queued.planned_task_id:
                     try:
-                        from agent.opencode.model_pool import clear_planned_task
+                        from agent.task_agent.model_pool import clear_planned_task
                         await clear_planned_task(queued.planned_task_id)
                     except Exception:
                         pass
@@ -389,7 +389,7 @@ async def _run_fp_review_worker(review_id: str) -> None:
 async def _run_single_fp_review_item(item: _FpReviewQueueItem, processed_offset: int) -> int:
     from agent.config import apply_network_env, apply_remote_config
     from agent.fp_reviewer import run_fp_review
-    from agent.opencode.model_pool import clear_planned_task
+    from agent.task_agent.model_pool import clear_planned_task
 
     if item.planned_task_id:
         await clear_planned_task(item.planned_task_id)
@@ -739,7 +739,7 @@ async def handle_feedback_selection_update(scan_id: str, feedback_entries: list[
         task = _task_manager.get(scan_id)
         if task is not None:
             task.feedback_entries = feedback_entries
-    from agent.opencode.task_service import set_scan_feedback_entries
+    from agent.task_agent.task_service import set_scan_feedback_entries
     set_scan_feedback_entries(scan_id, feedback_entries)
     from agent.fp_reviewer import set_fp_review_feedback
     set_fp_review_feedback(scan_id, feedback_entries)
@@ -748,7 +748,7 @@ async def handle_feedback_selection_update(scan_id: str, feedback_entries: list[
 async def handle_opencode_models(request_id: str, refresh: bool = False) -> dict:
     """Return models visible to the Agent's OpenCode-compatible serve process."""
     try:
-        from agent.opencode.serve_client import get_serve_manager
+        from agent.task_agent.serve_client import get_serve_manager
         from agent.opencode_integration import get_global_opencode_workspace
         from agent.opencode_workflows import (
             _build_cli_env,
@@ -816,7 +816,7 @@ async def handle_opencode_models(request_id: str, refresh: bool = False) -> dict
 async def handle_opencode_runtime_config(request_id: str) -> dict:
     """Read the exact Agent-wide opencode.json currently present on disk."""
     from agent.opencode_integration import opencode_runtime_config_path
-    from agent.opencode.serve_client import get_serve_manager
+    from agent.task_agent.serve_client import get_serve_manager
 
     config_path = opencode_runtime_config_path()
     checked_at = datetime.now(timezone.utc).isoformat()
@@ -858,7 +858,7 @@ async def handle_opencode_runtime_config(request_id: str) -> dict:
 async def handle_mcp_probe(request_id: str, target: str, mcp_config: dict) -> dict:
     """Probe one saved MCP configuration and report the serve reload state."""
     from agent.mcp_probe import probe_mcp_config
-    from agent.opencode.serve_client import get_serve_manager
+    from agent.task_agent.serve_client import get_serve_manager
 
     result = await probe_mcp_config(target, mcp_config if isinstance(mcp_config, dict) else {})
     result.update(get_serve_manager().config_runtime_status())
@@ -872,7 +872,7 @@ async def handle_mcp_probe(request_id: str, target: str, mcp_config: dict) -> di
 
 async def handle_mcp_status(request_id: str) -> dict:
     """Return the actual managed-MCP state of the current OpenCode serve."""
-    from agent.opencode.serve_client import get_serve_manager
+    from agent.task_agent.serve_client import get_serve_manager
 
     return {
         "type": "mcp_status_result",
@@ -883,7 +883,7 @@ async def handle_mcp_status(request_id: str) -> dict:
 
 async def handle_mcp_reload(request_id: str, target: str) -> dict:
     """Schedule a retry of one saved managed MCP without restarting serve."""
-    from agent.opencode.serve_client import get_serve_manager
+    from agent.task_agent.serve_client import get_serve_manager
 
     try:
         get_serve_manager().retry_managed_mcp(target)
@@ -937,9 +937,9 @@ async def _run_skill_creator(
         raise RuntimeError("Agent config is not initialized")
 
     from agent.scanner import _configure_backend
-    from agent.opencode import run_opencode_task
+    from agent.task_agent import run_opencode_task
     from agent.opencode_integration import get_global_opencode_workspace, get_workspace_lock
-    from agent.opencode.task_service import bind_opencode_execution_context
+    from agent.task_agent.task_service import bind_opencode_execution_context
 
     request_dir = Path.home() / ".opendeephole" / "skill_create" / request_id
     if request_dir.exists():

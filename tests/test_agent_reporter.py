@@ -128,7 +128,7 @@ class AgentReporterTests(unittest.TestCase):
                 return last_updated_at
 
             with patch(
-                "agent.opencode.model_pool.model_pool_snapshot",
+                "agent.task_agent.model_pool.model_pool_snapshot",
                 return_value={
                     "scope_id": "scan-1",
                     "global_running": 1,
@@ -137,7 +137,7 @@ class AgentReporterTests(unittest.TestCase):
                     "updated_at": "2026-06-10T16:00:00",
                 },
             ), patch(
-                "agent.opencode.model_pool.wait_for_model_pool_update",
+                "agent.task_agent.model_pool.wait_for_model_pool_update",
                 side_effect=wait_for_update,
             ):
                 await asyncio.gather(
@@ -212,10 +212,10 @@ class AgentReporterTests(unittest.TestCase):
                 return last_updated_at
 
             with patch(
-                "agent.opencode.model_pool.model_pool_snapshot",
+                "agent.task_agent.model_pool.model_pool_snapshot",
                 side_effect=snapshots,
             ), patch(
-                "agent.opencode.model_pool.wait_for_model_pool_update",
+                "agent.task_agent.model_pool.wait_for_model_pool_update",
                 side_effect=wait_for_update,
             ):
                 await asyncio.gather(
@@ -265,7 +265,7 @@ class AgentReporterTests(unittest.TestCase):
                 return last_updated_at
 
             with patch(
-                "agent.opencode.model_pool.model_pool_snapshot",
+                "agent.task_agent.model_pool.model_pool_snapshot",
                 return_value={
                     "scope_id": "scan-1",
                     "global_running": 1,
@@ -274,7 +274,7 @@ class AgentReporterTests(unittest.TestCase):
                     "updated_at": "t0",
                 },
             ), patch(
-                "agent.opencode.model_pool.wait_for_model_pool_update",
+                "agent.task_agent.model_pool.wait_for_model_pool_update",
                 side_effect=wait_for_update,
             ):
                 await asyncio.gather(
@@ -319,7 +319,7 @@ class AgentReporterTests(unittest.TestCase):
                 return last_updated_at
 
             with patch(
-                "agent.opencode.model_pool.model_pool_snapshot",
+                "agent.task_agent.model_pool.model_pool_snapshot",
                 return_value={
                     "global_running": 1,
                     "global_queued": 0,
@@ -327,7 +327,7 @@ class AgentReporterTests(unittest.TestCase):
                     "updated_at": "t0",
                 },
             ), patch(
-                "agent.opencode.model_pool.wait_for_model_pool_update",
+                "agent.task_agent.model_pool.wait_for_model_pool_update",
                 side_effect=wait_for_update,
             ):
                 await asyncio.gather(

@@ -7,16 +7,17 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import pytest
+import yaml
 
-import agent.opencode as opencode
-from agent.opencode.host import (
+import agent.task_agent as opencode
+from agent.task_agent.host import (
     OpenCodeHostBindings,
     OpenCodeSessionRuntime,
     reset_opencode_configuration,
 )
-from agent.opencode.model_pool import ModelLease, ModelOption
-from agent.opencode.serve_client import OpenCodePromptResult, _serve_port
-from agent.opencode.standalone import (
+from agent.task_agent.model_pool import ModelLease, ModelOption
+from agent.task_agent.serve_client import OpenCodePromptResult, _serve_port
+from agent.task_agent.standalone import (
     CONFIG_ENV,
     ensure_opencode_configuration,
     load_standalone_config,
@@ -57,7 +58,7 @@ def _config_text(
     )
 
 
-def _write_config(root: Path, name: str = "opencode-agent.yaml", **kwargs) -> Path:
+def _write_config(root: Path, name: str = "task-agent.yaml", **kwargs) -> Path:
     project = root / "project"
     project.mkdir(exist_ok=True)
     path = root / name
@@ -100,6 +101,30 @@ def test_standalone_config_loads_context_runtime_and_relative_paths(tmp_path: Pa
     assert config.opencode_concurrency == 2
     assert config.opencode.models[0].model == "provider/model"
     assert config.opencode_config == {"provider": {}}
+
+
+def test_example_config_contains_disabled_remote_and_local_mcp_examples() -> None:
+    example_path = (
+        Path(opencode.__file__).resolve().parent / "task-agent.example.yaml"
+    )
+    raw = yaml.safe_load(example_path.read_text(encoding="utf-8"))
+    mcp = raw["serve"]["opencode_config"]["mcp"]
+
+    assert mcp["remote-example"] == {
+        "type": "remote",
+        "url": "http://127.0.0.1:9123/mcp",
+        "enabled": False,
+        "timeout": 30_000,
+        "oauth": False,
+        "headers": {"Authorization": "Bearer replace-me"},
+    }
+    assert mcp["local-example"] == {
+        "type": "local",
+        "command": ["python3", "-m", "your_mcp_server"],
+        "environment": {"PROJECT_DIR": "/absolute/path/to/source"},
+        "enabled": False,
+        "timeout": 30_000,
+    }
 
 
 @pytest.mark.parametrize(
@@ -159,7 +184,7 @@ def test_standalone_config_discovery_uses_environment_then_cwd(
     try:
         configured = ensure_opencode_configuration(None)
         assert configured is not None
-        assert configured.source_path == (cwd_root / "opencode-agent.yaml").resolve()
+        assert configured.source_path == (cwd_root / "task-agent.yaml").resolve()
     finally:
         reset_opencode_configuration()
 
@@ -167,11 +192,11 @@ def test_standalone_config_discovery_uses_environment_then_cwd(
 def test_concurrent_first_calls_load_standalone_configuration_once(tmp_path: Path) -> None:
     config_path = _write_config(tmp_path)
     reset_opencode_configuration()
-    from agent.opencode import standalone
+    from agent.task_agent import standalone
 
     original_load = standalone.load_standalone_config
     with patch(
-        "agent.opencode.standalone.load_standalone_config",
+        "agent.task_agent.standalone.load_standalone_config",
         wraps=original_load,
     ) as load:
         try:
@@ -191,7 +216,7 @@ def test_host_configuration_wins_without_reading_standalone_file(tmp_path: Path)
     opencode.configure_opencode(_host_bindings(tmp_path))
     try:
         with patch(
-            "agent.opencode.standalone.load_standalone_config",
+            "agent.task_agent.standalone.load_standalone_config",
             side_effect=AssertionError("must not read standalone config"),
         ):
             assert ensure_opencode_configuration(None) is None
@@ -227,7 +252,7 @@ def test_standalone_configuration_is_fixed_until_shutdown(tmp_path: Path) -> Non
 def test_public_task_bootstraps_standalone_context_and_reuses_session(
     tmp_path: Path,
 ) -> None:
-    from agent.opencode import serve_client, task_service
+    from agent.task_agent import serve_client, task_service
 
     config_path = _write_config(tmp_path, port=4318)
     lease = ModelLease(
@@ -267,15 +292,15 @@ def test_public_task_bootstraps_standalone_context_and_reuses_session(
         try:
             with (
                 patch(
-                    "agent.opencode.task_service.acquire_model_lease",
+                    "agent.task_agent.task_service.acquire_model_lease",
                     new=AsyncMock(return_value=lease),
                 ),
                 patch(
-                    "agent.opencode.task_service.release_model_lease",
+                    "agent.task_agent.task_service.release_model_lease",
                     new=AsyncMock(),
                 ),
                 patch(
-                    "agent.opencode.task_service.update_model_lease_context",
+                    "agent.task_agent.task_service.update_model_lease_context",
                     new=AsyncMock(),
                 ),
                 patch.object(
@@ -330,7 +355,7 @@ def test_standalone_public_task_prints_realtime_progress(
     task_type: str,
     prefix: str,
 ) -> None:
-    from agent.opencode import serve_client, task_service
+    from agent.task_agent import serve_client, task_service
 
     config_path = _write_config(tmp_path)
     lease = ModelLease(
@@ -371,15 +396,15 @@ def test_standalone_public_task_prints_realtime_progress(
         try:
             with (
                 patch(
-                    "agent.opencode.task_service.acquire_model_lease",
+                    "agent.task_agent.task_service.acquire_model_lease",
                     new=acquire,
                 ),
                 patch(
-                    "agent.opencode.task_service.release_model_lease",
+                    "agent.task_agent.task_service.release_model_lease",
                     new=AsyncMock(),
                 ),
                 patch(
-                    "agent.opencode.task_service.update_model_lease_context",
+                    "agent.task_agent.task_service.update_model_lease_context",
                     new=AsyncMock(),
                 ),
                 patch.object(
@@ -434,7 +459,7 @@ def test_host_configuration_does_not_install_default_console_output(tmp_path: Pa
         try:
             with (
                 patch(
-                    "agent.opencode.task_service._run_component_task",
+                    "agent.task_agent.task_service._run_component_task",
                     new=AsyncMock(return_value=expected),
                 ),
                 patch("builtins.print") as console,

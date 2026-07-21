@@ -167,11 +167,11 @@ tail -f logs/opendeephole.log
 - Pydantic models for all API request/response in `backend/models.py`
 - `vuln_type` is a plain string (not enum) matching the checker directory name
 - One Agent-wide OpenCode workspace lives at `~/.opendeephole/opencode_workspace`; scans/reviews/validators bind scope and permissions per task, while API `directory` points at the real code root
-- The self-contained OpenCode framework lives in `agent/opencode/`; OpenDeepHole-specific workspace/MCP configuration is in `agent/opencode_integration.py`, workflows are in `agent/opencode_workflows.py`, and `backend/` must not own or import this client runtime
+- The self-contained Task Agent framework lives in `agent/task_agent/`; OpenDeepHole-specific workspace/MCP configuration is in `agent/opencode_integration.py`, workflows are in `agent/opencode_workflows.py`, and `backend/` must not own or import this client runtime
 - OpenCode TaskSpec does not expose workspace, scope/task context, MCP/SKILL selectors, permissions, CLI config, or global concurrency; the Agent computes them centrally
 - JSON Schema rules are appended to the user prompt instead of the system prompt; framework-generated model instructions are Chinese, and Schema failures are corrected in the same session first; `attempt` counts fresh-session retries that release and reacquire a model Lease
 - Agent OpenCode configs are stored server-side in `_agent_configs` (keyed by agent name) and pushed to agents on connect and UI save
-- Model-pool scheduling (`agent/opencode/model_pool.py`): `opencode_concurrency` is a global Agent gate, with per-model `max_concurrency`; pending tasks are priority-descending/FIFO, require capability without downgrade, prefer the lowest sufficient model, and remain blocked until model configuration/time-window changes make them runnable
+- Model-pool scheduling (`agent/task_agent/model_pool.py`): `opencode_concurrency` is a global Agent gate, with per-model `max_concurrency`; pending tasks are priority-descending/FIFO, require capability without downgrade, prefer the lowest sufficient model, and remain blocked until model configuration/time-window changes make them runnable
 - **Always update both README.md and CLAUDE.md when making structural or architectural changes**
 
 ## Code Parser (Shared Indexer)
@@ -201,11 +201,6 @@ backend/
     upload.py     — POST /api/upload (legacy server-hosted scan flow)
     feedback.py   — Feedback CRUD
   analyzers/base.py — BaseAnalyzer ABC + Candidate dataclass
-  opencode/
-    task_service.py — priority/capability scheduling, OpenCode task/session lifecycle, plain-text output and local JSON extraction
-    runner.py     — audit prompt/result compatibility facade over task_service
-    serve_client.py — long-lived OpenCode serve process and session API
-    config.py     — Agent-wide workspace initialization and global SKILL registration
   registry.py     — Auto-discovers and loads checkers from checkers/
   store/          — SQLite scan store (scans, vulnerabilities, events, feedback, processed keys)
   models.py       — All Pydantic models
@@ -224,6 +219,9 @@ agent/
   index_store.py  — Manages code_index.db in project directory
   local_mcp.py    — Agent-owned shared MCP gateway with per-project routing
   config.py       — AgentConfig, load_config(), apply_remote_config()
+  task_agent/     — Self-contained task/model/session/Serve framework
+  opencode_integration.py — OpenDeepHole workspace, MCP, SKILL, and runtime configuration adapter
+  opencode_workflows.py — OpenDeepHole audit and reporting workflows
   skills/         — Standalone skills: fp_review*.md, fp_review_match.md, git_history_mine.md, variant_hunt.md
 
 checkers/         — Plugin directories (npd, oob, safe_mem_oob, uaf, intoverflow, memleak)

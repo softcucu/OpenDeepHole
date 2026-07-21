@@ -7,7 +7,7 @@ import json
 from pathlib import Path
 
 from agent.vulnerability_validation import ValidationResult
-from agent.opencode import run_opencode_task
+from agent.task_agent import run_opencode_task
 
 
 RESULT_SCHEMA = {
@@ -95,7 +95,7 @@ async def validate(**kwargs) -> ValidationResult:
 
 
 async def main() -> None:
-    """Run this example with the standalone OpenCode component configuration."""
+    """Run this example with the standalone Task Agent component configuration."""
     work_dir = (Path.cwd() / ".opendeephole" / "validator-demo").resolve()
     work_dir.mkdir(parents=True, exist_ok=True)
 

@@ -10,7 +10,7 @@ from agent import fp_reviewer
 from agent.config import AgentConfig, OpenCodeConfig
 from agent.scanner import _build_function_source_cache, _attach_function_source
 from backend.models import Candidate, Vulnerability
-from agent.opencode import OpenCodeResult
+from agent.task_agent import OpenCodeResult
 
 
 def _valid_issue_report() -> str:

@@ -1,6 +1,6 @@
 from datetime import datetime, timezone
 
-from agent.opencode.output_format import with_local_timestamp
+from agent.task_agent.output_format import with_local_timestamp
 
 
 def test_with_local_timestamp_prefixes_every_line_and_is_idempotent() -> None:

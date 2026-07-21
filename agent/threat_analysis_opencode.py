@@ -13,9 +13,9 @@ from uuid import uuid4
 
 from backend.config import get_config
 from backend.models import ThreatAnalysis, ThreatAnalysisSources, ThreatAttackPath
-from agent.opencode import run_opencode_task
-from agent.opencode.model_pool import NO_AVAILABLE_MODEL_MESSAGE
-from agent.opencode.task_service import (
+from agent.task_agent import run_opencode_task
+from agent.task_agent.model_pool import NO_AVAILABLE_MODEL_MESSAGE
+from agent.task_agent.task_service import (
     bind_opencode_execution_context,
     get_opencode_execution_context,
 )

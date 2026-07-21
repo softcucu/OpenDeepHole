@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, patch
 
 from agent import fp_reviewer
 from agent.fp_reviewer import _FpStageResult
-from agent.opencode.model_pool import NoAvailableModelError
+from agent.task_agent.model_pool import NoAvailableModelError
 
 
 def _make_reporter() -> SimpleNamespace:
@@ -60,7 +60,7 @@ class FpReviewerEarlyExitTests(unittest.TestCase):
                 patch.object(fp_reviewer, "_create_fp_workspace", return_value=Path(tmp) / "workspace"),
                 patch.object(fp_reviewer, "_run_fp_review_stage", stage_mock),
                 patch.object(fp_reviewer, "effective_fp_review_cli_config", return_value=cli_config),
-                patch("agent.opencode.model_pool.total_model_capacity", return_value=1),
+                patch("agent.task_agent.model_pool.total_model_capacity", return_value=1),
             ):
                 asyncio.run(fp_reviewer.run_fp_review(
                     config=config,
@@ -103,7 +103,7 @@ class FpReviewerEarlyExitTests(unittest.TestCase):
                 patch.object(fp_reviewer, "_create_fp_workspace", return_value=Path(tmp) / "workspace"),
                 patch.object(fp_reviewer, "_run_fp_review_stage", stage_mock),
                 patch.object(fp_reviewer, "effective_fp_review_cli_config", return_value=cli_config),
-                patch("agent.opencode.model_pool.total_model_capacity", return_value=1),
+                patch("agent.task_agent.model_pool.total_model_capacity", return_value=1),
             ):
                 asyncio.run(fp_reviewer.run_fp_review(
                     config=config,
@@ -152,7 +152,7 @@ class FpReviewerEarlyExitTests(unittest.TestCase):
                 patch.object(fp_reviewer, "_create_fp_workspace", return_value=Path(tmp) / "workspace"),
                 patch.object(fp_reviewer, "_run_fp_review_stage", stage_mock),
                 patch.object(fp_reviewer, "effective_fp_review_cli_config", return_value=cli_config),
-                patch("agent.opencode.model_pool.total_model_capacity", return_value=1),
+                patch("agent.task_agent.model_pool.total_model_capacity", return_value=1),
             ):
                 asyncio.run(fp_reviewer.run_fp_review(
                     config=config,

@@ -1,4 +1,4 @@
-"""Self-contained OpenCode task and serve management component."""
+"""Self-contained Task Agent framework backed by OpenCode-compatible Serve."""
 
 from .api import OpenCodeResult, run_opencode_task
 from .host import OpenCodeHostBindings, OpenCodeSessionRuntime, configure_opencode

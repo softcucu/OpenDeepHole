@@ -38,8 +38,8 @@ class AgentRuntimePackageTests(unittest.TestCase):
         self.assertFalse(any("/vulnerability_validation/" in name for name in names))
         self.assertIn("agent/product_validators/demo/validator.yaml", names)
         self.assertIn("agent/product_validators/demo/validator.py", names)
-        self.assertIn("agent/opencode/standalone.py", names)
-        self.assertIn("agent/opencode/opencode-agent.example.yaml", names)
+        self.assertIn("agent/task_agent/standalone.py", names)
+        self.assertIn("agent/task_agent/task-agent.example.yaml", names)
         self.assertNotIn("agent/validation_debug.py", names)
 
     def test_agent_download_zip_includes_launchers_config_and_bundled_ctags(self) -> None:
@@ -57,8 +57,8 @@ class AgentRuntimePackageTests(unittest.TestCase):
         self.assertIn("ctags-p6.2.20260517.0-x64/ctags.exe", names)
         self.assertIn("agent/product_validators/demo/validator.yaml", names)
         self.assertIn("agent/product_validators/demo/validator.py", names)
-        self.assertIn("agent/opencode/standalone.py", names)
-        self.assertIn("agent/opencode/opencode-agent.example.yaml", names)
+        self.assertIn("agent/task_agent/standalone.py", names)
+        self.assertIn("agent/task_agent/task-agent.example.yaml", names)
         self.assertNotIn("agent/validation_debug.py", names)
         self.assertIn('server_url: "http://server.example"', agent_yaml)
         self.assertIn('owner_token: "owner-token"', agent_yaml)
@@ -223,10 +223,10 @@ class AgentRuntimePackageTests(unittest.TestCase):
     def test_runtime_install_replaces_product_validators_but_preserves_local_validation_dir(self) -> None:
         files = [
             ("agent/main.py", b"print('server snapshot')\n"),
-            ("agent/opencode/api.py", b"async def run_opencode_task(**kwargs):\n    pass\n"),
             ("agent/product_validators/demo/validator.py", b"async def validate(**kwargs):\n    pass\n"),
             ("agent/product_validators/demo/validator.yaml", b"schema_version: 1\nproduct: LTE\nvalidation_environment: lab\n"),
             ("agent/server.py", b"# server\n"),
+            ("agent/task_agent/api.py", b"async def run_opencode_task(**kwargs):\n    pass\n"),
             ("backend/api.py", b"# api\n"),
             ("requirements-agent.txt", b"requests\n"),
         ]
@@ -248,6 +248,11 @@ class AgentRuntimePackageTests(unittest.TestCase):
             )
             (root / "agent" / "main.py").write_text("print('old')\n", encoding="utf-8")
             (root / "agent" / "stale.py").write_text("# stale\n", encoding="utf-8")
+            (root / "agent" / "opencode").mkdir()
+            (root / "agent" / "opencode" / "api.py").write_text(
+                "# stale component package\n",
+                encoding="utf-8",
+            )
             (root / "backend").mkdir()
             (root / "backend" / "old.py").write_text("# old\n", encoding="utf-8")
             (root / "backend" / "opencode").mkdir()
@@ -267,9 +272,10 @@ class AgentRuntimePackageTests(unittest.TestCase):
                 "print('local validator')\n",
             )
             self.assertFalse((root / "agent" / "stale.py").exists())
+            self.assertFalse((root / "agent" / "opencode").exists())
             self.assertFalse((root / "backend" / "old.py").exists())
             self.assertFalse((root / "backend" / "opencode").exists())
-            self.assertTrue((root / "agent" / "opencode" / "api.py").is_file())
+            self.assertTrue((root / "agent" / "task_agent" / "api.py").is_file())
             self.assertEqual(
                 (root / "agent" / "main.py").read_text(encoding="utf-8"),
                 "print('server snapshot')\n",

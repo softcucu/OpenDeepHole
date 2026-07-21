@@ -1,4 +1,4 @@
-"""OpenDeepHole integration for the self-contained OpenCode component."""
+"""OpenDeepHole integration for the self-contained Task Agent component."""
 
 from __future__ import annotations
 
@@ -59,7 +59,7 @@ def _disabled_source_mcp_tools(directory: Path) -> tuple[str, ...]:
 
 def _build_session_runtime(cli_config, model_option, directory: Path):
     """Resolve the existing OpenDeepHole Serve configuration for the component."""
-    from agent.opencode import OpenCodeSessionRuntime
+    from agent.task_agent import OpenCodeSessionRuntime
     from agent import opencode_workflows as runtime_helpers
 
     effective = runtime_helpers._effective_cli_config(cli_config, model_option)
@@ -101,7 +101,7 @@ def _build_session_runtime(cli_config, model_option, directory: Path):
 
 def configure_opencode_component() -> None:
     """Register OpenDeepHole host bindings without starting OpenCode Serve."""
-    from agent.opencode import OpenCodeHostBindings, configure_opencode
+    from agent.task_agent import OpenCodeHostBindings, configure_opencode
 
     configure_opencode(OpenCodeHostBindings(
         get_config=get_config,
@@ -137,7 +137,7 @@ def get_global_opencode_workspace(*, mcp_port: int | None = None) -> Path:
 
     The workspace contains stable MCP/skill configuration only. Scan-specific
     state (scope, selected feedback and writable roots) is attached to each
-    task by :mod:`agent.opencode.task_service` and is never written here.
+    task by :mod:`agent.task_agent.task_service` and is never written here.
     """
     global _initialized_workspace
     workspace = _GLOBAL_WORKSPACE
