@@ -647,7 +647,7 @@ class OpenCodeTaskService:
                 )
                 lock_key = session_id or f"new:{record.task_id}:{session_attempt}"
                 session_lock = self._session_locks.setdefault(lock_key, asyncio.Lock())
-                prompt = spec.prompt
+                prompt = _initial_user_prompt(spec)
                 try:
                     async with session_lock:
                         for output_attempt in range(spec.output_retry_count + 1):
@@ -1078,11 +1078,12 @@ def _model_pool_task_context(
     total_session_attempts: int,
 ) -> dict[str, Any]:
     spec = record.spec
+    prompt = _initial_user_prompt(spec)
     context = {
         **record.execution_context.task_metadata,
         "task_name": spec.task_name,
-        "prompt": spec.prompt,
-        "prompt_length": len(spec.prompt),
+        "prompt": prompt,
+        "prompt_length": len(prompt),
         "priority": spec.priority,
         "revision": record.revision,
         "session_attempt": session_attempt,
@@ -1098,19 +1099,24 @@ def _model_pool_task_context(
 
 def _json_result_rule(schema: dict[str, Any]) -> str:
     return (
-        "Return the final result as plain JSON text matching the JSON Schema below. "
-        "The final assistant message must contain only that JSON value, without a "
-        "Markdown code fence or surrounding explanation. The application parses the "
-        "assistant text itself.\nJSON Schema:\n"
+        "请将最终结果作为符合下方 JSON Schema 的纯 JSON 文本返回。"
+        "最终回复只能包含这一个 JSON 值，不要使用 Markdown 代码围栏，也不要附加任何解释。"
+        "应用程序会自行解析回复文本。\nJSON Schema：\n"
         + json.dumps(schema, ensure_ascii=False, indent=2)
     )
 
 
+def _initial_user_prompt(spec: OpenCodeTaskSpec) -> str:
+    if spec.output_schema is None:
+        return spec.prompt
+    return spec.prompt + "\n\n" + _json_result_rule(spec.output_schema)
+
+
 def _json_correction_prompt(schema: dict[str, Any]) -> str:
     return (
-        "Your previous response was not valid JSON matching the required schema. "
-        "Correct only the final result now. Return exactly one JSON value, with no "
-        "Markdown fence, prose, or tool call.\nJSON Schema:\n"
+        "你上一次的回复不是符合目标 JSON Schema 的合法 JSON。"
+        "现在只修正最终结果：仅返回一个 JSON 值，不要使用 Markdown 代码围栏，"
+        "不要附加说明，也不要调用工具。\nJSON Schema：\n"
         + json.dumps(schema, ensure_ascii=False, indent=2)
     )
 
@@ -1121,9 +1127,9 @@ def _task_system_prompt(record: _TaskRecord) -> str:
     sections: list[str] = []
     if "deephole-code" in _disabled_source_mcp_tools(record.spec.directory):
         sections.append(
-            "## CodeGraph project scope\n\n"
-            f"CodeGraph is the active source-query MCP. Pass projectPath={record.spec.directory.resolve()} "
-            "to CodeGraph tools whenever the tool accepts a project path."
+            "## CodeGraph 项目范围\n\n"
+            "当前源码查询使用 CodeGraph MCP。调用支持项目路径参数的 CodeGraph 工具时，"
+            f"必须传入 projectPath={record.spec.directory.resolve()}。"
         )
     checker = str(record.execution_context.task_metadata.get("checker") or "").strip()
     if checker:
@@ -1135,13 +1141,11 @@ def _task_system_prompt(record: _TaskRecord) -> str:
         feedback = format_feedback_experience(matching)
         if feedback:
             sections.append(
-                "## Selected scan feedback\n\n"
-                "The following user-selected experience applies to this checker. "
-                "Use it as evidence and guidance, while still verifying the current code:\n"
+                "## 已选择的扫描反馈\n\n"
+                "以下用户选择的历史经验适用于当前检查项。请将其作为证据和参考，"
+                "同时仍需核验当前代码：\n"
                 + feedback
             )
-    if record.spec.output_schema is not None:
-        sections.append(_json_result_rule(record.spec.output_schema))
     return "\n\n".join(sections)
 
 

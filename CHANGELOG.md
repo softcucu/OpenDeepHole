@@ -2,6 +2,7 @@
 
 ## 2026-07-21
 
+- **变更** OpenCode 的 `output_schema` 约束改为以中文自动追加到首次用户提示词末尾，不再放入 system prompt；同 Session JSON 纠错、CodeGraph 项目范围和扫描反馈等任务服务自动提示也统一改为中文，任务队列记录实际发送的完整提示词
 - **变更** 产品漏洞验证入口由平台上下文对象改为严格的 `async def validate(**kwargs) -> ValidationResult`；漏洞、路径、模型策略、输出/产物/命令函数以及 manifest 动态配置全部按名称平铺注入，旧 `validate(ctx)` 签名会在加载时明确拒绝
 - **新增** 验证方法可自行定义本地 `main()`，通过 `prepare_validator_debug(...)` 复用真实 `agent.yaml` 并准备 OpenCode/MCP 上下文，随后由用户代码直接调用同一个 `validate(**kwargs)`；`output=print` 会同时承接异步 `emit_stdout` 和 OpenCode 流式输出，通用 `run_validator_debug(...)` 命令行入口继续兼容
 - **修复** 独立运行验证方法 `main()` 时会明确显示 OpenCode Serve 的准备、启动/重启/复用、URL、PID、Session 和启动失败信息，并实时打印模型文本、推理、工具调用及重试；同一输出同步保存到本次调试目录的 `agent.log`

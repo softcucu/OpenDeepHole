@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import inspect
+import json
 import threading
 from pathlib import Path
 from types import SimpleNamespace
@@ -338,7 +339,18 @@ def test_task_service_parses_json_and_computes_scope_and_permissions(tmp_path: P
             _source(),
         ))
         patches = _service_patches(manager)
-        with patches[0], patches[1] as acquire_mock, patches[2], patches[3], patches[4], patches[5]:
+        with (
+            patches[0],
+            patches[1] as acquire_mock,
+            patches[2],
+            patches[3],
+            patches[4],
+            patches[5],
+            patch(
+                "backend.opencode.task_service._disabled_source_mcp_tools",
+                return_value=("deephole-code",),
+            ),
+        ):
             scan_dir = tmp_path / ".opendeephole" / "scans" / "scan-7"
             with bind_opencode_execution_context(
                 scan_id="scan-7",
@@ -349,6 +361,11 @@ def test_task_service_parses_json_and_computes_scope_and_permissions(tmp_path: P
                     "checker": "oob",
                     "validation_debug": True,
                 },
+                feedback_entries=({
+                    "vuln_type": "oob",
+                    "reason": "边界检查缺失",
+                    "function_source": "void parse(void) {}",
+                },),
                 on_output=output.append,
             ):
                 result = await service.run_task(OpenCodeTaskSpec(
@@ -368,8 +385,19 @@ def test_task_service_parses_json_and_computes_scope_and_permissions(tmp_path: P
         assert captured["timeout"] == 12
         assert captured["return_details"] is True
         assert captured["show_serve_status"] is True
-        assert "plain JSON text" in captured["system_prompt"]
-        assert '"answer"' in captured["system_prompt"]
+        schema_text = json.dumps(SCHEMA, ensure_ascii=False, indent=2)
+        assert captured["prompt"].startswith("return an answer\n\n")
+        assert "请将最终结果作为符合下方 JSON Schema 的纯 JSON 文本返回" in captured["prompt"]
+        assert captured["prompt"].endswith(schema_text)
+        assert captured["prompt"].count(schema_text) == 1
+        assert "JSON Schema" not in captured["system_prompt"]
+        assert "## CodeGraph 项目范围" in captured["system_prompt"]
+        assert f"projectPath={tmp_path.resolve()}" in captured["system_prompt"]
+        assert "## 已选择的扫描反馈" in captured["system_prompt"]
+        assert "仍需核验当前代码" in captured["system_prompt"]
+        assert "用户理由：边界检查缺失" in captured["system_prompt"]
+        assert "CodeGraph project scope" not in captured["system_prompt"]
+        assert "Selected scan feedback" not in captured["system_prompt"]
         permission_tuples = {
             (rule["permission"], rule["pattern"], rule["action"])
             for rule in captured["permissions"]
@@ -384,6 +412,8 @@ def test_task_service_parses_json_and_computes_scope_and_permissions(tmp_path: P
         acquire_kwargs = acquire_mock.await_args.kwargs
         assert acquire_kwargs["stats_scope_id"] == "scan-7"
         assert acquire_kwargs["task_context"]["task_type"] == "audit"
+        assert acquire_kwargs["task_context"]["prompt"] == captured["prompt"]
+        assert acquire_kwargs["task_context"]["prompt_length"] == len(captured["prompt"])
         assert acquire_kwargs["task_context"]["session_attempt"] == 1
         assert callable(acquire_kwargs["global_concurrency"])
         assert acquire_kwargs["wait_when_unavailable"] is False
@@ -538,8 +568,17 @@ def test_invalid_json_is_corrected_in_the_same_session(tmp_path: Path) -> None:
         assert acquire_mock.await_count == 1
         assert release_mock.await_count == 1
         assert [session for _prompt, session in calls] == [None, "ses_same", "ses_same"]
-        assert calls[0][0] == "initial prompt"
-        assert all("previous response was not valid JSON" in prompt for prompt, _ in calls[1:])
+        schema_text = json.dumps(SCHEMA, ensure_ascii=False, indent=2)
+        assert calls[0][0].startswith("initial prompt\n\n")
+        assert "请将最终结果作为符合下方 JSON Schema 的纯 JSON 文本返回" in calls[0][0]
+        assert calls[0][0].endswith(schema_text)
+        assert all(
+            "你上一次的回复不是符合目标 JSON Schema 的合法 JSON" in prompt
+            for prompt, _ in calls[1:]
+        )
+        assert all(prompt.endswith(schema_text) for prompt, _ in calls[1:])
+        assert all(prompt.count(schema_text) == 1 for prompt, _ in calls)
+        assert all("Your previous response" not in prompt for prompt, _ in calls)
 
     asyncio.run(run())
 
@@ -609,10 +648,10 @@ def test_json_correction_exhaustion_requeues_with_new_session_and_same_task_id(t
 def test_execution_error_requeues_with_a_fresh_session(tmp_path: Path) -> None:
     async def run() -> None:
         service = OpenCodeTaskService()
-        calls: list[str | None] = []
+        calls: list[tuple[str, str | None]] = []
 
         async def run_prompt(**kwargs):
-            calls.append(kwargs["session_id"])
+            calls.append((kwargs["prompt"], kwargs["session_id"]))
             session_id = "ses_failed" if len(calls) == 1 else "ses_success"
             callback = kwargs["on_session_id"](session_id)
             if hasattr(callback, "__await__"):
@@ -651,7 +690,7 @@ def test_execution_error_requeues_with_a_fresh_session(tmp_path: Path) -> None:
         assert result.status == "success"
         assert result.session_id == "ses_success"
         assert result.text == "done"
-        assert calls == [None, None]
+        assert calls == [("run", None), ("run", None)]
         assert acquire_mock.await_count == 2
         assert {
             call.kwargs["task_id"] for call in acquire_mock.await_args_list
