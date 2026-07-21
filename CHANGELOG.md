@@ -2,6 +2,8 @@
 
 ## 2026-07-21
 
+- **修复** standalone `run_opencode_task()` 恢复完整实时终端输出：漏洞验证使用 `[validation/opencode]`，其它独立任务使用任务类型前缀，并覆盖任务排队、Serve、Session、step、reasoning、文本、JSON 修正、Provider 重试/错误和最终状态
+- **修复** OpenCode message 请求在总超时或取消后会 abort Session、取消并等待在途 HTTP 请求结束，再释放事件订阅和活动 Session 计数，避免失败请求残留为 busy 并阻塞后续复用
 - **重构** `run_opencode_task()` 在没有后端宿主绑定时可从独立 `opencode-agent.yaml` 自举项目/工作上下文、Serve 和模型池配置，后端环境继续以宿主配置为唯一来源；独立配置随单例锁定并在 `shutdown_opencode()` 后才允许切换
 - **变更** 删除 `agent.validation_debug` 和 validator 对 `prepare_validator_debug` 的依赖；demo 保留轻量 `main()`，手工构造示例 kwargs，并让 `run_opencode_task()` 直接从独立组件 YAML 自举 OpenCode
 - **变更** OpenCode 公共接口移除 `OpenCodeTaskType` 枚举，`task_type` 改为文档约束并由运行时白名单校验的字符串；所有 Agent 阶段和 validator 直接传 `audit`、`threat_analysis`、`vulnerability_validation` 等稳定值

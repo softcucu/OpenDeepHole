@@ -174,6 +174,52 @@ class _FakeModelAsyncClient:
         return _FakeResponse(response)
 
 
+class _HangingMessageAsyncClient:
+    instances: list["_HangingMessageAsyncClient"] = []
+    hang_messages = True
+
+    def __init__(self, *args, **kwargs) -> None:
+        self.posts: list[str] = []
+        self.message_started = asyncio.Event()
+        self.message_cancelled = False
+
+    async def __aenter__(self):
+        self.instances.append(self)
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb) -> None:
+        return None
+
+    async def get(self, path: str, **kwargs):
+        if path == "/experimental/tool/ids":
+            return _FakeResponse(["read"])
+        return _FakeResponse({})
+
+    async def post(self, path: str, **kwargs):
+        self.posts.append(path)
+        if path == "/session":
+            return _FakeResponse({"id": "session-hanging"})
+        if path.endswith("/abort"):
+            return _FakeResponse(True)
+        if path.endswith("/message"):
+            self.message_started.set()
+            if self.hang_messages:
+                try:
+                    await asyncio.Future()
+                except asyncio.CancelledError:
+                    self.message_cancelled = True
+                    raise
+            return _FakeResponse({
+                "info": {
+                    "id": "msg-recovered",
+                    "providerID": "provider",
+                    "modelID": "model",
+                },
+                "parts": [{"type": "text", "text": "recovered"}],
+            })
+        return _FakeResponse({})
+
+
 def test_run_prompt_uses_project_directory_and_default_tools(monkeypatch, tmp_path: Path) -> None:
     async def run() -> None:
         _FakeAsyncClient.instances = []
@@ -352,6 +398,107 @@ def test_run_prompt_emits_debug_serve_startup_failure(monkeypatch, tmp_path: Pat
         assert output[0].startswith("[opencode serve] preparing")
         assert output[1].startswith("[opencode serve] startup failed:")
         assert "provider failed to load" in output[1]
+
+    asyncio.run(run())
+
+
+def test_run_prompt_timeout_aborts_and_reaps_request_before_reuse(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    async def run() -> None:
+        _HangingMessageAsyncClient.instances = []
+        _HangingMessageAsyncClient.hang_messages = True
+        monkeypatch.setattr(
+            "agent.opencode.serve_client.httpx.AsyncClient",
+            _HangingMessageAsyncClient,
+        )
+
+        manager = OpenCodeServeManager()
+        manager._port = 4096
+        manager.ensure_managed_mcp = AsyncMock()
+
+        async def acquire(*args, **kwargs):
+            manager._active_sessions += 1
+            return "reused"
+
+        manager._acquire_session = AsyncMock(side_effect=acquire)
+
+        with pytest.raises(asyncio.TimeoutError):
+            await manager.run_prompt(
+                tool="opencode",
+                executable="opencode",
+                directory=tmp_path,
+                prompt="hang",
+                model="provider/model",
+                timeout=0.01,
+            )
+
+        first_client = _HangingMessageAsyncClient.instances[0]
+        assert "/session/session-hanging/abort" in first_client.posts
+        assert first_client.message_cancelled is True
+        assert manager._active_sessions == 0
+        assert manager._event_states == {}
+
+        _HangingMessageAsyncClient.hang_messages = False
+        result = await manager.run_prompt(
+            tool="opencode",
+            executable="opencode",
+            directory=tmp_path,
+            prompt="retry",
+            model="provider/model",
+            timeout=1,
+            return_details=True,
+        )
+
+        assert isinstance(result, OpenCodePromptResult)
+        assert result.text == "recovered"
+        assert manager._active_sessions == 0
+
+    asyncio.run(run())
+
+
+def test_run_prompt_caller_cancellation_aborts_and_reaps_request(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    async def run() -> None:
+        _HangingMessageAsyncClient.instances = []
+        _HangingMessageAsyncClient.hang_messages = True
+        monkeypatch.setattr(
+            "agent.opencode.serve_client.httpx.AsyncClient",
+            _HangingMessageAsyncClient,
+        )
+
+        manager = OpenCodeServeManager()
+        manager._port = 4096
+        manager.ensure_managed_mcp = AsyncMock()
+
+        async def acquire(*args, **kwargs):
+            manager._active_sessions += 1
+            return "reused"
+
+        manager._acquire_session = AsyncMock(side_effect=acquire)
+        caller = asyncio.create_task(manager.run_prompt(
+            tool="opencode",
+            executable="opencode",
+            directory=tmp_path,
+            prompt="cancel",
+            model="provider/model",
+            timeout=30,
+        ))
+        while not _HangingMessageAsyncClient.instances:
+            await asyncio.sleep(0)
+        client = _HangingMessageAsyncClient.instances[0]
+        await client.message_started.wait()
+        caller.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await caller
+
+        assert "/session/session-hanging/abort" in client.posts
+        assert client.message_cancelled is True
+        assert manager._active_sessions == 0
+        assert manager._event_states == {}
 
     asyncio.run(run())
 

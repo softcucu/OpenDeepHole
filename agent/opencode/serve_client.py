@@ -2277,17 +2277,21 @@ class OpenCodeServeManager:
                     )
                 try:
                     response = await self._wait_for_response(
-                        client=client,
                         request=request,
-                        session_id=active_session_id,
-                        params=params,
-                        headers=headers,
                         timeout=timeout,
                         cancel_event=cancel_event,
                     )
+                except (asyncio.TimeoutError, asyncio.CancelledError):
+                    await self._abort_session(
+                        client,
+                        active_session_id,
+                        params,
+                        headers,
+                    )
+                    await self._cancel_request_task(request)
+                    raise
                 except BaseException:
-                    if not request.done():
-                        request.cancel()
+                    await self._cancel_request_task(request)
                     raise
                 response.raise_for_status()
                 if event_state:
@@ -3101,11 +3105,7 @@ class OpenCodeServeManager:
     async def _wait_for_response(
         self,
         *,
-        client: httpx.AsyncClient,
         request: asyncio.Task[httpx.Response],
-        session_id: str,
-        params: dict[str, str],
-        headers: dict[str, str],
         timeout: int,
         cancel_event,
     ) -> httpx.Response:
@@ -3114,12 +3114,18 @@ class OpenCodeServeManager:
             if request.done():
                 return await request
             if cancel_event and cancel_event.is_set():
-                await self._abort_session(client, session_id, params, headers)
                 raise asyncio.CancelledError()
             if time.monotonic() - started > timeout:
-                await self._abort_session(client, session_id, params, headers)
                 raise asyncio.TimeoutError()
             await asyncio.sleep(0.2)
+
+    @staticmethod
+    async def _cancel_request_task(request: asyncio.Task[httpx.Response]) -> None:
+        """Cancel and reap an in-flight message request before releasing its Session."""
+        if not request.done():
+            request.cancel()
+        with contextlib.suppress(BaseException):
+            await request
 
     async def _ensure_started(
         self,

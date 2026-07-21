@@ -343,8 +343,16 @@ class OpenCodeTaskService:
         return record.execution_context.task_metadata.get("validation_debug") is True
 
     @classmethod
-    def _emit_validation_debug(cls, record: _TaskRecord, message: str) -> None:
-        if not cls._validation_debug_enabled(record):
+    def _task_progress_enabled(cls, record: _TaskRecord) -> bool:
+        metadata = record.execution_context.task_metadata
+        return (
+            cls._validation_debug_enabled(record)
+            or metadata.get("standalone_console") is True
+        )
+
+    @classmethod
+    def _emit_task_progress(cls, record: _TaskRecord, message: str) -> None:
+        if not cls._task_progress_enabled(record):
             return
         callback = record.execution_context.on_output
         if callback is None:
@@ -353,7 +361,7 @@ class OpenCodeTaskService:
             callback(message)
         except Exception:
             logger.exception(
-                "Failed to emit validation debug output for OpenCode task %s",
+                "Failed to emit progress output for OpenCode task %s",
                 record.task_id,
             )
 
@@ -424,7 +432,7 @@ class OpenCodeTaskService:
                 _required_work_dir(record.execution_context),
             )
         self._records[task_id] = record
-        self._emit_validation_debug(
+        self._emit_task_progress(
             record,
             f"[opencode task] queued task={task_id} name={normalized.task_name} "
             f"capability={normalized.required_capability} priority={normalized.priority}",
@@ -590,7 +598,7 @@ class OpenCodeTaskService:
                 record.status = "running"
                 if not record.started_at:
                     record.started_at = lease.started_at_iso or _now_iso()
-                self._emit_validation_debug(
+                self._emit_task_progress(
                     record,
                     f"[opencode task] running task={record.task_id} "
                     f"model_id={lease.option.id} "
@@ -662,9 +670,7 @@ class OpenCodeTaskService:
                                 system_prompt=system_prompt,
                                 permissions=permissions,
                                 return_details=True,
-                                show_serve_status=bool(
-                                    context.task_metadata.get("validation_debug")
-                                ),
+                                show_serve_status=self._task_progress_enabled(record),
                             )
                             assert isinstance(details, OpenCodePromptResult)
                             session_id = details.session_id
@@ -890,7 +896,7 @@ class OpenCodeTaskService:
             terminal_parts.append(f"model={resolved_model}")
         if error:
             terminal_parts.append(f"error={re.sub(r'\\s+', ' ', error).strip()}")
-        self._emit_validation_debug(record, " ".join(terminal_parts))
+        self._emit_task_progress(record, " ".join(terminal_parts))
         record.result_future.set_result(OpenCodeTaskResult(
             task_id=record.task_id,
             session_id=session_id,

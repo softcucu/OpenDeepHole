@@ -15,7 +15,19 @@ RESULT_SCHEMA = {
     "properties": {
         "is_problem": {"type": "boolean"},
         "summary": {"type": "string", "minLength": 1},
-        "evidence": {"type": "string"},
+        "evidence": {
+            "type": "array",
+            "minItems": 5,
+            "items": {
+                "type": "object",
+                "properties": {
+                    "id": {"type": "integer"},
+                    "name": {"type": ["string", "null"]},
+                },
+                "required": ["id", "name"],
+                "additionalProperties": False,
+            },
+        },
     },
     "required": ["is_problem", "summary", "evidence"],
     "additionalProperties": False,
@@ -24,7 +36,6 @@ RESULT_SCHEMA = {
 
 async def validate(**kwargs) -> ValidationResult:
     emit_stdout = kwargs["emit_stdout"]
-    publish_artifact = kwargs["publish_artifact"]
     validation_entry_function = kwargs["validation_entry_function"]
     vulnerable_function = kwargs["vulnerable_function"]
     vulnerability_type = kwargs["vulnerability_type"]
@@ -44,6 +55,9 @@ async def validate(**kwargs) -> ValidationResult:
         "重点从验证入口沿函数调用链检查输入是否能够到达漏洞函数。\n\n"
         f"调用链：{' -> '.join(call_chain)}\n\n"
         f"{report_markdown}"
+    )
+    prompt = (
+        "随机生成一段内容"
     )
     try:
         result = await run_opencode_task(
@@ -70,13 +84,8 @@ async def validate(**kwargs) -> ValidationResult:
         json.dumps(payload, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
-    await publish_artifact(
-        "opencode-result.json",
-        path=artifact_path,
-        title="验证产物",
-        kind="result",
-    )
     await emit_stdout("验证过程", str(payload.get("summary") or "验证完成"))
+    print(result.structured)
     return ValidationResult(
         validation_success=True,
         is_problem=bool(payload.get("is_problem")),
@@ -96,27 +105,8 @@ async def main() -> None:
         else:
             print(f"[{title}] {content}", flush=True)
 
-    async def publish_artifact(
-        name,
-        content=None,
-        *,
-        title="验证产物",
-        path=None,
-        kind="artifact",
-    ) -> dict[str, object]:
-        artifact_path = str(Path(path).resolve()) if path is not None else ""
-        print(f"[{title}] {name} {artifact_path}".rstrip(), flush=True)
-        return {
-            "title": title,
-            "name": name,
-            "kind": kind,
-            "path": artifact_path,
-            "content": "" if content is None else str(content),
-        }
-
     result = await validate(
         emit_stdout=emit_stdout,
-        publish_artifact=publish_artifact,
         validation_entry_function="handle_packet",
         vulnerable_function="parse_payload",
         vulnerability_type="oob",

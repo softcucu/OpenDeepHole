@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from os import PathLike
-from typing import Any, Literal
+from typing import Any, Callable, Literal
 
 
 _SUPPORTED_TASK_TYPES = frozenset({
@@ -21,6 +21,22 @@ _SUPPORTED_TASK_TYPES = frozenset({
     "memory_api_discovery",
     "skill_create",
 })
+
+
+def _standalone_output_prefix(task_type: str) -> str:
+    stage = "validation" if task_type == "vulnerability_validation" else task_type
+    return f"[{stage}/opencode]"
+
+
+def _standalone_console_output(task_type: str) -> Callable[[str], None]:
+    prefix = _standalone_output_prefix(task_type)
+
+    def emit(line: str) -> None:
+        text = str(line or "")
+        if text:
+            print(f"{prefix} {text}", flush=True)
+
+    return emit
 
 
 @dataclass(frozen=True)
@@ -83,5 +99,7 @@ async def run_opencode_task(
     with bind_opencode_execution_context(
         project_dir=standalone.project_dir,
         work_dir=standalone.work_dir,
+        task_metadata={"standalone_console": True},
+        on_output=_standalone_console_output(normalized_task_type),
     ):
         return await run()

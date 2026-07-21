@@ -11,14 +11,36 @@ schema_version: 2
 opencode_config: |
   {}
 base:
-  tool: "nga"
-  executable: "nga"
+  tool: "opencode"
+  executable: "opencode"
   no_proxy: "10.0.0.0/8"
 
 model_pool:
   global_concurrency: 4
   # A scan cannot start until at least one enabled row has an explicit model.
-  models: []
+  models:
+  - capability: high
+    enabled: false
+    executable: ''
+    id: deepseek/deepseek-v4-pro
+    max_concurrency: 1
+    max_retries: null
+    model: deepseek/deepseek-v4-pro
+    time_windows: []
+    timeout: null
+    tool: ''
+    weight: 1.0
+  - capability: high
+    enabled: true
+    executable: ''
+    id: deepseek/deepseek-v4-flash
+    max_concurrency: 1
+    max_retries: null
+    model: deepseek/deepseek-v4-flash
+    time_windows: []
+    timeout: null
+    tool: ''
+    weight: 1.0
 
 threat_analysis:
   enabled: true

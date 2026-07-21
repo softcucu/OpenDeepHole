@@ -11,6 +11,14 @@ serve:
   port: 4096
   timeout: 1200
   max_retries: 2
+  # 模型服务需要代理时在这里显式提供；按实际环境同时设置大小写变量。
+  # environment:
+  #   HTTP_PROXY: http://127.0.0.1:7890
+  #   HTTPS_PROXY: http://127.0.0.1:7890
+  #   http_proxy: http://127.0.0.1:7890
+  #   https_proxy: http://127.0.0.1:7890
+  #   NO_PROXY: 127.0.0.1,localhost
+  #   no_proxy: 127.0.0.1,localhost
   environment: {}
   opencode_config: {}
 

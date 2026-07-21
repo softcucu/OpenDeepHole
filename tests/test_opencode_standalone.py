@@ -318,6 +318,141 @@ def test_public_task_bootstraps_standalone_context_and_reuses_session(
     asyncio.run(run())
 
 
+@pytest.mark.parametrize(
+    ("task_type", "prefix"),
+    [
+        ("vulnerability_validation", "[validation/opencode]"),
+        ("audit", "[audit/opencode]"),
+    ],
+)
+def test_standalone_public_task_prints_realtime_progress(
+    tmp_path: Path,
+    task_type: str,
+    prefix: str,
+) -> None:
+    from agent.opencode import serve_client, task_service
+
+    config_path = _write_config(tmp_path)
+    lease = ModelLease(
+        option=ModelOption(
+            id="provider/model",
+            model="provider/model",
+            use_default_model=False,
+            capability="high",
+            weight=1,
+            max_concurrency=1,
+        ),
+        running=1,
+        global_running=1,
+        task_id="task-console",
+    )
+    acquire = AsyncMock(return_value=lease)
+
+    async def run_prompt(_manager, **kwargs):
+        assert kwargs["show_serve_status"] is True
+        assert callable(kwargs["on_line"])
+        kwargs["on_line"]("[opencode serve] ready mode=started url=http://127.0.0.1:4096 pid=42")
+        kwargs["on_line"]("[opencode serve llm reasoning] checking")
+        callback = kwargs["on_session_id"]("ses-console")
+        if hasattr(callback, "__await__"):
+            await callback
+        return OpenCodePromptResult(
+            session_id="ses-console",
+            message_id="msg-console",
+            lines=["done"],
+            text="done",
+            model="provider/model",
+        )
+
+    async def run() -> None:
+        reset_opencode_configuration()
+        task_service.reset_opencode_task_service()
+        serve_client._manager = None
+        try:
+            with (
+                patch(
+                    "agent.opencode.task_service.acquire_model_lease",
+                    new=acquire,
+                ),
+                patch(
+                    "agent.opencode.task_service.release_model_lease",
+                    new=AsyncMock(),
+                ),
+                patch(
+                    "agent.opencode.task_service.update_model_lease_context",
+                    new=AsyncMock(),
+                ),
+                patch.object(
+                    serve_client.OpenCodeServeManager,
+                    "run_prompt",
+                    new=run_prompt,
+                ),
+                patch("builtins.print") as console,
+            ):
+                result = await opencode.run_opencode_task(
+                    task_name="console task",
+                    task_type=task_type,
+                    prompt="test console output",
+                    required_capability="high",
+                    config_path=config_path,
+                )
+
+            assert result.status == "success"
+            assert acquire.await_args.kwargs["wait_when_unavailable"] is True
+            lines = [str(call.args[0]) for call in console.call_args_list]
+            assert any(line.startswith(f"{prefix} [opencode task] queued") for line in lines)
+            assert any(line.startswith(f"{prefix} [opencode task] running") for line in lines)
+            assert (
+                f"{prefix} [opencode serve llm reasoning] checking"
+                in lines
+            )
+            assert any(
+                line.startswith(f"{prefix} [opencode task] finished")
+                and "status=success" in line
+                for line in lines
+            )
+            assert all(call.kwargs == {"flush": True} for call in console.call_args_list)
+        finally:
+            await opencode.shutdown_opencode()
+            reset_opencode_configuration()
+
+    asyncio.run(run())
+
+
+def test_host_configuration_does_not_install_default_console_output(tmp_path: Path) -> None:
+    reset_opencode_configuration()
+    opencode.configure_opencode(_host_bindings(tmp_path))
+
+    async def run() -> None:
+        expected = opencode.OpenCodeResult(
+            session_id="ses-host",
+            status="success",
+            text="done",
+            structured=None,
+            model="provider/model",
+        )
+        try:
+            with (
+                patch(
+                    "agent.opencode.task_service._run_component_task",
+                    new=AsyncMock(return_value=expected),
+                ),
+                patch("builtins.print") as console,
+            ):
+                result = await opencode.run_opencode_task(
+                    task_name="host task",
+                    task_type="audit",
+                    prompt="test host output",
+                    required_capability="high",
+                )
+            assert result == expected
+            console.assert_not_called()
+        finally:
+            reset_opencode_configuration()
+
+    asyncio.run(run())
+
+
 def test_runtime_port_override_precedes_process_environment(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
