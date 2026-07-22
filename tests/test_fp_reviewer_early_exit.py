@@ -5,8 +5,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
-from agent import fp_reviewer
-from agent.fp_reviewer import _FpStageResult
+from deephole_client import fp_reviewer
+from deephole_client.fp_reviewer import _FpStageResult
 from task_agent.model_pool import NoAvailableModelError
 
 
@@ -55,8 +55,8 @@ class FpReviewerEarlyExitTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmp:
             with (
-                patch("agent.fp_reviewer.Path.home", return_value=Path(tmp)),
-                patch("agent.mcp_registry.lookup", return_value=(12345, "active-scan")),
+                patch("deephole_client.fp_reviewer.Path.home", return_value=Path(tmp)),
+                patch("deephole_client.mcp_registry.lookup", return_value=(12345, "active-scan")),
                 patch.object(fp_reviewer, "_create_fp_workspace", return_value=Path(tmp) / "workspace"),
                 patch.object(fp_reviewer, "_run_fp_review_stage", stage_mock),
                 patch.object(fp_reviewer, "effective_fp_review_cli_config", return_value=cli_config),
@@ -98,8 +98,8 @@ class FpReviewerEarlyExitTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmp:
             with (
-                patch("agent.fp_reviewer.Path.home", return_value=Path(tmp)),
-                patch("agent.mcp_registry.lookup", return_value=(12345, "active-scan")),
+                patch("deephole_client.fp_reviewer.Path.home", return_value=Path(tmp)),
+                patch("deephole_client.mcp_registry.lookup", return_value=(12345, "active-scan")),
                 patch.object(fp_reviewer, "_create_fp_workspace", return_value=Path(tmp) / "workspace"),
                 patch.object(fp_reviewer, "_run_fp_review_stage", stage_mock),
                 patch.object(fp_reviewer, "effective_fp_review_cli_config", return_value=cli_config),
@@ -147,8 +147,8 @@ class FpReviewerEarlyExitTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmp:
             with (
-                patch("agent.fp_reviewer.Path.home", return_value=Path(tmp)),
-                patch("agent.mcp_registry.lookup", return_value=(12345, "active-scan")),
+                patch("deephole_client.fp_reviewer.Path.home", return_value=Path(tmp)),
+                patch("deephole_client.mcp_registry.lookup", return_value=(12345, "active-scan")),
                 patch.object(fp_reviewer, "_create_fp_workspace", return_value=Path(tmp) / "workspace"),
                 patch.object(fp_reviewer, "_run_fp_review_stage", stage_mock),
                 patch.object(fp_reviewer, "effective_fp_review_cli_config", return_value=cli_config),

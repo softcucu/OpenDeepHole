@@ -2,7 +2,7 @@ from pathlib import Path
 from subprocess import CompletedProcess
 from unittest.mock import patch
 
-from agent import git_history
+from deephole_client import git_history
 
 
 def test_git_history_commands_use_utf8_replace(tmp_path: Path) -> None:
@@ -24,7 +24,7 @@ def test_git_history_commands_use_utf8_replace(tmp_path: Path) -> None:
             return CompletedProcess(cmd, 0, stdout="diff --git a/file.c b/file.c\n", stderr="")
         raise AssertionError(f"unexpected git command: {cmd}")
 
-    with patch("agent.git_history.subprocess.run", side_effect=fake_run):
+    with patch("deephole_client.git_history.subprocess.run", side_effect=fake_run):
         assert git_history.is_git_repo(tmp_path) is True
         commits = git_history.collect_commits(tmp_path, max_commits=1)
         diff = git_history._commit_diff(tmp_path, "abc123")

@@ -113,4 +113,4 @@ fi
 
 check_source_index_tools
 
-"$PYTHON_CMD" -m agent.main "$@"
+"$PYTHON_CMD" -m deephole_client.main "$@"

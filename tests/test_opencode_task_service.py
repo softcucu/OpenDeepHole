@@ -138,6 +138,8 @@ def test_public_contract_contains_only_component_owned_fields() -> None:
         "invalid_json_retry_count",
         "session_id",
         "config_path",
+        "output",
+        "cancel_event",
     ]
     assert [item.name for item in dataclasses.fields(OpenCodeResult)] == [
         "session_id",
@@ -145,6 +147,7 @@ def test_public_contract_contains_only_component_owned_fields() -> None:
         "text",
         "structured",
         "model",
+        "output_source",
     ]
     assert get_type_hints(run_opencode_task)["task_type"] is str
     assert "cancelled" not in get_args(get_type_hints(OpenCodeResult)["status"])
@@ -183,6 +186,7 @@ def test_public_interface_uses_bound_directories_and_returns_only_public_result(
             text='{"answer": 7}',
             structured={"answer": 7},
             model="provider/model",
+            output_source=internal.output_source.model_dump(),
         )
         spec = service.run_task.await_args.args[0]
         assert spec.directory == tmp_path.resolve()
@@ -203,6 +207,51 @@ def test_public_interface_uses_bound_directories_and_returns_only_public_result(
                 required_capability="low",
             )
         assert plain.structured is None
+
+    asyncio.run(run())
+
+
+def test_public_interface_can_override_bound_output_and_cancellation(tmp_path: Path) -> None:
+    async def run() -> None:
+        from task_agent.task_service import get_opencode_execution_context
+
+        parent_cancel = threading.Event()
+        child_cancel = threading.Event()
+        parent_output: list[str] = []
+        captured: dict = {}
+
+        async def component_task(**_kwargs):
+            context = get_opencode_execution_context()
+            captured["output"] = context.on_output
+            captured["cancel_event"] = context.cancel_event
+            return OpenCodeResult(
+                session_id="ses-override",
+                status="success",
+                text="ok",
+                structured=None,
+                model="provider/model",
+            )
+
+        with (
+            patch("task_agent.task_service._run_component_task", new=component_task),
+            _task_context(
+                tmp_path,
+                on_output=parent_output.append,
+                cancel_event=parent_cancel,
+            ),
+        ):
+            result = await run_opencode_task(
+                task_name="override context",
+                task_type="audit",
+                prompt="inspect context",
+                required_capability="low",
+                output=None,
+                cancel_event=child_cancel,
+            )
+
+        assert result.session_id == "ses-override"
+        assert captured["output"] is None
+        assert captured["cancel_event"] is child_cancel
 
     asyncio.run(run())
 
@@ -333,7 +382,6 @@ def test_task_service_parses_json_and_computes_scope_and_permissions(tmp_path: P
 
         async def run_prompt(**kwargs):
             captured.update(kwargs)
-            kwargs["on_line"]("[opencode serve llm text] streamed answer")
             callback = kwargs["on_session_id"]("ses_structured")
             if hasattr(callback, "__await__"):
                 await callback
@@ -399,6 +447,7 @@ def test_task_service_parses_json_and_computes_scope_and_permissions(tmp_path: P
         assert captured["timeout"] == 12
         assert captured["return_details"] is True
         assert captured["show_serve_status"] is True
+        assert captured["log_stage"] == "audit"
         schema_text = json.dumps(SCHEMA, ensure_ascii=False, indent=2)
         assert captured["prompt"].startswith("return an answer\n\n")
         assert "请将最终结果作为符合下方 JSON Schema 的纯 JSON 文本返回" in captured["prompt"]
@@ -431,11 +480,11 @@ def test_task_service_parses_json_and_computes_scope_and_permissions(tmp_path: P
         assert acquire_kwargs["task_context"]["session_attempt"] == 1
         assert callable(acquire_kwargs["global_concurrency"])
         assert acquire_kwargs["wait_when_unavailable"] is False
-        assert any("[opencode task] queued" in line for line in output)
-        assert any("[opencode task] running" in line for line in output)
-        assert any("streamed answer" in line for line in output)
+        assert any(line.startswith("[audit][pending][task] QUEUED") for line in output)
+        assert any(line.startswith("[audit][pending][task] START") for line in output)
         assert any(
-            "[opencode task] finished" in line and "status=success" in line
+            line.startswith("[audit][ses_structured][task] FINISHED")
+            and "status=success" in line
             for line in output
         )
 
@@ -468,9 +517,9 @@ def test_validation_debug_empty_model_pool_fails_without_starting_serve(tmp_path
         assert result.status == "failure"
         assert result.error == NO_AVAILABLE_MODEL_MESSAGE
         manager.run_prompt.assert_not_awaited()
-        assert any("[opencode task] queued" in line for line in output)
+        assert any(line.startswith("[opencode][pending][task] QUEUED") for line in output)
         assert any(
-            "[opencode task] finished" in line
+            line.startswith("[opencode][pending][task] FINISHED")
             and "status=failure" in line
             and NO_AVAILABLE_MODEL_MESSAGE in line
             for line in output

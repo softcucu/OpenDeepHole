@@ -2531,8 +2531,8 @@ async def agent_get_feedback(vuln_types: Optional[str] = None) -> list:
 # Agent package download
 # ---------------------------------------------------------------------------
 
-_AGENT_DIRS = ["agent", "task_agent", "checkers", "code_parser", "mcp_server", "backend"]
-_AGENT_RUNTIME_DIRS = ["agent", "task_agent", "code_parser", "mcp_server", "backend"]
+_AGENT_DIRS = ["deephole_client", "task_agent", "checkers", "code_parser", "mcp_server", "backend"]
+_AGENT_RUNTIME_DIRS = ["deephole_client", "task_agent", "code_parser", "mcp_server", "backend"]
 _AGENT_TOOL_DIRS = ["ctags-p6.2.20260517.0-x64"]
 _AGENT_THREAT_ANALYSIS_FILES = [
     "attack-tree-threat-analysis.md",
@@ -2553,7 +2553,6 @@ _AGENT_DOWNLOAD_SKIP_DIRS = {
     ".pytest_cache",
     "static",
     "system_skills",
-    "vulnerability_validation",
 }
 _AGENT_RUNTIME_SKIP_DIRS = set(_AGENT_DOWNLOAD_SKIP_DIRS)
 _AGENT_SKIP_SUFFIXES = {".pyc", ".pyo"}

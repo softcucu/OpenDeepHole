@@ -10,18 +10,18 @@ import json
 from pathlib import Path
 from typing import TYPE_CHECKING, Iterator
 
-from backend.analyzers.base import BaseAnalyzer, Candidate
-from backend.analyzers.semgrep_locations import (
+from deephole_client.static_analysis.base import BaseAnalyzer, Candidate
+from deephole_client.static_analysis.semgrep_locations import (
     function_from_db_location,
     relative_reported_path,
 )
-from backend.analyzers.semgrep_runner import DEFAULT_SEMGREP_TIMEOUT_SECONDS, run_semgrep
-from backend.logger import get_logger
+from deephole_client.static_analysis.semgrep_runner import DEFAULT_SEMGREP_TIMEOUT_SECONDS, run_semgrep
+import logging
 
 if TYPE_CHECKING:
     from code_parser import CodeDatabase
 
-_log = get_logger(__name__)
+_log = logging.getLogger(__name__)
 
 _RULE_FILE = Path(__file__).parent / "intoverflow_semgrep.yml"
 _SEMGREP_TIMEOUT_SECONDS = DEFAULT_SEMGREP_TIMEOUT_SECONDS
@@ -187,8 +187,13 @@ class Analyzer(BaseAnalyzer):
 
             subject = arith_expr or sink_expr or "整数运算"
             parts: list[str] = [
-                f"函数 `{func_name}` 中整数运算 `{subject}` 是否存在整数溢出问题，请审计确认。"
+                f"函数 `{func_name}` 中整数运算 `{subject}` 是否存在整数溢出问题，请审计确认。",
+                f"规则来源: {source}",
             ]
+            if message:
+                parts.append(f"Semgrep 说明: {message}")
+            if risk_class:
+                parts.append(f"风险分类: {risk_class}")
 
             details: list[str] = []
             if arith_expr:
@@ -203,7 +208,9 @@ class Analyzer(BaseAnalyzer):
                 details.append(f"中间变量: {target_var}")
             if details:
                 parts.append("相关线索：\n" + "\n".join(details))
-            parts.append("审计要点：确认输入是否外部可控、是否存在有效范围/溢出检查、溢出结果是否可达危险使用点。")
+            if matched_lines:
+                parts.append(f"匹配代码：\n{matched_lines}")
+            parts.append("复核重点：确认输入是否外部可控、是否存在有效范围/溢出检查、溢出结果是否可达危险使用点。")
 
             yield Candidate(
                 file=rel_path,

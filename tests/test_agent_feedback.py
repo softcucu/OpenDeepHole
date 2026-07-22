@@ -6,9 +6,9 @@ from types import SimpleNamespace
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
-from agent import fp_reviewer
-from agent.config import AgentConfig, OpenCodeConfig
-from agent.scanner import _build_function_source_cache, _attach_function_source
+from deephole_client import fp_reviewer
+from deephole_client.config import AgentConfig, OpenCodeConfig
+from deephole_client.scanner import _build_function_source_cache, _attach_function_source
 from backend.models import Candidate, Vulnerability
 from task_agent import OpenCodeResult
 
@@ -221,11 +221,11 @@ class AgentFeedbackTests(unittest.TestCase):
             with tempfile.TemporaryDirectory() as tmp:
                 workspace = Path(tmp) / "workspace"
                 with (
-                    patch("agent.fp_reviewer.Path.home", return_value=Path(tmp)),
-                    patch("agent.mcp_registry.lookup", return_value=(7000, "scan-1")),
+                    patch("deephole_client.fp_reviewer.Path.home", return_value=Path(tmp)),
+                    patch("deephole_client.mcp_registry.lookup", return_value=(7000, "scan-1")),
                     patch.object(fp_reviewer, "_create_fp_workspace", return_value=workspace),
                     patch("backend.config.get_config", return_value=SimpleNamespace()),
-                    patch("agent.fp_reviewer.run_opencode_task", new=invoke),
+                    patch("deephole_client.fp_reviewer.run_opencode_task", new=invoke),
                 ):
                     await fp_reviewer.run_fp_review(
                         config=config,
@@ -322,11 +322,11 @@ class AgentFeedbackTests(unittest.TestCase):
             with tempfile.TemporaryDirectory() as tmp:
                 workspace = Path(tmp) / "workspace"
                 with (
-                    patch("agent.fp_reviewer.Path.home", return_value=Path(tmp)),
-                    patch("agent.mcp_registry.lookup", return_value=(7000, "scan-1")),
+                    patch("deephole_client.fp_reviewer.Path.home", return_value=Path(tmp)),
+                    patch("deephole_client.mcp_registry.lookup", return_value=(7000, "scan-1")),
                     patch.object(fp_reviewer, "_create_fp_workspace", return_value=workspace),
                     patch("backend.config.get_config", return_value=SimpleNamespace()),
-                    patch("agent.fp_reviewer.run_opencode_task", new=invoke),
+                    patch("deephole_client.fp_reviewer.run_opencode_task", new=invoke),
                 ):
                     await fp_reviewer.run_fp_review(
                         config=config,
@@ -411,11 +411,11 @@ class AgentFeedbackTests(unittest.TestCase):
             with tempfile.TemporaryDirectory() as tmp:
                 workspace = Path(tmp) / "workspace"
                 with (
-                    patch("agent.fp_reviewer.Path.home", return_value=Path(tmp)),
-                    patch("agent.mcp_registry.lookup", return_value=(7000, "scan-1")),
+                    patch("deephole_client.fp_reviewer.Path.home", return_value=Path(tmp)),
+                    patch("deephole_client.mcp_registry.lookup", return_value=(7000, "scan-1")),
                     patch.object(fp_reviewer, "_create_fp_workspace", return_value=workspace),
                     patch("backend.config.get_config", return_value=SimpleNamespace()),
-                    patch("agent.fp_reviewer.run_opencode_task", new=invoke),
+                    patch("deephole_client.fp_reviewer.run_opencode_task", new=invoke),
                 ):
                     await fp_reviewer.run_fp_review(
                         config=config,

@@ -8,7 +8,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from backend.analyzers.base import BaseAnalyzer, Candidate, scoped_functions
+from deephole_client.static_analysis.base import BaseAnalyzer, Candidate, scoped_functions
 
 if TYPE_CHECKING:
     from code_parser import CodeDatabase

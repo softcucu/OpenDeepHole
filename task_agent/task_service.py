@@ -37,6 +37,7 @@ from .model_pool import (
     release_model_lease,
     update_model_lease_context,
 )
+from .output_format import format_task_output, task_output_stage
 from .serve_client import OpenCodePromptResult, get_serve_manager
 
 logger = logging.getLogger(__name__)
@@ -351,14 +352,22 @@ class OpenCodeTaskService:
         )
 
     @classmethod
-    def _emit_task_progress(cls, record: _TaskRecord, message: str) -> None:
+    def _emit_task_progress(
+        cls,
+        record: _TaskRecord,
+        message: str,
+        *,
+        session_id: str | None = None,
+    ) -> None:
         if not cls._task_progress_enabled(record):
             return
         callback = record.execution_context.on_output
         if callback is None:
             return
+        stage = task_output_stage(record.execution_context.task_metadata.get("task_type"))
+        resolved_session_id = record.spec.session_id if session_id is None else session_id
         try:
-            callback(message)
+            callback(format_task_output(stage, resolved_session_id, "task", message))
         except Exception:
             logger.exception(
                 "Failed to emit progress output for OpenCode task %s",
@@ -434,7 +443,7 @@ class OpenCodeTaskService:
         self._records[task_id] = record
         self._emit_task_progress(
             record,
-            f"[opencode task] queued task={task_id} name={normalized.task_name} "
+            f"QUEUED task={task_id} name={normalized.task_name} "
             f"capability={normalized.required_capability} priority={normalized.priority}",
         )
         record.worker = asyncio.create_task(
@@ -600,7 +609,7 @@ class OpenCodeTaskService:
                     record.started_at = lease.started_at_iso or _now_iso()
                 self._emit_task_progress(
                     record,
-                    f"[opencode task] running task={record.task_id} "
+                    f"START task={record.task_id} "
                     f"model_id={lease.option.id} "
                     f"model={lease.option.model or '<cli-default>'} "
                     f"capability={lease.option.capability}",
@@ -671,6 +680,9 @@ class OpenCodeTaskService:
                                 permissions=permissions,
                                 return_details=True,
                                 show_serve_status=self._task_progress_enabled(record),
+                                log_stage=task_output_stage(
+                                    record.execution_context.task_metadata.get("task_type")
+                                ),
                             )
                             assert isinstance(details, OpenCodePromptResult)
                             session_id = details.session_id
@@ -686,12 +698,12 @@ class OpenCodeTaskService:
                                     f"({spec.output_retry_count}) without matching the target schema"
                                 )
                             prompt = _json_correction_prompt(spec.output_schema)
-                            if context.on_output:
-                                context.on_output(
-                                    "[json-correction "
-                                    f"{output_attempt + 1}/{spec.output_retry_count}] "
-                                    "requesting schema-compliant JSON in the same session"
-                                )
+                            self._emit_task_progress(
+                                record,
+                                f"JSON_CORRECTION {output_attempt + 1}/{spec.output_retry_count} "
+                                "requesting schema-compliant JSON in the same session",
+                                session_id=session_id,
+                            )
                 finally:
                     if lock_key.startswith("new:"):
                         self._session_locks.pop(lock_key, None)
@@ -813,11 +825,12 @@ class OpenCodeTaskService:
 
             if retry_reason and session_attempt < total_session_attempts:
                 record.status = "queued"
-                if context.on_output:
-                    context.on_output(
-                        f"[session-retry {session_attempt}/{fresh_retry_count}] "
-                        f"{retry_reason}; requeueing with a new session"
-                    )
+                self._emit_task_progress(
+                    record,
+                    f"RETRY {session_attempt}/{fresh_retry_count} "
+                    f"reason={retry_reason} next_session=new",
+                    session_id=final_session_id or session_id,
+                )
                 session_attempt += 1
                 continue
 
@@ -885,7 +898,7 @@ class OpenCodeTaskService:
         if record.result_future.done():
             return
         terminal_parts = [
-            "[opencode task] finished",
+            "FINISHED",
             f"task={record.task_id}",
             f"status={status}",
         ]
@@ -896,7 +909,11 @@ class OpenCodeTaskService:
             terminal_parts.append(f"model={resolved_model}")
         if error:
             terminal_parts.append(f"error={re.sub(r'\\s+', ' ', error).strip()}")
-        self._emit_task_progress(record, " ".join(terminal_parts))
+        self._emit_task_progress(
+            record,
+            " ".join(terminal_parts),
+            session_id=session_id,
+        )
         record.result_future.set_result(OpenCodeTaskResult(
             task_id=record.task_id,
             session_id=session_id,
@@ -1234,6 +1251,11 @@ async def _run_component_task(
             )
         )
 
+    output_source = (
+        result.output_source.model_dump()
+        if hasattr(result.output_source, "model_dump")
+        else dict(result.output_source or {})
+    )
     if result.status == "cancelled":
         raise asyncio.CancelledError(result.error or "OpenCode task cancelled")
     if result.status == "success":
@@ -1243,6 +1265,7 @@ async def _run_component_task(
             text=result.text,
             structured=result.structured if output_schema is not None else None,
             model=result.model,
+            output_source=output_source,
         )
     if result.status == "timeout":
         return OpenCodeResult(
@@ -1251,6 +1274,7 @@ async def _run_component_task(
             text=result.error or "OpenCode task timed out",
             structured=None,
             model=result.model,
+            output_source=output_source,
         )
     return OpenCodeResult(
         session_id=result.session_id,
@@ -1258,6 +1282,7 @@ async def _run_component_task(
         text=result.error or result.text or "OpenCode task failed",
         structured=None,
         model=result.model,
+        output_source=output_source,
     )
 
 

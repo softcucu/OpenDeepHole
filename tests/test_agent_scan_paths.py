@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
-from agent.scanner import (
+from deephole_client.scanner import (
     GIT_HISTORY_PIPELINE_ENABLED,
     MEMORY_API_DISCOVERY_PIPELINE_ENABLED,
     STATIC_PROGRESS_MIN_INTERVAL_SECONDS,
@@ -34,7 +34,7 @@ from agent.scanner import (
     is_project_level_candidate,
     refresh_backend_runtime_config,
 )
-from agent.config import AgentConfig
+from deephole_client.config import AgentConfig
 from backend.api import agent as agent_api
 from backend.api import scan as scan_api
 from backend.models import (
@@ -299,7 +299,7 @@ class AgentScanPathTests(unittest.TestCase):
                     schema_version="1.0",
                     analysis_id="threat-1",
                 ))
-                with patch("agent.opencode_workflows.run_threat_analysis_audit", runner):
+                with patch("deephole_client.opencode_workflows.run_threat_analysis_audit", runner):
                     await _run_threat_analysis_phase(
                         config=AgentConfig(),
                         project_path=project.resolve(),
@@ -333,7 +333,7 @@ class AgentScanPathTests(unittest.TestCase):
                     return None
 
                 with patch(
-                    "agent.opencode_workflows.run_threat_analysis_audit",
+                    "deephole_client.opencode_workflows.run_threat_analysis_audit",
                     new=AsyncMock(side_effect=NoAvailableModelError()),
                 ):
                     await _run_threat_analysis_phase(
@@ -352,7 +352,7 @@ class AgentScanPathTests(unittest.TestCase):
             asyncio.run(run())
 
     def test_threat_auditor_persists_failure_then_propagates_no_model_error(self) -> None:
-        from agent.threat_auditor import run_threat_audit_tasks
+        from deephole_client.threat_auditor import run_threat_audit_tasks
 
         task = ThreatAuditTask(
             task_id="threat-audit-no-model",
@@ -368,7 +368,7 @@ class AgentScanPathTests(unittest.TestCase):
 
         async def run() -> None:
             with (
-                patch("agent.threat_auditor.build_threat_audit_tasks", return_value=[task]),
+                patch("deephole_client.threat_auditor.build_threat_audit_tasks", return_value=[task]),
                 patch(
                     "task_agent.model_pool.register_planned_task",
                     new=AsyncMock(return_value="planned-1"),
@@ -376,7 +376,7 @@ class AgentScanPathTests(unittest.TestCase):
                 patch("task_agent.model_pool.total_model_capacity", return_value=1),
                 patch("task_agent.model_pool.clear_planned_task", new=AsyncMock()),
                 patch(
-                    "agent.opencode_workflows.run_threat_audit",
+                    "deephole_client.opencode_workflows.run_threat_audit",
                     new=AsyncMock(side_effect=NoAvailableModelError()),
                 ) as runner,
             ):
@@ -434,7 +434,7 @@ class AgentScanPathTests(unittest.TestCase):
                     schema_version="1.0",
                     analysis_id="new-threat",
                 ))
-                with patch("agent.opencode_workflows.run_threat_analysis_audit", runner):
+                with patch("deephole_client.opencode_workflows.run_threat_analysis_audit", runner):
                     await _run_threat_analysis_phase(
                         config=AgentConfig(),
                         project_path=project.resolve(),
@@ -477,8 +477,8 @@ class AgentScanPathTests(unittest.TestCase):
                 )
                 auditor = AsyncMock()
                 with (
-                    patch("agent.opencode_workflows.run_threat_analysis_audit", AsyncMock()) as runner,
-                    patch("agent.threat_auditor.run_threat_audit_tasks", auditor),
+                    patch("deephole_client.opencode_workflows.run_threat_analysis_audit", AsyncMock()) as runner,
+                    patch("deephole_client.threat_auditor.run_threat_audit_tasks", auditor),
                 ):
                     await _run_threat_analysis_phase(
                         config=AgentConfig(),
@@ -552,10 +552,10 @@ class AgentScanPathTests(unittest.TestCase):
                 auditor = AsyncMock()
                 with (
                     patch(
-                        "agent.opencode_workflows.run_threat_analysis_audit",
+                        "deephole_client.opencode_workflows.run_threat_analysis_audit",
                         new=AsyncMock(side_effect=fake_runner),
                     ),
-                    patch("agent.threat_auditor.run_threat_audit_tasks", auditor),
+                    patch("deephole_client.threat_auditor.run_threat_audit_tasks", auditor),
                 ):
                     await _run_threat_analysis_phase(
                         config=config,
@@ -616,7 +616,7 @@ class AgentScanPathTests(unittest.TestCase):
                     schema_version="1.0",
                     analysis_id="new-threat",
                 ))
-                with patch("agent.opencode_workflows.run_threat_analysis_audit", runner):
+                with patch("deephole_client.opencode_workflows.run_threat_analysis_audit", runner):
                     await _run_threat_analysis_phase(
                         config=AgentConfig(),
                         project_path=project.resolve(),

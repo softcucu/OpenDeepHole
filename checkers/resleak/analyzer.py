@@ -30,8 +30,8 @@ import tree_sitter
 import tree_sitter_cpp
 from tree_sitter import Language
 
-from backend.analyzers.base import BaseAnalyzer, Candidate
-from backend.source_filter import iter_source_files
+from deephole_client.static_analysis.base import BaseAnalyzer, Candidate
+from deephole_client.static_analysis.source_filter import iter_source_files
 
 if TYPE_CHECKING:
     from code_parser import CodeDatabase
@@ -506,7 +506,7 @@ class Analyzer(BaseAnalyzer):
         artifact_allocs: set[str] = set()
         artifact_frees: set[str] = set()
         try:
-            from backend.preprocess.memory_api_artifact import load_memory_api_artifact
+            from deephole_client.static_analysis.memory_api_artifact import load_memory_api_artifact
             artifact = load_memory_api_artifact(project_path)
             for item in artifact.get("allocators") or []:
                 if isinstance(item, dict) and item.get("name"):
@@ -614,8 +614,8 @@ class Analyzer(BaseAnalyzer):
                     except OSError:
                         pass
         else:
-            from backend.logger import get_logger
-            get_logger(__name__).warning("cppcheck not found; Phase 1 skipped for resleak")
+            import logging
+            logging.getLogger(__name__).warning("cppcheck not found; Phase 1 skipped for resleak")
 
         # ---- Phase 2: 锁类资源正则扫描 ----
         files2 = sorted(_iter_sources(project_path))

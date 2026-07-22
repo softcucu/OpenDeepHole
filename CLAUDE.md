@@ -26,7 +26,7 @@ Browser  ──HTTP──►  Backend (FastAPI, port 8000)
 
 - **Frontend**: React + TypeScript + Vite + Tailwind CSS (builds to `backend/static/`)
 - **Backend**: Python FastAPI (port 8000) — serves API + frontend static files, stores scan records in SQLite, manages WebSocket connections to agents
-- **Agent**: Python daemon (`agent/`) — runs on the machine with the source code, connects to backend via WebSocket, executes the full scan pipeline locally
+- **Agent**: Python daemon (`deephole_client/`) — runs on the machine with the source code, connects to backend via WebSocket, executes the full scan pipeline locally
 - **MCP Server**: Python FastMCP (port 8100) — provides source-code query tools; the Agent owns one shared local gateway and routes `project_id` to each scan index
 - **Deployment**: `start.sh` builds frontend and restarts uvicorn; Docker via `docker-compose.yml`
 
@@ -57,7 +57,7 @@ Agent → Server (HTTP POST, scan results):
 **Online status** = WebSocket connection alive (no heartbeat needed).  
 Config update via `PUT /api/agent/{id}/config` is also pushed to the agent's live WS connection.
 
-## Agent — Scan Pipeline (`agent/scanner.py`)
+## Agent — Scan Pipeline (`deephole_client/scanner.py`)
 
 Each scan runs the full pipeline locally on the agent machine:
 
@@ -67,8 +67,8 @@ Each scan runs the full pipeline locally on the agent machine:
 3. MCP      — register project_id → code_index.db on the Agent-owned shared gateway
 4. OpenCode — refresh the Agent-wide ~/.opendeephole/opencode_workspace and global SKILL registry
 5. Static   — each checker's analyzer.find_candidates() → scoped candidate list (cached for resume)
-5.5 Git history — (fresh scans, git repo, git_history.enabled) agent/git_history.py mines security-fix
-    patterns from commit history (one JSON-returning OpenCode task per commit); agent/variant_hunter.py
+5.5 Git history — (fresh scans, git repo, git_history.enabled) deephole_client/git_history.py mines security-fix
+    patterns from commit history (one JSON-returning OpenCode task per commit); deephole_client/variant_hunter.py
     then hunts whole-repo same-class sites per pattern via plain-text JSON → extra candidates tagged
     metadata.variant_of, merged into the candidate set. Patterns pushed via POST /api/agent/scan/{id}/git_history
 6. AI audit — run_audit() per deduplicated candidate through OpenCodeTaskService;
@@ -84,7 +84,7 @@ Each scan runs the full pipeline locally on the agent machine:
 **Resume support**: scan dir at `~/.opendeephole/scans/<scan_id>/` is preserved on cancel/error.  
 **Index storage**: `code_index.db` is stored directly in the project directory (`<project_path>/code_index.db`). Re-scanning the same project reuses the existing index.
 
-## Agent — FP Review Pipeline (`agent/fp_reviewer.py`)
+## Agent — FP Review Pipeline (`deephole_client/fp_reviewer.py`)
 
 Per vulnerability: an optional `history_match` stage first, then the three-stage debate `prove_bug` → `prove_fp` → `final_judge`. Each stage returns plain-text JSON from an OpenCode task; Python extracts and validates it, owns Markdown artifact persistence, and retries invalid/missing JSON results.
 
@@ -138,7 +138,7 @@ uvicorn backend.main:app --reload --host 0.0.0.0          # Start backend (hot r
 
 # Agent (separate machine or same machine)
 pip install -r requirements-agent.txt
-python3 -m agent.main --server http://localhost:8000      # Connect to backend
+python3 -m deephole_client.main --server http://localhost:8000      # Connect to backend
 
 # Local checker development without backend
 PYTHONPATH=. python3 tools/checker_test.py memleak /path/to/source --min-candidates 1
@@ -167,7 +167,7 @@ tail -f logs/opendeephole.log
 - Pydantic models for all API request/response in `backend/models.py`
 - `vuln_type` is a plain string (not enum) matching the checker directory name
 - One Agent-wide OpenCode workspace lives at `~/.opendeephole/opencode_workspace`; scans/reviews/validators bind scope and permissions per task, while API `directory` points at the real code root
-- The self-contained Task Agent framework lives in `task_agent/`; OpenDeepHole-specific workspace/MCP configuration is in `agent/opencode_integration.py`, workflows are in `agent/opencode_workflows.py`, and `backend/` must not own or import this client runtime
+- The self-contained Task Agent framework lives in `task_agent/`; the six backend-free business processes live under `deephole_client/`, and `backend/` must not own client execution
 - OpenCode TaskSpec does not expose workspace, scope/task context, MCP/SKILL selectors, permissions, CLI config, or global concurrency; the Agent computes them centrally
 - JSON Schema rules are appended to the user prompt instead of the system prompt; framework-generated model instructions are Chinese, and Schema failures are corrected in the same session first; `attempt` counts fresh-session retries that release and reacquire a model Lease
 - Agent OpenCode configs are stored server-side in `_agent_configs` (keyed by agent name) and pushed to agents on connect and UI save
@@ -207,12 +207,14 @@ backend/
   config.py       — AppConfig loaded from config.yaml
   logger.py       — Rotating file + console logger
 
-task_agent/      — Installable task/model/session/Serve framework
+task_agent/                — Installable task/model/session/Serve framework
 
-agent/
+deephole_client/
   main.py         — Entry point; WebSocket client loop with auto-reconnect
   server.py       — Command handlers: handle_task(), handle_stop(), handle_resume()
-  scanner.py      — Full local scan pipeline (index → static → git-history → AI → report)
+  scanner.py      — Coordinates indexing, standalone processes, and platform reporting
+  threat_analysis/, static_analysis/, candidate_audit/, threat_audit/, fp_review/, vulnerability_validation/
+                  — Backend-free async business processes with standalone CLIs
   git_history.py  — Mines git-history security-fix patterns (one LLM call per commit)
   variant_hunter.py — Hunts whole-repo same-class sites per history pattern → variant candidates
   fp_reviewer.py  — FP review: history_match (skip→high) + three-stage debate, binary severity

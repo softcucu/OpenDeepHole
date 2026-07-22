@@ -6,13 +6,13 @@ import unittest
 import time
 from pathlib import Path
 
-from agent.scanner import (
+from deephole_client.scanner import (
     _is_streaming_threat_analysis,
     _opencode_pool_has_pipeline_work,
     _streaming_threat_analysis_id,
 )
-from agent.threat_auditor import _scan_path_from_analysis, build_threat_audit_tasks
-from agent.threat_analysis_opencode import (
+from deephole_client.threat_auditor import _scan_path_from_analysis, build_threat_audit_tasks
+from deephole_client.threat_analysis_opencode import (
     _attack_goals_from_base_output,
     _base_model_agent_shards,
     _invoke_stage,
@@ -24,7 +24,7 @@ from agent.threat_analysis_opencode import (
     _with_method_confirmation_task_defaults,
 )
 from backend.threat_analysis.harness import build_code_index
-from agent.opencode_workflows import _read_fresh_threat_analysis_result
+from deephole_client.opencode_workflows import _read_fresh_threat_analysis_result
 from task_agent import OpenCodeResult
 from task_agent.task_service import get_opencode_execution_context
 from backend.models import ScanItemStatus, ScanMeta, ScanStatus, ThreatAuditTask, Vulnerability

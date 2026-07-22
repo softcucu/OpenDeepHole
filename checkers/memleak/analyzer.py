@@ -21,8 +21,8 @@ import tree_sitter
 import tree_sitter_cpp
 from tree_sitter import Language
 
-from backend.analyzers.base import BaseAnalyzer, Candidate
-from backend.source_filter import iter_source_files
+from deephole_client.static_analysis.base import BaseAnalyzer, Candidate
+from deephole_client.static_analysis.source_filter import iter_source_files
 
 if TYPE_CHECKING:
     from code_parser import CodeDatabase
@@ -988,7 +988,7 @@ class Analyzer(BaseAnalyzer):
         files = _collect_source_files(project_path)
         total = len(files)
         try:
-            from backend.preprocess.memory_api_artifact import memory_deallocator_names
+            from deephole_client.static_analysis.memory_api_artifact import memory_deallocator_names
             extra_free_funcs = memory_deallocator_names(project_path)
         except Exception:
             extra_free_funcs = set()

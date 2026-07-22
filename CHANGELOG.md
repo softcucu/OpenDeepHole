@@ -2,12 +2,19 @@
 
 ## 2026-07-22
 
+- **重构** 本地 Python 包由 `agent` 直接切换为 `deephole_client`；界面/API 的 Agent 名称、`/api/agent`、`agent.yaml` 和启动脚本名称保持不变，旧 Python 导入路径不提供兼容层
+- **重构** 威胁分析、静态分析、候选点审计、威胁审计、去误报和漏洞验证拆为 `deephole_client/` 下六个独立目录，各自只公开一个严格 `async **kwargs` 入口、独立 CLI 和完整 key 文档；过程不连接后端，统一返回 JSON 数据并发出结构化事件
+- **重构** Agent 扫描协调器只保留源码索引、任务调度和平台上报，威胁/静态/候选审计以整阶段调用新过程；去误报与漏洞验证队列通过适配层调用批处理过程
+- **变更** `task_agent.run_opencode_task()` 新增可选 `output` 与 `cancel_event` 覆盖，`OpenCodeResult` 增加 JSON 化 `output_source`，便于独立过程与平台运行使用同一模型任务入口
+- **修复** `intoverflow` 静态候选描述恢复规则来源、Semgrep 说明、匹配代码与复核重点，保证独立静态分析的结果保留完整审计上下文
+- **变更** `task_agent` 控制台进度统一为 `[stage][session_id][task|session|step]`，漏洞验证 stage 使用 `validation`，Session 创建前使用 `pending`；每次消息明确标记 Session 启停，工具与 SKILL 只输出脱敏生命周期摘要，不再打印模型 text/reasoning 或工具返回正文
+- **修复** `task_agent` 精确登记自身启动的 Serve 子进程，在显式 shutdown、解释器正常退出、Ctrl-C 和 SIGTERM 时终止整棵进程树并安全删除匹配 PID 的归属标记；任务间仍保持单例复用，退出清理不按端口误杀未知进程
 - **重构** 自包含组件从 `agent/task_agent/` 提升为仓库顶层 `task_agent/`，仓库内外统一使用 `from task_agent import run_opencode_task`，不再暴露与源码落位耦合的 `agent.task_agent` 导入路径
 - **新增** `task_agent/` 提供独立 Python 包元数据，可直接复制到其它项目的导入根目录或通过 `python -m pip install ./task_agent` 安装；Agent 完整下载与运行时热更新同步包含该顶层组件
 
 ## 2026-07-21
 
-- **重构** 自包含任务管理框架统一命名为 `agent.task_agent`，公共调用改为 `from agent.task_agent import run_opencode_task`；独立配置同步改用 `task-agent.yaml`、`TASK_AGENT_CONFIG` 和 `task-agent.example.yaml`，不保留旧包或旧配置名兼容层
+- **重构** 自包含任务管理框架统一命名为 `agent.task_agent`，公共调用改为 `from deephole_client.task_agent import run_opencode_task`；独立配置同步改用 `task-agent.yaml`、`TASK_AGENT_CONFIG` 和 `task-agent.example.yaml`，不保留旧包或旧配置名兼容层
 - **文档** `task-agent.example.yaml` 在 `serve.opencode_config.mcp` 中补充默认关闭的远程 HTTP MCP 与本地进程 MCP 示例，包括静态请求头、OAuth 开关、启动命令、环境变量和毫秒级超时
 - **修复** standalone `run_opencode_task()` 恢复完整实时终端输出：漏洞验证使用 `[validation/opencode]`，其它独立任务使用任务类型前缀，并覆盖任务排队、Serve、Session、step、reasoning、文本、JSON 修正、Provider 重试/错误和最终状态
 - **修复** OpenCode message 请求在总超时或取消后会 abort Session、取消并等待在途 HTTP 请求结束，再释放事件订阅和活动 Session 计数，避免失败请求残留为 busy 并阻塞后续复用
@@ -52,7 +59,7 @@
 - **变更** 验证方法不再热加载或运行于独立 worker 子进程，统一在 Agent 主进程事件循环中执行严格的 `async def validate(ctx) -> ValidationResult`；验证任务按环境使用 Agent 全局 FIFO 队列及环境并发上限，普通编译/PoC 命令仍由 `ctx.run_command(...)` 托管并支持进程树取消
 - **变更** validator 直接通过 `get_opencode_task_service().run_task(OpenCodeTaskSpec(...))` 复用威胁分析和候选审计的模型池、Session 与 MCP 上下文；两个独立模型任务可通过 `asyncio.gather(...)` 并发提交，同一 Session 的续写保持串行
 - **新增** 验证上下文直接提供漏洞文件、验证入口函数、漏洞函数、函数调用链、漏洞类型、Markdown 报告、项目根目录、扫描路径和默认可写工作目录；显式中间输出与产物继续沿用原验证页面，OpenCode 流和普通 `print(...)` 仅输出到 Agent/调试控制台
-- **新增** `python -m agent.validation_debug` 支持在不启动 Web 后端的情况下加载真实 manifest、Agent 配置和 debug case 单独运行验证方法；开发指南补齐并发 OpenCode、Session、取消、产物和部署约定
+- **新增** `python -m deephole_client.validation_debug` 支持在不启动 Web 后端的情况下加载真实 manifest、Agent 配置和 debug case 单独运行验证方法；开发指南补齐并发 OpenCode、Session、取消、产物和部署约定
 - **变更** `agent/product_validators/` 纳入任务前强制 Agent runtime 同步并移除手动同步 API/按钮和旧脚本命令配置；候选点/项目/威胁审计 JSON 新增 `vuln_type`、入口到漏洞函数的 `call_chain` 与 Markdown `vulnerability_report` 持久化，所有生效 SKILL 和运行时提示词清除废弃的结果提交工具说明
 
 ## 2026-07-16

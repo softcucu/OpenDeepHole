@@ -2121,7 +2121,7 @@ async def agent_fp_review_progress(scan_id: str, body: AgentFpReviewProgress) ->
         raise HTTPException(status_code=404, detail="FP review not found")
     if job.status == FpReviewStatus.CANCELLED:
         return {"ok": True}
-    # Auto-recover from agent disconnect: the agent's FP review task survived
+    # Auto-recover from agent disconnect: the Agent's FP review task survived
     # the WebSocket reconnect and is still posting progress.
     if job.status == FpReviewStatus.ERROR and _is_agent_disconnect_error(job.error_message):
         store.update_fp_review_job(body.review_id, status="running", error_message="")

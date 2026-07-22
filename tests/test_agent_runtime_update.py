@@ -10,11 +10,11 @@ from unittest.mock import AsyncMock, patch
 
 import yaml
 
-import agent.updater as updater
-import agent.main as agent_main
-import agent.server as agent_server
-from agent.config import AgentConfig
-from agent.updater import compute_runtime_hash
+import deephole_client.updater as updater
+import deephole_client.main as agent_main
+import deephole_client.server as agent_server
+from deephole_client.config import AgentConfig
+from deephole_client.updater import compute_runtime_hash
 from backend.api import agent as agent_api
 
 
@@ -24,7 +24,7 @@ class AgentRuntimePackageTests(unittest.TestCase):
         with zipfile.ZipFile(_bytes_path(data)) as zf:
             names = set(zf.namelist())
 
-        self.assertIn("agent/main.py", names)
+        self.assertIn("deephole_client/main.py", names)
         self.assertIn("requirements-agent.txt", names)
         self.assertIn("attack-tree-threat-analysis.md", names)
         self.assertIn("attack-method-reference-catalog.md", names)
@@ -35,13 +35,12 @@ class AgentRuntimePackageTests(unittest.TestCase):
         self.assertNotIn("run_agent.bat", names)
         self.assertFalse(any(name.startswith("backend/static/") for name in names))
         self.assertFalse(any(name.startswith("backend/system_skills/") for name in names))
-        self.assertFalse(any("/vulnerability_validation/" in name for name in names))
-        self.assertIn("agent/product_validators/demo/validator.yaml", names)
-        self.assertIn("agent/product_validators/demo/validator.py", names)
+        self.assertIn("deephole_client/vulnerability_validation/product_validators/demo/validator.yaml", names)
+        self.assertIn("deephole_client/vulnerability_validation/product_validators/demo/validator.py", names)
         self.assertIn("task_agent/standalone.py", names)
         self.assertIn("task_agent/task-agent.example.yaml", names)
         self.assertIn("task_agent/pyproject.toml", names)
-        self.assertNotIn("agent/validation_debug.py", names)
+        self.assertNotIn("deephole_client/validation_debug.py", names)
 
     def test_agent_download_zip_includes_launchers_config_and_bundled_ctags(self) -> None:
         data = agent_api._build_agent_zip("http://server.example", "owner-token")
@@ -56,17 +55,18 @@ class AgentRuntimePackageTests(unittest.TestCase):
         self.assertIn("attack-method-reference-catalog.md", names)
         self.assertTrue(any(name.startswith("checkers/") for name in names))
         self.assertIn("ctags-p6.2.20260517.0-x64/ctags.exe", names)
-        self.assertIn("agent/product_validators/demo/validator.yaml", names)
-        self.assertIn("agent/product_validators/demo/validator.py", names)
+        self.assertIn("deephole_client/vulnerability_validation/product_validators/demo/validator.yaml", names)
+        self.assertIn("deephole_client/vulnerability_validation/product_validators/demo/validator.py", names)
         self.assertIn("task_agent/standalone.py", names)
         self.assertIn("task_agent/task-agent.example.yaml", names)
         self.assertIn("task_agent/pyproject.toml", names)
-        self.assertNotIn("agent/validation_debug.py", names)
+        self.assertNotIn("deephole_client/validation_debug.py", names)
         self.assertIn('server_url: "http://server.example"', agent_yaml)
         self.assertIn('owner_token: "owner-token"', agent_yaml)
         parsed = yaml.safe_load(agent_yaml)
         self.assertEqual(parsed["schema_version"], 2)
-        self.assertEqual(parsed["model_pool"]["models"], [])
+        self.assertTrue(parsed["model_pool"]["models"])
+        self.assertTrue(all(model.get("model") for model in parsed["model_pool"]["models"]))
         self.assertNotIn("llm_api", parsed)
 
     def test_launchers_do_not_auto_install_ctags_system_packages(self) -> None:
@@ -110,7 +110,7 @@ class AgentRuntimePackageTests(unittest.TestCase):
         self.assertNotIn("PYTHON_CMD=py -3", batch_text)
         self.assertIn("[ERROR] Python was not found", batch_text)
         self.assertIn("%PYTHON_CMD% -m pip install -r requirements-agent.txt", batch_text)
-        self.assertIn("%PYTHON_CMD% -m agent.main %*", batch_text)
+        self.assertIn("%PYTHON_CMD% -m deephole_client.main %*", batch_text)
 
     def test_runtime_hash_matches_archive_contents(self) -> None:
         data = agent_api._build_agent_runtime_zip()
@@ -121,7 +121,7 @@ class AgentRuntimePackageTests(unittest.TestCase):
             self.assertEqual(compute_runtime_hash(root), agent_api._agent_runtime_hash())
 
     def test_runtime_hash_scope_includes_top_level_task_agent(self) -> None:
-        expected_dirs = ["agent", "task_agent", "code_parser", "mcp_server", "backend"]
+        expected_dirs = ["deephole_client", "task_agent", "code_parser", "mcp_server", "backend"]
         self.assertEqual(updater.runtime_hash_scope()["version"], 3)
         self.assertEqual(updater.runtime_hash_scope()["dirs"], expected_dirs)
         self.assertEqual(agent_api._agent_runtime_hash_scope(), updater.runtime_hash_scope())
@@ -142,8 +142,8 @@ class AgentRuntimePackageTests(unittest.TestCase):
     def test_runtime_hash_ignores_checker_changes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            (root / "agent").mkdir()
-            (root / "agent" / "main.py").write_text("print('agent')\n", encoding="utf-8")
+            (root / "deephole_client").mkdir()
+            (root / "deephole_client" / "main.py").write_text("print('agent')\n", encoding="utf-8")
             checker_dir = root / "checkers" / "demo"
             checker_dir.mkdir(parents=True)
             (checker_dir / "checker.yaml").write_text("name: demo\n", encoding="utf-8")
@@ -159,8 +159,8 @@ class AgentRuntimePackageTests(unittest.TestCase):
     def test_runtime_hash_ignores_system_skill_changes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            (root / "agent").mkdir()
-            (root / "agent" / "main.py").write_text("print('agent')\n", encoding="utf-8")
+            (root / "deephole_client").mkdir()
+            (root / "deephole_client" / "main.py").write_text("print('agent')\n", encoding="utf-8")
             skill_dir = root / "backend" / "system_skills" / "deephole-skill-creator"
             skill_dir.mkdir(parents=True)
             (skill_dir / "SKILL.md").write_text(
@@ -176,26 +176,26 @@ class AgentRuntimePackageTests(unittest.TestCase):
 
             self.assertEqual(before, compute_runtime_hash(root))
 
-    def test_runtime_hash_ignores_local_validation_script_changes(self) -> None:
+    def test_runtime_hash_includes_validation_process_changes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            (root / "agent").mkdir()
-            (root / "agent" / "main.py").write_text("print('agent')\n", encoding="utf-8")
-            validator_dir = root / "agent" / "vulnerability_validation"
+            (root / "deephole_client").mkdir()
+            (root / "deephole_client" / "main.py").write_text("print('agent')\n", encoding="utf-8")
+            validator_dir = root / "deephole_client" / "vulnerability_validation"
             validator_dir.mkdir()
             (validator_dir / "validator.py").write_text("print('v1')\n", encoding="utf-8")
 
             before = compute_runtime_hash(root)
             (validator_dir / "validator.py").write_text("print('v2')\n", encoding="utf-8")
 
-            self.assertEqual(before, compute_runtime_hash(root))
+            self.assertNotEqual(before, compute_runtime_hash(root))
 
     def test_runtime_hash_includes_product_validator_changes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            (root / "agent" / "product_validators").mkdir(parents=True)
-            (root / "agent" / "main.py").write_text("print('agent')\n", encoding="utf-8")
-            validator = root / "agent" / "product_validators" / "demo" / "__init__.py"
+            (root / "deephole_client" / "vulnerability_validation" / "product_validators").mkdir(parents=True)
+            (root / "deephole_client" / "main.py").write_text("print('agent')\n", encoding="utf-8")
+            validator = root / "deephole_client" / "vulnerability_validation" / "product_validators" / "demo" / "__init__.py"
             validator.parent.mkdir()
             validator.write_text("print('v1')\n", encoding="utf-8")
 
@@ -206,47 +206,47 @@ class AgentRuntimePackageTests(unittest.TestCase):
 
     def test_runtime_download_serves_payload_snapshot(self) -> None:
         agent_api._runtime_download_tokens.clear()
-        snapshot_files = [("agent/main.py", b"snapshot")]
+        snapshot_files = [("deephole_client/main.py", b"snapshot")]
 
         with patch("backend.api.agent._read_agent_runtime_files", return_value=snapshot_files):
             payload = agent_api.create_agent_runtime_update_payload("http://server.example")
 
         self.assertEqual(payload["manifest"]["runtime_hash"], payload["hash"])
         self.assertEqual(payload["manifest"]["hash_scope"], payload["hash_scope"])
-        self.assertEqual(payload["manifest"]["files"][0]["path"], "agent/main.py")
+        self.assertEqual(payload["manifest"]["files"][0]["path"], "deephole_client/main.py")
         request = _FakeRequest(payload["token"])
         response = asyncio.run(agent_api.agent_runtime_download(request))
 
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             with zipfile.ZipFile(_bytes_path(response.body)) as zf:
-                self.assertEqual(zf.read("agent/main.py"), b"snapshot")
+                self.assertEqual(zf.read("deephole_client/main.py"), b"snapshot")
                 zf.extractall(root)
             self.assertEqual(compute_runtime_hash(root), payload["hash"])
         self.assertEqual(agent_api._runtime_download_tokens, {})
 
     def test_runtime_install_accepts_manifest_verified_scope_mismatch(self) -> None:
-        files = [("agent/main.py", b"print('server snapshot')\n")]
+        files = [("deephole_client/main.py", b"print('server snapshot')\n")]
         archive = agent_api._build_agent_runtime_zip_from_files(files)
         expected_hash = agent_api._agent_runtime_hash_for_files(files)
         manifest = _runtime_manifest(files, scope={"version": 1, "dirs": ["agent", "checkers"]})
 
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            with patch("agent.updater.runtime_root", return_value=root):
+            with patch("deephole_client.updater.runtime_root", return_value=root):
                 updater._install_update_archive(archive, expected_hash, manifest)
 
             self.assertEqual(
-                (root / "agent" / "main.py").read_text(encoding="utf-8"),
+                (root / "deephole_client" / "main.py").read_text(encoding="utf-8"),
                 "print('server snapshot')\n",
             )
 
-    def test_runtime_install_replaces_product_validators_but_preserves_local_validation_dir(self) -> None:
+    def test_runtime_install_replaces_the_complete_client_process_tree(self) -> None:
         files = [
-            ("agent/main.py", b"print('server snapshot')\n"),
-            ("agent/product_validators/demo/validator.py", b"async def validate(**kwargs):\n    pass\n"),
-            ("agent/product_validators/demo/validator.yaml", b"schema_version: 1\nproduct: LTE\nvalidation_environment: lab\n"),
-            ("agent/server.py", b"# server\n"),
+            ("deephole_client/main.py", b"print('server snapshot')\n"),
+            ("deephole_client/server.py", b"# server\n"),
+            ("deephole_client/vulnerability_validation/product_validators/demo/validator.py", b"async def validate(**kwargs):\n    pass\n"),
+            ("deephole_client/vulnerability_validation/product_validators/demo/validator.yaml", b"schema_version: 1\nproduct: LTE\nvalidation_environment: lab\n"),
             ("task_agent/api.py", b"async def run_opencode_task(**kwargs):\n    pass\n"),
             ("backend/api.py", b"# api\n"),
             ("requirements-agent.txt", b"requests\n"),
@@ -257,25 +257,25 @@ class AgentRuntimePackageTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            (root / "agent" / "product_validators" / "custom").mkdir(parents=True)
-            (root / "agent" / "product_validators" / "custom" / "validator.py").write_text(
+            (root / "deephole_client" / "vulnerability_validation" / "product_validators" / "custom").mkdir(parents=True)
+            (root / "deephole_client" / "vulnerability_validation" / "product_validators" / "custom" / "validator.py").write_text(
                 "async def validate(**kwargs):\n    pass\n",
                 encoding="utf-8",
             )
-            (root / "agent" / "vulnerability_validation").mkdir(parents=True)
-            (root / "agent" / "vulnerability_validation" / "validator.py").write_text(
+            (root / "deephole_client" / "vulnerability_validation").mkdir(parents=True, exist_ok=True)
+            (root / "deephole_client" / "vulnerability_validation" / "local_validator.py").write_text(
                 "print('local validator')\n",
                 encoding="utf-8",
             )
-            (root / "agent" / "main.py").write_text("print('old')\n", encoding="utf-8")
-            (root / "agent" / "stale.py").write_text("# stale\n", encoding="utf-8")
-            (root / "agent" / "opencode").mkdir()
-            (root / "agent" / "opencode" / "api.py").write_text(
+            (root / "deephole_client" / "main.py").write_text("print('old')\n", encoding="utf-8")
+            (root / "deephole_client" / "stale.py").write_text("# stale\n", encoding="utf-8")
+            (root / "deephole_client" / "opencode").mkdir()
+            (root / "deephole_client" / "opencode" / "api.py").write_text(
                 "# stale component package\n",
                 encoding="utf-8",
             )
-            (root / "agent" / "task_agent").mkdir()
-            (root / "agent" / "task_agent" / "api.py").write_text(
+            (root / "deephole_client" / "task_agent").mkdir()
+            (root / "deephole_client" / "task_agent" / "api.py").write_text(
                 "# stale task agent package\n",
                 encoding="utf-8",
             )
@@ -288,37 +288,34 @@ class AgentRuntimePackageTests(unittest.TestCase):
             )
             (root / "requirements-agent.txt").write_text("old\n", encoding="utf-8")
 
-            with patch("agent.updater.runtime_root", return_value=root):
+            with patch("deephole_client.updater.runtime_root", return_value=root):
                 updater._install_update_archive(archive, expected_hash, manifest)
 
-            self.assertFalse((root / "agent" / "product_validators" / "custom").exists())
-            self.assertTrue((root / "agent" / "product_validators" / "demo" / "validator.yaml").is_file())
-            self.assertEqual(
-                (root / "agent" / "vulnerability_validation" / "validator.py").read_text(encoding="utf-8"),
-                "print('local validator')\n",
-            )
-            self.assertFalse((root / "agent" / "stale.py").exists())
-            self.assertFalse((root / "agent" / "opencode").exists())
-            self.assertFalse((root / "agent" / "task_agent").exists())
+            self.assertFalse((root / "deephole_client" / "vulnerability_validation" / "product_validators" / "custom").exists())
+            self.assertTrue((root / "deephole_client" / "vulnerability_validation" / "product_validators" / "demo" / "validator.yaml").is_file())
+            self.assertFalse((root / "deephole_client" / "vulnerability_validation" / "local_validator.py").exists())
+            self.assertFalse((root / "deephole_client" / "stale.py").exists())
+            self.assertFalse((root / "deephole_client" / "opencode").exists())
+            self.assertFalse((root / "deephole_client" / "task_agent").exists())
             self.assertFalse((root / "backend" / "old.py").exists())
             self.assertFalse((root / "backend" / "opencode").exists())
             self.assertTrue((root / "task_agent" / "api.py").is_file())
             self.assertEqual(
-                (root / "agent" / "main.py").read_text(encoding="utf-8"),
+                (root / "deephole_client" / "main.py").read_text(encoding="utf-8"),
                 "print('server snapshot')\n",
             )
             self.assertEqual(compute_runtime_hash(root), expected_hash)
 
     def test_runtime_install_rejects_manifest_missing_file(self) -> None:
         manifest_files = [
-            ("agent/main.py", b"print('server snapshot')\n"),
+            ("deephole_client/main.py", b"print('server snapshot')\n"),
             ("backend/api.py", b"# backend\n"),
         ]
         archive_files = [manifest_files[0]]
 
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            with patch("agent.updater.runtime_root", return_value=root):
+            with patch("deephole_client.updater.runtime_root", return_value=root):
                 with self.assertRaisesRegex(RuntimeError, "manifest mismatch"):
                     updater._install_update_archive(
                         agent_api._build_agent_runtime_zip_from_files(archive_files),
@@ -327,7 +324,7 @@ class AgentRuntimePackageTests(unittest.TestCase):
                     )
 
     def test_runtime_install_rejects_manifest_extra_file(self) -> None:
-        manifest_files = [("agent/main.py", b"print('server snapshot')\n")]
+        manifest_files = [("deephole_client/main.py", b"print('server snapshot')\n")]
         archive_files = [
             *manifest_files,
             ("backend/api.py", b"# backend\n"),
@@ -335,7 +332,7 @@ class AgentRuntimePackageTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            with patch("agent.updater.runtime_root", return_value=root):
+            with patch("deephole_client.updater.runtime_root", return_value=root):
                 with self.assertRaisesRegex(RuntimeError, "manifest mismatch"):
                     updater._install_update_archive(
                         agent_api._build_agent_runtime_zip_from_files(archive_files),
@@ -344,12 +341,12 @@ class AgentRuntimePackageTests(unittest.TestCase):
                     )
 
     def test_runtime_install_rejects_manifest_file_hash_mismatch(self) -> None:
-        manifest_files = [("agent/main.py", b"print('server snapshot')\n")]
-        archive_files = [("agent/main.py", b"print('tampered')\n")]
+        manifest_files = [("deephole_client/main.py", b"print('server snapshot')\n")]
+        archive_files = [("deephole_client/main.py", b"print('tampered')\n")]
 
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            with patch("agent.updater.runtime_root", return_value=root):
+            with patch("deephole_client.updater.runtime_root", return_value=root):
                 with self.assertRaisesRegex(RuntimeError, "manifest hash mismatch"):
                     updater._install_update_archive(
                         agent_api._build_agent_runtime_zip_from_files(archive_files),
@@ -358,11 +355,11 @@ class AgentRuntimePackageTests(unittest.TestCase):
                     )
 
     def test_runtime_install_without_manifest_keeps_strict_hash_check(self) -> None:
-        files = [("agent/main.py", b"print('server snapshot')\n")]
+        files = [("deephole_client/main.py", b"print('server snapshot')\n")]
 
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            with patch("agent.updater.runtime_root", return_value=root):
+            with patch("deephole_client.updater.runtime_root", return_value=root):
                 with self.assertRaisesRegex(RuntimeError, "content hash mismatch"):
                     updater._install_update_archive(
                         agent_api._build_agent_runtime_zip_from_files(files),
@@ -420,8 +417,8 @@ class AgentRuntimePackageTests(unittest.TestCase):
         handler = AsyncMock(return_value={"ok": True})
 
         with (
-            patch("agent.updater.ensure_runtime_updated", new=update),
-            patch("agent.server.handle_skill_create", new=handler),
+            patch("deephole_client.updater.ensure_runtime_updated", new=update),
+            patch("deephole_client.server.handle_skill_create", new=handler),
         ):
             result = asyncio.run(agent_main._handle_command(
                 {
@@ -451,8 +448,8 @@ class AgentRuntimePackageTests(unittest.TestCase):
         handler = AsyncMock()
 
         with (
-            patch("agent.updater.ensure_runtime_updated", new=update),
-            patch("agent.server.handle_fp_review", new=handler),
+            patch("deephole_client.updater.ensure_runtime_updated", new=update),
+            patch("deephole_client.server.handle_fp_review", new=handler),
         ):
             asyncio.run(agent_main._handle_command(
                 {
@@ -504,8 +501,8 @@ class AgentRuntimePackageTests(unittest.TestCase):
             "agent_runtime_update": {"hash": "new-runtime"},
         }
         with (
-            patch("agent.updater.ensure_runtime_updated", new=check_update),
-            patch("agent.server.handle_resume", new=handle_resume),
+            patch("deephole_client.updater.ensure_runtime_updated", new=check_update),
+            patch("deephole_client.server.handle_resume", new=handle_resume),
         ):
             asyncio.run(agent_main._handle_command(command, None, None, None))
 
@@ -538,12 +535,12 @@ class AgentRuntimePackageTests(unittest.TestCase):
             pending_file = Path(tmp) / "pending_commands.json"
             with (
                 patch.object(updater, "PENDING_COMMANDS_FILE", pending_file),
-                patch("agent.updater.compute_runtime_hash", return_value="old-runtime"),
-                patch("agent.updater._download_update", new=download),
-                patch("agent.updater.save_pending_command", side_effect=save_pending),
-                patch("agent.updater._install_update_archive", side_effect=lambda *_args: calls.append("install")),
-                patch("agent.updater._install_requirements_if_needed", side_effect=lambda: calls.append("requirements")),
-                patch("agent.updater._restart_process", side_effect=lambda: calls.append("restart")),
+                patch("deephole_client.updater.compute_runtime_hash", return_value="old-runtime"),
+                patch("deephole_client.updater._download_update", new=download),
+                patch("deephole_client.updater.save_pending_command", side_effect=save_pending),
+                patch("deephole_client.updater._install_update_archive", side_effect=lambda *_args: calls.append("install")),
+                patch("deephole_client.updater._install_requirements_if_needed", side_effect=lambda: calls.append("requirements")),
+                patch("deephole_client.updater._restart_process", side_effect=lambda: calls.append("restart")),
             ):
                 updated = asyncio.run(
                     updater.ensure_runtime_updated(
@@ -564,8 +561,8 @@ class AgentRuntimePackageTests(unittest.TestCase):
         handler = AsyncMock()
 
         with (
-            patch("agent.updater.ensure_runtime_updated", new=update),
-            patch("agent.server.handle_vulnerability_validation", new=handler),
+            patch("deephole_client.updater.ensure_runtime_updated", new=update),
+            patch("deephole_client.server.handle_vulnerability_validation", new=handler),
         ):
             asyncio.run(agent_main._handle_command(
                 {
@@ -594,8 +591,8 @@ class AgentRuntimePackageTests(unittest.TestCase):
         reporter = AsyncMock()
 
         with (
-            patch("agent.updater.ensure_runtime_updated", new=update),
-            patch("agent.server.handle_vulnerability_validation", new=handler),
+            patch("deephole_client.updater.ensure_runtime_updated", new=update),
+            patch("deephole_client.server.handle_vulnerability_validation", new=handler),
         ):
             asyncio.run(agent_main._handle_command(
                 {

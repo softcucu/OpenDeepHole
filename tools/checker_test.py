@@ -24,7 +24,7 @@ from backend.analyzers.base import BaseAnalyzer
 from backend.models import Candidate, Vulnerability
 from backend.registry import CHECKERS_DIR, CHECKERS_DIR_ENV, CheckerEntry, refresh_registry
 from code_parser import CodeDatabase, CppAnalyzer
-from agent.scanner import build_project_level_candidate, is_project_level_candidate
+from deephole_client.scanner import build_project_level_candidate, is_project_level_candidate
 
 
 _SKIP_DIRS = {"__pycache__", ".git", ".mypy_cache", ".pytest_cache"}
@@ -376,10 +376,10 @@ async def _run_audits(
     original_config_path = os.environ.get("CONFIG_PATH")
     _configure_backend_from_agent_config(config_path, project_path)
 
-    from agent import mcp_registry
-    from agent.local_mcp import LocalMCPServer
-    from agent.opencode_integration import get_global_opencode_workspace
-    from agent.opencode_workflows import run_audit, run_project_audit, run_sensitive_clear_audit
+    from deephole_client import mcp_registry
+    from deephole_client.local_mcp import LocalMCPServer
+    from deephole_client.opencode_integration import get_global_opencode_workspace
+    from deephole_client.opencode_workflows import run_audit, run_project_audit, run_sensitive_clear_audit
     from task_agent.task_service import (
         reset_opencode_execution_context,
         set_opencode_execution_context,
@@ -462,7 +462,7 @@ def _agent_project_dir_for_index(index_db: Path) -> Path:
 
 
 def _configure_backend_from_agent_config(config_path: Path, project_path: Path) -> None:
-    from agent.config import load_config
+    from deephole_client.config import load_config
 
     agent_cfg = load_config(config_path if config_path.is_file() else None)
     config_dir = Path(tempfile.mkdtemp(prefix="opendeephole-checker-audit-"))

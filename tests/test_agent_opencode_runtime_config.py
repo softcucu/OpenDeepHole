@@ -11,11 +11,11 @@ import pytest
 from fastapi import HTTPException
 from fastapi.responses import Response
 
-from agent import main as agent_main
-from agent import server as agent_server
+from deephole_client import main as agent_main
+from deephole_client import server as agent_server
 from backend.api import agent as agent_api
 from backend.models import AgentInfo, AgentRemoteConfig, User
-import agent.opencode_integration as opencode_config
+import deephole_client.opencode_integration as opencode_config
 from task_agent import serve_client
 from backend.store.sqlite import SqliteScanStore
 

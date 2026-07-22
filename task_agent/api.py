@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from os import PathLike
 from typing import Any, Callable, Literal
 
@@ -21,20 +21,14 @@ _SUPPORTED_TASK_TYPES = frozenset({
     "memory_api_discovery",
     "skill_create",
 })
+_UNSET = object()
 
 
-def _standalone_output_prefix(task_type: str) -> str:
-    stage = "validation" if task_type == "vulnerability_validation" else task_type
-    return f"[{stage}/opencode]"
-
-
-def _standalone_console_output(task_type: str) -> Callable[[str], None]:
-    prefix = _standalone_output_prefix(task_type)
-
+def _standalone_console_output() -> Callable[[str], None]:
     def emit(line: str) -> None:
         text = str(line or "")
         if text:
-            print(f"{prefix} {text}", flush=True)
+            print(text, flush=True)
 
     return emit
 
@@ -46,6 +40,7 @@ class OpenCodeResult:
     text: str
     structured: Any
     model: str
+    output_source: dict[str, Any] = field(default_factory=dict)
 
 
 async def run_opencode_task(
@@ -58,6 +53,8 @@ async def run_opencode_task(
     invalid_json_retry_count: int = 2,
     session_id: str | None = None,
     config_path: str | PathLike[str] | None = None,
+    output: Callable[[str], Any] | None | object = _UNSET,
+    cancel_event: Any = _UNSET,
 ) -> OpenCodeResult:
     """Run one OpenCode task using host-bound or standalone file configuration."""
     normalized_name = str(task_name or "").strip()
@@ -77,6 +74,8 @@ async def run_opencode_task(
     retry_count = int(invalid_json_retry_count)
     if retry_count < 0:
         raise ValueError("OpenCode invalid_json_retry_count cannot be negative")
+    if output is not _UNSET and output is not None and not callable(output):
+        raise TypeError("OpenCode output must be callable or None")
 
     from .standalone import ensure_opencode_configuration
     from .task_service import _run_component_task, bind_opencode_execution_context
@@ -94,12 +93,26 @@ async def run_opencode_task(
             session_id=str(session_id or "").strip() or None,
         )
 
+    async def run_with_overrides() -> OpenCodeResult:
+        overrides: dict[str, Any] = {}
+        if output is not _UNSET:
+            overrides["on_output"] = output
+        if cancel_event is not _UNSET:
+            overrides["cancel_event"] = cancel_event
+        if not overrides:
+            return await run()
+        with bind_opencode_execution_context(**overrides):
+            return await run()
+
     if standalone is None:
-        return await run()
+        return await run_with_overrides()
+    standalone_output = _standalone_console_output() if output is _UNSET else output
+    standalone_cancel_event = None if cancel_event is _UNSET else cancel_event
     with bind_opencode_execution_context(
         project_dir=standalone.project_dir,
         work_dir=standalone.work_dir,
         task_metadata={"standalone_console": True},
-        on_output=_standalone_console_output(normalized_task_type),
+        on_output=standalone_output,
+        cancel_event=standalone_cancel_event,
     ):
         return await run()

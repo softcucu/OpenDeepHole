@@ -1,6 +1,35 @@
 from datetime import datetime, timezone
 
-from task_agent.output_format import with_local_timestamp
+from task_agent.output_format import (
+    format_task_output,
+    is_task_output_line,
+    task_output_stage,
+    with_local_timestamp,
+)
+
+
+def test_task_output_header_uses_stage_session_and_three_categories() -> None:
+    assert task_output_stage("vulnerability_validation") == "validation"
+    assert task_output_stage("audit") == "audit"
+    assert format_task_output("validation", "", "task", "QUEUED\nnow") == (
+        "[validation][pending][task] QUEUED now"
+    )
+    assert format_task_output("audit", "ses-1", "session", "START") == (
+        "[audit][ses-1][session] START"
+    )
+    assert format_task_output("scan", "ses-2", "step", "TOOL START") == (
+        "[scan][ses-2][step] TOOL START"
+    )
+
+
+def test_existing_task_output_header_is_not_wrapped_by_host_prefix() -> None:
+    now = datetime(2026, 7, 10, 12, 34, 56, tzinfo=timezone.utc)
+    line = "[validation][ses-1][step] TOOL START name=read"
+
+    formatted = with_local_timestamp(line, prefix="[model=test]", now=now)
+
+    assert formatted == f"[2026-07-10 12:34:56] {line}"
+    assert is_task_output_line(line) is True
 
 
 def test_with_local_timestamp_prefixes_every_line_and_is_idempotent() -> None:

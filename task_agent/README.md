@@ -18,6 +18,8 @@ result = await run_opencode_task(
     invalid_json_retry_count=2,
     session_id=None,
     config_path=None,
+    output=None,
+    cancel_event=None,
 )
 ```
 
@@ -33,6 +35,10 @@ result = await run_opencode_task(
 | `invalid_json_retry_count` | `int` | `2` | 首次结果不符合 `output_schema` 时，在同一会话中要求模型修正 JSON 的最大次数，必须大于或等于 `0`。该参数不控制新会话重试次数。 |
 | `session_id` | `str` 或 `None` | `None` | 传入已有 Serve 会话 ID 以续接会话；省略、传入 `None` 或空字符串时创建新会话。同一组件生命周期内，续接会话不能切换项目目录或可写工作目录。 |
 | `config_path` | `str`、`PathLike[str]` 或 `None` | `None` | 独立运行时使用的 YAML 配置文件路径。未传入时依次读取 `TASK_AGENT_CONFIG` 和当前目录下的 `task-agent.yaml`。宿主配置已注册时不能再传入此参数。 |
+| `output` | callable 或 `None` | 使用当前执行上下文 | 可选的本次调用输出覆盖；传 `None` 可关闭 Task Agent 控制台流。 |
+| `cancel_event` | 提供 `is_set()` 的对象 | 使用当前执行上下文 | 可选的本次调用取消信号覆盖。 |
+
+返回的 `OpenCodeResult` 包含 `session_id`、`status`、`text`、`structured`、`model` 和可直接 JSON 序列化的 `output_source`。
 
 `task_type` 是文档约定的字符串，而不是导出的枚举。支持的值包括 `audit`、`project_audit`、`sensitive_clear`、`report_audit`、`threat_analysis`、`threat_audit`、`fp_review`、`vulnerability_validation`、`git_history`、`variant_hunt`、`memory_api_discovery` 和 `skill_create`；未知值会在提交前被拒绝。
 
@@ -40,10 +46,12 @@ result = await run_opencode_task(
 
 未注册宿主时，同一函数会从组件自有的 YAML 文件完成初始化。可以传入 `config_path=...`、设置 `TASK_AGENT_CONFIG`，或将 `task-agent.yaml` 放在当前目录中。请复制 `task-agent.example.yaml` 作为起点。在单例的整个生命周期内，该配置会固定项目、可写工作目录、组件工作区、Serve 进程设置和显式模型池。只有执行 `await shutdown_opencode()` 后才能选择其他配置。
 
+一次 `run_opencode_task()` 返回后不会立即关闭 Serve；只要 Python 宿主进程仍在运行，后续任务就会继续复用这个单例。调用 `await shutdown_opencode()` 会立即终止组件启动的 Serve 进程树。若调用方未显式 shutdown，组件也会在解释器正常退出以及收到 `SIGINT`（Ctrl-C）或 `SIGTERM` 时自动清理，并把信号继续交给宿主原有处理逻辑。`SIGKILL` 和 `os._exit()` 无法执行 Python 清理；这类异常退出由下次启动时的归属标记恢复逻辑处理。
+
 OpenCode 的原生配置放在 `serve.opencode_config` 下，其中 MCP 配置使用 `serve.opencode_config.mcp`。示例文件同时给出了 `type: remote` 的 HTTP MCP 和 `type: local` 的进程 MCP；两项默认关闭，配置好 URL、请求头或启动命令后再将对应的 `enabled` 改为 `true`。MCP 的 `timeout` 单位为毫秒。
 
-独立运行时，组件默认将任务排队、模型选择、Serve 启动或复用、Session 状态、工具数量、step、reasoning、文本、JSON 修正和最终状态实时打印到终端并立即刷新。`vulnerability_validation` 使用 `[validation/opencode]` 前缀，其它任务使用 `[<task_type>/opencode]`；宿主模式仍只使用宿主绑定的输出回调，不会额外重复打印。
+独立运行时，组件按 `[<stage>][<session_id>][task|session|step]` 打印结构化进度并立即刷新。`vulnerability_validation` 的 stage 固定为 `validation`，其它任务使用原始 `task_type`；Session 创建前使用 `pending`。`task` 记录排队、模型选择、Serve 和最终状态，`session` 明确标记当前消息执行的 `START`/`STOP`、重试及错误，`step` 记录工具、SKILL 和模型 step。模型 text、reasoning 及工具返回正文不写入控制台，但最终 text 仍正常返回并参与 JSON 解析。一次消息执行结束只打印 `STOP ... retained=true`，不会删除可续写的 Session。宿主模式仍只使用宿主绑定的输出回调，不会额外重复打印。
 
 `serve.timeout` 是一次模型请求的总超时。模型 Provider 无法连接时，OpenCode 自身的 `busy`、`retry` 和 `error` 会出现在上述实时输出中；达到总超时或调用被取消后，组件会 abort 当前 Session 请求并回收请求与事件任务。若模型服务需要代理，请在 `serve.environment` 中同时配置实际环境要求的大小写代理变量和 `NO_PROXY`/`no_proxy`，不要依赖另一个应用进程已经加载的环境。
 
-此目录不会从 OpenDeepHole 的 `agent`、`backend`、`mcp_server` 或 `code_parser` 包中导入任何内容。如需提取给其它平台，请复制整个目录并将其放到平台的 Python 导入根目录，或直接安装该目录；依赖会由包元数据安装。随后提供 `task-agent.yaml`，并让所有调用点继续使用上文所示的公开导入方式。已有自身配置系统的应用也可以改为注册 `OpenCodeHostBindings`；宿主绑定的优先级始终高于独立配置文件发现机制。
+此目录不会从 OpenDeepHole 的 `deephole_client`、`backend`、`mcp_server` 或 `code_parser` 包中导入任何内容。如需提取给其它平台，请复制整个目录并将其放到平台的 Python 导入根目录，或直接安装该目录；依赖会由包元数据安装。随后提供 `task-agent.yaml`，并让所有调用点继续使用上文所示的公开导入方式。已有自身配置系统的应用也可以改为注册 `OpenCodeHostBindings`；宿主绑定的优先级始终高于独立配置文件发现机制。

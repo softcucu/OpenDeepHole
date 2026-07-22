@@ -9173,7 +9173,7 @@
                                             "session.last",
                                             "prompt.clear",
                                             "prompt.submit",
-                                            "agent.cycle"
+                                            "deephole_client.cycle"
                                         ]
                                     },
                                     {
@@ -14319,7 +14319,7 @@
                                             "session.last",
                                             "prompt.clear",
                                             "prompt.submit",
-                                            "agent.cycle"
+                                            "deephole_client.cycle"
                                         ]
                                     },
                                     {

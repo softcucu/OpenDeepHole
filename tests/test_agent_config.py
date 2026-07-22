@@ -5,7 +5,7 @@ from unittest.mock import patch
 
 import yaml
 
-from agent.config import (
+from deephole_client.config import (
     AgentConfig,
     apply_network_env,
     apply_remote_config,
@@ -508,7 +508,7 @@ class AgentConfigTests(unittest.TestCase):
 
     def test_managed_config_accepts_bearer_authorization_header(self) -> None:
         from backend.api.agent import _validate_managed_config
-        from agent.opencode_integration import managed_mcp_config_fingerprint
+        from deephole_client.opencode_integration import managed_mcp_config_fingerprint
 
         config = AgentRemoteConfig()
         config.product_info.enabled = True

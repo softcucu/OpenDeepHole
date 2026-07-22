@@ -5,8 +5,8 @@ from pathlib import Path
 
 import yaml
 
-from agent.config import AgentConfig
-from agent.scanner import _configure_backend
+from deephole_client.config import AgentConfig
+from deephole_client.scanner import _configure_backend
 
 
 class AgentResultPathTests(unittest.TestCase):

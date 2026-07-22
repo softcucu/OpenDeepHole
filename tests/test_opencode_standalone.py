@@ -344,16 +344,16 @@ def test_public_task_bootstraps_standalone_context_and_reuses_session(
 
 
 @pytest.mark.parametrize(
-    ("task_type", "prefix"),
+    ("task_type", "stage"),
     [
-        ("vulnerability_validation", "[validation/opencode]"),
-        ("audit", "[audit/opencode]"),
+        ("vulnerability_validation", "validation"),
+        ("audit", "audit"),
     ],
 )
 def test_standalone_public_task_prints_realtime_progress(
     tmp_path: Path,
     task_type: str,
-    prefix: str,
+    stage: str,
 ) -> None:
     from task_agent import serve_client, task_service
 
@@ -376,8 +376,7 @@ def test_standalone_public_task_prints_realtime_progress(
     async def run_prompt(_manager, **kwargs):
         assert kwargs["show_serve_status"] is True
         assert callable(kwargs["on_line"])
-        kwargs["on_line"]("[opencode serve] ready mode=started url=http://127.0.0.1:4096 pid=42")
-        kwargs["on_line"]("[opencode serve llm reasoning] checking")
+        assert kwargs["log_stage"] == stage
         callback = kwargs["on_session_id"]("ses-console")
         if hasattr(callback, "__await__"):
             await callback
@@ -425,17 +424,14 @@ def test_standalone_public_task_prints_realtime_progress(
             assert result.status == "success"
             assert acquire.await_args.kwargs["wait_when_unavailable"] is True
             lines = [str(call.args[0]) for call in console.call_args_list]
-            assert any(line.startswith(f"{prefix} [opencode task] queued") for line in lines)
-            assert any(line.startswith(f"{prefix} [opencode task] running") for line in lines)
-            assert (
-                f"{prefix} [opencode serve llm reasoning] checking"
-                in lines
-            )
+            assert any(line.startswith(f"[{stage}][pending][task] QUEUED") for line in lines)
+            assert any(line.startswith(f"[{stage}][pending][task] START") for line in lines)
             assert any(
-                line.startswith(f"{prefix} [opencode task] finished")
+                line.startswith(f"[{stage}][ses-console][task] FINISHED")
                 and "status=success" in line
                 for line in lines
             )
+            assert all("reasoning" not in line.lower() for line in lines)
             assert all(call.kwargs == {"flush": True} for call in console.call_args_list)
         finally:
             await opencode.shutdown_opencode()

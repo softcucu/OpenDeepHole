@@ -19,7 +19,7 @@ from typing import TYPE_CHECKING
 import tree_sitter_cpp
 from tree_sitter import Language, Parser
 
-from backend.analyzers.base import BaseAnalyzer, Candidate, scoped_functions
+from deephole_client.static_analysis.base import BaseAnalyzer, Candidate, scoped_functions
 from code_parser.code_utils import find_nodes_by_type
 
 if TYPE_CHECKING:

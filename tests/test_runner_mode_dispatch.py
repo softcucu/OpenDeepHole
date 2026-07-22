@@ -15,7 +15,7 @@ from task_agent.task_service import (
     bind_opencode_execution_context,
     get_opencode_execution_context,
 )
-from agent.opencode_workflows import (
+from deephole_client.opencode_workflows import (
     _DEFAULT_OPENCODE_NO_PROXY,
     _build_cli_command,
     _build_cli_env,
@@ -33,7 +33,7 @@ from agent.opencode_workflows import (
     run_threat_analysis_audit,
     run_threat_audit,
 )
-from agent.opencode_integration import managed_opencode_config_path
+from deephole_client.opencode_integration import managed_opencode_config_path
 
 
 def _write_managed_config(workspace: Path, payload: dict) -> None:
@@ -208,9 +208,9 @@ def test_threat_analysis_result_uses_project_root(tmp_path: Path) -> None:
             return _opencode_success()
 
         with (
-            patch("agent.opencode_workflows.get_config", return_value=cfg),
+            patch("deephole_client.opencode_workflows.get_config", return_value=cfg),
             patch(
-                "agent.opencode_workflows.run_opencode_task",
+                "deephole_client.opencode_workflows.run_opencode_task",
                 new=AsyncMock(side_effect=fake_run),
             ),
             bind_opencode_execution_context(
@@ -420,9 +420,9 @@ def test_attack_tree_threat_analysis_prioritizes_one_tree_pipeline(tmp_path: Pat
             return _opencode_success()
 
         with (
-            patch("agent.opencode_workflows.get_config", return_value=cfg),
+            patch("deephole_client.opencode_workflows.get_config", return_value=cfg),
             patch(
-                "agent.opencode_workflows.run_opencode_task",
+                "deephole_client.opencode_workflows.run_opencode_task",
                 new=AsyncMock(side_effect=fake_run),
             ),
             bind_opencode_execution_context(
@@ -497,8 +497,8 @@ def test_threat_audit_prompt_preserves_remote_path_context(tmp_path: Path) -> No
             return _opencode_success()
 
         with (
-            patch("agent.opencode_workflows.get_config", return_value=cfg),
-            patch("agent.opencode_workflows.run_opencode_task", new=AsyncMock(side_effect=fake_run)),
+            patch("deephole_client.opencode_workflows.get_config", return_value=cfg),
+            patch("deephole_client.opencode_workflows.run_opencode_task", new=AsyncMock(side_effect=fake_run)),
             bind_opencode_execution_context(
                 scan_id="scan-1",
                 project_dir=tmp_path / "project",
@@ -904,8 +904,8 @@ def test_terminate_process_tree_uses_taskkill_on_windows() -> None:
         return SimpleNamespace(returncode=0)
 
     with (
-        patch("agent.opencode_workflows.sys.platform", "win32"),
-        patch("agent.opencode_workflows.subprocess.run", side_effect=fake_run),
+        patch("deephole_client.opencode_workflows.sys.platform", "win32"),
+        patch("deephole_client.opencode_workflows.subprocess.run", side_effect=fake_run),
     ):
         _terminate_process_tree(proc, tool="opencode", reason="timeout")
 
@@ -918,9 +918,9 @@ def test_terminate_process_tree_falls_back_when_taskkill_fails() -> None:
     proc = _FakeProc()
 
     with (
-        patch("agent.opencode_workflows.sys.platform", "win32"),
+        patch("deephole_client.opencode_workflows.sys.platform", "win32"),
         patch(
-            "agent.opencode_workflows.subprocess.run",
+            "deephole_client.opencode_workflows.subprocess.run",
             return_value=SimpleNamespace(returncode=1),
         ),
     ):
@@ -934,9 +934,9 @@ def test_terminate_process_tree_uses_process_group_on_posix() -> None:
     proc = _FakeProc()
 
     with (
-        patch("agent.opencode_workflows.sys.platform", "linux"),
-        patch("agent.opencode_workflows.os.getpgid", return_value=999) as getpgid,
-        patch("agent.opencode_workflows.os.killpg") as killpg,
+        patch("deephole_client.opencode_workflows.sys.platform", "linux"),
+        patch("deephole_client.opencode_workflows.os.getpgid", return_value=999) as getpgid,
+        patch("deephole_client.opencode_workflows.os.killpg") as killpg,
     ):
         _terminate_process_tree(proc, tool="opencode", reason="timeout")
 
@@ -983,9 +983,9 @@ def test_run_audit_via_opencode_returns_failed_result_after_exhausted_errors(tmp
         )
 
         with (
-            patch("agent.opencode_workflows.get_config", return_value=cfg),
+            patch("deephole_client.opencode_workflows.get_config", return_value=cfg),
             patch(
-                "agent.opencode_workflows.run_opencode_task",
+                "deephole_client.opencode_workflows.run_opencode_task",
                 new=AsyncMock(return_value=OpenCodeResult(
                     session_id="ses-failed",
                     status="failure",
@@ -1035,8 +1035,8 @@ def test_run_audit_via_opencode_propagates_no_model_without_retry(tmp_path: Path
         ))
 
         with (
-            patch("agent.opencode_workflows.get_config", return_value=cfg),
-            patch("agent.opencode_workflows.run_opencode_task", new=invoke),
+            patch("deephole_client.opencode_workflows.get_config", return_value=cfg),
+            patch("deephole_client.opencode_workflows.run_opencode_task", new=invoke),
             bind_opencode_execution_context(
                 scan_id="scan-1",
                 project_dir=tmp_path,

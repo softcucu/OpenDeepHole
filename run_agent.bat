@@ -63,7 +63,7 @@ if errorlevel 1 (
 call :CHECK_SOURCE_INDEX_TOOLS
 if errorlevel 1 exit /b 1
 
-%PYTHON_CMD% -m agent.main %*
+%PYTHON_CMD% -m deephole_client.main %*
 exit /b %ERRORLEVEL%
 
 :PRINT_SOURCE_TOOL_HELP

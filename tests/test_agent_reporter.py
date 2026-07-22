@@ -6,7 +6,7 @@ from unittest.mock import patch
 
 import httpx
 
-from agent.reporter import Reporter
+from deephole_client.reporter import Reporter
 
 
 class AgentReporterTests(unittest.TestCase):

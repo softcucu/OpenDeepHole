@@ -4,7 +4,10 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from agent.vulnerability_validation import PRODUCT_VALIDATORS_DIR, discover_validator_manifests
+from deephole_client.vulnerability_validation.runtime import (
+    PRODUCT_VALIDATORS_DIR,
+    discover_validator_manifests,
+)
 from backend.logger import get_logger
 from backend.models import ValidationTarget
 

@@ -2,7 +2,7 @@ import asyncio
 import json
 from pathlib import Path
 
-from agent import memory_api_discovery as discovery
+from deephole_client import memory_api_discovery as discovery
 
 
 class FakeDb:

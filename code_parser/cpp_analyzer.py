@@ -22,7 +22,7 @@ from typing import Callable
 import tree_sitter_cpp
 from tree_sitter import Language, Node, Parser
 
-from backend.source_filter import iter_source_files
+from deephole_client.static_analysis.source_filter import iter_source_files
 
 from .code_database import CodeDatabase
 

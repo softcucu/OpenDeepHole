@@ -190,11 +190,11 @@ def test_checker_test_cli_audit_uses_existing_audit_path(tmp_path: Path, monkeyp
             ai_verdict="confirmed",
         )
 
-    monkeypatch.setattr("agent.local_mcp.LocalMCPServer", DummyMCPServer)
-    monkeypatch.setattr("agent.mcp_registry.register", lambda *args, **kwargs: None)
-    monkeypatch.setattr("agent.mcp_registry.unregister", lambda *args, **kwargs: None)
-    monkeypatch.setattr("agent.opencode_integration.get_global_opencode_workspace", lambda *args, **kwargs: project_dir)
-    monkeypatch.setattr("agent.opencode_workflows.run_audit", fake_run_audit)
+    monkeypatch.setattr("deephole_client.local_mcp.LocalMCPServer", DummyMCPServer)
+    monkeypatch.setattr("deephole_client.mcp_registry.register", lambda *args, **kwargs: None)
+    monkeypatch.setattr("deephole_client.mcp_registry.unregister", lambda *args, **kwargs: None)
+    monkeypatch.setattr("deephole_client.opencode_integration.get_global_opencode_workspace", lambda *args, **kwargs: project_dir)
+    monkeypatch.setattr("deephole_client.opencode_workflows.run_audit", fake_run_audit)
 
     rc = checker_test.main([
         "localcheck",
@@ -284,11 +284,11 @@ def test_checker_test_cli_project_audit_returns_multiple_results(tmp_path: Path,
             ),
         ]
 
-    monkeypatch.setattr("agent.local_mcp.LocalMCPServer", DummyMCPServer)
-    monkeypatch.setattr("agent.mcp_registry.register", lambda *args, **kwargs: None)
-    monkeypatch.setattr("agent.mcp_registry.unregister", lambda *args, **kwargs: None)
-    monkeypatch.setattr("agent.opencode_integration.get_global_opencode_workspace", lambda *args, **kwargs: project_dir)
-    monkeypatch.setattr("agent.opencode_workflows.run_project_audit", fake_run_project_audit)
+    monkeypatch.setattr("deephole_client.local_mcp.LocalMCPServer", DummyMCPServer)
+    monkeypatch.setattr("deephole_client.mcp_registry.register", lambda *args, **kwargs: None)
+    monkeypatch.setattr("deephole_client.mcp_registry.unregister", lambda *args, **kwargs: None)
+    monkeypatch.setattr("deephole_client.opencode_integration.get_global_opencode_workspace", lambda *args, **kwargs: project_dir)
+    monkeypatch.setattr("deephole_client.opencode_workflows.run_project_audit", fake_run_project_audit)
 
     rc = checker_test.main([
         "skillonly",

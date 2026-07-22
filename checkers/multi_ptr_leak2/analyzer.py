@@ -15,8 +15,8 @@ from typing import TYPE_CHECKING, Iterable, Iterator
 import tree_sitter_cpp
 from tree_sitter import Language, Node, Parser
 
-from backend.analyzers.base import BaseAnalyzer, Candidate, in_scope as _in_scope, scope_prefix as _scope_prefix
-from backend.source_filter import iter_source_files
+from deephole_client.static_analysis.base import BaseAnalyzer, Candidate, in_scope as _in_scope, scope_prefix as _scope_prefix
+from deephole_client.static_analysis.source_filter import iter_source_files
 
 if TYPE_CHECKING:
     from code_parser import CodeDatabase

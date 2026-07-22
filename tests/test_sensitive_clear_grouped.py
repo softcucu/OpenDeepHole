@@ -5,7 +5,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from backend.models import Candidate
-from agent.opencode_workflows import _sensitive_clear_prompt
+from deephole_client.opencode_workflows import _sensitive_clear_prompt
 from checkers.sensitive_clear.analyzer import Analyzer
 
 

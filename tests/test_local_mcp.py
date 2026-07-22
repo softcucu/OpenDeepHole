@@ -9,7 +9,7 @@ from code_parser import CodeDatabase
 from mcp import ClientSession
 from mcp.client.streamable_http import streamable_http_client
 
-from agent.local_mcp import LocalMCPServer, shutdown_local_mcp_gateway
+from deephole_client.local_mcp import LocalMCPServer, shutdown_local_mcp_gateway
 
 
 @pytest.fixture(autouse=True)
@@ -167,7 +167,7 @@ def test_streamable_http_survives_gateway_restart_across_event_loops(
 
 
 def test_wait_ready_fails_when_server_thread_exits(monkeypatch) -> None:
-    monkeypatch.setattr("agent.local_mcp._find_free_port", lambda: 43123)
+    monkeypatch.setattr("deephole_client.local_mcp._find_free_port", lambda: 43123)
     server = LocalMCPServer()
     server._thread = _FakeThread(alive=False)
     server._thread_error = ValueError("uvicorn failed")
@@ -181,21 +181,21 @@ def test_wait_ready_fails_when_server_thread_exits(monkeypatch) -> None:
 
 
 def test_wait_ready_times_out_explicitly(monkeypatch) -> None:
-    monkeypatch.setattr("agent.local_mcp._find_free_port", lambda: 43123)
+    monkeypatch.setattr("deephole_client.local_mcp._find_free_port", lambda: 43123)
     server = LocalMCPServer()
     server._thread = _FakeThread(alive=True)
     clock = {"now": 100.0}
 
-    monkeypatch.setattr("agent.local_mcp.time.monotonic", lambda: clock["now"])
+    monkeypatch.setattr("deephole_client.local_mcp.time.monotonic", lambda: clock["now"])
     monkeypatch.setattr(
-        "agent.local_mcp.time.sleep",
+        "deephole_client.local_mcp.time.sleep",
         lambda seconds: clock.__setitem__("now", clock["now"] + seconds),
     )
 
     def connection_failed(*_args, **_kwargs):
         raise OSError("not listening")
 
-    monkeypatch.setattr("agent.local_mcp.socket.create_connection", connection_failed)
+    monkeypatch.setattr("deephole_client.local_mcp.socket.create_connection", connection_failed)
 
     with pytest.raises(TimeoutError, match="Timed out after 0.2s") as excinfo:
         server._wait_ready(timeout=0.2)
@@ -205,7 +205,7 @@ def test_wait_ready_times_out_explicitly(monkeypatch) -> None:
 
 
 def test_start_cleans_up_after_readiness_failure(monkeypatch) -> None:
-    monkeypatch.setattr("agent.local_mcp._find_free_port", lambda: 43123)
+    monkeypatch.setattr("deephole_client.local_mcp._find_free_port", lambda: 43123)
     server = LocalMCPServer()
     stopped = []
 

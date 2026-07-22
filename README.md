@@ -159,7 +159,7 @@ OpenDeepHole Agent
 ```
 
 Agent 通过 WebSocket 保持长连接，等待服务器推送任务。
-启动后的 Agent 支持任务执行前自动更新运行时代码。服务端更新 `agent/`（包含 `agent/product_validators/`）、`backend/`、`code_parser/`、`mcp_server/`、包内 Windows ctags 目录或 `requirements-agent.txt` 后，旧 Agent 会在下次启动扫描、恢复扫描、去误报或漏洞验证任务前下载最新 runtime 并重启后继续执行；runtime 更新包会携带快照 manifest，用于校验下载 zip 的文件集合和逐文件 hash；`checkers/` 更新仍在创建或恢复扫描时按选中检查项同步，不单独触发 runtime 重启；如果更新了 `run_agent.sh` 或 `run_agent.bat`，需要重新下载 Agent 包。
+启动后的 Agent 支持任务执行前自动更新运行时代码。服务端更新 `deephole_client/`（包含 `deephole_client/vulnerability_validation/product_validators/`）、`backend/`、`code_parser/`、`mcp_server/`、包内 Windows ctags 目录或 `requirements-agent.txt` 后，旧 Agent 会在下次启动扫描、恢复扫描、去误报或漏洞验证任务前下载最新 runtime 并重启后继续执行；runtime 更新包会携带快照 manifest，用于校验下载 zip 的文件集合和逐文件 hash；`checkers/` 更新仍在创建或恢复扫描时按选中检查项同步，不单独触发 runtime 重启；如果更新了 `run_agent.sh` 或 `run_agent.bat`，需要重新下载 Agent 包。
 
 验证方法的 manifest、kwargs、返回值和 OpenCode 调用约定见 [`docs/vulnerability_validation.md`](docs/vulnerability_validation.md)。
 
@@ -648,16 +648,21 @@ Agent 运行时会在以下位置产生数据：
 ```
 OpenDeepHole/
 ├── task_agent/            # 可独立安装的任务/模型/Session/Serve 框架
-├── agent/                 # 本地 Agent Python 包
+├── deephole_client/       # 本地 Agent Python 包
+│   ├── threat_analysis/   # 独立威胁分析过程
+│   ├── static_analysis/   # 独立静态分析过程及 checker API
+│   ├── candidate_audit/  # 独立候选点审计过程
+│   ├── threat_audit/     # 独立威胁审计过程
+│   ├── fp_review/        # 独立去误报过程
+│   ├── vulnerability_validation/ # 独立漏洞验证过程及验证器
 │   ├── config.py          # agent.yaml 配置加载
 │   ├── main.py            # 守护进程入口（WebSocket 连接 + 自动重连）
 │   ├── server.py          # WebSocket 命令处理（task/stop/resume）
 │   ├── task_manager.py    # 任务生命周期管理（创建/停止/恢复）
-│   ├── scanner.py         # 完整扫描流程（索引→静态分析→AI审计→上报）
+│   ├── scanner.py         # 过程协调、源码索引和平台结果上报
 │   ├── reporter.py        # 向服务器上报进度和结果
 │   ├── local_mcp.py       # Agent 进程级共享 MCP 网关
-│   ├── opencode_integration.py # OpenDeepHole 配置、workspace、MCP/SKILL 适配
-│   └── opencode_workflows.py   # OpenDeepHole 审计与报告工作流
+│   └── opencode_integration.py # 平台 Task Agent 宿主适配
 ├── checkers/              # 插件目录（每种漏洞类型一个子目录）
 │   ├── npd/               # checker.yaml + SKILL.md/prompt.txt + analyzer.py
 │   ├── oob/
@@ -679,8 +684,7 @@ OpenDeepHole/
 │   │   ├── feedback.py    # 误报反馈 CRUD
 │   │   ├── checkers.py    # Checker 列表 API
 │   │   └── auth.py        # 用户认证与管理 API
-│   ├── registry.py        # Checker 自动发现与注册
-│   └── analyzers/base.py  # 静态分析器基类
+│   └── registry.py        # 服务端 checker 元数据目录
 ├── mcp_server/            # Agent 共享 MCP 网关与源码查询工具
 ├── agent.yaml             # Agent 配置模板
 ├── run_agent.sh           # Agent 守护进程启动脚本（Linux/macOS）

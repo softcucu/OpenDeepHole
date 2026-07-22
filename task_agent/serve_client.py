@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import atexit
 import asyncio
 import contextlib
 import hashlib
@@ -15,6 +16,7 @@ import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -30,10 +32,11 @@ from .config_json import (
     is_sensitive_opencode_config_key,
     redact_opencode_config_content,
 )
+from .output_format import format_task_output, task_output_stage
 
 logger = logging.getLogger(__name__)
 
-_SERVE_START_TIMEOUT_SECONDS = 30.0
+_SERVE_START_TIMEOUT_SECONDS =60.0
 _SERVE_STOP_TIMEOUT_SECONDS = 5.0
 _SERVE_REQUEST_TIMEOUT_SECONDS = 20.0
 _SERVE_MODEL_FALLBACK_TIMEOUT_SECONDS = 5.0
@@ -738,6 +741,196 @@ def _terminate_windows_process_tree(
         pass
 
 
+@dataclass(frozen=True)
+class _OwnedServeProcess:
+    """An exact Serve child started by this Python process."""
+
+    owner_pid: int
+    pid: int
+    proc: subprocess.Popen
+    marker_path: Path
+
+
+_OWNED_SERVE_PROCESS_LOCK = threading.RLock()
+_OWNED_SERVE_PROCESSES: dict[tuple[int, int], _OwnedServeProcess] = {}
+_SERVE_ATEXIT_REGISTERED = False
+_SERVE_SIGNAL_HANDLERS: dict[int, Any] = {}
+_SERVE_SIGNAL_HOOK_OWNER_PID: int | None = None
+
+
+def _current_owned_serve_key(pid: int) -> tuple[int, int]:
+    return os.getpid(), int(pid)
+
+
+def _restore_serve_signal_handlers_if_idle() -> None:
+    """Restore host handlers after the last Serve owned by this process stops."""
+    global _SERVE_SIGNAL_HOOK_OWNER_PID
+
+    if threading.current_thread() is not threading.main_thread():
+        return
+    owner_pid = os.getpid()
+    with _OWNED_SERVE_PROCESS_LOCK:
+        if any(record.owner_pid == owner_pid for record in _OWNED_SERVE_PROCESSES.values()):
+            return
+        if _SERVE_SIGNAL_HOOK_OWNER_PID != owner_pid:
+            return
+        previous_handlers = dict(_SERVE_SIGNAL_HANDLERS)
+        _SERVE_SIGNAL_HANDLERS.clear()
+        _SERVE_SIGNAL_HOOK_OWNER_PID = None
+
+    for signum, previous in previous_handlers.items():
+        try:
+            if signal.getsignal(signum) is _handle_owned_serve_signal:
+                signal.signal(signum, previous)
+        except (OSError, RuntimeError, ValueError):
+            logger.debug("Failed to restore process signal handler %s", signum, exc_info=True)
+
+
+def _cleanup_owned_serve_processes(reason: str = "process exit") -> None:
+    """Synchronously terminate every Serve child started by this process.
+
+    This path deliberately uses the in-memory Popen object instead of port
+    discovery.  It therefore cannot terminate an unrelated process which has
+    subsequently acquired the configured Serve port.
+    """
+    owner_pid = os.getpid()
+    with _OWNED_SERVE_PROCESS_LOCK:
+        owned = [
+            record
+            for record in _OWNED_SERVE_PROCESSES.values()
+            if record.owner_pid == owner_pid
+        ]
+        for record in owned:
+            _OWNED_SERVE_PROCESSES.pop((record.owner_pid, record.pid), None)
+
+    for record in owned:
+        try:
+            try:
+                returncode = record.proc.poll()
+            except Exception:
+                returncode = None
+            if returncode is None:
+                logger.info(
+                    "Stopping OpenCode Serve process tree pid %s during %s",
+                    record.pid,
+                    reason,
+                )
+                wait_method = getattr(record.proc, "wait", None)
+                wait = (
+                    (lambda timeout, method=wait_method: method(timeout=timeout))
+                    if callable(wait_method)
+                    else None
+                )
+                _terminate_process_tree(record.pid, wait=wait)
+        except BaseException:
+            # Signal and interpreter-exit cleanup must remain best effort and
+            # must never suppress the host process's original exit semantics.
+            logger.warning(
+                "Failed to stop OpenCode Serve process tree pid %s during %s",
+                record.pid,
+                reason,
+                exc_info=True,
+            )
+        finally:
+            _remove_marker_for_pid(record.marker_path, record.pid)
+
+    _restore_serve_signal_handlers_if_idle()
+
+
+def _delegate_process_signal(signum: int, frame: Any, previous: Any) -> None:
+    if previous == signal.SIG_IGN:
+        return
+    if previous in (None, signal.SIG_DFL) or previous is _handle_owned_serve_signal:
+        signal.signal(signum, signal.SIG_DFL)
+        os.kill(os.getpid(), signum)
+        return
+    if callable(previous):
+        previous(signum, frame)
+        # asyncio.run() replaces the default SIGINT handler with Runner's
+        # first-interrupt cancellation callback. Calling that callback from a
+        # chained Python signal handler marks the task cancelled, but does not
+        # reliably wake every selector implementation. Raising here preserves
+        # Ctrl-C's exit semantics; Runner.close() still cancels and drains the
+        # remaining tasks so their finally blocks execute.
+        callback = getattr(previous, "func", None)
+        callback_owner = getattr(callback, "__self__", None)
+        if (
+            signum == signal.SIGINT
+            and getattr(callback, "__name__", "") == "_on_sigint"
+            and type(callback_owner).__module__ == "asyncio.runners"
+        ):
+            raise KeyboardInterrupt
+
+
+def _handle_owned_serve_signal(signum: int, frame: Any) -> None:
+    with _OWNED_SERVE_PROCESS_LOCK:
+        previous = _SERVE_SIGNAL_HANDLERS.get(signum, signal.SIG_DFL)
+    _cleanup_owned_serve_processes(f"signal {signum}")
+    _delegate_process_signal(signum, frame, previous)
+
+
+def _install_serve_exit_hooks() -> None:
+    """Install process-exit cleanup while preserving the host signal handlers."""
+    global _SERVE_ATEXIT_REGISTERED, _SERVE_SIGNAL_HOOK_OWNER_PID
+
+    with _OWNED_SERVE_PROCESS_LOCK:
+        if not _SERVE_ATEXIT_REGISTERED:
+            atexit.register(_cleanup_owned_serve_processes, "interpreter exit")
+            _SERVE_ATEXIT_REGISTERED = True
+
+    # Python only permits signal registration from the main thread. Normal
+    # interpreter exit is still covered by atexit when a caller starts Serve
+    # from another thread.
+    if threading.current_thread() is not threading.main_thread():
+        return
+
+    owner_pid = os.getpid()
+    with _OWNED_SERVE_PROCESS_LOCK:
+        if _SERVE_SIGNAL_HOOK_OWNER_PID == owner_pid:
+            return
+        _SERVE_SIGNAL_HOOK_OWNER_PID = owner_pid
+
+    for signum in (signal.SIGINT, signal.SIGTERM):
+        try:
+            previous = signal.getsignal(signum)
+            if previous is _handle_owned_serve_signal:
+                continue
+            with _OWNED_SERVE_PROCESS_LOCK:
+                _SERVE_SIGNAL_HANDLERS[int(signum)] = previous
+            signal.signal(signum, _handle_owned_serve_signal)
+        except (OSError, RuntimeError, ValueError):
+            logger.debug("Failed to install process signal handler %s", signum, exc_info=True)
+
+
+def _register_owned_serve_process(proc: subprocess.Popen, marker_path: Path) -> None:
+    """Register a freshly spawned Serve child for process-exit cleanup."""
+    pid = int(getattr(proc, "pid", 0) or 0)
+    if pid <= 0:
+        return
+    owner_pid = os.getpid()
+    record = _OwnedServeProcess(
+        owner_pid=owner_pid,
+        pid=pid,
+        proc=proc,
+        marker_path=marker_path,
+    )
+    with _OWNED_SERVE_PROCESS_LOCK:
+        _OWNED_SERVE_PROCESSES[(owner_pid, pid)] = record
+    _install_serve_exit_hooks()
+
+
+def _unregister_owned_serve_process(pid: int | None) -> None:
+    if pid is None:
+        return
+    try:
+        normalized_pid = int(pid)
+    except (TypeError, ValueError):
+        return
+    with _OWNED_SERVE_PROCESS_LOCK:
+        _OWNED_SERVE_PROCESSES.pop(_current_owned_serve_key(normalized_pid), None)
+    _restore_serve_signal_handlers_if_idle()
+
+
 def _resolve_executable(name: str) -> str:
     path = shutil.which(name)
     if path:
@@ -1019,6 +1212,22 @@ def _tool_source(tool_name: object) -> str:
     return "builtin"
 
 
+def _is_skill_tool(tool_name: object) -> bool:
+    normalized = str(tool_name or "").strip().casefold().replace("-", "_")
+    return normalized == "skill"
+
+
+def _skill_name(input_value: object) -> str:
+    if not isinstance(input_value, dict):
+        return "unknown"
+    return _one_line_preview(
+        input_value.get("name")
+        or input_value.get("skill")
+        or input_value.get("skill_name")
+        or "unknown"
+    )
+
+
 def _event_session_id(props: dict[str, Any]) -> str:
     session_id = props.get("sessionID")
     if isinstance(session_id, str) and session_id:
@@ -1054,7 +1263,7 @@ class _BufferedEventEmitter:
 
     def _emit(self, text: object) -> bool:
         preview = _one_line_preview(text)
-        if not preview:
+        if not preview or self._on_line is None:
             return False
         self._on_line(f"{self._prefix} {preview}")
         return True
@@ -1079,35 +1288,37 @@ class _BufferedEventEmitter:
 
 
 class _ServeEventState:
-    def __init__(self, tool: str, session_id: str, on_line) -> None:
+    def __init__(
+        self,
+        tool: str,
+        session_id: str,
+        on_line,
+        *,
+        log_stage: str = "opencode",
+    ) -> None:
         self.tool = tool
         self.session_id = session_id
         self.on_line = on_line
+        self.log_stage = task_output_stage(log_stage)
         self.emitted_text = False
         self.emitted_response_text = False
         self.seen_next_text_event = False
         self.seen_next_reasoning_event = False
-        self.text = _BufferedEventEmitter(on_line, f"[{tool} serve llm text]")
-        self.reasoning = _BufferedEventEmitter(on_line, f"[{tool} serve llm reasoning]")
-        self.final_text = _BufferedEventEmitter(on_line, f"[{tool} serve llm text final]")
-        self.final_reasoning = _BufferedEventEmitter(
-            on_line,
-            f"[{tool} serve llm reasoning final]",
-        )
-        self.recovery_text = _BufferedEventEmitter(
-            on_line,
-            f"[{tool} serve llm text recovery]",
-        )
-        self.recovery_reasoning = _BufferedEventEmitter(
-            on_line,
-            f"[{tool} serve llm reasoning recovery]",
-        )
+        # Text and reasoning remain internally aggregated for the final result
+        # and JSON parsing, but never reach the console output callback.
+        self.text = _BufferedEventEmitter(None, "")
+        self.reasoning = _BufferedEventEmitter(None, "")
+        self.final_text = _BufferedEventEmitter(None, "")
+        self.final_reasoning = _BufferedEventEmitter(None, "")
+        self.recovery_text = _BufferedEventEmitter(None, "")
+        self.recovery_reasoning = _BufferedEventEmitter(None, "")
         self.message_roles: dict[str, str] = {}
         self.part_types: dict[str, str] = {}
         self.part_message_ids: dict[str, str] = {}
         self.part_text: dict[str, str] = {}
         self.part_emitted_text: dict[str, str] = {}
         self.tool_calls_emitted: set[str] = set()
+        self.tool_call_metadata: dict[str, tuple[str, object]] = {}
         self.tool_results_emitted: set[tuple[str, str]] = set()
         self.step_events_emitted: set[tuple[str, str]] = set()
         self.session_errors_emitted: set[str] = set()
@@ -1119,6 +1330,16 @@ class _ServeEventState:
         self.final_snapshots_emitted: set[tuple[str, str]] = set()
         self.recovery_snapshots_emitted: set[tuple[str, str]] = set()
         self.session_terminal = False
+
+    def emit(self, category: str, message: object) -> None:
+        self.on_line(
+            format_task_output(
+                self.log_stage,
+                self.session_id,
+                category,
+                message,
+            )
+        )
 
     def flush(self) -> None:
         text_flushed = self.text.flush()
@@ -1351,14 +1572,20 @@ class _ServeEventState:
         part_id: object = "",
     ) -> None:
         call = str(call_id or part_id or tool_name or "unknown")
+        name = str(tool_name or "")
+        if name or call not in self.tool_call_metadata:
+            self.tool_call_metadata[call] = (name, input_value or {})
         if call in self.tool_calls_emitted:
             return
         self.tool_calls_emitted.add(call)
-        name = str(tool_name or "")
-        self.on_line(
-            f"[{self.tool} serve tool_call] session={self.session_id} source={_tool_source(name)} "
-            f"name={name} id={call} input={_json_one_line(input_value or {})}"
-        )
+        if _is_skill_tool(name):
+            message = f"SKILL START name={_skill_name(input_value)} id={call}"
+        else:
+            message = (
+                f"TOOL START source={_tool_source(name)} name={name or 'unknown'} "
+                f"id={call} input={_json_one_line(input_value or {})}"
+            )
+        self.emit("step", message)
 
     def emit_tool_result(
         self,
@@ -1372,10 +1599,13 @@ class _ServeEventState:
     ) -> None:
         call = str(call_id or part_id or tool_name or "unknown")
         normalized_status = "success" if status in {"success", "completed"} else "failed"
+        recorded_name, recorded_input = self.tool_call_metadata.get(call, ("", {}))
+        resolved_name = str(tool_name or recorded_name or "")
+        resolved_input = input_value if input_value is not None else recorded_input
         self.emit_tool_call(
             call_id=call,
-            tool_name=tool_name,
-            input_value=input_value,
+            tool_name=resolved_name,
+            input_value=resolved_input,
             part_id=part_id,
         )
         key = (call, normalized_status)
@@ -1383,10 +1613,17 @@ class _ServeEventState:
             return
         self.tool_results_emitted.add(key)
         suffix = f" {summary}" if summary else ""
-        self.on_line(
-            f"[{self.tool} serve tool_result] session={self.session_id} "
-            f"status={normalized_status} id={call}{suffix}"
-        )
+        if _is_skill_tool(resolved_name):
+            message = (
+                f"SKILL STOP status={normalized_status} "
+                f"name={_skill_name(resolved_input)} id={call}{suffix}"
+            )
+        else:
+            message = (
+                f"TOOL STOP status={normalized_status} "
+                f"name={resolved_name or 'unknown'} id={call}{suffix}"
+            )
+        self.emit("step", message)
 
     def handle_tool_part(self, part: dict[str, Any]) -> None:
         state = part.get("state")
@@ -1435,10 +1672,11 @@ class _ServeEventState:
             message = _one_line_preview(status.get("message") or "")
             if message:
                 details.append(f"message={message}")
-        suffix = f" {' '.join(details)}" if details else ""
-        self.on_line(
-            f"[{self.tool} serve session] session={self.session_id} status={status_type}{suffix}"
-        )
+        if status_type == "retry":
+            suffix = f" {' '.join(details)}" if details else ""
+            self.emit("session", f"RETRY{suffix}")
+        elif status_type not in {"busy", "idle"}:
+            self.emit("session", f"STATUS status={status_type}")
 
     def emit_session_error(self, error: object) -> None:
         self.session_terminal = True
@@ -1446,10 +1684,7 @@ class _ServeEventState:
         if summary in self.session_errors_emitted:
             return
         self.session_errors_emitted.add(summary)
-        self.on_line(
-            f"[{self.tool} serve session] session={self.session_id} status=error "
-            f"error={summary}"
-        )
+        self.emit("session", f"ERROR error={summary}")
 
     def emit_step(self, status: str, props: dict[str, Any], *, part_id: object = "") -> None:
         step_id = str(part_id or props.get("id") or props.get("stepID") or "step")
@@ -1467,9 +1702,12 @@ class _ServeEventState:
         if error:
             details.append(f"error={error}")
         suffix = f" {' '.join(details)}" if details else ""
-        self.on_line(
-            f"[{self.tool} serve step] session={self.session_id} status={status} id={step_id}{suffix}"
-        )
+        action = {
+            "started": "START",
+            "finished": "STOP",
+            "failed": "FAIL",
+        }.get(status, status.upper())
+        self.emit("step", f"{action} id={step_id}{suffix}")
 
     def handle_part(self, part: object) -> None:
         if not isinstance(part, dict):
@@ -2159,7 +2397,27 @@ class OpenCodeServeManager:
         permissions: list[dict[str, str]] | None = None,
         return_details: bool = False,
         show_serve_status: bool = False,
+        log_stage: str = "opencode",
     ) -> list[str] | OpenCodePromptResult:
+        normalized_log_stage = task_output_stage(log_stage)
+        active_session_id = str(session_id or "").strip()
+        session_mode = "continued" if active_session_id else "created"
+
+        def emit(category: str, message: object, *, current_session_id: str | None = None) -> None:
+            if on_line is None:
+                return
+            resolved_session_id = (
+                active_session_id if current_session_id is None else current_session_id
+            )
+            on_line(
+                format_task_output(
+                    normalized_log_stage,
+                    resolved_session_id,
+                    category,
+                    message,
+                )
+            )
+
         normalized_env_overrides = _normalized_env_overrides(env_overrides)
         key = OpenCodeServeKey(
             tool=tool,
@@ -2170,8 +2428,9 @@ class OpenCodeServeManager:
             env_overrides=normalized_env_overrides,
         )
         if show_serve_status and on_line:
-            on_line(
-                f"[{tool} serve] preparing executable={executable} "
+            emit(
+                "task",
+                f"SERVE PREPARING executable={executable} "
                 f"port={_serve_port(normalized_env_overrides)}"
             )
         try:
@@ -2181,23 +2440,27 @@ class OpenCodeServeManager:
             )
         except Exception as exc:
             if show_serve_status and on_line:
-                on_line(
-                    f"[{tool} serve] startup failed: "
-                    f"{_one_line_preview(exc, _SERVE_STARTUP_LOG_TAIL_LIMIT + 500)}"
+                emit(
+                    "task",
+                    "SERVE STARTUP_FAILED "
+                    f"error={_one_line_preview(exc, _SERVE_STARTUP_LOG_TAIL_LIMIT + 500)}",
                 )
             raise
-        active_session_id = str(session_id or "").strip()
         event_state: _ServeEventState | None = None
         event_registered = False
         event_flush_task: asyncio.Task | None = None
         snapshot_poll_task: asyncio.Task | None = None
+        session_started = False
+        session_outcome = "failure"
+        session_error = ""
         params = _serve_context_params(directory)
         headers = _serve_context_headers(directory)
         try:
             if show_serve_status and on_line:
                 pid = int(getattr(self._proc, "pid", 0) or 0)
-                on_line(
-                    f"[{tool} serve] ready mode={serve_mode} "
+                emit(
+                    "task",
+                    f"SERVE READY mode={serve_mode} "
                     f"url={self.base_url} pid={pid}"
                 )
             await self.ensure_managed_mcp(directory)
@@ -2234,8 +2497,17 @@ class OpenCodeServeManager:
                         await result
                 if on_line:
                     config_note = f" config={config_workspace}" if config_workspace else ""
-                    on_line(f"[{tool} serve] session={active_session_id} directory={directory}{config_note}")
-                    event_state = _ServeEventState(tool, active_session_id, on_line)
+                    emit(
+                        "session",
+                        f"START mode={session_mode} directory={directory}{config_note}",
+                    )
+                    session_started = True
+                    event_state = _ServeEventState(
+                        tool,
+                        active_session_id,
+                        on_line,
+                        log_stage=normalized_log_stage,
+                    )
                     event_flush_task = asyncio.create_task(
                         _flush_event_state_periodically(event_state)
                     )
@@ -2245,7 +2517,13 @@ class OpenCodeServeManager:
                     "agent": agent,
                     "parts": [{"type": "text", "text": prompt}],
                 }
-                tool_ids = await self._list_tool_ids(client, params, headers, on_line=on_line, tool=tool)
+                tool_ids = await self._list_tool_ids(
+                    client,
+                    params,
+                    headers,
+                    on_line=(lambda message: emit("session", message)) if on_line else None,
+                    tool=tool,
+                )
                 mcp_overrides = _mcp_tool_overrides(tool_ids, mcp_tools, disabled_mcp_tools)
                 if mcp_overrides:
                     payload["tools"] = mcp_overrides
@@ -2334,11 +2612,6 @@ class OpenCodeServeManager:
                                     event_state.handle_part(part)
                     event_state.reconcile_text("text", "".join(response_text))
                     event_state.flush()
-                elif on_line:
-                    for line in response_text:
-                        preview = _one_line_preview(line)
-                        if preview:
-                            on_line(f"[{tool} serve llm text] {preview}")
                 details = OpenCodePromptResult(
                     session_id=active_session_id,
                     message_id=_response_message_id(response_data),
@@ -2347,21 +2620,47 @@ class OpenCodeServeManager:
                     model=response_model,
                     raw=response_data,
                 )
+                session_outcome = "success"
                 return details if return_details else lines
+        except asyncio.TimeoutError as exc:
+            session_outcome = "timeout"
+            session_error = str(exc) or "OpenCode task timed out"
+            raise
+        except asyncio.CancelledError:
+            session_outcome = "cancelled"
+            raise
+        except BaseException as exc:
+            session_outcome = "failure"
+            session_error = str(exc) or type(exc).__name__
+            raise
         finally:
-            if snapshot_poll_task is not None:
-                snapshot_poll_task.cancel()
-                with contextlib.suppress(BaseException):
-                    await snapshot_poll_task
-            if event_registered:
-                await self._unregister_event_state(active_session_id)
-            if event_flush_task is not None:
-                event_flush_task.cancel()
-                with contextlib.suppress(BaseException):
-                    await event_flush_task
-            if event_state:
-                event_state.flush()
-            await self._release_active_session()
+            try:
+                if snapshot_poll_task is not None:
+                    snapshot_poll_task.cancel()
+                    with contextlib.suppress(BaseException):
+                        await snapshot_poll_task
+                if event_registered:
+                    await self._unregister_event_state(active_session_id)
+                if event_flush_task is not None:
+                    event_flush_task.cancel()
+                    with contextlib.suppress(BaseException):
+                        await event_flush_task
+                if event_state:
+                    event_state.flush()
+            finally:
+                try:
+                    if session_started:
+                        error_note = (
+                            f" error={_one_line_preview(session_error)}"
+                            if session_error
+                            else ""
+                        )
+                        emit(
+                            "session",
+                            f"STOP status={session_outcome} retained=true{error_note}",
+                        )
+                finally:
+                    await self._release_active_session()
 
     async def _session_api_request(
         self,
@@ -2542,7 +2841,7 @@ class OpenCodeServeManager:
         if state is None:
             logger.debug("OpenCode serve event: %s", line)
             return
-        state.on_line(f"[{state.tool} serve event] {line}")
+        state.emit("session", f"EVENT {line}")
 
     def _note_event_channel_connected(
         self,
@@ -2770,7 +3069,7 @@ class OpenCodeServeManager:
             response.raise_for_status()
         except Exception as exc:
             if on_line:
-                on_line(f"[{tool} serve] tool discovery unavailable: {_one_line_preview(exc)}")
+                on_line(f"TOOL_DISCOVERY unavailable error={_one_line_preview(exc)}")
             return []
         tool_ids = _tool_ids_from_response(response.json())
         if on_line:
@@ -2781,7 +3080,7 @@ class OpenCodeServeManager:
                     f" mcp_tools={len(mcp_tool_ids)} "
                     f"mcp_names={_one_line_preview(','.join(mcp_tool_ids))}"
                 )
-            on_line(f"[{tool} serve] tools={len(tool_ids)}{mcp_note}")
+            on_line(f"TOOLS count={len(tool_ids)}{mcp_note}")
         return tool_ids
 
     async def list_models(
@@ -3045,6 +3344,7 @@ class OpenCodeServeManager:
         """Acquire a short-lived serve operation and report a deferred reload."""
         async with self._lock:
             if self._proc is not None and self._proc.poll() is not None:
+                _unregister_owned_serve_process(getattr(self._proc, "pid", None))
                 await self._reset_managed_mcp_process_state()
                 await self._stop_event_hub()
                 self._proc = None
@@ -3142,6 +3442,7 @@ class OpenCodeServeManager:
     ) -> str:
         had_process = self._proc is not None
         if self._proc is not None and self._proc.poll() is not None:
+            _unregister_owned_serve_process(getattr(self._proc, "pid", None))
             await self._reset_managed_mcp_process_state()
             await self._stop_event_hub()
             self._proc = None
@@ -3247,6 +3548,7 @@ class OpenCodeServeManager:
             self._startup_log_path = None
             _remove_file(startup_log_path)
             raise
+        _register_owned_serve_process(self._proc, self._marker_path)
         self._key = key
         self._port = port
         self._startup_cwd = prepared_cwd
@@ -3407,7 +3709,10 @@ class OpenCodeServeManager:
                         reason="serve parent process already exited",
                     )
             finally:
-                _remove_file(startup_log_path)
+                try:
+                    _unregister_owned_serve_process(getattr(proc, "pid", None))
+                finally:
+                    _remove_file(startup_log_path)
             return
         pid = int(getattr(proc, "pid", 0) or 0)
         try:
@@ -3427,7 +3732,10 @@ class OpenCodeServeManager:
                         reason="serve shutdown",
                     )
             finally:
-                _remove_file(startup_log_path)
+                try:
+                    _unregister_owned_serve_process(getattr(proc, "pid", None))
+                finally:
+                    _remove_file(startup_log_path)
 
 
 _manager: OpenCodeServeManager | None = None

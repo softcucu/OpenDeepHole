@@ -68,5 +68,5 @@ threat_analysis:
 ## 单独运行
 
 ```bash
-python -m agent.threat_analysis_cli --project /path/to/project --implementation attack_tree
+python -m deephole_client.threat_analysis_cli --project /path/to/project --implementation attack_tree
 ```

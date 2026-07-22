@@ -1,6 +1,8 @@
 import asyncio
 import hashlib
 import json
+import os
+import signal
 import subprocess
 from pathlib import Path
 from unittest.mock import AsyncMock
@@ -360,14 +362,26 @@ def test_run_prompt_emits_debug_serve_status(
             timeout=30,
             on_line=output.append,
             show_serve_status=True,
+            log_stage="validation",
         )
 
-        assert output[0] == "[opencode serve] preparing executable=opencode port=12345"
+        assert output[0] == (
+            "[validation][pending][task] "
+            "SERVE PREPARING executable=opencode port=12345"
+        )
         assert output[1] == (
-            f"[opencode serve] ready mode={serve_mode} "
+            f"[validation][pending][task] SERVE READY mode={serve_mode} "
             "url=http://127.0.0.1:12345 pid=24680"
         )
-        assert any("[opencode serve] session=session-1" in line for line in output)
+        assert any(
+            line.startswith("[validation][session-1][session] START mode=created")
+            for line in output
+        )
+        assert output[-1] == (
+            "[validation][session-1][session] "
+            "STOP status=success retained=true"
+        )
+        assert all("done" not in line for line in output)
 
     asyncio.run(run())
 
@@ -395,8 +409,8 @@ def test_run_prompt_emits_debug_serve_startup_failure(monkeypatch, tmp_path: Pat
                 show_serve_status=True,
             )
 
-        assert output[0].startswith("[opencode serve] preparing")
-        assert output[1].startswith("[opencode serve] startup failed:")
+        assert output[0].startswith("[opencode][pending][task] SERVE PREPARING")
+        assert output[1].startswith("[opencode][pending][task] SERVE STARTUP_FAILED")
         assert "provider failed to load" in output[1]
 
     asyncio.run(run())
@@ -423,6 +437,7 @@ def test_run_prompt_timeout_aborts_and_reaps_request_before_reuse(
             return "reused"
 
         manager._acquire_session = AsyncMock(side_effect=acquire)
+        output: list[str] = []
 
         with pytest.raises(asyncio.TimeoutError):
             await manager.run_prompt(
@@ -432,6 +447,8 @@ def test_run_prompt_timeout_aborts_and_reaps_request_before_reuse(
                 prompt="hang",
                 model="provider/model",
                 timeout=0.01,
+                on_line=output.append,
+                log_stage="validation",
             )
 
         first_client = _HangingMessageAsyncClient.instances[0]
@@ -439,6 +456,13 @@ def test_run_prompt_timeout_aborts_and_reaps_request_before_reuse(
         assert first_client.message_cancelled is True
         assert manager._active_sessions == 0
         assert manager._event_states == {}
+        assert any(
+            line.startswith("[validation][session-hanging][session] START mode=created")
+            for line in output
+        )
+        assert output[-1].startswith(
+            "[validation][session-hanging][session] STOP status=timeout retained=true"
+        )
 
         _HangingMessageAsyncClient.hang_messages = False
         result = await manager.run_prompt(
@@ -479,6 +503,7 @@ def test_run_prompt_caller_cancellation_aborts_and_reaps_request(
             return "reused"
 
         manager._acquire_session = AsyncMock(side_effect=acquire)
+        output: list[str] = []
         caller = asyncio.create_task(manager.run_prompt(
             tool="opencode",
             executable="opencode",
@@ -486,6 +511,7 @@ def test_run_prompt_caller_cancellation_aborts_and_reaps_request(
             prompt="cancel",
             model="provider/model",
             timeout=30,
+            on_line=output.append,
         ))
         while not _HangingMessageAsyncClient.instances:
             await asyncio.sleep(0)
@@ -499,6 +525,10 @@ def test_run_prompt_caller_cancellation_aborts_and_reaps_request(
         assert client.message_cancelled is True
         assert manager._active_sessions == 0
         assert manager._event_states == {}
+        assert output[-1] == (
+            "[opencode][session-hanging][session] "
+            "STOP status=cancelled retained=true"
+        )
 
     asyncio.run(run())
 
@@ -531,6 +561,7 @@ def test_run_prompt_continues_session_without_native_format_and_with_selected_mc
         project = tmp_path / "project"
         project.mkdir()
         permissions = [{"permission": "edit", "pattern": "*", "action": "deny"}]
+        output: list[str] = []
 
         details = await manager.run_prompt(
             tool="opencode",
@@ -544,6 +575,8 @@ def test_run_prompt_continues_session_without_native_format_and_with_selected_mc
             system_prompt="selected skill",
             permissions=permissions,
             return_details=True,
+            on_line=output.append,
+            log_stage="audit",
         )
 
         assert isinstance(details, OpenCodePromptResult)
@@ -566,6 +599,14 @@ def test_run_prompt_continues_session_without_native_format_and_with_selected_mc
             "mcp__deephole-code__view_function_code": True,
             "mcp__deephole-code__view_struct_code": False,
         }
+        assert any(
+            line.startswith("[audit][session-existing][session] START mode=continued")
+            for line in output
+        )
+        assert output[-1] == (
+            "[audit][session-existing][session] STOP status=success retained=true"
+        )
+        assert all("done" not in line for line in output)
 
     try:
         asyncio.run(run())
@@ -761,7 +802,12 @@ def test_run_prompt_omits_tools_field_when_tool_discovery_fails(monkeypatch, tmp
             "params": {"directory": str(project)},
             "headers": {"x-opencode-directory": str(project)},
         }]
-        assert "tool discovery unavailable" in "\n".join(output)
+        assert any(
+            line.startswith(
+                "[opencode][session-1][session] TOOL_DISCOVERY unavailable"
+            )
+            for line in output
+        )
 
     asyncio.run(run())
 
@@ -804,7 +850,7 @@ def test_run_prompt_logs_discovered_mcp_tool_names(monkeypatch, tmp_path: Path) 
             ]
 
         logged = "\n".join(output)
-        assert "tools=3 mcp_tools=2" in logged
+        assert "[opencode][session-1][session] TOOLS count=3 mcp_tools=2" in logged
         assert "mcp__deephole-code__view_function_code" in logged
         assert "mcp__deephole-code__view_struct_code" in logged
 
@@ -1119,20 +1165,21 @@ def test_run_prompt_streams_session_events_without_tool_result_body(monkeypatch,
         assert lines == ["done"]
         logged = "\n".join(output)
         assert all("\n" not in line for line in output)
-        assert "[opencode serve llm text] middle output" in logged
-        assert "[opencode serve llm reasoning] reasoning" in logged
-        assert "[opencode serve llm reasoning] step" in logged
-        assert "middle output" in logged
-        assert "tool_call" in logged
-        assert "tool_result" in logged
+        assert "middle output" not in logged
+        assert "reasoning" not in logged
+        assert "TOOL START" in logged
+        assert "TOOL STOP" in logged
         assert "status=success" in logged
-        assert "session=session-1" in logged
+        assert "[opencode][session-1][step]" in logged
         assert "name=read" in logged
         assert "src/main.c" in logged
         assert "text_chars=18" in logged
         assert "secret source body" not in logged
         assert "ignore" not in logged
-        assert "[opencode serve llm text final] done" in logged
+        assert "done" not in logged
+        assert output[-1] == (
+            "[opencode][session-1][session] STOP status=success retained=true"
+        )
 
     asyncio.run(run())
 
@@ -1166,8 +1213,8 @@ def test_run_prompt_compacts_final_text_when_sse_has_no_text(monkeypatch, tmp_pa
         )
 
         assert lines == ["first line\nsecond line"]
-        assert "[opencode serve llm text] first line" in output
-        assert "[opencode serve llm text] second line" in output
+        assert "first line" not in "\n".join(output)
+        assert "second line" not in "\n".join(output)
         assert all("\n" not in line for line in output)
 
     asyncio.run(run())
@@ -1210,14 +1257,14 @@ def test_run_prompt_streams_sync_session_events(monkeypatch, tmp_path: Path) -> 
 
         assert lines == ["done"]
         logged = "\n".join(output)
-        assert "[opencode serve llm text] sync text" in logged
-        assert "[opencode serve llm reasoning] sync reasoning" in logged
-        assert "tool_call" in logged
-        assert "tool_result" in logged
+        assert "sync text" not in logged
+        assert "sync reasoning" not in logged
+        assert "TOOL START" in logged
+        assert "TOOL STOP" in logged
         assert "src/win.c" in logged
         assert "text_chars=21" in logged
         assert "hidden sync tool body" not in logged
-        assert "[opencode serve llm text final] done" in logged
+        assert "done" not in logged
 
     asyncio.run(run())
 
@@ -1253,10 +1300,9 @@ def test_run_prompt_uses_ended_text_when_no_delta(monkeypatch, tmp_path: Path) -
             on_line=output.append,
         )
 
-        assert "[opencode serve llm text] ended only" in output
-        assert "[opencode serve llm text] text" in output
-        assert "[opencode serve llm reasoning] ended reasoning" in output
-        assert "[opencode serve llm reasoning] text" in output
+        logged = "\n".join(output)
+        assert "ended only" not in logged
+        assert "ended reasoning" not in logged
         assert all("\n" not in line for line in output)
 
     asyncio.run(run())
@@ -1295,8 +1341,9 @@ def test_message_part_delta_survives_non_text_session_next_event(monkeypatch, tm
             on_line=output.append,
         )
 
-        assert "[opencode serve llm text] fallback text" in output
-        assert "[opencode serve llm reasoning] fallback reasoning" in output
+        logged = "\n".join(output)
+        assert "fallback text" not in logged
+        assert "fallback reasoning" not in logged
         assert all("\n" not in line for line in output)
 
     asyncio.run(run())
@@ -1332,8 +1379,9 @@ def test_final_text_prints_when_event_stream_only_has_reasoning(monkeypatch, tmp
         )
 
         assert lines == ["done"]
-        assert "[opencode serve llm reasoning] only reasoning" in output
-        assert "[opencode serve llm text] done" in output
+        logged = "\n".join(output)
+        assert "only reasoning" not in logged
+        assert "done" not in logged
 
     asyncio.run(run())
 
@@ -1368,13 +1416,9 @@ def test_run_prompt_reconciles_only_missing_sse_text_tail(monkeypatch, tmp_path:
             on_line=output.append,
         )
 
-        chunks = [
-            line.removeprefix("[opencode serve llm text] ")
-            for line in output
-            if line.startswith("[opencode serve llm text] ")
-        ]
-        assert "".join(chunks) == "prefix-tail"
-        assert chunks.count("prefix") == 1
+        logged = "\n".join(output)
+        assert "prefix" not in logged
+        assert "tail" not in logged
 
     asyncio.run(run())
 
@@ -1452,20 +1496,20 @@ def test_run_prompt_final_fallback_does_not_log_tool_output_body(
         )
 
         logged = "\n".join(output)
-        assert "safe final answer" in logged
+        assert "safe final answer" not in logged
         assert "secret final tool body" not in logged
         assert "secret tool title" not in logged
         assert "secret nested tool content" not in logged
         assert "secret final tool body" in lines
         assert "source=mcp" in logged
-        assert "serve tool_call" in logged
-        assert "serve tool_result" in logged
+        assert "TOOL START" in logged
+        assert "TOOL STOP" in logged
         assert "output_chars=22" in logged
 
     asyncio.run(run())
 
 
-def test_open_source_message_parts_stream_text_reasoning_and_ignore_user_prompt() -> None:
+def test_open_source_message_parts_collect_text_reasoning_without_printing() -> None:
     output: list[str] = []
     state = _ServeEventState("opencode", "session-1", output.append)
 
@@ -1570,10 +1614,10 @@ def test_open_source_message_parts_stream_text_reasoning_and_ignore_user_prompt(
         },
     }, state)
 
-    logged = "\n".join(output)
-    assert output.count("[opencode serve llm text] open source middle output") == 1
-    assert "[opencode serve llm reasoning] reasoning step" in output
-    assert "secret prompt" not in logged
+    assert output == []
+    assert state.observed_response_text == "open source middle output\n"
+    assert state.observed_reasoning_text == "reasoning step\n"
+    assert "secret prompt" not in state.observed_response_text
 
 
 def test_sync_message_part_snapshot_uses_nested_session_and_flushes_once() -> None:
@@ -1612,7 +1656,8 @@ def test_sync_message_part_snapshot_uses_nested_session_and_flushes_once() -> No
         },
     }, state)
     state.flush()
-    assert output == ["[opencode serve llm text] snapshot without newline"]
+    assert output == []
+    assert state.observed_response_text == "snapshot without newline"
 
 
 def test_text_part_waits_for_message_role_before_printing() -> None:
@@ -1664,7 +1709,8 @@ def test_text_part_waits_for_message_role_before_printing() -> None:
     }, state)
     state.flush()
 
-    assert output == ["[opencode serve llm text] assistant answer"]
+    assert output == []
+    assert state.observed_response_text == "assistant answer"
     assert "TOP SECRET PROMPT" not in "\n".join(output)
 
 
@@ -1698,10 +1744,9 @@ def test_assistant_message_error_is_visible_and_deduplicated() -> None:
         "properties": {"sessionID": "session-1", "error": error},
     }, state)
 
-    error_lines = [line for line in output if "status=error" in line]
+    error_lines = [line for line in output if " ERROR " in line]
     assert error_lines == [
-        "[opencode serve session] session=session-1 status=error "
-        "error=APIError: provider failed"
+        "[opencode][session-1][session] ERROR error=APIError: provider failed"
     ]
     assert "secret provider response body" not in "\n".join(output)
     assert state.session_terminal is True
@@ -1740,7 +1785,8 @@ def test_replayed_event_id_and_mixed_protocol_text_are_deduplicated() -> None:
     }, state)
     state.flush()
 
-    assert output == ["[opencode serve llm text] same text"]
+    assert output == []
+    assert state.observed_response_text == "same text\n"
 
 
 def test_incompatible_final_text_emits_complete_final_snapshot() -> None:
@@ -1753,10 +1799,9 @@ def test_incompatible_final_text_emits_complete_final_snapshot() -> None:
     state.reconcile_text("text", "prefix-MISSING-suffix")
     state.reconcile_text("text", "prefix-MISSING-suffix")
 
-    assert "[opencode serve llm text] prefix-suffix" in output
-    assert output.count(
-        "[opencode serve llm text final] prefix-MISSING-suffix"
-    ) == 1
+    assert output == []
+    assert state.observed_response_text == "prefix-MISSING-suffix"
+    assert state.final_snapshots_emitted == {("text", "prefix-MISSING-suffix")}
 
 
 def test_legacy_step_events_use_event_identity_for_multiple_steps() -> None:
@@ -1776,7 +1821,7 @@ def test_legacy_step_events_use_event_identity_for_multiple_steps() -> None:
         _handle_serve_event(event, state)
         _handle_serve_event(event, state)
 
-    step_lines = [line for line in output if "serve step" in line]
+    step_lines = [line for line in output if "][step] START " in line]
     assert len(step_lines) == 2
     assert "id=step-event-1" in step_lines[0]
     assert "id=step-event-2" in step_lines[1]
@@ -1880,8 +1925,8 @@ def test_open_source_tool_parts_and_key_statuses_are_visible_without_tool_body()
     }, state)
 
     logged = "\n".join(output)
-    assert logged.count("serve tool_call") == 1
-    assert logged.count("serve tool_result") == 1
+    assert logged.count("TOOL START") == 1
+    assert logged.count("TOOL STOP") == 1
     assert "source=mcp" in logged
     assert "output_chars=18" in logged
     assert "duration_ms=40" in logged
@@ -1889,11 +1934,43 @@ def test_open_source_tool_parts_and_key_statuses_are_visible_without_tool_body()
     assert "pending call body" not in logged
     assert "secret tool prompt" not in logged
     assert '"prompt":"<redacted>"' in logged
-    assert logged.count("status=busy") == 1
-    assert "status=retry attempt=2 next=10 message=rate limited" in logged
-    assert "status=idle" in logged
-    assert "serve step" in logged
-    assert "status=error error=provider failed" in logged
+    assert "busy" not in logged
+    assert "RETRY attempt=2 next=10 message=rate limited" in logged
+    assert "idle" not in logged
+    assert "][step] START " in logged
+    assert "][step] STOP " in logged
+    assert "][session] ERROR error=provider failed" in logged
+
+
+def test_skill_tool_is_printed_as_step_lifecycle_without_skill_prompt() -> None:
+    output: list[str] = []
+    state = _ServeEventState(
+        "opencode",
+        "session-1",
+        output.append,
+        log_stage="validation",
+    )
+
+    state.emit_tool_call(
+        call_id="skill-1",
+        tool_name="skill",
+        input_value={"name": "exploit-validation", "prompt": "secret instructions"},
+    )
+    state.emit_tool_result(
+        call_id="skill-1",
+        tool_name="skill",
+        input_value={"name": "exploit-validation", "prompt": "secret instructions"},
+        status="success",
+        summary="",
+    )
+
+    assert output == [
+        "[validation][session-1][step] "
+        "SKILL START name=exploit-validation id=skill-1",
+        "[validation][session-1][step] "
+        "SKILL STOP status=success name=exploit-validation id=skill-1",
+    ]
+    assert "secret instructions" not in "\n".join(output)
 
 
 def test_no_newline_delta_is_flushed_periodically(monkeypatch) -> None:
@@ -1933,8 +2010,9 @@ def test_no_newline_delta_is_flushed_periodically(monkeypatch) -> None:
             with pytest.raises(asyncio.CancelledError):
                 await task
 
-        assert output == ["[opencode serve llm text] visible before task completion"]
-        assert state.emitted_response_text is True
+        assert output == []
+        assert state.observed_response_text == "visible before task completion"
+        assert state.emitted_response_text is False
 
     asyncio.run(run())
 
@@ -1981,7 +2059,7 @@ def test_event_failure_logs_are_aggregated_and_recovery_is_single(monkeypatch) -
     clock["now"] = 132.0
     manager._note_event_channel_connected(runtime)
 
-    event_lines = [line for line in output if "serve event" in line]
+    event_lines = [line for line in output if "][session] EVENT " in line]
     assert len(event_lines) == 3
     assert "status=disconnected" in event_lines[0]
     assert "fallback=polling" in event_lines[0]
@@ -2065,7 +2143,7 @@ def test_server_connected_then_immediate_eof_does_not_log_false_recovery(
         with pytest.raises(asyncio.CancelledError):
             await manager._run_event_channel(runtime, is_global=True)
 
-        event_lines = [line for line in output if "serve event" in line]
+        event_lines = [line for line in output if "][session] EVENT " in line]
         assert len(event_lines) == 1
         assert "status=disconnected" in event_lines[0]
         assert "status=reconnected" not in event_lines[0]
@@ -2154,8 +2232,10 @@ def test_global_event_hub_is_shared_and_routes_wrapped_sessions(
                     "data": {"sessionID": "session-b", "delta": "beta\n"},
                 },
             })
-            assert output_a == ["[opencode serve llm text] alpha"]
-            assert output_b == ["[opencode serve llm text] beta"]
+            assert output_a == []
+            assert output_b == []
+            assert state_a.observed_response_text == "alpha\n"
+            assert state_b.observed_response_text == "beta\n"
         finally:
             await manager._stop_event_hub()
 
@@ -2336,10 +2416,12 @@ def test_snapshot_polling_fills_text_reasoning_and_tool_state_then_pauses_on_rec
                 await task
 
         logged = "\n".join(output)
-        assert "[opencode serve llm text] hello world" in logged
-        assert "[opencode serve llm reasoning] think" in logged
-        assert logged.count("serve tool_call") == 1
-        assert logged.count("serve tool_result") == 1
+        assert "hello world" not in logged
+        assert "think" not in logged
+        assert state.observed_response_text == "hello world\n"
+        assert state.observed_reasoning_text == "think\n"
+        assert logged.count("TOOL START") == 1
+        assert logged.count("TOOL STOP") == 1
         assert "source=mcp" in logged
         assert "SECRET TOOL BODY" not in logged
 
@@ -2386,6 +2468,134 @@ def test_terminate_process_tree_uses_taskkill_on_windows(monkeypatch) -> None:
     assert commands == [["taskkill", "/PID", "12345", "/T", "/F"]]
 
 
+def test_owned_serve_exit_cleanup_is_idempotent(monkeypatch, tmp_path: Path) -> None:
+    from task_agent import serve_client
+
+    class FakeProc:
+        pid = 12345
+
+        def __init__(self) -> None:
+            self.wait_calls: list[float] = []
+
+        def poll(self):
+            return None
+
+        def wait(self, timeout):
+            self.wait_calls.append(timeout)
+
+    marker_path = tmp_path / "serve-marker.json"
+    marker_path.write_text(json.dumps({"pid": 12345}), encoding="utf-8")
+    terminated: list[int] = []
+
+    def fake_terminate(pid, timeout=5.0, wait=None):
+        terminated.append(pid)
+        assert wait is not None
+        wait(0.01)
+
+    monkeypatch.setattr(serve_client, "_install_serve_exit_hooks", lambda: None)
+    monkeypatch.setattr(serve_client, "_terminate_process_tree", fake_terminate)
+    proc = FakeProc()
+    serve_client._register_owned_serve_process(proc, marker_path)
+
+    serve_client._cleanup_owned_serve_processes("test exit")
+    serve_client._cleanup_owned_serve_processes("duplicate exit")
+
+    assert terminated == [12345]
+    assert proc.wait_calls == [0.01]
+    assert not marker_path.exists()
+    assert (os.getpid(), 12345) not in serve_client._OWNED_SERVE_PROCESSES
+
+
+def test_owned_serve_exit_cleanup_preserves_marker_for_new_pid(monkeypatch, tmp_path: Path) -> None:
+    from task_agent import serve_client
+
+    class FakeProc:
+        pid = 12345
+
+        def poll(self):
+            return None
+
+        def wait(self, timeout):
+            return None
+
+    marker_path = tmp_path / "serve-marker.json"
+    marker_path.write_text(json.dumps({"pid": 54321}), encoding="utf-8")
+    terminated: list[int] = []
+
+    monkeypatch.setattr(serve_client, "_install_serve_exit_hooks", lambda: None)
+    monkeypatch.setattr(
+        serve_client,
+        "_terminate_process_tree",
+        lambda pid, **kwargs: terminated.append(pid),
+    )
+    serve_client._register_owned_serve_process(FakeProc(), marker_path)
+
+    serve_client._cleanup_owned_serve_processes("test exit")
+
+    assert terminated == [12345]
+    assert json.loads(marker_path.read_text(encoding="utf-8"))["pid"] == 54321
+
+
+def test_owned_serve_signal_hook_delegates_and_restores_host_handlers(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    from task_agent import serve_client
+
+    class FakeProc:
+        pid = 12345
+
+        def poll(self):
+            return 0
+
+    delegated: list[tuple[int, object]] = []
+
+    def host_sigint(signum, frame):
+        delegated.append((signum, frame))
+
+    def host_sigterm(signum, frame):
+        delegated.append((signum, frame))
+
+    handlers = {
+        int(signal.SIGINT): host_sigint,
+        int(signal.SIGTERM): host_sigterm,
+    }
+    atexit_callbacks: list[tuple[object, tuple[object, ...]]] = []
+    monkeypatch.setattr(serve_client, "_OWNED_SERVE_PROCESSES", {})
+    monkeypatch.setattr(serve_client, "_SERVE_ATEXIT_REGISTERED", False)
+    monkeypatch.setattr(serve_client, "_SERVE_SIGNAL_HANDLERS", {})
+    monkeypatch.setattr(serve_client, "_SERVE_SIGNAL_HOOK_OWNER_PID", None)
+    monkeypatch.setattr(
+        serve_client.atexit,
+        "register",
+        lambda callback, *args: atexit_callbacks.append((callback, args)),
+    )
+    monkeypatch.setattr(
+        serve_client.signal,
+        "getsignal",
+        lambda signum: handlers[int(signum)],
+    )
+    monkeypatch.setattr(
+        serve_client.signal,
+        "signal",
+        lambda signum, handler: handlers.__setitem__(int(signum), handler),
+    )
+
+    serve_client._register_owned_serve_process(FakeProc(), tmp_path / "marker.json")
+    assert handlers[int(signal.SIGINT)] is serve_client._handle_owned_serve_signal
+    assert handlers[int(signal.SIGTERM)] is serve_client._handle_owned_serve_signal
+
+    frame = object()
+    serve_client._handle_owned_serve_signal(signal.SIGTERM, frame)
+
+    assert delegated == [(signal.SIGTERM, frame)]
+    assert handlers[int(signal.SIGINT)] is host_sigint
+    assert handlers[int(signal.SIGTERM)] is host_sigterm
+    assert atexit_callbacks == [
+        (serve_client._cleanup_owned_serve_processes, ("interpreter exit",))
+    ]
+
+
 def test_parse_listener_pids_handles_windows_and_ipv6_netstat() -> None:
     from task_agent import serve_client
 
@@ -2423,6 +2633,7 @@ def test_start_locked_uses_fixed_port_and_writes_marker(monkeypatch, tmp_path: P
         commands: list[list[str]] = []
         envs: list[dict[str, str]] = []
         popen_kwargs: list[dict] = []
+        registered: list[tuple[object, Path]] = []
         startup_logs: list[str] = []
         git_init_cwds: list[Path] = []
         marker_path = tmp_path / "serve-marker.json"
@@ -2456,6 +2667,10 @@ def test_start_locked_uses_fixed_port_and_writes_marker(monkeypatch, tmp_path: P
 
         monkeypatch.setattr("task_agent.serve_client.subprocess.Popen", fake_popen)
         monkeypatch.setattr("task_agent.serve_client.subprocess.run", fake_run)
+        monkeypatch.setattr(
+            "task_agent.serve_client._register_owned_serve_process",
+            lambda proc, path: registered.append((proc, path)),
+        )
         monkeypatch.setattr(
             "task_agent.serve_client.logger.info",
             lambda message, *args: startup_logs.append(message % args if args else str(message)),
@@ -2493,6 +2708,7 @@ def test_start_locked_uses_fixed_port_and_writes_marker(monkeypatch, tmp_path: P
         assert marker["port"] == 4096
         assert marker["tool"] == "opencode"
         assert marker["config_hash"] == "abc123"
+        assert registered == [(manager._proc, marker_path)]
         assert "OPENCODE_CONFIG_CONTENT" not in envs[0]
         assert envs[0]["OPENCODE_CONFIG_DIR"] == str(startup_cwd)
         runtime_config_path = startup_cwd / "opencode.json"
@@ -2599,6 +2815,10 @@ def test_start_locked_uses_bootstrap_cwd_without_runtime_workspace(monkeypatch, 
 
         monkeypatch.setattr("task_agent.serve_client.subprocess.run", fake_run)
         monkeypatch.setattr("task_agent.serve_client.subprocess.Popen", fake_popen)
+        monkeypatch.setattr(
+            "task_agent.serve_client._register_owned_serve_process",
+            lambda proc, path: None,
+        )
 
         manager = OpenCodeServeManager()
         manager._wait_health_locked = AsyncMock()
@@ -2756,6 +2976,10 @@ def test_start_locked_stops_previous_agent_owned_marker(monkeypatch, tmp_path: P
         monkeypatch.setattr("task_agent.serve_client._port_is_in_use", lambda port: False)
         monkeypatch.setattr("task_agent.serve_client.asyncio.to_thread", fake_to_thread)
         monkeypatch.setattr("task_agent.serve_client.subprocess.Popen", lambda *args, **kwargs: FakeProc())
+        monkeypatch.setattr(
+            "task_agent.serve_client._register_owned_serve_process",
+            lambda proc, path: None,
+        )
 
         manager = OpenCodeServeManager()
         manager._wait_health_locked = AsyncMock()
@@ -2806,6 +3030,10 @@ def test_start_locked_reclaims_stale_child_listener_after_marker_parent_exits(mo
         monkeypatch.setattr("task_agent.serve_client._terminate_process_tree", fake_terminate)
         monkeypatch.setattr("task_agent.serve_client.asyncio.to_thread", fake_to_thread)
         monkeypatch.setattr("task_agent.serve_client.subprocess.Popen", lambda *args, **kwargs: FakeProc())
+        monkeypatch.setattr(
+            "task_agent.serve_client._register_owned_serve_process",
+            lambda proc, path: None,
+        )
 
         manager = OpenCodeServeManager()
         manager._wait_health_locked = AsyncMock()
@@ -2821,6 +3049,8 @@ def test_start_locked_reclaims_stale_child_listener_after_marker_parent_exits(mo
 
 def test_stop_locked_terminates_process_tree_and_removes_marker(monkeypatch, tmp_path: Path) -> None:
     async def run() -> None:
+        from task_agent import serve_client
+
         class FakeProc:
             pid = 33333
 
@@ -2857,16 +3087,19 @@ def test_stop_locked_terminates_process_tree_and_removes_marker(monkeypatch, tmp
         monkeypatch.setenv("OPENCODE_SERVE_MARKER", str(marker_path))
         monkeypatch.setattr("task_agent.serve_client._terminate_process_tree", fake_terminate)
         monkeypatch.setattr("task_agent.serve_client.asyncio.to_thread", fake_to_thread)
+        monkeypatch.setattr("task_agent.serve_client._install_serve_exit_hooks", lambda: None)
 
         proc = FakeProc()
         manager = OpenCodeServeManager()
         manager._proc = proc
+        serve_client._register_owned_serve_process(proc, marker_path)
 
         await manager._stop_locked()
 
         assert terminated == [33333]
         assert proc.wait_calls == [0.01]
         assert not marker_path.exists()
+        assert (os.getpid(), 33333) not in serve_client._OWNED_SERVE_PROCESSES
 
     asyncio.run(run())
 

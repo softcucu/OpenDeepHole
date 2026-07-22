@@ -17,15 +17,15 @@ import tree_sitter
 import tree_sitter_cpp
 from tree_sitter import Language
 
-from backend.analyzers.base import BaseAnalyzer, Candidate
-from backend.analyzers.semgrep_locations import function_from_db_location
-from backend.analyzers.semgrep_runner import run_semgrep
-from backend.logger import get_logger
+from deephole_client.static_analysis.base import BaseAnalyzer, Candidate
+from deephole_client.static_analysis.semgrep_locations import function_from_db_location
+from deephole_client.static_analysis.semgrep_runner import run_semgrep
+import logging
 
 if TYPE_CHECKING:
     from code_parser import CodeDatabase
 
-_log = get_logger(__name__)
+_log = logging.getLogger(__name__)
 
 _RULE_FILE = Path(__file__).parent / "c_cpp_loop_no_progress_semgrep_with_func.yaml"
 _SEMGREP_TIMEOUT_SECONDS = 15 * 60
