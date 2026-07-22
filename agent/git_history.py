@@ -20,9 +20,9 @@ from typing import Awaitable, Callable, Optional
 from uuid import uuid4
 
 from backend.models import HistoryPattern
-from agent.task_agent import run_opencode_task
-from agent.task_agent.output_format import with_local_timestamp
-from agent.task_agent.task_service import (
+from task_agent import run_opencode_task
+from task_agent.output_format import with_local_timestamp
+from task_agent.task_service import (
     bind_opencode_execution_context,
     get_opencode_execution_context,
 )
@@ -163,7 +163,7 @@ async def mine_history(
 
     返回去重后的 HistoryPattern 列表。非 git 仓库或无提交时返回 []。
     """
-    from agent.task_agent.model_pool import (
+    from task_agent.model_pool import (
         NO_AVAILABLE_MODEL_MESSAGE,
         NoAvailableModelError,
         total_model_capacity,

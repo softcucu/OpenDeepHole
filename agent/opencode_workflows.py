@@ -20,15 +20,15 @@ from datetime import datetime, timezone
 from backend.config import get_config
 from backend.logger import get_logger
 from backend.models import Candidate, OutputSource, ThreatAnalysis, ThreatAuditTask, Vulnerability
-from agent.task_agent import OpenCodeResult, run_opencode_task
-from agent.task_agent.task_service import bind_opencode_execution_context
-from agent.task_agent.model_pool import (
+from task_agent import OpenCodeResult, run_opencode_task
+from task_agent.task_service import bind_opencode_execution_context
+from task_agent.model_pool import (
     NoAvailableModelError,
     clear_planned_task,
 )
-from agent.task_agent.config_json import dump_opencode_config, parse_opencode_jsonc
-from agent.task_agent.output_format import with_local_timestamp
-from agent.task_agent.result_json import (
+from task_agent.config_json import dump_opencode_config, parse_opencode_jsonc
+from task_agent.output_format import with_local_timestamp
+from task_agent.result_json import (
     AUDITED_VULNERABILITY_RESULT_JSON_INSTRUCTION,
     AUDITED_VULNERABILITY_RESULT_JSON_SCHEMA,
     AUDITED_VULNERABILITY_RESULTS_JSON_INSTRUCTION,
@@ -1243,7 +1243,7 @@ def _failure_reason(log_path: Path | None, fallback: str) -> str:
 
 
 def _scan_task_log_path(scan_id: str, filename: str) -> Path:
-    from agent.task_agent.task_service import get_opencode_execution_context
+    from task_agent.task_service import get_opencode_execution_context
 
     context = get_opencode_execution_context()
     if context.work_dir is None:
@@ -1258,7 +1258,7 @@ def _scan_task_log_path(scan_id: str, filename: str) -> Path:
 
 
 def _required_task_project_dir(project_dir: Path | None) -> Path:
-    from agent.task_agent.task_service import get_opencode_execution_context
+    from task_agent.task_service import get_opencode_execution_context
 
     context = get_opencode_execution_context()
     resolved = Path(project_dir).resolve() if project_dir is not None else context.project_dir
@@ -1276,7 +1276,7 @@ def _opencode_result_text(
     if result.status == "timeout":
         raise asyncio.TimeoutError(result.text)
     if result.status == "failure":
-        from agent.task_agent.model_pool import NO_AVAILABLE_MODEL_MESSAGE
+        from task_agent.model_pool import NO_AVAILABLE_MODEL_MESSAGE
 
         if result.text == NO_AVAILABLE_MODEL_MESSAGE:
             raise NoAvailableModelError()

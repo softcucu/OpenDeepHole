@@ -380,7 +380,7 @@ async def _run_audits(
     from agent.local_mcp import LocalMCPServer
     from agent.opencode_integration import get_global_opencode_workspace
     from agent.opencode_workflows import run_audit, run_project_audit, run_sensitive_clear_audit
-    from agent.task_agent.task_service import (
+    from task_agent.task_service import (
         reset_opencode_execution_context,
         set_opencode_execution_context,
     )

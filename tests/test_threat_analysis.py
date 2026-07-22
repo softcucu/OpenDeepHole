@@ -25,8 +25,8 @@ from agent.threat_analysis_opencode import (
 )
 from backend.threat_analysis.harness import build_code_index
 from agent.opencode_workflows import _read_fresh_threat_analysis_result
-from agent.task_agent import OpenCodeResult
-from agent.task_agent.task_service import get_opencode_execution_context
+from task_agent import OpenCodeResult
+from task_agent.task_service import get_opencode_execution_context
 from backend.models import ScanItemStatus, ScanMeta, ScanStatus, ThreatAuditTask, Vulnerability
 from backend.store.sqlite import SqliteScanStore
 from backend.threat_analysis import (

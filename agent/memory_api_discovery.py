@@ -26,10 +26,10 @@ from backend.preprocess.memory_api_artifact import (
     memory_allocator_names,
     memory_deallocator_names,
 )
-from agent.task_agent import run_opencode_task
-from agent.task_agent.model_pool import configured_global_concurrency
-from agent.task_agent.output_format import with_local_timestamp
-from agent.task_agent.task_service import bind_opencode_execution_context
+from task_agent import run_opencode_task
+from task_agent.model_pool import configured_global_concurrency
+from task_agent.output_format import with_local_timestamp
+from task_agent.task_service import bind_opencode_execution_context
 
 logger = get_logger(__name__)
 

@@ -26,8 +26,8 @@ from backend.models import (
     ThreatAttackPath,
     Vulnerability,
 )
-from agent.task_agent.model_pool import NoAvailableModelError
-from agent.task_agent.output_format import with_local_timestamp
+from task_agent.model_pool import NoAvailableModelError
+from task_agent.output_format import with_local_timestamp
 from backend.registry import CHECKERS_DIR_ENV
 from backend.source_filter import source_path_has_ignored_dir
 
@@ -107,7 +107,7 @@ async def _wait_for_opencode_pool_pipeline_work(
     timeout_seconds: float = OPENCODE_POOL_TERMINAL_DRAIN_TIMEOUT_SECONDS,
 ) -> None:
     """Wait briefly for scan-pipeline OpenCode work to leave the model pool."""
-    from agent.task_agent.model_pool import model_pool_snapshot, wait_for_model_pool_update
+    from task_agent.model_pool import model_pool_snapshot, wait_for_model_pool_update
 
     deadline = time.monotonic() + max(0.0, timeout_seconds)
     snapshot = model_pool_snapshot(scan_id)
@@ -137,7 +137,7 @@ async def _drain_opencode_pool_before_finish(
 ) -> None:
     """Clear planned scan work and publish the final pool snapshot before finish_scan."""
     try:
-        from agent.task_agent.model_pool import clear_planned_tasks
+        from task_agent.model_pool import clear_planned_tasks
         await clear_planned_tasks(scan_id, task_types)
     except Exception:
         pass
@@ -155,7 +155,7 @@ async def _drain_opencode_pool_before_finish(
 
 async def _clear_finished_opencode_pool_history(scan_id: str) -> None:
     try:
-        from agent.task_agent.model_pool import clear_completed_tasks
+        from task_agent.model_pool import clear_completed_tasks
         await clear_completed_tasks(scan_id)
     except Exception:
         pass
@@ -787,7 +787,7 @@ async def _run_threat_analysis_phase(
             await maybe
     finally:
         if planned_task_id:
-            from agent.task_agent.model_pool import clear_planned_task
+            from task_agent.model_pool import clear_planned_task
             await clear_planned_task(planned_task_id)
 
 
@@ -1137,7 +1137,7 @@ async def run_scan(
     scan_dir = Path.home() / ".opendeephole" / "scans" / scan_id
     scan_dir.mkdir(parents=True, exist_ok=True)
 
-    from agent.task_agent.task_service import (
+    from task_agent.task_service import (
         clear_scan_feedback_entries,
         reset_opencode_execution_context,
         set_opencode_execution_context,
@@ -1770,7 +1770,7 @@ async def run_scan(
             await emit("auditing", f"Audit order: {_audit_order_summary(remaining)}")
 
         cancelled = False
-        from agent.task_agent.model_pool import total_model_capacity
+        from task_agent.model_pool import total_model_capacity
         audit_capacity = total_model_capacity(
             config.opencode,
             global_concurrency=config.opencode_concurrency,
@@ -1918,7 +1918,7 @@ async def run_scan(
                     if isinstance(candidate.metadata, dict):
                         planned_task_id = str(candidate.metadata.get("_opencode_planned_task_id") or "")
                     if planned_task_id:
-                        from agent.task_agent.model_pool import clear_planned_task
+                        from task_agent.model_pool import clear_planned_task
                         await clear_planned_task(planned_task_id)
                     vuln = Vulnerability(
                         file=candidate.file,

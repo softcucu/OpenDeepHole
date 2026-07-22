@@ -1,5 +1,10 @@
 # 更新日志
 
+## 2026-07-22
+
+- **重构** 自包含组件从 `agent/task_agent/` 提升为仓库顶层 `task_agent/`，仓库内外统一使用 `from task_agent import run_opencode_task`，不再暴露与源码落位耦合的 `agent.task_agent` 导入路径
+- **新增** `task_agent/` 提供独立 Python 包元数据，可直接复制到其它项目的导入根目录或通过 `python -m pip install ./task_agent` 安装；Agent 完整下载与运行时热更新同步包含该顶层组件
+
 ## 2026-07-21
 
 - **重构** 自包含任务管理框架统一命名为 `agent.task_agent`，公共调用改为 `from agent.task_agent import run_opencode_task`；独立配置同步改用 `task-agent.yaml`、`TASK_AGENT_CONFIG` 和 `task-agent.example.yaml`，不保留旧包或旧配置名兼容层

@@ -20,13 +20,13 @@ from typing import Optional
 from uuid import uuid4
 
 from backend.models import OutputSource, ScanEvent
-from agent.task_agent import run_opencode_task
-from agent.task_agent.model_pool import NO_AVAILABLE_MODEL_MESSAGE, NoAvailableModelError
-from agent.task_agent.output_format import with_local_timestamp
-from agent.task_agent.result_json import (
+from task_agent import run_opencode_task
+from task_agent.model_pool import NO_AVAILABLE_MODEL_MESSAGE, NoAvailableModelError
+from task_agent.output_format import with_local_timestamp
+from task_agent.result_json import (
     VULNERABILITY_RESULT_JSON_SCHEMA,
 )
-from agent.task_agent.task_service import bind_opencode_execution_context
+from task_agent.task_service import bind_opencode_execution_context
 from agent.config import effective_fp_review_cli_config
 
 
@@ -212,7 +212,7 @@ async def run_fp_review(
     review_dir = Path.home() / ".opendeephole" / "fp_reviews" / review_id
     review_dir.mkdir(parents=True, exist_ok=True)
     set_fp_review_feedback(scan_id, feedback_entries or [])
-    from agent.task_agent.task_service import (
+    from task_agent.task_service import (
         reset_opencode_execution_context,
         set_opencode_execution_context,
     )
@@ -621,7 +621,7 @@ async def run_fp_review(
         except Exception:
             pass
         try:
-            from agent.task_agent.model_pool import clear_completed_tasks
+            from task_agent.model_pool import clear_completed_tasks
             await clear_completed_tasks(scan_id)
         except Exception:
             pass

@@ -227,11 +227,11 @@ async def _apply_live_config_update(config) -> None:
     """Apply server-managed model/API config to already loaded backend state."""
     from agent.config import apply_network_env
     from agent.scanner import refresh_backend_runtime_config
-    from agent.task_agent.model_pool import (
+    from task_agent.model_pool import (
         notify_model_pool_config_changed,
         refresh_configured_model_pool,
     )
-    from agent.task_agent.serve_client import get_serve_manager, mark_serve_config_dirty
+    from task_agent.serve_client import get_serve_manager, mark_serve_config_dirty
 
     apply_network_env(config)
     refresh_backend_runtime_config(config)
@@ -446,7 +446,7 @@ async def _main() -> None:
         await _ws_loop(config, task_manager, reporter)
     finally:
         try:
-            from agent.task_agent import shutdown_opencode
+            from task_agent import shutdown_opencode
             await shutdown_opencode()
         except Exception as exc:
             print(f"Warning: failed to stop OpenCode serve: {exc}")

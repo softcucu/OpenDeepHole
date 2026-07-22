@@ -2531,8 +2531,8 @@ async def agent_get_feedback(vuln_types: Optional[str] = None) -> list:
 # Agent package download
 # ---------------------------------------------------------------------------
 
-_AGENT_DIRS = ["agent", "checkers", "code_parser", "mcp_server", "backend"]
-_AGENT_RUNTIME_DIRS = ["agent", "code_parser", "mcp_server", "backend"]
+_AGENT_DIRS = ["agent", "task_agent", "checkers", "code_parser", "mcp_server", "backend"]
+_AGENT_RUNTIME_DIRS = ["agent", "task_agent", "code_parser", "mcp_server", "backend"]
 _AGENT_TOOL_DIRS = ["ctags-p6.2.20260517.0-x64"]
 _AGENT_THREAT_ANALYSIS_FILES = [
     "attack-tree-threat-analysis.md",
@@ -2561,7 +2561,7 @@ _AGENT_SKIP_SUFFIXES = {".pyc", ".pyo"}
 
 def _agent_runtime_hash_scope() -> dict:
     return {
-        "version": 2,
+        "version": 3,
         "dirs": list(_AGENT_RUNTIME_DIRS),
         "tool_dirs": list(_AGENT_TOOL_DIRS),
         "root_files": list(_AGENT_RUNTIME_ROOT_FILES),

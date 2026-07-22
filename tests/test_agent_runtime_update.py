@@ -38,8 +38,9 @@ class AgentRuntimePackageTests(unittest.TestCase):
         self.assertFalse(any("/vulnerability_validation/" in name for name in names))
         self.assertIn("agent/product_validators/demo/validator.yaml", names)
         self.assertIn("agent/product_validators/demo/validator.py", names)
-        self.assertIn("agent/task_agent/standalone.py", names)
-        self.assertIn("agent/task_agent/task-agent.example.yaml", names)
+        self.assertIn("task_agent/standalone.py", names)
+        self.assertIn("task_agent/task-agent.example.yaml", names)
+        self.assertIn("task_agent/pyproject.toml", names)
         self.assertNotIn("agent/validation_debug.py", names)
 
     def test_agent_download_zip_includes_launchers_config_and_bundled_ctags(self) -> None:
@@ -57,8 +58,9 @@ class AgentRuntimePackageTests(unittest.TestCase):
         self.assertIn("ctags-p6.2.20260517.0-x64/ctags.exe", names)
         self.assertIn("agent/product_validators/demo/validator.yaml", names)
         self.assertIn("agent/product_validators/demo/validator.py", names)
-        self.assertIn("agent/task_agent/standalone.py", names)
-        self.assertIn("agent/task_agent/task-agent.example.yaml", names)
+        self.assertIn("task_agent/standalone.py", names)
+        self.assertIn("task_agent/task-agent.example.yaml", names)
+        self.assertIn("task_agent/pyproject.toml", names)
         self.assertNotIn("agent/validation_debug.py", names)
         self.assertIn('server_url: "http://server.example"', agent_yaml)
         self.assertIn('owner_token: "owner-token"', agent_yaml)
@@ -117,6 +119,25 @@ class AgentRuntimePackageTests(unittest.TestCase):
             with zipfile.ZipFile(_bytes_path(data)) as zf:
                 zf.extractall(root)
             self.assertEqual(compute_runtime_hash(root), agent_api._agent_runtime_hash())
+
+    def test_runtime_hash_scope_includes_top_level_task_agent(self) -> None:
+        expected_dirs = ["agent", "task_agent", "code_parser", "mcp_server", "backend"]
+        self.assertEqual(updater.runtime_hash_scope()["version"], 3)
+        self.assertEqual(updater.runtime_hash_scope()["dirs"], expected_dirs)
+        self.assertEqual(agent_api._agent_runtime_hash_scope(), updater.runtime_hash_scope())
+
+    def test_runtime_hash_includes_task_agent_changes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            component = root / "task_agent"
+            component.mkdir()
+            source = component / "api.py"
+            source.write_text("def run_opencode_task(): pass\n", encoding="utf-8")
+
+            before = compute_runtime_hash(root)
+            source.write_text("async def run_opencode_task(): pass\n", encoding="utf-8")
+
+            self.assertNotEqual(before, compute_runtime_hash(root))
 
     def test_runtime_hash_ignores_checker_changes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -226,7 +247,7 @@ class AgentRuntimePackageTests(unittest.TestCase):
             ("agent/product_validators/demo/validator.py", b"async def validate(**kwargs):\n    pass\n"),
             ("agent/product_validators/demo/validator.yaml", b"schema_version: 1\nproduct: LTE\nvalidation_environment: lab\n"),
             ("agent/server.py", b"# server\n"),
-            ("agent/task_agent/api.py", b"async def run_opencode_task(**kwargs):\n    pass\n"),
+            ("task_agent/api.py", b"async def run_opencode_task(**kwargs):\n    pass\n"),
             ("backend/api.py", b"# api\n"),
             ("requirements-agent.txt", b"requests\n"),
         ]
@@ -253,6 +274,11 @@ class AgentRuntimePackageTests(unittest.TestCase):
                 "# stale component package\n",
                 encoding="utf-8",
             )
+            (root / "agent" / "task_agent").mkdir()
+            (root / "agent" / "task_agent" / "api.py").write_text(
+                "# stale task agent package\n",
+                encoding="utf-8",
+            )
             (root / "backend").mkdir()
             (root / "backend" / "old.py").write_text("# old\n", encoding="utf-8")
             (root / "backend" / "opencode").mkdir()
@@ -273,9 +299,10 @@ class AgentRuntimePackageTests(unittest.TestCase):
             )
             self.assertFalse((root / "agent" / "stale.py").exists())
             self.assertFalse((root / "agent" / "opencode").exists())
+            self.assertFalse((root / "agent" / "task_agent").exists())
             self.assertFalse((root / "backend" / "old.py").exists())
             self.assertFalse((root / "backend" / "opencode").exists())
-            self.assertTrue((root / "agent" / "task_agent" / "api.py").is_file())
+            self.assertTrue((root / "task_agent" / "api.py").is_file())
             self.assertEqual(
                 (root / "agent" / "main.py").read_text(encoding="utf-8"),
                 "print('server snapshot')\n",

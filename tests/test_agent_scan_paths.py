@@ -49,7 +49,7 @@ from backend.models import (
     ThreatAuditTask,
     User,
 )
-from agent.task_agent.model_pool import NoAvailableModelError
+from task_agent.model_pool import NoAvailableModelError
 from backend.store.sqlite import SqliteScanStore
 from backend.threat_analysis import apply_threat_analysis_scan_scope, parse_threat_analysis_data
 
@@ -370,11 +370,11 @@ class AgentScanPathTests(unittest.TestCase):
             with (
                 patch("agent.threat_auditor.build_threat_audit_tasks", return_value=[task]),
                 patch(
-                    "agent.task_agent.model_pool.register_planned_task",
+                    "task_agent.model_pool.register_planned_task",
                     new=AsyncMock(return_value="planned-1"),
                 ),
-                patch("agent.task_agent.model_pool.total_model_capacity", return_value=1),
-                patch("agent.task_agent.model_pool.clear_planned_task", new=AsyncMock()),
+                patch("task_agent.model_pool.total_model_capacity", return_value=1),
+                patch("task_agent.model_pool.clear_planned_task", new=AsyncMock()),
                 patch(
                     "agent.opencode_workflows.run_threat_audit",
                     new=AsyncMock(side_effect=NoAvailableModelError()),

@@ -9,9 +9,9 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from backend.models import Candidate, ThreatAuditTask
-from agent.task_agent import OpenCodeResult
-from agent.task_agent.model_pool import NO_AVAILABLE_MODEL_MESSAGE, NoAvailableModelError
-from agent.task_agent.task_service import (
+from task_agent import OpenCodeResult
+from task_agent.model_pool import NO_AVAILABLE_MODEL_MESSAGE, NoAvailableModelError
+from task_agent.task_service import (
     bind_opencode_execution_context,
     get_opencode_execution_context,
 )

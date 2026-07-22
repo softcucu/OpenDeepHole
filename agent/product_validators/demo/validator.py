@@ -7,7 +7,7 @@ import json
 from pathlib import Path
 
 from agent.vulnerability_validation import ValidationResult
-from agent.task_agent import run_opencode_task
+from task_agent import run_opencode_task
 
 
 RESULT_SCHEMA = {

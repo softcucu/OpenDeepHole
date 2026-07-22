@@ -17,7 +17,7 @@ from typing import Any
 import httpx
 
 
-RUNTIME_DIRS = ("agent", "code_parser", "mcp_server", "backend")
+RUNTIME_DIRS = ("agent", "task_agent", "code_parser", "mcp_server", "backend")
 RUNTIME_TOOL_DIRS = ("ctags-p6.2.20260517.0-x64",)
 RUNTIME_ROOT_FILES = (
     "requirements-agent.txt",
@@ -47,7 +47,7 @@ def _should_skip(path: Path) -> bool:
 
 def runtime_hash_scope() -> dict[str, Any]:
     return {
-        "version": 2,
+        "version": 3,
         "dirs": list(RUNTIME_DIRS),
         "tool_dirs": list(RUNTIME_TOOL_DIRS),
         "root_files": list(RUNTIME_ROOT_FILES),

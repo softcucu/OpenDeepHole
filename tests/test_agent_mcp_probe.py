@@ -13,7 +13,7 @@ from fastapi import HTTPException
 from agent import mcp_probe
 from backend.api import agent as agent_api
 from backend.models import AgentInfo, AgentRemoteConfig, User
-from agent.task_agent.serve_client import OpenCodeServeManager
+from task_agent.serve_client import OpenCodeServeManager
 from backend.store.sqlite import SqliteScanStore
 
 
