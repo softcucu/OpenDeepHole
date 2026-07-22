@@ -1,9 +1,5 @@
 # 更新日志
 
-## 2026-07-22
-
-- **示例** 产品漏洞验证 demo 增加两个独立 OpenCode task 的并发调用方式，通过 `asyncio.gather()` 同时执行代码可达性与利用条件分析，并分别检查、解析和保存两个任务的结果
-
 ## 2026-07-21
 
 - **重构** 自包含任务管理框架统一命名为 `agent.task_agent`，公共调用改为 `from agent.task_agent import run_opencode_task`；独立配置同步改用 `task-agent.yaml`、`TASK_AGENT_CONFIG` 和 `task-agent.example.yaml`，不保留旧包或旧配置名兼容层
