@@ -38,8 +38,6 @@ class AgentConfigTests(unittest.TestCase):
         self.assertEqual(cfg.git_history.max_commits, 200)
         self.assertTrue(cfg.git_history.variant_hunt)
         self.assertTrue(cfg.threat_analysis.enabled)
-        self.assertEqual(cfg.threat_analysis.implementation, "attack_tree")
-        self.assertEqual(cfg.threat_analysis.attack_path_audit_mode, "after_analysis")
         self.assertTrue(cfg.static_dedup)
         self.assertTrue(cfg.pattern_filter.enabled)
         self.assertEqual(cfg.pattern_filter.scope, "directory")
@@ -58,8 +56,6 @@ class AgentConfigTests(unittest.TestCase):
         self.assertEqual(AgentRemoteConfig().model_pool.models, [])
         self.assertEqual(AgentRemoteConfig().opencode_concurrency, 4)
         self.assertTrue(AgentRemoteConfig().threat_analysis.enabled)
-        self.assertEqual(AgentRemoteConfig().threat_analysis.attack_path_audit_mode, "after_analysis")
-        self.assertEqual(AgentRemoteConfig().threat_analysis.model_policy.max_retries, 3)
 
     def test_full_remote_defaults_do_not_switch_agent_to_opencode(self) -> None:
         cfg = AgentConfig()
@@ -116,8 +112,6 @@ class AgentConfigTests(unittest.TestCase):
                 },
                 "threat_analysis": {
                     "enabled": False,
-                    "implementation": "custom_impl",
-                    "attack_path_audit_mode": "immediate",
                 },
                 "static_dedup": False,
                 "pattern_filter": {"enabled": False, "scope": "repo"},
@@ -151,8 +145,6 @@ class AgentConfigTests(unittest.TestCase):
         self.assertEqual(cfg.git_history.paths, "src tests")
         self.assertFalse(cfg.git_history.variant_hunt)
         self.assertFalse(cfg.threat_analysis.enabled)
-        self.assertEqual(cfg.threat_analysis.implementation, "custom_impl")
-        self.assertEqual(cfg.threat_analysis.attack_path_audit_mode, "immediate")
         self.assertFalse(cfg.static_dedup)
         self.assertFalse(cfg.pattern_filter.enabled)
         self.assertEqual(cfg.pattern_filter.scope, "repo")
@@ -177,15 +169,7 @@ class AgentConfigTests(unittest.TestCase):
         self.assertEqual(remote["model_pool"], {"global_concurrency": 4, "models": []})
         self.assertEqual(
             remote["threat_analysis"],
-            {
-                "enabled": True,
-                "attack_path_audit_mode": "after_analysis",
-                "model_policy": {
-                    "required_capability": "high",
-                    "timeout_seconds": 1200,
-                    "max_retries": 3,
-                },
-            },
+            {"enabled": True},
         )
         self.assertEqual(remote["vulnerability_mining"]["required_capability"], "low")
         self.assertEqual(remote["false_positive"]["required_capability"], "high")
@@ -230,12 +214,6 @@ class AgentConfigTests(unittest.TestCase):
                     },
                     "threat_analysis": {
                         "enabled": False,
-                        "attack_path_audit_mode": "immediate",
-                        "model_policy": {
-                            "required_capability": "medium",
-                            "timeout_seconds": 900,
-                            "max_retries": 4,
-                        },
                     },
                     "code_graph": {
                         "enabled": True,
@@ -290,8 +268,7 @@ class AgentConfigTests(unittest.TestCase):
             self.assertEqual(raw["model_pool"]["global_concurrency"], 3)
             self.assertEqual(raw["model_pool"]["models"][0]["model"], "provider/model")
             self.assertNotIn("use_default_model", raw["model_pool"]["models"][0])
-            self.assertEqual(raw["threat_analysis"]["model_policy"]["max_retries"], 4)
-            self.assertEqual(raw["threat_analysis"]["model_policy"]["required_capability"], "high")
+            self.assertEqual(raw["threat_analysis"], {"enabled": False})
             self.assertEqual(raw["code_graph"]["remote"]["url"], "http://graph.test/mcp")
             self.assertEqual(
                 raw["code_graph"]["remote"]["headers"]["Authorization"],
@@ -336,13 +313,11 @@ class AgentConfigTests(unittest.TestCase):
             cfg,
             {
                 "pattern_filter": {"enabled": "false", "scope": "invalid"},
-                "threat_analysis": {"attack_path_audit_mode": "invalid"},
             },
         )
 
         self.assertFalse(cfg.pattern_filter.enabled)
         self.assertEqual(cfg.pattern_filter.scope, "directory")
-        self.assertEqual(cfg.threat_analysis.attack_path_audit_mode, "after_analysis")
 
     def test_legacy_executable_infers_tool_and_fp_review_inherits(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

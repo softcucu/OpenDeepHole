@@ -350,23 +350,27 @@ class AgentReporterTests(unittest.TestCase):
             all(post["json"]["agent_session_id"] == reporter.agent_session_id for post in fake_client.posts)
         )
 
-    def test_get_threat_analysis_returns_parsed_result(self) -> None:
+    def test_get_threat_analysis_returns_opaque_artifact_bundle(self) -> None:
+        bundle = {
+            "entrypoint_result": {
+                "result": True,
+                "attack_tree_path": "attack-trees.json",
+            },
+            "artifacts": {
+                "attack_tree_path": {
+                    "path": "attack-trees.json",
+                    "content": {"attack_trees": []},
+                },
+            },
+        }
+
         class FakeClient:
             async def get(self, url, timeout=None):
                 request = httpx.Request("GET", url)
                 return httpx.Response(
                     200,
                     request=request,
-                    json={
-                        "schema_version": "1.0",
-                        "analysis_id": "stored-threat",
-                        "scan_scope": {
-                            "project_path": "/repo",
-                            "code_scan_path": "/repo/src",
-                            "code_scan_relative_path": "src",
-                        },
-                        "assets": [],
-                    },
+                    json=bundle,
                 )
 
         reporter = Reporter("http://server")
@@ -374,9 +378,7 @@ class AgentReporterTests(unittest.TestCase):
 
         analysis = asyncio.run(reporter.get_threat_analysis("scan-1"))
 
-        self.assertIsNotNone(analysis)
-        self.assertEqual(analysis.analysis_id, "stored-threat")
-        self.assertEqual(analysis.scan_scope.code_scan_relative_path, "src")
+        self.assertEqual(analysis, bundle)
 
     def test_get_threat_analysis_returns_none_for_missing_result(self) -> None:
         class FakeClient:

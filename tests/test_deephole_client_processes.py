@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import json
 import tempfile
 import threading
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 from deephole_client.code_graph_build.code_database import CodeDatabase
@@ -17,7 +19,6 @@ from deephole_client.static_analysis import run_static_analysis
 from deephole_client.threat_analysis import run_threat_analysis
 from deephole_client.threat_audit import run_threat_audit
 from deephole_client.vulnerability_validation import run_vulnerability_validation
-from deephole_client.threat_analysis.parsing import parse_threat_analysis_data
 
 
 PROCESS_FUNCTIONS = (
@@ -58,31 +59,60 @@ def test_threat_processes_run_with_task_agent_only() -> None:
         project = root / "project"
         project.mkdir()
         events: list[dict] = []
-        threat_result = parse_threat_analysis_data({
-            "schema_version": "1.1",
-            "assets": [],
-            "high_risk_external_interfaces": [],
-            "attack_trees": [],
-            "attack_paths": [{
-                "path_id": "AP-1",
-                "attack_surface_name": "socket",
-                "attack_method_name": "malformed packet",
-                "code_paths": [{"path": "src/parser.c", "description": "parser"}],
-            }],
-            "code_path_mappings": [],
-        })
+
+        def native_threat_analysis(**kwargs):
+            output_path = Path(kwargs["output_path"])
+            value_assets = output_path / "value-assets.json"
+            attack_trees = output_path / "attack-trees.json"
+            high_risk_modules = output_path / "high-risk-modules.json"
+            value_assets.write_text("[]", encoding="utf-8")
+            attack_trees.write_text(json.dumps({
+                "attack_trees": [{
+                    "tree_id": "TREE-1",
+                    "value_asset": {"asset_name": "service"},
+                    "nodes": [],
+                    "attack_paths": [{
+                        "path_id": "AP-1",
+                        "path_name": "remote parser path",
+                        "path_description": "socket input reaches parser",
+                        "related_high_risk_modules": [{
+                            "module_name": "parser",
+                            "node_id": "NODE-1",
+                            "association_description": "entry",
+                        }],
+                        "attack_patterns": [{
+                            "pattern_id": "PATTERN-1",
+                            "pattern_name": "malformed packet",
+                            "association_description": "length mismatch",
+                        }],
+                    }],
+                }],
+            }), encoding="utf-8")
+            high_risk_modules.write_text(json.dumps([{
+                "模块名称": "parser",
+                "代码目录": "src/parser.c",
+                "面临威胁": "out of bounds",
+            }]), encoding="utf-8")
+            return {
+                "result": True,
+                "value_asset_path": str(value_assets),
+                "attack_tree_path": str(attack_trees),
+                "high_risk_modules_path": str(high_risk_modules),
+            }
+
         with patch(
-            "deephole_client.threat_analysis.runner.run_attack_tree_threat_analysis",
-            new=AsyncMock(return_value=threat_result),
+            "deephole_client.threat_analysis.runner._load_implementation",
+            return_value=SimpleNamespace(
+                run_threat_analysis=native_threat_analysis,
+            ),
         ):
             analysis = await run_threat_analysis(
-                project_path=project,
-                work_dir=root / "threat",
-                scan_id="scan-1",
+                code_path=project,
+                output_path=root / "threat",
                 output=events.append,
             )
-        assert analysis["status"] == "success"
-        assert analysis["analysis"]["attack_paths"][0]["path_id"] == "AP-1"
+        assert analysis["result"] is True
+        assert Path(analysis["attack_tree_path"]).is_file()
         assert events and all(event["process"] == "threat_analysis" for event in events)
 
         audit_task_result = _task_result({"vulnerabilities": [{
@@ -98,7 +128,8 @@ def test_threat_processes_run_with_task_agent_only() -> None:
                 project_path=project,
                 work_dir=root / "audit",
                 scan_id="scan-1",
-                threat_analysis=analysis["analysis"],
+                attack_tree_path=analysis["attack_tree_path"],
+                high_risk_modules_path=analysis["high_risk_modules_path"],
             )
         assert audit["status"] == "success"
         assert audit["vulnerabilities"][0]["analysis_source"] == "threat_audit"

@@ -69,15 +69,6 @@ class GitHistoryConfig:
 @dataclass
 class ThreatAnalysisConfig:
     enabled: bool = True
-    implementation: str = "attack_tree"
-    attack_path_audit_mode: str = "after_analysis"  # after_analysis | immediate
-    product_mcp_name: str = "product-info"
-    product_mcp_detection_timeout_seconds: int = 60
-    model_policy: "ModelTaskPolicyConfig" = field(
-        default_factory=lambda: ModelTaskPolicyConfig(
-            required_capability="high", timeout_seconds=1200, max_retries=3
-        )
-    )
 
 
 @dataclass
@@ -276,20 +267,6 @@ def _normalize_git_history_config(config: GitHistoryConfig) -> None:
 
 def _normalize_threat_analysis_config(config: ThreatAnalysisConfig) -> None:
     config.enabled = _bool_value(config.enabled, True)
-    config.implementation = str(config.implementation or "attack_tree").strip() or "attack_tree"
-    mode = str(getattr(config, "attack_path_audit_mode", "") or "after_analysis").strip().lower()
-    aliases = {
-        "after_analysis": "after_analysis",
-        "after-all": "after_analysis",
-        "after_all": "after_analysis",
-        "batch": "after_analysis",
-        "deferred": "after_analysis",
-        "wait_for_analysis": "after_analysis",
-        "immediate": "immediate",
-        "streaming": "immediate",
-        "incremental": "immediate",
-    }
-    config.attack_path_audit_mode = aliases.get(mode, "after_analysis")
 
 
 @dataclass
@@ -433,16 +410,11 @@ def apply_remote_config(config: AgentConfig, remote: dict) -> None:
         threat = remote.get("threat_analysis") if isinstance(remote.get("threat_analysis"), dict) else {}
         if "enabled" in threat:
             config.threat_analysis.enabled = _bool_value(threat.get("enabled"), True)
-        if "attack_path_audit_mode" in threat:
-            config.threat_analysis.attack_path_audit_mode = str(threat.get("attack_path_audit_mode") or "")
         _normalize_threat_analysis_config(config.threat_analysis)
-        _apply_policy(config.threat_analysis.model_policy, threat.get("model_policy"))
         _apply_policy(config.vulnerability_mining, remote.get("vulnerability_mining"))
         _apply_policy(config.false_positive, remote.get("false_positive"))
         config.code_graph = _mcp_config(remote.get("code_graph"), config.code_graph)
         config.product_info = _mcp_config(remote.get("product_info"), config.product_info)
-        config.threat_analysis.product_mcp_name = config.product_info.name
-        config.threat_analysis.product_mcp_detection_timeout_seconds = config.product_info.timeout_seconds
         validation = remote.get("vulnerability_validation")
         if isinstance(validation, dict):
             config.vulnerability_validation.environments = _validation_environments(
@@ -582,8 +554,6 @@ def remote_config_dict(config: AgentConfig) -> dict:
         },
         "threat_analysis": {
             "enabled": config.threat_analysis.enabled,
-            "attack_path_audit_mode": config.threat_analysis.attack_path_audit_mode,
-            "model_policy": dataclasses.asdict(config.threat_analysis.model_policy),
         },
         "code_graph": dataclasses.asdict(config.code_graph),
         "product_info": dataclasses.asdict(config.product_info),

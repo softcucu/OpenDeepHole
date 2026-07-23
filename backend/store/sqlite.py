@@ -28,7 +28,6 @@ from backend.models import (
     ScanStatus,
     ScanSummary,
     SkillReport,
-    ThreatAnalysis,
     ThreatAuditTask,
     ThreatCodePath,
     UserInDB,
@@ -1962,9 +1961,12 @@ class SqliteScanStore(ScanStoreBase):
 
     # -- Threat analysis --
 
-    def replace_threat_analysis(self, scan_id: str, analysis: ThreatAnalysis) -> ThreatAnalysis:
-        updated_at = analysis.updated_at or datetime.now(timezone.utc).isoformat()
-        stored = analysis.model_copy(update={"updated_at": updated_at})
+    def replace_threat_analysis(self, scan_id: str, analysis: dict) -> dict:
+        if not isinstance(analysis, dict):
+            raise TypeError("threat analysis artifact bundle must be a dict")
+        updated_at = datetime.now(timezone.utc).isoformat()
+        serialized = json.dumps(analysis, ensure_ascii=False)
+        stored = json.loads(serialized)
         with self._lock:
             self._conn.execute(
                 """\
@@ -1974,12 +1976,12 @@ class SqliteScanStore(ScanStoreBase):
                     content = excluded.content,
                     updated_at = excluded.updated_at
                 """,
-                (scan_id, stored.model_dump_json(), updated_at),
+                (scan_id, serialized, updated_at),
             )
             self._conn.commit()
         return stored
 
-    def get_threat_analysis(self, scan_id: str) -> ThreatAnalysis | None:
+    def get_threat_analysis(self, scan_id: str) -> dict | None:
         cur = self._conn.execute(
             "SELECT content, updated_at FROM threat_analysis WHERE scan_id = ?",
             (scan_id,),
@@ -1988,12 +1990,10 @@ class SqliteScanStore(ScanStoreBase):
         if row is None:
             return None
         try:
-            analysis = ThreatAnalysis.model_validate_json(row["content"])
+            analysis = json.loads(row["content"])
         except Exception:
             return None
-        if not analysis.updated_at:
-            analysis = analysis.model_copy(update={"updated_at": row["updated_at"] or ""})
-        return analysis
+        return analysis if isinstance(analysis, dict) else None
 
     def upsert_threat_audit_task(self, scan_id: str, task: ThreatAuditTask) -> ThreatAuditTask:
         now = datetime.now(timezone.utc).isoformat()

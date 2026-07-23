@@ -2,6 +2,10 @@
 
 ## 2026-07-23
 
+- **重构** 将 `ThreatAnalysis/src/threat_analysis_harness` 原样嵌入 `deephole_client/threat_analysis/threat_analysis_harness/`；外层只保留异步 `run_threat_analysis(**kwargs)` 门面和 CLI，删除旧攻击树实现、旧 Schema、旧 Skill 安装器与实现选择配置
+- **新增** `task_agent.run_sync_component()` 支持异步过程门面安全调用同步实现，并让同步实现内部的 `run_opencode_task()` 回到所属事件循环；过程私有 `skill_paths` 和 `task_agent_config` 可按任务绑定，不污染全局工作区
+- **变更** 威胁分析入口直接返回原生 `result/value_asset_path/attack_tree_path/high_risk_modules_path`，Agent 仅在上报时收集为透明 artifact bundle，后端按原 JSON 存储，前端直接展示原生价值资产、高风险模块、内部节点和攻击树
+- **变更** 威胁审计不再消费旧的归一化威胁模型，改为直接读取原生攻击树与高风险模块文件，并为每个 `attack_pattern` 建立独立任务；威胁分析配置收敛为唯一的 `enabled`
 - **重构** 最终将代码图谱构建也抽成第七个独立过程 `deephole_client/code_graph_build/`；它只公开异步 `run_code_graph_build(**kwargs)`，自带 CLI 和完整 key 文档，静态分析与 MCP 分别通过自己的只读索引接口消费结果
 - **重构** 静态规则分析与候选点审计彻底拆为 `static_analysis/rules/` 和 `candidate_audit/rules/` 两棵资源目录；传输包使用明确的 `static/`、`audit/` 根，静态过程不读取 SKILL，审计过程不加载 Analyzer
 - **重构** `deephole_client/scanner.py` 收敛为七个过程的调度和平台上报适配器；后端只保留 API、配置、存储、DTO 与规则元数据，不再导入或执行代码图谱、静态分析、威胁分析等客户端过程

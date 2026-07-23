@@ -25,7 +25,6 @@ from backend.models import (
     ScanStatus,
     ScanSummary,
     SkillReport,
-    ThreatAnalysis,
     ThreatAuditTask,
     UserInDB,
     Vulnerability,
@@ -171,12 +170,12 @@ class ScanStoreBase(ABC):
     # -- Threat analysis --
 
     @abstractmethod
-    def replace_threat_analysis(self, scan_id: str, analysis: ThreatAnalysis) -> ThreatAnalysis:
-        """Replace the attack-tree threat analysis result for a scan."""
+    def replace_threat_analysis(self, scan_id: str, analysis: dict) -> dict:
+        """Replace the opaque threat-analysis artifact bundle for a scan."""
 
     @abstractmethod
-    def get_threat_analysis(self, scan_id: str) -> ThreatAnalysis | None:
-        """Return the attack-tree threat analysis result for a scan if present."""
+    def get_threat_analysis(self, scan_id: str) -> dict | None:
+        """Return the opaque threat-analysis artifact bundle if present."""
 
     @abstractmethod
     def upsert_threat_audit_task(self, scan_id: str, task: ThreatAuditTask) -> ThreatAuditTask:

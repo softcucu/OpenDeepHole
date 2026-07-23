@@ -87,10 +87,6 @@ class GitHistoryConfig(BaseModel):
 
 class ThreatAnalysisConfig(BaseModel):
     enabled: bool = True
-    implementation: str = "attack_tree"
-    attack_path_audit_mode: str = "after_analysis"  # after_analysis | immediate
-    product_mcp_name: str = "product-info"
-    product_mcp_detection_timeout_seconds: int = 60
 
 
 class ModelTaskPolicyConfig(BaseModel):
@@ -179,9 +175,6 @@ class AppConfig(BaseModel):
     memory_api_discovery: MemoryApiDiscoveryConfig = MemoryApiDiscoveryConfig()
     git_history: GitHistoryConfig = GitHistoryConfig()
     threat_analysis: ThreatAnalysisConfig = ThreatAnalysisConfig()
-    threat_analysis_policy: ModelTaskPolicyConfig = ModelTaskPolicyConfig(
-        required_capability="high", max_retries=3
-    )
     vulnerability_mining: ModelTaskPolicyConfig = ModelTaskPolicyConfig(
         required_capability="low"
     )

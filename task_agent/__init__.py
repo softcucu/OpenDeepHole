@@ -1,6 +1,11 @@
 """Self-contained Task Agent framework backed by OpenCode-compatible Serve."""
 
-from .api import OpenCodeResult, opencode_task_context, run_opencode_task
+from .api import (
+    OpenCodeResult,
+    opencode_task_context,
+    run_opencode_task,
+    run_sync_component,
+)
 from .host import OpenCodeHostBindings, OpenCodeSessionRuntime, configure_opencode
 
 
@@ -22,5 +27,6 @@ __all__ = [
     "configure_opencode",
     "opencode_task_context",
     "run_opencode_task",
+    "run_sync_component",
     "shutdown_opencode",
 ]

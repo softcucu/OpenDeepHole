@@ -17,6 +17,7 @@ from typing import Any, Callable
 from uuid import uuid4
 
 from .api import OpenCodeResult
+from .config_json import dump_opencode_config, parse_opencode_jsonc
 from .host import (
     OpenCodeInvocationMetadata as OutputSource,
     OpenCodeSessionRuntime as _SessionRuntime,
@@ -71,6 +72,8 @@ class OpenCodeExecutionContext:
     scan_id: str = ""
     project_dir: Path | None = None
     work_dir: Path | None = None
+    config_path: Path | None = None
+    skill_paths: tuple[Path, ...] = ()
     task_metadata: dict[str, Any] = field(default_factory=dict)
     feedback_entries: tuple[dict[str, Any], ...] = ()
     on_output: Callable[[str], Any] | None = field(default=None, compare=False, repr=False)
@@ -111,6 +114,8 @@ def set_opencode_execution_context(
     scan_id: str | None = None,
     project_dir: Path | None | object = _INHERIT_CONTEXT_VALUE,
     work_dir: Path | None | object = _INHERIT_CONTEXT_VALUE,
+    config_path: Path | None | object = _INHERIT_CONTEXT_VALUE,
+    skill_paths: Any = _INHERIT_CONTEXT_VALUE,
     task_metadata: dict[str, Any] | None = None,
     feedback_entries: Any = None,
     on_output: Callable[[str], Any] | None | object = _INHERIT_CONTEXT_VALUE,
@@ -131,6 +136,16 @@ def set_opencode_execution_context(
 
     next_project_dir = resolved_path(project_dir, current.project_dir)
     next_work_dir = resolved_path(work_dir, current.work_dir)
+    next_config_path = resolved_path(config_path, current.config_path)
+    if skill_paths is _INHERIT_CONTEXT_VALUE:
+        next_skill_paths = current.skill_paths
+    else:
+        next_skill_paths = tuple(
+            dict.fromkeys(
+                Path(path).expanduser().resolve()
+                for path in (skill_paths or ())
+            )
+        )
     if scan_id is not None and not next_scan_id:
         if project_dir is _INHERIT_CONTEXT_VALUE:
             next_project_dir = None
@@ -148,6 +163,8 @@ def set_opencode_execution_context(
         scan_id=next_scan_id,
         project_dir=next_project_dir,
         work_dir=next_work_dir,
+        config_path=next_config_path,
+        skill_paths=next_skill_paths,
         task_metadata=metadata,
         feedback_entries=feedback,
         on_output=current.on_output if on_output is _INHERIT_CONTEXT_VALUE else on_output,
@@ -197,6 +214,8 @@ def _snapshot_execution_context() -> OpenCodeExecutionContext:
         scan_id=current.scan_id,
         project_dir=current.project_dir,
         work_dir=current.work_dir,
+        config_path=current.config_path,
+        skill_paths=tuple(current.skill_paths),
         task_metadata=dict(current.task_metadata),
         feedback_entries=tuple(dict(entry) for entry in feedback),
         on_output=current.on_output,
@@ -876,6 +895,10 @@ class OpenCodeTaskService:
             lease.option,
             spec.directory,
         )
+        runtime = _runtime_with_skill_paths(
+            runtime,
+            record.execution_context.skill_paths,
+        )
         model = runtime.model
         source = OutputSource(
             backend="opencode",
@@ -1000,6 +1023,38 @@ class OpenCodeTaskService:
         return result
 
 
+def _runtime_with_skill_paths(
+    runtime: _SessionRuntime,
+    skill_paths: tuple[Path, ...],
+) -> _SessionRuntime:
+    """Merge component-owned skill roots into one task's Serve config."""
+    if not skill_paths:
+        return runtime
+    config = parse_opencode_jsonc(
+        runtime.config_content,
+        source="OpenCode component runtime config",
+    )
+    skills = config.get("skills")
+    if not isinstance(skills, dict):
+        skills = {}
+        config["skills"] = skills
+    configured = skills.get("paths")
+    if isinstance(configured, str):
+        configured_paths = [configured]
+    elif isinstance(configured, list):
+        configured_paths = [str(path) for path in configured if str(path).strip()]
+    else:
+        configured_paths = []
+    skills["paths"] = list(dict.fromkeys([
+        *configured_paths,
+        *(str(path) for path in skill_paths),
+    ]))
+    return dataclasses.replace(
+        runtime,
+        config_content=dump_opencode_config(config),
+    )
+
+
 def _cfg_value(config_obj: Any, key: str, default: Any = None) -> Any:
     if isinstance(config_obj, dict):
         return config_obj.get(key, default)
@@ -1023,8 +1078,6 @@ def _task_model_policy(context: OpenCodeExecutionContext) -> Any | None:
     """Return the authoritative phase policy for a model-backed task."""
     config = get_config()
     task_type = str(context.task_metadata.get("task_type") or "").strip()
-    if task_type == "threat_analysis":
-        return getattr(config, "threat_analysis_policy", None)
     if task_type in {
         "audit",
         "project_audit",

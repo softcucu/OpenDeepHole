@@ -24,18 +24,7 @@ def _runtime_sections(config: AgentConfig, scan_dir: Path | None = None) -> dict
         "opencode_concurrency": config.opencode_concurrency,
         "memory_api_discovery": dataclasses.asdict(config.memory_api_discovery),
         "git_history": dataclasses.asdict(config.git_history),
-        "threat_analysis": {
-            "enabled": config.threat_analysis.enabled,
-            "implementation": config.threat_analysis.implementation,
-            "attack_path_audit_mode": config.threat_analysis.attack_path_audit_mode,
-            "product_mcp_name": config.threat_analysis.product_mcp_name,
-            "product_mcp_detection_timeout_seconds": (
-                config.threat_analysis.product_mcp_detection_timeout_seconds
-            ),
-        },
-        "threat_analysis_policy": dataclasses.asdict(
-            config.threat_analysis.model_policy,
-        ),
+        "threat_analysis": dataclasses.asdict(config.threat_analysis),
         "vulnerability_mining": dataclasses.asdict(config.vulnerability_mining),
         "false_positive": dataclasses.asdict(config.false_positive),
         "code_graph": dataclasses.asdict(config.code_graph),
@@ -86,9 +75,6 @@ def refresh_platform_runtime_config(config: AgentConfig) -> None:
     current.git_history = backend_config.GitHistoryConfig(**raw["git_history"])
     current.threat_analysis = backend_config.ThreatAnalysisConfig(
         **raw["threat_analysis"],
-    )
-    current.threat_analysis_policy = backend_config.ModelTaskPolicyConfig(
-        **raw["threat_analysis_policy"],
     )
     current.vulnerability_mining = backend_config.ModelTaskPolicyConfig(
         **raw["vulnerability_mining"],

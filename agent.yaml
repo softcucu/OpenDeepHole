@@ -44,11 +44,6 @@ model_pool:
 
 threat_analysis:
   enabled: true
-  attack_path_audit_mode: "after_analysis"
-  model_policy:
-    required_capability: "high"
-    timeout_seconds: 1200
-    max_retries: 3
 
 code_graph:
   enabled: false

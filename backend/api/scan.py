@@ -44,7 +44,6 @@ from backend.models import (
     ScanStatus,
     ScanSummary,
     SkillReport,
-    ThreatAnalysis,
     ThreatAuditTask,
     UnmarkRequest,
     UpdateScanValidationTargetRequest,
@@ -2035,12 +2034,12 @@ async def get_scan_git_history(
     return get_scan_store().get_git_history_patterns(scan_id)
 
 
-@router.get("/api/scan/{scan_id}/threat-analysis", response_model=ThreatAnalysis)
+@router.get("/api/scan/{scan_id}/threat-analysis", response_model=dict)
 async def get_scan_threat_analysis(
     scan_id: str,
     current_user: User = Depends(get_current_user),
-) -> ThreatAnalysis:
-    """Return the attack-tree threat analysis result for a scan."""
+) -> dict:
+    """Return the opaque threat-analysis artifact bundle for a scan."""
     _check_scan_owner(scan_id, current_user)
     analysis = get_scan_store().get_threat_analysis(scan_id)
     if analysis is None:

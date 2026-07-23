@@ -6,6 +6,9 @@
 - `ThreatAnalysisPanel.tsx`：独立面板组件，只通过 props 接收数据。
 - `index.ts`：feature 对外出口。
 
+面板直接读取后端保存的原生 artifact bundle，不再依赖旧版归一化
+`ThreatAnalysis` Schema，也不在 `ScanStatus.tsx` 中复制实现专属字段。
+
 独立使用：
 
 ```tsx

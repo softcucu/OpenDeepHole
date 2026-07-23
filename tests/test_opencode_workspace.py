@@ -13,9 +13,6 @@ from deephole_client.opencode_integration import (
     refresh_global_opencode_config,
     writable_edit_patterns,
 )
-from deephole_client.threat_analysis.workspace import (
-    install_attack_tree_threat_analysis_skill,
-)
 
 
 def assert_opencode_read_permissions(
@@ -190,47 +187,3 @@ class OpencodeWorkspaceTests(unittest.TestCase):
                 live_path.read_text(encoding="utf-8"),
                 '{"sentinel": true}',
             )
-
-    def test_threat_analysis_installs_only_its_own_workspace_assets(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            package_root = (
-                Path(__file__).resolve().parents[1]
-                / "deephole_client"
-                / "threat_analysis"
-            )
-            workspace = Path(tmp)
-            managed_path = managed_opencode_config_path(workspace)
-            managed_path.write_text(
-                json.dumps({
-                    "permission": {},
-                    "mcp": {
-                        "deephole-code": {
-                            "type": "remote",
-                            "url": "http://127.0.0.1:9123/mcp",
-                        }
-                    },
-                }),
-                encoding="utf-8",
-            )
-
-            install_attack_tree_threat_analysis_skill(
-                workspace=workspace,
-                skill_path=package_root / "attack-tree-threat-analysis.md",
-                reference_catalog_path=(
-                    package_root / "attack-method-reference-catalog.md"
-                ),
-            )
-
-            config = json.loads(managed_path.read_text(encoding="utf-8"))
-            self.assertEqual(config["permission"]["task"], {"*": "allow"})
-            self.assertIn("threat-asset-enumerator", config["agent"])
-            self.assertTrue((
-                workspace
-                / ".opencode"
-                / "skills"
-                / "threat-method-confirm-agent"
-                / "SKILL.md"
-            ).is_file())
-            self.assertFalse((
-                workspace / ".opencode" / "skills" / "prove-bug"
-            ).exists())

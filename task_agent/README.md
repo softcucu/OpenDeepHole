@@ -60,6 +60,15 @@ result = await run_opencode_task(
 
 返回的 `OpenCodeResult` 包含 `session_id`、`status`、`text`、`structured`、`model` 和可直接 JSON 序列化的 `output_source`。
 
+已有业务实现若提供同步入口，不需要为了接入平台改成异步，也不要在同步代码里感知宿主事件
+循环。外层异步门面使用 `await run_sync_component(sync_entry, **kwargs)` 即可；该桥会在独立
+线程执行同步入口，并把入口内部对 `run_opencode_task()` 的调用调度回门面所属事件循环。这样
+平台公开入口仍统一为 `async`，原实现及其同步任务提交器可以保持不变。
+
+过程门面还可以通过 `opencode_task_context(..., config_path=..., skill_paths=[...])` 绑定独立
+配置和过程私有 SKILL 根。绑定值会被内部 `run_opencode_task()` 继承，SKILL 路径仅合并到该
+任务的 Serve 配置，不会写入 Agent 全局工作区。
+
 `output_schema` 只定义本地解析和校验规则。需要模型首次就按 Schema 输出时，调用方必须像上例一样把要求和 Schema 明确写入 `prompt`。自定义 `invalid_json_retry_prompt` 也不会被组件追加 Schema、重试序号或其它文字；若省略该参数，组件才会使用当前内置的中文纠错提示词。显式传入空字符串、纯空白或非字符串会在提交任务前报错。
 
 `task_type` 是文档约定的字符串，而不是导出的枚举。支持的值包括 `audit`、`project_audit`、`sensitive_clear`、`report_audit`、`threat_analysis`、`threat_audit`、`fp_review`、`vulnerability_validation`、`git_history`、`variant_hunt`、`memory_api_discovery` 和 `skill_create`；未知值会在提交前被拒绝。

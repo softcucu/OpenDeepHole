@@ -15,11 +15,18 @@ from task_agent import run_opencode_task
 
 PROCESS_NAME = "threat_audit"
 _ALLOWED_KEYS = {
-    "project_path", "work_dir", "scan_id", "threat_analysis", "concurrency",
+    "project_path", "work_dir", "scan_id", "attack_tree_path",
+    "high_risk_modules_path", "concurrency",
     "required_capability", "include_task_ids", "exclude_task_ids",
     "task_agent_config", "output", "cancel_event",
 }
-_REQUIRED_KEYS = {"project_path", "work_dir", "scan_id", "threat_analysis"}
+_REQUIRED_KEYS = {
+    "project_path",
+    "work_dir",
+    "scan_id",
+    "attack_tree_path",
+    "high_risk_modules_path",
+}
 _GENERATED_THREAT_ID_PATTERN = re.compile(
     r"^(?:METHOD|NODE|AP|ASSET|RISK|GOAL|DOMAIN|SURFACE|TREE)-"
     r"[A-Z0-9][A-Z0-9-]*$",
@@ -96,219 +103,162 @@ def _task_description(
     )
 
 
-def _attack_path_tasks(
+def _load_json(path_value: Any, key: str) -> Any:
+    path = Path(path_value).expanduser().resolve()
+    if not path.is_file():
+        raise FileNotFoundError(f"{key} is not a file: {path}")
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"{key} is not valid JSON: {path}") from exc
+
+
+def _module_code_paths(module: dict[str, Any]) -> list[dict[str, str]]:
+    raw_paths = module.get("代码目录")
+    values = raw_paths if isinstance(raw_paths, list) else [raw_paths]
+    description = str(
+        module.get("判断为高风险模块的原因")
+        or module.get("面临威胁")
+        or ""
+    )
+    return [
+        {"path": str(value).strip(), "description": description}
+        for value in values
+        if str(value or "").strip()
+    ]
+
+
+def _tasks(
     scan_id: str,
-    analysis: dict[str, Any],
+    attack_tree_data: dict[str, Any],
+    high_risk_modules: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
+    modules_by_name = {
+        str(module.get("模块名称") or "").strip(): module
+        for module in high_risk_modules
+        if isinstance(module, dict) and str(module.get("模块名称") or "").strip()
+    }
     result: list[dict[str, Any]] = []
     seen: set[str] = set()
-    for path_index, attack_path in enumerate(analysis.get("attack_paths") or []):
-        if not isinstance(attack_path, dict):
-            continue
-        path_id = str(attack_path.get("path_id") or f"path-{path_index + 1}")
-        identity = str(attack_path.get("fingerprint") or path_id).strip()
-        if not identity:
-            identity = json.dumps(attack_path, ensure_ascii=False, sort_keys=True)
-        if identity in seen:
-            continue
-        seen.add(identity)
-        code_paths: list[dict[str, str]] = []
-        for raw_code_path in attack_path.get("code_paths") or []:
-            if isinstance(raw_code_path, str):
-                raw_code_path = {"path": raw_code_path}
-            if not isinstance(raw_code_path, dict):
-                continue
-            code_paths.append({
-                "path": str(raw_code_path.get("path") or ""),
-                "description": str(raw_code_path.get("description") or ""),
-            })
-        first_code_path = code_paths[0] if code_paths else {}
-        surface_name = _display_label(
-            attack_path.get("attack_surface_name"),
-            "未命名攻击面",
-        )
-        method_name = _display_label(
-            attack_path.get("attack_method_name"),
-            "未命名攻击方式",
-        )
-        attack_goal = _display_label(
-            attack_path.get("attack_goal_name"),
-            "未命名攻击目标",
-        )
-        risk_name = _display_label(
-            attack_path.get("risk_name"),
-            "未命名风险",
-        )
-        asset_name = _display_label(
-            attack_path.get("asset_name"),
-            "未命名资产",
-        )
-        result.append({
-            "task_id": _stable_task_id(scan_id, identity),
-            "scan_id": scan_id,
-            "status": "pending",
-            "surface_node_id": str(attack_path.get("attack_surface_id") or ""),
-            "surface_name": surface_name,
-            "method_node_id": str(attack_path.get("attack_method_id") or ""),
-            "method_name": method_name,
-            "attack_goal": attack_goal,
-            "risk_id": str(attack_path.get("risk_id") or ""),
-            "risk_name": risk_name,
-            "asset_id": str(attack_path.get("asset_id") or ""),
-            "asset_name": asset_name,
-            "code_path": str(first_code_path.get("path") or ""),
-            "code_path_description": str(
-                first_code_path.get("description") or "",
-            ),
-            "code_paths": code_paths,
-            "attack_path_id": path_id,
-            "attack_path_fingerprint": str(
-                attack_path.get("fingerprint") or "",
-            ),
-            "preconditions": list(attack_path.get("preconditions") or []),
-            "evidence": list(attack_path.get("evidence") or []),
-            "description": _task_description(
-                attack_goal=attack_goal,
-                surface_name=surface_name,
-                method_name=method_name,
-                asset_name=asset_name,
-                risk_name=risk_name,
-            ),
-        })
-    return result
-
-
-def _legacy_tree_tasks(
-    scan_id: str,
-    analysis: dict[str, Any],
-) -> list[dict[str, Any]]:
-    """Build surface/method tasks for schema versions without attack_paths."""
-    risks: dict[str, tuple[str, str, str]] = {}
-    for asset in analysis.get("assets") or []:
-        if not isinstance(asset, dict):
-            continue
-        for risk in asset.get("risks") or []:
-            if isinstance(risk, dict) and risk.get("risk_id"):
-                risks[str(risk["risk_id"])] = (
-                    str(risk.get("name") or ""),
-                    str(asset.get("asset_id") or ""),
-                    str(asset.get("name") or ""),
-                )
-
-    surfaces: dict[str, tuple[dict[str, Any], dict[str, Any], list[dict[str, Any]]]] = {}
-    for tree in analysis.get("attack_trees") or []:
+    raw_trees = attack_tree_data.get("attack_trees") or []
+    for tree_index, tree in enumerate(raw_trees):
         if not isinstance(tree, dict):
             continue
-        nodes = [item for item in tree.get("nodes") or [] if isinstance(item, dict)]
-        children: dict[str, list[dict[str, Any]]] = {}
-        for node in nodes:
-            parent_id = str(node.get("parent_id") or "")
-            if parent_id:
-                children.setdefault(parent_id, []).append(node)
-        for group in children.values():
-            group.sort(key=lambda item: int(item.get("order") or 0))
-        for surface in nodes:
-            if str(surface.get("node_type") or "").lower() != "surface":
+        tree_id = str(tree.get("tree_id") or f"tree-{tree_index + 1}")
+        asset = tree.get("value_asset")
+        asset = asset if isinstance(asset, dict) else {}
+        asset_name = _display_label(asset.get("asset_name"), "未命名资产")
+        nodes = {
+            str(node.get("node_id") or ""): node
+            for node in tree.get("nodes") or []
+            if isinstance(node, dict) and node.get("node_id")
+        }
+        for path_index, attack_path in enumerate(tree.get("attack_paths") or []):
+            if not isinstance(attack_path, dict):
                 continue
-            methods: list[dict[str, Any]] = []
-            stack = list(reversed(children.get(str(surface.get("node_id") or ""), [])))
-            while stack:
-                node = stack.pop()
-                if str(node.get("node_type") or "").lower() == "method":
-                    methods.append(node)
-                else:
-                    stack.extend(
-                        reversed(children.get(str(node.get("node_id") or ""), [])),
-                    )
-            surfaces[str(surface.get("node_id") or "")] = (
-                tree,
-                surface,
-                methods or [{"node_type": "method", "name": "未标记攻击方式"}],
+            path_id = str(
+                attack_path.get("path_id")
+                or f"{tree_id}-path-{path_index + 1}"
             )
-
-    result: list[dict[str, Any]] = []
-    seen: set[tuple[str, str]] = set()
-    for mapping in analysis.get("code_path_mappings") or []:
-        if not isinstance(mapping, dict):
-            continue
-        surface_id = str(mapping.get("surface_node_id") or "")
-        surface_info = surfaces.get(surface_id)
-        if surface_info is None:
-            continue
-        tree, surface, methods = surface_info
-        risk_name, asset_id, asset_name = risks.get(
-            str(tree.get("risk_id") or ""),
-            ("", str(tree.get("asset_id") or ""), ""),
-        )
-        code_paths = mapping.get("code_paths") or []
-        if not isinstance(code_paths, list):
-            code_paths = []
-        for method in methods:
-            method_id = str(method.get("node_id") or "").strip()
-            method_identity = method_id or (
-                f"name:{method.get('name') or ''}\0order:{method.get('order') or 0}"
-            )
-            key = (surface_id, method_identity)
-            if key in seen:
-                continue
-            seen.add(key)
+            related = [
+                item
+                for item in attack_path.get("related_high_risk_modules") or []
+                if isinstance(item, dict)
+            ]
+            matched_modules = [
+                modules_by_name[name]
+                for name in (
+                    str(item.get("module_name") or "").strip()
+                    for item in related
+                )
+                if name in modules_by_name
+            ]
+            code_paths: list[dict[str, str]] = []
+            seen_paths: set[str] = set()
+            for module in matched_modules:
+                for code_path in _module_code_paths(module):
+                    if code_path["path"] in seen_paths:
+                        continue
+                    seen_paths.add(code_path["path"])
+                    code_paths.append(code_path)
+            first_code_path = code_paths[0] if code_paths else {}
+            surface = related[0] if related else {}
+            surface_id = str(surface.get("node_id") or "")
             surface_name = _display_label(
-                surface.get("name"),
-                "未命名攻击面",
+                surface.get("module_name")
+                or (nodes.get(surface_id) or {}).get("node_name"),
+                "未命名高风险模块",
             )
-            method_name = _display_label(
-                method.get("name"),
-                "未命名攻击方式",
-            )
+            risks = list(dict.fromkeys(
+                str(module.get("面临威胁") or "").strip()
+                for module in matched_modules
+                if str(module.get("面临威胁") or "").strip()
+            ))
+            risk_name = "；".join(risks) or "未命名风险"
             attack_goal = _display_label(
-                tree.get("attack_goal"),
-                "未命名攻击目标",
+                attack_path.get("path_name"),
+                str((nodes.get(str(tree.get("root_node_id") or "")) or {}).get("node_name") or "未命名攻击目标"),
             )
-            readable_risk_name = _display_label(
-                risk_name,
-                "未命名风险",
-            )
-            readable_asset_name = _display_label(
-                asset_name,
-                "未命名资产",
-            )
-            result.append({
-                "task_id": _stable_task_id(
-                    scan_id,
-                    f"{surface_id}\0{method_identity}",
-                ),
-                "scan_id": scan_id,
-                "status": "pending",
-                "surface_node_id": surface_id,
-                "surface_name": surface_name,
-                "method_node_id": method_id or method_identity,
-                "method_name": method_name,
-                "attack_goal": attack_goal,
-                "risk_id": str(tree.get("risk_id") or ""),
-                "risk_name": readable_risk_name,
-                "asset_id": asset_id,
-                "asset_name": readable_asset_name,
-                "code_path": "",
-                "code_path_description": "",
-                "code_paths": code_paths,
-                "attack_path_id": "",
-                "attack_path_fingerprint": "",
-                "preconditions": [],
-                "evidence": [],
-                "description": _task_description(
-                    attack_goal=attack_goal,
-                    surface_name=surface_name,
-                    method_name=method_name,
-                    asset_name=readable_asset_name,
-                    risk_name=readable_risk_name,
-                ),
-            })
+            evidence = [
+                value
+                for value in [
+                    str(attack_path.get("path_description") or "").strip(),
+                    *(str(item.get("association_description") or "").strip() for item in related),
+                ]
+                if value
+            ]
+            patterns = [
+                item
+                for item in attack_path.get("attack_patterns") or []
+                if isinstance(item, dict)
+            ]
+            for pattern_index, pattern in enumerate(patterns):
+                pattern_id = str(
+                    pattern.get("pattern_id")
+                    or f"{path_id}-pattern-{pattern_index + 1}"
+                )
+                method_name = _display_label(
+                    pattern.get("pattern_name"),
+                    "未命名攻击模式",
+                )
+                identity = f"{tree_id}\0{path_id}\0{pattern_id}\0{method_name}"
+                if identity in seen:
+                    continue
+                seen.add(identity)
+                fingerprint = hashlib.sha1(identity.encode("utf-8")).hexdigest()
+                result.append({
+                    "task_id": _stable_task_id(scan_id, identity),
+                    "scan_id": scan_id,
+                    "status": "pending",
+                    "surface_node_id": surface_id,
+                    "surface_name": surface_name,
+                    "method_node_id": pattern_id,
+                    "method_name": method_name,
+                    "attack_goal": attack_goal,
+                    "risk_id": "",
+                    "risk_name": risk_name,
+                    "asset_id": "",
+                    "asset_name": asset_name,
+                    "code_path": str(first_code_path.get("path") or ""),
+                    "code_path_description": str(
+                        first_code_path.get("description") or "",
+                    ),
+                    "code_paths": code_paths,
+                    "attack_path_id": path_id,
+                    "attack_path_fingerprint": fingerprint,
+                    "preconditions": [],
+                    "evidence": evidence,
+                    "attack_pattern": dict(pattern),
+                    "native_attack_path": dict(attack_path),
+                    "description": _task_description(
+                        attack_goal=attack_goal,
+                        surface_name=surface_name,
+                        method_name=method_name,
+                        asset_name=asset_name,
+                        risk_name=risk_name,
+                    ),
+                })
     return result
-
-
-def _tasks(scan_id: str, analysis: dict[str, Any]) -> list[dict[str, Any]]:
-    attack_path_tasks = _attack_path_tasks(scan_id, analysis)
-    return attack_path_tasks or _legacy_tree_tasks(scan_id, analysis)
 
 
 def _normalize_vulnerability(raw: dict[str, Any], task: dict[str, Any], source: dict[str, Any]) -> dict[str, Any]:
@@ -348,9 +298,18 @@ async def run_threat_audit(**kwargs: Any) -> dict[str, Any]:
     if not project.is_dir():
         raise FileNotFoundError(f"project_path is not a directory: {project}")
     work_dir.mkdir(parents=True, exist_ok=True)
-    analysis = kwargs["threat_analysis"]
-    if not isinstance(analysis, dict):
-        raise TypeError("threat_analysis must be a dict")
+    attack_tree_data = _load_json(
+        kwargs["attack_tree_path"],
+        "attack_tree_path",
+    )
+    if not isinstance(attack_tree_data, dict):
+        raise TypeError("attack_tree_path must contain a JSON object")
+    high_risk_modules = _load_json(
+        kwargs["high_risk_modules_path"],
+        "high_risk_modules_path",
+    )
+    if not isinstance(high_risk_modules, list):
+        raise TypeError("high_risk_modules_path must contain a JSON array")
     output = kwargs.get("output")
     if output is not None and not callable(output):
         raise TypeError("output must be callable or None")
@@ -360,7 +319,7 @@ async def run_threat_audit(**kwargs: Any) -> dict[str, Any]:
     if capability not in {"low", "high"}:
         raise ValueError("required_capability must be 'low' or 'high'")
     scan_id = str(kwargs["scan_id"]).strip()
-    tasks = _tasks(scan_id, analysis)
+    tasks = _tasks(scan_id, attack_tree_data, high_risk_modules)
     included = {str(item) for item in kwargs.get("include_task_ids") or []}
     excluded = {str(item) for item in kwargs.get("exclude_task_ids") or []}
     if included:

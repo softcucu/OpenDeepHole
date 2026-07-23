@@ -22,6 +22,13 @@ JSON 写 stdout。业务过程不导入 `backend`、`reporter`、`server` 或其
 `task_agent_config` 指向自己的 `task-agent.yaml`。不调用模型的代码图谱构建和静态规则分析
 无需 Task Agent 配置。
 
+接入已有实现时，实现代码放在对应过程目录的内部子目录，外层 `runner.py` 只负责参数校验、
+上下文绑定和调用。已有入口是同步函数也不需要修改实现，可由异步门面调用
+`task_agent.run_sync_component()`；同步实现内部仍可正常使用
+`task_agent.run_opencode_task()`。实现自己的 SKILL 目录通过门面的 `skill_paths` 上下文按任务
+合并，不需要安装到 Agent 全局工作区。`threat_analysis/` 就是这一模式的完整样例，其
+`threat_analysis_harness/` 与来源实现逐文件一致。
+
 统一事件格式：
 
 ```json
@@ -34,4 +41,6 @@ JSON 写 stdout。业务过程不导入 `backend`、`reporter`、`server` 或其
 ```
 
 协调器先调用代码图谱构建，再并行启动静态分析与威胁分析；静态分析只读取已有
-`code_index.db`，候选点审计只消费静态分析结果。后端不执行这些过程。
+`code_index.db`，候选点审计只消费静态分析结果。威胁分析保持原生三份 JSON 产物和原生
+返回值，协调器只在上报时把文件装入透明 artifact bundle；威胁审计直接读取其中的攻击树和
+高风险模块文件，并按每个攻击模式拆分任务。后端不执行这些过程，也不维护实现专属 Schema。

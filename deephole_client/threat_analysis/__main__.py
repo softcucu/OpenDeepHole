@@ -10,62 +10,41 @@ from .runner import run_threat_analysis
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Run threat analysis without the backend")
-    parser.add_argument("--project-path", required=True)
-    parser.add_argument("--work-dir", required=True)
-    parser.add_argument("--code-scan-path")
-    parser.add_argument("--scan-id", default="standalone")
-    parser.add_argument("--product", default="")
+    parser = argparse.ArgumentParser(
+        description="Run the vendored threat-analysis implementation",
+    )
+    parser.add_argument("--code-path", required=True)
+    parser.add_argument("--output-path", required=True)
     parser.add_argument("--task-agent-config")
-    parser.add_argument(
-        "--required-capability",
-        choices=("low", "high"),
-        default="high",
-    )
-    parser.add_argument("--timeout-seconds", type=int, default=1200)
-    parser.add_argument("--max-retries", type=int, default=3)
-    parser.add_argument("--opencode-config-path")
-    parser.add_argument("--configured-mcp-name", action="append", default=[])
-    parser.add_argument("--product-mcp-name", default="product-info")
-    parser.add_argument(
-        "--product-mcp-detection-timeout-seconds",
-        type=int,
-        default=60,
-    )
-    parser.add_argument("--mock", action="store_true")
-    parser.add_argument("--result-path")
-    parser.add_argument("--no-reuse-cache", action="store_true")
+    parser.add_argument("--product-mcp")
+    parser.add_argument("--attack-modes")
+    parser.add_argument("--resume", action="store_true")
     parser.add_argument("--output-file")
     args = parser.parse_args()
+
+    attack_modes = None
+    if args.attack_modes:
+        attack_modes = json.loads(args.attack_modes)
+        if not isinstance(attack_modes, dict):
+            parser.error("--attack-modes must be a JSON object")
 
     def event_output(event: dict) -> None:
         print(json.dumps(event, ensure_ascii=False), file=sys.stderr, flush=True)
 
     result = asyncio.run(run_threat_analysis(
-        project_path=args.project_path,
-        work_dir=args.work_dir,
-        code_scan_path=args.code_scan_path or args.project_path,
-        scan_id=args.scan_id,
-        product=args.product,
+        code_path=args.code_path,
+        output_path=args.output_path,
+        is_resume=args.resume,
+        product_mcp=args.product_mcp,
+        attack_modes=attack_modes,
         task_agent_config=args.task_agent_config,
-        required_capability=args.required_capability,
-        timeout_seconds=args.timeout_seconds,
-        max_retries=args.max_retries,
-        opencode_config_path=args.opencode_config_path,
-        configured_mcp_names=args.configured_mcp_name,
-        product_mcp_name=args.product_mcp_name,
-        product_mcp_detection_timeout_seconds=(
-            args.product_mcp_detection_timeout_seconds
-        ),
-        mock=args.mock,
-        result_path=args.result_path,
-        reuse_cache=not args.no_reuse_cache,
         output=event_output,
     ))
     text = json.dumps(result, ensure_ascii=False, indent=2)
     if args.output_file:
         Path(args.output_file).write_text(text + "\n", encoding="utf-8")
     print(text)
+    raise SystemExit(0 if result.get("result") is True else 1)
 
 
 if __name__ == "__main__":

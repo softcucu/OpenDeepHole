@@ -1,45 +1,39 @@
-"""Independent async entry point for the complete threat-analysis pipeline."""
+"""Async framework adapter for the vendored threat-analysis harness."""
 
 from __future__ import annotations
 
 import asyncio
+import importlib.util
 import inspect
+import sys
+import threading
 from pathlib import Path
-from typing import Any
+from types import ModuleType
+from typing import Any, Mapping
 
-from .attack_paths import build_analysis_from_attack_paths
-from .attack_tree import AttackTreeThreatAnalysis
-from .models import ThreatAnalysisSources, ThreatAttackPath
-from .opencode_pipeline import run_attack_tree_threat_analysis
-from .parsing import (
-    apply_threat_analysis_scan_scope,
-    build_threat_analysis_scan_scope,
-    write_threat_analysis_file,
-)
+from task_agent import opencode_task_context, run_sync_component
 
 
 PROCESS_NAME = "threat_analysis"
+_IMPLEMENTATION_PACKAGE = "threat_analysis_harness"
+_IMPLEMENTATION_ROOT = Path(__file__).resolve().parent / _IMPLEMENTATION_PACKAGE
+_SKILL_ROOTS = (
+    _IMPLEMENTATION_ROOT / "skills" / "value-assets",
+    _IMPLEMENTATION_ROOT / "skills" / "high-risk-modules",
+    _IMPLEMENTATION_ROOT / "skills" / "attack-trees",
+)
 _ALLOWED_KEYS = {
-    "project_path",
-    "work_dir",
-    "code_scan_path",
-    "scan_id",
-    "product",
-    "reuse_cache",
-    "result_path",
-    "required_capability",
-    "timeout_seconds",
-    "max_retries",
+    "code_path",
+    "output_path",
+    "is_resume",
+    "product_mcp",
+    "attack_modes",
     "task_agent_config",
-    "opencode_config_path",
-    "configured_mcp_names",
-    "product_mcp_name",
-    "product_mcp_detection_timeout_seconds",
-    "mock",
     "output",
     "cancel_event",
 }
-_REQUIRED_KEYS = {"project_path", "work_dir"}
+_REQUIRED_KEYS = {"code_path", "output_path"}
+_IMPORT_LOCK = threading.RLock()
 
 
 async def _emit(output: Any, kind: str, message: str, **data: Any) -> None:
@@ -55,10 +49,6 @@ async def _emit(output: Any, kind: str, message: str, **data: Any) -> None:
         await value
 
 
-def _cancelled(cancel_event: Any) -> bool:
-    return bool(cancel_event is not None and cancel_event.is_set())
-
-
 def _directory(value: Any, key: str, *, create: bool = False) -> Path:
     path = Path(value).expanduser().resolve()
     if create:
@@ -68,8 +58,44 @@ def _directory(value: Any, key: str, *, create: bool = False) -> Path:
     return path
 
 
+def _load_implementation() -> ModuleType:
+    """Load the untouched nested package under its original top-level name."""
+    expected_init = (_IMPLEMENTATION_ROOT / "__init__.py").resolve()
+    if not expected_init.is_file():
+        raise FileNotFoundError(
+            f"Threat-analysis implementation is missing: {expected_init}"
+        )
+    with _IMPORT_LOCK:
+        loaded = sys.modules.get(_IMPLEMENTATION_PACKAGE)
+        if loaded is not None:
+            loaded_file = Path(str(getattr(loaded, "__file__", ""))).resolve()
+            if loaded_file != expected_init:
+                raise RuntimeError(
+                    "A different threat_analysis_harness package is already loaded: "
+                    f"{loaded_file}"
+                )
+            return loaded
+        spec = importlib.util.spec_from_file_location(
+            _IMPLEMENTATION_PACKAGE,
+            expected_init,
+            submodule_search_locations=[str(_IMPLEMENTATION_ROOT)],
+        )
+        if spec is None or spec.loader is None:
+            raise ImportError(
+                f"Cannot load threat-analysis implementation: {expected_init}"
+            )
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[_IMPLEMENTATION_PACKAGE] = module
+        try:
+            spec.loader.exec_module(module)
+        except BaseException:
+            sys.modules.pop(_IMPLEMENTATION_PACKAGE, None)
+            raise
+        return module
+
+
 async def run_threat_analysis(**kwargs: Any) -> dict[str, Any]:
-    """Build a scope-aware attack-tree threat model for one project."""
+    """Call the untouched native entry point and return its result unchanged."""
     unknown = sorted(set(kwargs) - _ALLOWED_KEYS)
     if unknown:
         raise TypeError(
@@ -85,185 +111,95 @@ async def run_threat_analysis(**kwargs: Any) -> dict[str, Any]:
             + ", ".join(missing)
         )
 
-    project = _directory(kwargs["project_path"], "project_path")
-    work_dir = _directory(kwargs["work_dir"], "work_dir", create=True)
-    scan_root = _directory(
-        kwargs.get("code_scan_path") or project,
-        "code_scan_path",
+    code_path = _directory(kwargs["code_path"], "code_path")
+    output_path = _directory(
+        kwargs["output_path"],
+        "output_path",
+        create=True,
     )
-    try:
-        scan_root.relative_to(project)
-    except ValueError as exc:
-        raise ValueError("code_scan_path must be inside project_path") from exc
-
     output = kwargs.get("output")
     if output is not None and not callable(output):
         raise TypeError("output must be callable or None")
-    cancel_event = kwargs.get("cancel_event")
-    capability = str(kwargs.get("required_capability") or "high").lower()
-    if capability not in {"low", "high"}:
-        raise ValueError("required_capability must be 'low' or 'high'")
-    configured_mcp_names = kwargs.get("configured_mcp_names") or []
-    if not isinstance(configured_mcp_names, list):
-        raise TypeError("configured_mcp_names must be a list")
+    attack_modes = kwargs.get("attack_modes")
+    if attack_modes is not None and not isinstance(attack_modes, Mapping):
+        raise TypeError("attack_modes must be a mapping or None")
+    task_agent_config = kwargs.get("task_agent_config")
+    if task_agent_config is not None:
+        task_agent_config = Path(task_agent_config).expanduser().resolve()
 
-    implementation = AttackTreeThreatAnalysis()
-    result_path = Path(
-        kwargs.get("result_path") or implementation.result_path(project)
-    ).expanduser().resolve()
-    if bool(kwargs.get("reuse_cache", True)):
-        cached = implementation.load_cached(project, scan_root)
-        if cached.analysis is not None:
-            await _emit(
-                output,
-                "artifact",
-                cached.message or "Loaded cached threat analysis",
-                path=str(result_path),
-                cache_hit=True,
-            )
-            return {
-                "status": "success",
-                "analysis": cached.analysis.model_dump(mode="json"),
-                "cache_hit": True,
-                "output_source": {},
-            }
-        if cached.message:
-            await _emit(output, "warning", cached.message)
-
-    if _cancelled(cancel_event):
-        return {
-            "status": "cancelled",
-            "analysis": None,
-            "cache_hit": False,
-            "output_source": {},
-        }
-
-    scan_id = str(kwargs.get("scan_id") or "standalone").strip()
-    scan_scope = build_threat_analysis_scan_scope(project, scan_root)
-
-    async def on_attack_paths(paths: list[ThreatAttackPath]) -> None:
-        partial = build_analysis_from_attack_paths(
-            paths,
-            analysis_id=f"{scan_id}-streaming",
-            sources=ThreatAnalysisSources(
-                repositories=[scan_scope.code_scan_relative_path or "."],
-            ),
-            scan_scope=scan_scope,
-        )
-        await _emit(
-            output,
-            "attack_paths",
-            f"Threat analysis produced {len(paths)} attack path(s)",
-            attack_paths=[
-                path.model_dump(mode="json")
-                for path in paths
-            ],
-            analysis=partial.model_dump(mode="json"),
+    implementation = _load_implementation()
+    native_entry = getattr(implementation, "run_threat_analysis", None)
+    if not callable(native_entry):
+        raise RuntimeError(
+            "threat_analysis_harness does not export run_threat_analysis"
         )
 
     event_loop = asyncio.get_running_loop()
     pending_output_tasks: set[asyncio.Task[Any]] = set()
 
-    def on_model_output(line: str) -> None:
-        if output is None:
-            return
-        task = event_loop.create_task(_emit(output, "log", str(line)))
+    def schedule_output(text: str) -> None:
+        task = event_loop.create_task(_emit(output, "log", text))
         pending_output_tasks.add(task)
         task.add_done_callback(pending_output_tasks.discard)
 
-    package_root = Path(__file__).resolve().parent
-    await _emit(output, "progress", "Threat analysis started", scan_id=scan_id)
+    def task_output(line: str) -> None:
+        text = str(line or "").strip()
+        if not text or output is None:
+            return
+        try:
+            running_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            running_loop = None
+        if running_loop is event_loop:
+            schedule_output(text)
+        else:
+            event_loop.call_soon_threadsafe(schedule_output, text)
+
+    await _emit(
+        output,
+        "progress",
+        "Threat analysis started",
+        code_path=str(code_path),
+        output_path=str(output_path),
+    )
     try:
-        analysis = await run_attack_tree_threat_analysis(
-            workspace=work_dir / "workspace",
-            work_dir=work_dir / "run",
-            project_id=scan_id,
-            skill_path=package_root / "attack-tree-threat-analysis.md",
-            reference_catalog_path=package_root / "attack-method-reference-catalog.md",
-            on_output=on_model_output,
-            cancel_event=cancel_event,
-            timeout=max(1, int(kwargs.get("timeout_seconds") or 1200)),
-            project_dir=project,
-            code_scan_path=scan_root,
-            product=str(kwargs.get("product") or ""),
-            on_attack_paths=on_attack_paths,
-            required_capability=capability,
-            max_retries=(
-                3
-                if kwargs.get("max_retries") is None
-                else max(0, int(kwargs["max_retries"]))
-            ),
-            task_agent_config=kwargs.get("task_agent_config"),
-            opencode_config_path=(
-                Path(kwargs["opencode_config_path"]).expanduser().resolve()
-                if kwargs.get("opencode_config_path")
-                else None
-            ),
-            configured_mcp_names=[
-                str(name)
-                for name in configured_mcp_names
-            ],
-            product_mcp_name=str(
-                kwargs.get("product_mcp_name") or "product-info"
-            ),
-            product_mcp_detection_timeout_seconds=max(
-                1,
-                int(
-                    kwargs.get("product_mcp_detection_timeout_seconds")
-                    or 60
-                ),
-            ),
-            mock=bool(kwargs.get("mock", False)),
-        )
-    except asyncio.CancelledError:
-        raise
-    except Exception as exc:
-        if _cancelled(cancel_event):
-            return {
-                "status": "cancelled",
-                "analysis": None,
-                "cache_hit": False,
-                "output_source": {},
-            }
-        await _emit(output, "error", f"Threat analysis failed: {exc}")
-        return {
-            "status": "failure",
-            "analysis": None,
-            "cache_hit": False,
-            "error": str(exc),
-            "output_source": {},
-        }
+        with opencode_task_context(
+            project_dir=code_path,
+            work_dir=output_path,
+            config_path=task_agent_config,
+            skill_paths=[str(path) for path in _SKILL_ROOTS],
+            task_metadata={"standalone_console": True},
+            output=task_output,
+            cancel_event=kwargs.get("cancel_event"),
+        ):
+            result = await run_sync_component(
+                native_entry,
+                code_path=code_path,
+                output_path=output_path,
+                is_resume=bool(kwargs.get("is_resume", False)),
+                product_mcp=kwargs.get("product_mcp"),
+                attack_modes=attack_modes,
+            )
     finally:
+        await asyncio.sleep(0)
         if pending_output_tasks:
             await asyncio.gather(*pending_output_tasks, return_exceptions=True)
 
-    if analysis is None:
-        status = "cancelled" if _cancelled(cancel_event) else "failure"
-        return {
-            "status": status,
-            "analysis": None,
-            "cache_hit": False,
-            "error": "" if status == "cancelled" else "No threat analysis result",
-            "output_source": {},
-        }
-
-    analysis = apply_threat_analysis_scan_scope(
-        analysis,
-        project,
-        scan_root,
-    )
-    result_path.parent.mkdir(parents=True, exist_ok=True)
-    write_threat_analysis_file(result_path, analysis)
-    await _emit(
-        output,
-        "artifact",
-        "Threat analysis completed",
-        path=str(result_path),
-        attack_path_count=len(analysis.attack_paths),
-    )
-    return {
-        "status": "success",
-        "analysis": analysis.model_dump(mode="json"),
-        "cache_hit": False,
-        "output_source": {},
-    }
+    if not isinstance(result, dict):
+        raise TypeError(
+            "threat_analysis_harness.run_threat_analysis() must return a dict"
+        )
+    if result.get("result") is True:
+        await _emit(
+            output,
+            "artifact",
+            "Threat analysis completed",
+            output_path=str(output_path),
+        )
+    else:
+        await _emit(
+            output,
+            "error",
+            str(result.get("reason") or "Threat analysis failed"),
+        )
+    return result

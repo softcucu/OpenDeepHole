@@ -200,113 +200,98 @@ export interface SkillReport {
   output_source?: OutputSource;
 }
 
-export interface ThreatAnalysisSources {
-  repositories: string[];
-  documents: string[];
-  mcp_available?: boolean;
-  product_mcp_name?: string;
-}
-
-export interface ThreatAnalysisScanScope {
-  project_path: string;
-  code_scan_path: string;
-  code_scan_relative_path: string;
-}
-
-export interface ThreatRisk {
-  risk_id: string;
-  name: string;
-  security_property: string;
-  description: string;
-}
-
-export interface ThreatAsset {
-  asset_id: string;
-  name: string;
-  description: string;
-  asset_type: string;
-  criticality: string;
-  risks: ThreatRisk[];
-}
-
-export interface ThreatAttackTreeNode {
-  node_id: string;
-  parent_id: string | null;
-  node_type: "goal" | "domain" | "surface" | "method" | string;
-  name: string;
-  order: number;
-  basis: string[];
-  surface_type?: string;
-  preconditions?: string[];
-}
-
-export interface ThreatAttackTree {
-  tree_id: string;
-  asset_id: string;
-  risk_id: string;
-  attack_goal: string;
-  root_node_id: string;
-  nodes: ThreatAttackTreeNode[];
-}
-
 export interface ThreatCodePath {
   path: string;
   description: string;
 }
 
-export interface ThreatCodePathMapping {
-  surface_node_id: string;
-  code_paths: ThreatCodePath[];
+export interface NativeThreatValueAsset {
+  "资产名": string;
+  "资产类别": string;
+  "资产描述": string;
+  "攻击损失": string;
+  "判断为价值资产的原因": string;
 }
 
-export interface ThreatExternalInterface {
-  interface_id: string;
-  name: string;
+export interface NativeThreatHighRiskModule {
+  "模块名称": string;
+  "代码目录": string | string[];
+  "面临威胁": string;
+  "是否外部暴露面": string;
+  "判断为高风险模块的原因": string;
+  [key: string]: unknown;
+}
+
+export interface NativeThreatTreeNode {
+  node_id: string;
+  node_type: string;
+  node_name: string;
   description: string;
-  interface_type: string;
-  component: string;
-  exposure: string;
-  input_types: string[];
-  auth_required: string;
-  affected_asset_ids: string[];
-  candidate_code_paths: ThreatCodePath[];
-  source: string;
+  module_name: string | null;
+  is_high_risk_module: boolean;
+  external_exposure: boolean;
+  external_interface_description: string | null;
 }
 
-export interface ThreatAttackPath {
+export interface NativeThreatAttackPattern {
+  pattern_id: string;
+  pattern_name: string;
+  association_description: string;
+}
+
+export interface NativeThreatAttackPath {
   path_id: string;
-  fingerprint: string;
-  asset_id: string;
-  asset_name: string;
-  risk_id: string;
-  risk_name: string;
-  attack_goal_id: string;
-  attack_goal_name: string;
-  attack_domain_id: string;
-  attack_domain_name: string;
-  attack_surface_id: string;
-  attack_surface_name: string;
-  attack_surface_type: string;
-  attack_method_id: string;
-  attack_method_name: string;
-  preconditions: string[];
-  code_paths: ThreatCodePath[];
-  evidence: string[];
-  source: string;
-  agent_sources: string[];
+  path_name: string;
+  node_ids: string[];
+  edge_ids: string[];
+  path_description: string;
+  related_high_risk_modules: Array<{
+    module_name: string;
+    node_id: string;
+    external_exposure: boolean;
+    path_role: string;
+    association_description: string;
+  }>;
+  attack_patterns: NativeThreatAttackPattern[];
+}
+
+export interface NativeThreatAttackTree {
+  tree_id: string;
+  value_asset: {
+    asset_name: string;
+    asset_category: string;
+    asset_description: string;
+    attack_loss: string;
+  };
+  nodes: NativeThreatTreeNode[];
+  edges: Array<{
+    edge_id: string;
+    source_node_id: string;
+    target_node_id: string;
+    influence_type: string;
+    description: string;
+  }>;
+  attack_paths: NativeThreatAttackPath[];
+}
+
+export interface ThreatAnalysisArtifact<T = unknown> {
+  path: string;
+  content: T;
 }
 
 export interface ThreatAnalysis {
-  schema_version: string;
-  analysis_id: string;
-  sources: ThreatAnalysisSources;
-  scan_scope: ThreatAnalysisScanScope;
-  assets: ThreatAsset[];
-  high_risk_external_interfaces?: ThreatExternalInterface[];
-  attack_trees: ThreatAttackTree[];
-  attack_paths?: ThreatAttackPath[];
-  code_path_mappings: ThreatCodePathMapping[];
-  updated_at: string;
+  entrypoint_result: {
+    result: boolean;
+    value_asset_path?: string;
+    attack_tree_path?: string;
+    high_risk_modules_path?: string;
+    [key: string]: unknown;
+  };
+  artifacts: Record<string, ThreatAnalysisArtifact | undefined> & {
+    value_asset_path?: ThreatAnalysisArtifact<NativeThreatValueAsset[]>;
+    high_risk_modules_path?: ThreatAnalysisArtifact<NativeThreatHighRiskModule[]>;
+    attack_tree_path?: ThreatAnalysisArtifact<{ attack_trees: NativeThreatAttackTree[] }>;
+  };
 }
 
 export interface ThreatAuditTask {
@@ -573,8 +558,6 @@ export interface AgentMcpConfig {
 
 export interface AgentThreatAnalysisConfig {
   enabled: boolean;
-  attack_path_audit_mode: "after_analysis" | "immediate" | string;
-  model_policy: AgentModelTaskPolicy;
 }
 
 export interface AgentValidationEnvironmentConfig {

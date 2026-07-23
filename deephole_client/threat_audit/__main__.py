@@ -14,7 +14,8 @@ def main() -> None:
     parser.add_argument("--project-path", required=True)
     parser.add_argument("--work-dir", required=True)
     parser.add_argument("--scan-id", default="standalone")
-    parser.add_argument("--threat-analysis", required=True, help="Threat-analysis JSON file")
+    parser.add_argument("--attack-tree-path", required=True)
+    parser.add_argument("--high-risk-modules-path", required=True)
     parser.add_argument("--concurrency", type=int, default=1)
     parser.add_argument(
         "--required-capability",
@@ -26,14 +27,15 @@ def main() -> None:
     parser.add_argument("--exclude-task-id", action="append", dest="exclude_task_ids")
     parser.add_argument("--output-file")
     args = parser.parse_args()
-    analysis = json.loads(Path(args.threat_analysis).read_text(encoding="utf-8"))
 
     def event_output(event: dict) -> None:
         print(json.dumps(event, ensure_ascii=False), file=sys.stderr, flush=True)
 
     result = asyncio.run(run_threat_audit(
         project_path=args.project_path, work_dir=args.work_dir, scan_id=args.scan_id,
-        threat_analysis=analysis, concurrency=args.concurrency,
+        attack_tree_path=args.attack_tree_path,
+        high_risk_modules_path=args.high_risk_modules_path,
+        concurrency=args.concurrency,
         required_capability=args.required_capability,
         task_agent_config=args.task_agent_config, include_task_ids=args.include_task_ids,
         exclude_task_ids=args.exclude_task_ids, output=event_output,

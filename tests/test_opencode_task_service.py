@@ -26,6 +26,7 @@ from task_agent.task_service import (
     OpenCodeTaskService,
     OpenCodeTaskSpec,
     _SessionRuntime,
+    _runtime_with_skill_paths,
     bind_opencode_execution_context,
 )
 
@@ -102,6 +103,28 @@ def _task_context(tmp_path: Path, **kwargs):
         work_dir=tmp_path / "work",
         **kwargs,
     )
+
+
+def test_component_skill_paths_are_merged_into_runtime_config(
+    tmp_path: Path,
+) -> None:
+    runtime = dataclasses.replace(
+        _runtime(tmp_path),
+        config_content='{"skills":{"paths":["/existing"]}}',
+    )
+
+    merged = _runtime_with_skill_paths(
+        runtime,
+        (tmp_path / "skills-a", tmp_path / "skills-a", tmp_path / "skills-b"),
+    )
+
+    config = json.loads(merged.config_content)
+    assert config["skills"]["paths"] == [
+        "/existing",
+        str(tmp_path / "skills-a"),
+        str(tmp_path / "skills-b"),
+    ]
+    assert runtime.config_content == '{"skills":{"paths":["/existing"]}}'
 
 
 def _service_patches(manager, *, max_retries: int = 2, runtime_config=None):

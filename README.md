@@ -109,7 +109,7 @@ agent_name: "my-agent"
 owner_token: ""
 ```
 
-下载包会自动填入 `server_url` 和 `owner_token`。首次启动并连接后，在 Web UI 的 **「Agent 配置」** 页面按机器名与 IP 选择 Agent，统一配置基础工具、显式模型池、完整 OpenCode JSONC、威胁分析、代码图谱 MCP、产品信息 MCP、漏洞挖掘、去误报和各验证环境。服务端会持久化配置并推送给在线 Agent；离线编辑会在重连后生效。
+下载包会自动填入 `server_url` 和 `owner_token`。首次启动并连接后，在 Web UI 的 **「Agent 配置」** 页面按机器名与 IP 选择 Agent，统一配置基础工具、显式模型池、完整 OpenCode JSONC、威胁分析开关、代码图谱 MCP、产品信息 MCP、漏洞挖掘、去误报和各验证环境。服务端会持久化配置并推送给在线 Agent；离线编辑会在重连后生效。
 
 代码图谱和产品信息配置区提供手动 **「检测 MCP」**：检测只在 Agent 上执行 MCP `initialize` 和 `list_tools`，不会调用业务工具，并会展示最近结果、工具列表及 OpenCode 配置加载状态。保存 MCP 后不需要重启 Agent；没有活动 Session 时在下一次模型任务自动加载，有活动 Session 时不会中断当前任务，而是在空闲后的下一次任务加载。检测结果会持久化，Agent 离线时仍可查看带时间戳的历史结果；修改并保存 MCP 配置后，旧结果会标记为需要重新检测。
 
@@ -558,7 +558,7 @@ model_pool:
 
 模型的 `time_windows` 可配置多段，每段用 ISO 星期 `1..7` 表示周一至周日，并按 Agent 本地时间判断；各段取并集，未配置任何时间段表示全天可用。跨夜时间按当前星期判断，例如周一至周六 `22:00-06:00` 表示这些日期的 `00:00-06:00` 与 `22:00-24:00` 可用，周日不可用。旧配置未填写 `weekdays` 时继续按每天处理。
 
-OpenCode 最终配置按“本机发现及显式指定的配置 < Web `opencode_config` < OpenDeepHole 受管字段”合并。受管字段包括 `$schema`、deephole-code 与已启用的受管 MCP、全局技能路径、运行权限和威胁分析子 Agent；这些值不能从 Web 配置覆盖。API Key、Token 等敏感值会以明文保存在服务端数据库、Agent 的 `agent.yaml` 和运行时文件中，应只在可信环境填写。
+OpenCode 最终配置按“本机发现及显式指定的配置 < Web `opencode_config` < OpenDeepHole 受管字段”合并。受管字段包括 `$schema`、deephole-code 与已启用的受管 MCP、公共技能路径和运行权限；这些值不能从 Web 配置覆盖。过程私有 SKILL（例如原生威胁分析 harness 的三个 SKILL 根）只在对应任务的运行配置中临时合并，不安装到 Agent 全局工作区。API Key、Token 等敏感值会以明文保存在服务端数据库、Agent 的 `agent.yaml` 和运行时文件中，应只在可信环境填写。
 
 配置更新只会刷新独立的受管源并把 OpenCode serve 标记为待重载，不会提前改写正在运行的最终文件。serve 空闲后的下一次启动会原子写入 `~/.opendeephole/opencode_workspace/opencode.json`（POSIX 权限 `0600`），设置 `OPENCODE_CONFIG_DIR` 并显式清除 `OPENCODE_CONFIG_CONTENT`；存在活动 Session 时延迟到空闲边界，因此无需重启 Agent，也不会强制终止正在运行的 Session。
 
@@ -566,7 +566,7 @@ OpenCode 调用约定：
 
 - `nga` / `opencode`：整个 Agent 固定使用 `~/.opendeephole/opencode_workspace`，扫描、复核和验证不再创建各自的配置 workspace，也不再向项目目录镜像运行配置。Agent 根据 Web 管理的基础工具和模型行生成 serve 配置。
 - `nga` / `opencode` 只通过 serve API 调用，默认端口为 `4096`，可用 `OPENCODE_SERVE_PORT` 覆盖。组件只调用 `task_agent.run_opencode_task()`；真实项目目录和 `.opendeephole` 工作目录由执行上下文提供，不回退到当前目录，也不允许调用方传 permission。
-- 每个 Session 可读取 `project_dir`，文件编辑工具只能写当前 `work_dir`，`bash` 全面禁用。所有内置/checker SKILL 注册到全局 skill root，由 OpenCode 按 prompt 名称加载。
+- 每个 Session 可读取 `project_dir`，文件编辑工具只能写当前 `work_dir`，`bash` 全面禁用。公共内置/checker SKILL 注册到全局 skill root；过程私有 SKILL 由过程门面按任务追加，由 OpenCode 按 prompt 名称加载。
 - `output_schema` 只用于普通文本 JSON 的本地解析和校验，不发送 OpenCode 原生 `format`，也不修改首次用户 prompt；调用方需要自行把输出要求和 Schema 写入 prompt。JSON 不合规时默认在原 Session 追加 2 次包含 Schema 的中文纠正，也可通过 `invalid_json_retry_prompt` 提供原样发送的自定义纠正提示词；纠正耗尽或普通执行错误后，内部任务策略决定是否重新排队并创建新 Session。
 - OpenCode/nga serve 会话会保留在真实项目目录下，便于用 `opencode session list` 查看历史；Agent 只在取消或超时时 abort session，不在正常完成后删除 session。
 - Agent 进程内只有一个共享 deephole-code MCP 网关；各扫描用 `project_id` 注册自己的 `code_index.db` 路由，不再为每个扫描启动独立 MCP 服务。
@@ -676,7 +676,7 @@ OpenDeepHole/
 ├── task_agent/            # 可独立安装的任务/模型/Session/Serve 框架
 ├── deephole_client/       # 本地客户端与过程协调器
 │   ├── code_graph_build/  # 独立代码图谱构建过程
-│   ├── threat_analysis/   # 独立威胁分析过程
+│   ├── threat_analysis/   # 独立威胁分析过程（含原样嵌入的 harness）
 │   ├── static_analysis/   # 独立静态规则分析过程及静态规则
 │   ├── candidate_audit/   # 独立候选点审计过程及审计规则
 │   ├── threat_audit/      # 独立威胁审计过程

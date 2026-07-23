@@ -20,6 +20,7 @@ from .candidate_audit import run_candidate_audit
 from .code_graph_build import run_code_graph_build
 from .config import AgentConfig
 from .platform_runtime import configure_platform_runtime
+from .process_artifacts import collect_json_artifacts
 from .reporter import Reporter
 from .static_analysis import run_static_analysis
 from .threat_analysis import run_threat_analysis
@@ -162,47 +163,36 @@ async def _run_threat_processes(
     project_path: Path,
     code_scan_path: Path,
     scan_dir: Path,
-    product: str,
     cancel_event: threading.Event,
     output: ProcessOutput,
     retry_task_ids: list[str] | None,
 ) -> dict[str, Any]:
-    policy = config.threat_analysis.model_policy
-    from .opencode_integration import (
-        build_managed_mcp_runtime_specs,
-        managed_opencode_config_path,
-        get_global_opencode_workspace,
-    )
-
-    workspace = get_global_opencode_workspace()
-    configured_mcp_names = [
-        str(spec["name"])
-        for spec in build_managed_mcp_runtime_specs(config).values()
-        if spec.get("enabled") and not spec.get("error") and spec.get("name")
-    ]
+    output_path = scan_dir / "threat_analysis"
     result = await run_threat_analysis(
-        project_path=project_path,
-        code_scan_path=code_scan_path,
-        work_dir=scan_dir / "threat_analysis",
-        scan_id=scan_id,
-        product=product,
-        reuse_cache=True,
-        required_capability=_capability(policy.required_capability),
-        timeout_seconds=max(1, int(policy.timeout_seconds or 1200)),
-        max_retries=max(0, int(policy.max_retries or 0)),
-        opencode_config_path=managed_opencode_config_path(workspace),
-        configured_mcp_names=configured_mcp_names,
-        product_mcp_name=config.threat_analysis.product_mcp_name,
-        product_mcp_detection_timeout_seconds=(
-            config.threat_analysis.product_mcp_detection_timeout_seconds
+        code_path=code_scan_path,
+        output_path=output_path,
+        is_resume=True,
+        product_mcp=(
+            config.product_info.name
+            if config.product_info.enabled
+            else None
         ),
         output=output,
         cancel_event=cancel_event,
     )
-    analysis = result.get("analysis")
-    if result.get("status") != "success" or not isinstance(analysis, dict):
+    if result.get("result") is not True:
         return result
-    await reporter.push_threat_analysis(scan_id, analysis)
+    try:
+        artifact_bundle = collect_json_artifacts(
+            result,
+            output_root=output_path,
+        )
+    except Exception as exc:
+        return {
+            "result": False,
+            "reason": f"Threat-analysis artifact collection failed: {exc}",
+        }
+    await reporter.push_threat_analysis(scan_id, artifact_bundle)
 
     existing = await reporter.get_threat_audit_tasks(scan_id)
     completed_ids = {
@@ -212,7 +202,8 @@ async def _run_threat_processes(
         project_path=project_path,
         work_dir=scan_dir / "threat_audit",
         scan_id=scan_id,
-        threat_analysis=analysis,
+        attack_tree_path=result["attack_tree_path"],
+        high_risk_modules_path=result["high_risk_modules_path"],
         concurrency=max(1, int(config.opencode_concurrency or 1)),
         required_capability=_capability(
             config.vulnerability_mining.required_capability,
@@ -431,7 +422,6 @@ async def run_scan(
                     project_path=project,
                     code_scan_path=scan_root,
                     scan_dir=scan_dir,
-                    product=product,
                     cancel_event=cancel_event,
                     output=process_output,
                     retry_task_ids=retry_threat_audit_task_ids,
@@ -584,7 +574,7 @@ async def run_scan(
             if (
                 threat_only
                 and isinstance(threat_result, dict)
-                and threat_result.get("status") != "success"
+                and threat_result.get("result") is not True
                 and not cancel_event.is_set()
             ):
                 await _finish_scan(
@@ -594,7 +584,7 @@ async def run_scan(
                     vulnerabilities=[],
                     total=0,
                     processed=0,
-                    error=str(threat_result.get("error") or "Threat analysis failed"),
+                    error=str(threat_result.get("reason") or "Threat analysis failed"),
                 )
                 return
 

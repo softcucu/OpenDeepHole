@@ -3,7 +3,7 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { getScanStatus, stopScan, resumeScan, downloadScanReport, downloadScanReportZip, getCheckers, updateScanFeedback, getSkillContent, triggerFpReview, stopFpReview, getFpReview, getFpReviewSkill, getScanGitHistory, getSkillReports, getAgentIndexStatus, triggerVulnerabilityValidation, stopVulnerabilityValidation } from "../api/client";
 import { getScanThreatAnalysis, ThreatAnalysisPanel } from "../features/threatAnalysis";
-import type { Candidate, CodeIndexStats, FpReviewJob, HistoryPattern, IndexStatus, ScanItemStatus, ScanStatus as ScanStatusType, ScanEvent, CheckerInfo, SkillReport, OpenCodePoolStatus, ScanCandidate, Vulnerability, OutputSource, VulnerabilityValidation } from "../types";
+import type { Candidate, CodeIndexStats, FpReviewJob, HistoryPattern, IndexStatus, ScanItemStatus, ScanStatus as ScanStatusType, ScanEvent, CheckerInfo, SkillReport, OpenCodePoolStatus, ScanCandidate, Vulnerability, OutputSource, ThreatAnalysis, VulnerabilityValidation } from "../types";
 import { useScanSSE } from "../hooks/useScanSSE";
 import type { ScanSSEHandlers, SSEStateSetters } from "../hooks/useScanSSE";
 import VulnerabilityList from "./VulnerabilityList";
@@ -14,7 +14,6 @@ const STATIC_CANDIDATE_PAGE_SIZE = 20;
 const SCAN_QUEUE_PAGE_SIZE = 12;
 const AGENT_DISCONNECT_ERROR = "Agent 断开连接";
 const FINAL_USER_VERDICTS = new Set(["confirmed", "false_positive"]);
-const STREAMING_THREAT_ANALYSIS_ID_PREFIX = "STREAMING-ATA-";
 const ACTIVE_THREAT_TASK_STATUSES = new Set(["pending", "queued", "running", "analyzing", "auditing"]);
 const THREAT_POOL_TASK_TYPES = new Set(["threat_analysis", "threat_audit"]);
 
@@ -130,10 +129,6 @@ function candidateKey(item: Pick<Candidate, "file" | "line" | "function" | "vuln
   return `${item.file}\u0000${item.line}\u0000${item.function}\u0000${item.vuln_type}`;
 }
 
-function isStreamingThreatAnalysis(scan: ScanStatusType): boolean {
-  return Boolean(scan.threat_analysis?.analysis_id?.startsWith(STREAMING_THREAT_ANALYSIS_ID_PREFIX));
-}
-
 function isActiveThreatAuditStatus(status: string | null | undefined): boolean {
   return ACTIVE_THREAT_TASK_STATUSES.has(String(status || "").trim().toLowerCase());
 }
@@ -160,9 +155,24 @@ function hasActiveThreatPoolWork(pool: OpenCodePoolStatus | null | undefined): b
 }
 
 function hasActiveThreatWork(scan: ScanStatusType): boolean {
-  return isStreamingThreatAnalysis(scan)
-    || (scan.threat_audit_tasks ?? []).some((task) => isActiveThreatAuditStatus(task.status))
+  return (scan.threat_audit_tasks ?? []).some((task) => isActiveThreatAuditStatus(task.status))
     || hasActiveThreatPoolWork(scan.opencode_pool);
+}
+
+function threatAnalysisSummary(analysis: ThreatAnalysis): string {
+  if (!analysis.artifacts || !analysis.entrypoint_result) {
+    return "不支持的威胁分析格式";
+  }
+  const assets = analysis.artifacts.value_asset_path?.content;
+  const treeDocument = analysis.artifacts.attack_tree_path?.content;
+  const trees = (
+    treeDocument
+    && typeof treeDocument === "object"
+    && Array.isArray((treeDocument as { attack_trees?: unknown }).attack_trees)
+  )
+    ? (treeDocument as { attack_trees: unknown[] }).attack_trees
+    : [];
+  return `${Array.isArray(assets) ? assets.length : 0} 资产 · ${trees.length} 攻击树`;
 }
 
 function currentStageLabel(scan: ScanStatusType, events: ScanEvent[]): string {
@@ -1505,7 +1515,7 @@ function ProcessFlowNav({
       id: "threat",
       label: "威胁分析",
       detail: scan.threat_analysis
-        ? `${scan.threat_analysis.assets.length} 资产 · ${scan.threat_analysis.attack_trees.length} 攻击树`
+        ? threatAnalysisSummary(scan.threat_analysis)
         : "攻击树分析",
       status: flowStatus(Boolean(scan.threat_analysis), threatRunning),
       active: activeTab === "threat",

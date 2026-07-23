@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from enum import Enum
+from typing import Any
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
@@ -334,115 +335,9 @@ class SkillReport(BaseModel):
     output_source: OutputSource = Field(default_factory=OutputSource)
 
 
-class ThreatAnalysisSources(BaseModel):
-    """Input sources actually used by the attack-tree threat analysis."""
-    repositories: list[str] = []
-    documents: list[str] = []
-    mcp_available: bool = False
-    product_mcp_name: str = ""
-
-
-class ThreatAnalysisScanScope(BaseModel):
-    """Code scope covered by the threat-analysis result."""
-    project_path: str = ""
-    code_scan_path: str = ""
-    code_scan_relative_path: str = ""
-
-
-class ThreatRisk(BaseModel):
-    risk_id: str = ""
-    name: str = ""
-    security_property: str = ""
-    description: str = ""
-
-
-class ThreatAsset(BaseModel):
-    asset_id: str = ""
-    name: str = ""
-    description: str = ""
-    asset_type: str = "other"
-    criticality: str = "medium"
-    risks: list[ThreatRisk] = []
-
-
-class ThreatAttackTreeNode(BaseModel):
-    node_id: str = ""
-    parent_id: str | None = None
-    node_type: str = ""
-    name: str = ""
-    order: int = 0
-    basis: list[str] = []
-    surface_type: str = ""
-    preconditions: list[str] = []
-
-
-class ThreatAttackTree(BaseModel):
-    tree_id: str = ""
-    asset_id: str = ""
-    risk_id: str = ""
-    attack_goal: str = ""
-    root_node_id: str = ""
-    nodes: list[ThreatAttackTreeNode] = []
-
-
 class ThreatCodePath(BaseModel):
     path: str = ""
     description: str = ""
-
-
-class ThreatCodePathMapping(BaseModel):
-    surface_node_id: str = ""
-    code_paths: list[ThreatCodePath] = []
-
-
-class ThreatExternalInterface(BaseModel):
-    interface_id: str = ""
-    name: str = ""
-    description: str = ""
-    interface_type: str = "other"
-    component: str = ""
-    exposure: str = ""
-    input_types: list[str] = []
-    auth_required: str = ""
-    affected_asset_ids: list[str] = []
-    candidate_code_paths: list[ThreatCodePath] = []
-    source: str = "code"
-
-
-class ThreatAttackPath(BaseModel):
-    path_id: str = ""
-    fingerprint: str = ""
-    asset_id: str = ""
-    asset_name: str = ""
-    risk_id: str = ""
-    risk_name: str = ""
-    attack_goal_id: str = ""
-    attack_goal_name: str = ""
-    attack_domain_id: str = ""
-    attack_domain_name: str = ""
-    attack_surface_id: str = ""
-    attack_surface_name: str = ""
-    attack_surface_type: str = ""
-    attack_method_id: str = ""
-    attack_method_name: str = ""
-    preconditions: list[str] = []
-    code_paths: list[ThreatCodePath] = []
-    evidence: list[str] = []
-    source: str = "code"
-    agent_sources: list[str] = []
-
-
-class ThreatAnalysis(BaseModel):
-    schema_version: str = "1.0"
-    analysis_id: str = ""
-    sources: ThreatAnalysisSources = Field(default_factory=ThreatAnalysisSources)
-    scan_scope: ThreatAnalysisScanScope = Field(default_factory=ThreatAnalysisScanScope)
-    assets: list[ThreatAsset] = []
-    high_risk_external_interfaces: list[ThreatExternalInterface] = []
-    attack_trees: list[ThreatAttackTree] = []
-    attack_paths: list[ThreatAttackPath] = []
-    code_path_mappings: list[ThreatCodePathMapping] = []
-    updated_at: str = ""
 
 
 class ThreatAuditTask(BaseModel):
@@ -564,7 +459,7 @@ class ScanStatus(BaseModel):
     candidates: list[ScanCandidate] = []
     vulnerabilities: list[Vulnerability]
     skill_reports: list[SkillReport] = []
-    threat_analysis: ThreatAnalysis | None = None
+    threat_analysis: dict[str, Any] | None = None
     threat_audit_tasks: list[ThreatAuditTask] = []
     validations: list[VulnerabilityValidation] = []
     events: list[ScanEvent] = []
@@ -842,12 +737,6 @@ class AgentGitHistoryConfig(BaseModel):
 
 class AgentThreatAnalysisConfig(BaseModel):
     enabled: bool = True
-    attack_path_audit_mode: str = "after_analysis"
-    model_policy: AgentModelTaskPolicy = AgentModelTaskPolicy(
-        required_capability="high",
-        timeout_seconds=1200,
-        max_retries=3,
-    )
 
 
 class AgentPatternFilterConfig(BaseModel):
@@ -928,10 +817,6 @@ class AgentRemoteConfig(BaseModel):
         retries = _safe_policy_int(opencode.get("max_retries"), 2, minimum=0)
         fp_timeout = _safe_policy_int(fp_cli.get("timeout"), timeout, minimum=1)
         fp_retries = _safe_policy_int(fp_cli.get("max_retries"), retries, minimum=0)
-        product_name = str(threat.get("product_mcp_name") or "product-info")
-        product_timeout = _safe_policy_int(
-            threat.get("product_mcp_detection_timeout_seconds"), 60, minimum=1
-        )
         return {
             "schema_version": 2,
             "opencode_config": str(
@@ -948,17 +833,10 @@ class AgentRemoteConfig(BaseModel):
             },
             "threat_analysis": {
                 "enabled": threat.get("enabled", True),
-                "attack_path_audit_mode": threat.get("attack_path_audit_mode", "after_analysis"),
-                "model_policy": {
-                    "required_capability": "high",
-                    "timeout_seconds": timeout,
-                    "max_retries": 3,
-                },
             },
             "product_info": {
                 "enabled": False,
-                "name": product_name,
-                "timeout_seconds": product_timeout,
+                "name": "product-info",
             },
             "vulnerability_mining": {
                 "required_capability": "low",

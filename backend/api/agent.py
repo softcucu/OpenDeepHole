@@ -68,7 +68,6 @@ from backend.models import (
     ScanEvent,
     ScanItemStatus,
     SkillReport,
-    ThreatAnalysis,
     ThreatAuditTask,
     User,
     Vulnerability,
@@ -297,12 +296,9 @@ def _validate_managed_config(
                     detail=f"模型 {model_id} 的使用时间窗口起止时间不能相同",
                 )
     policies = {
-        "威胁分析": config.threat_analysis.model_policy,
         "漏洞挖掘": config.vulnerability_mining,
         "去误报": config.false_positive,
     }
-    if config.threat_analysis.attack_path_audit_mode not in {"after_analysis", "immediate"}:
-        raise HTTPException(status_code=422, detail="威胁分析的攻击路径审计模式无效")
     for environment, env_cfg in config.vulnerability_validation.environments.items():
         if not str(environment).strip():
             raise HTTPException(status_code=422, detail="验证环境名称不能为空")
@@ -2086,7 +2082,7 @@ async def agent_get_git_history(scan_id: str) -> list[HistoryPattern]:
 
 @router.post("/scan/{scan_id}/threat-analysis")
 async def agent_push_threat_analysis(scan_id: str, body: dict) -> dict:
-    """Agent uploads the parsed attack-tree threat-analysis JSON for a scan."""
+    """Agent uploads an opaque bundle of threat-analysis artifacts."""
     try:
         analysis = parse_threat_analysis_data(body)
     except Exception as exc:
@@ -2100,17 +2096,19 @@ async def agent_push_threat_analysis(scan_id: str, body: dict) -> dict:
         scan.threat_analysis = analysis
 
     from backend.sse import publish
-    publish(scan_id, "threat_analysis", {"analysis": analysis.model_dump()})
+    publish(scan_id, "threat_analysis", {"analysis": analysis})
+    artifact_count = len(analysis.get("artifacts") or {})
     logger.info(
-        "Threat analysis stored for scan %s: %d asset(s), %d attack tree(s)",
-        scan_id, len(analysis.assets), len(analysis.attack_trees),
+        "Threat analysis stored for scan %s: %d artifact(s)",
+        scan_id,
+        artifact_count,
     )
-    return {"ok": True, "asset_count": len(analysis.assets), "tree_count": len(analysis.attack_trees)}
+    return {"ok": True, "artifact_count": artifact_count}
 
 
-@router.get("/scan/{scan_id}/threat-analysis", response_model=ThreatAnalysis)
-async def agent_get_threat_analysis(scan_id: str) -> ThreatAnalysis:
-    """Return the stored attack-tree threat analysis for a scan resume."""
+@router.get("/scan/{scan_id}/threat-analysis", response_model=dict)
+async def agent_get_threat_analysis(scan_id: str) -> dict:
+    """Return the stored threat-analysis artifact bundle."""
     analysis = get_scan_store().get_threat_analysis(scan_id)
     if analysis is None:
         raise HTTPException(status_code=404, detail="No threat analysis found for this scan")
