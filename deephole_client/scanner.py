@@ -23,7 +23,7 @@ from .platform_runtime import configure_platform_runtime
 from .process_artifacts import collect_json_artifacts
 from .reporter import Reporter
 from .static_analysis import run_static_analysis
-from .threat_analysis import run_threat_analysis
+from .threat_analysis_runner import run_threat_analysis
 from .threat_audit import run_threat_audit
 
 

@@ -2,7 +2,7 @@
 
 ## 2026-07-23
 
-- **重构** 将 `ThreatAnalysis/src/threat_analysis_harness` 原样嵌入 `deephole_client/threat_analysis/threat_analysis_harness/`；外层只保留异步 `run_threat_analysis(**kwargs)` 门面和 CLI，删除旧攻击树实现、旧 Schema、旧 Skill 安装器与实现选择配置
+- **重构** 将 `ThreatAnalysis/src/threat_analysis_harness` 原样平铺为 `deephole_client/threat_analysis/`；平台异步门面外移至 `deephole_client/threat_analysis_runner.py`，不再向原生目录添加 runner、README 或 `__main__.py`
 - **新增** `task_agent.run_sync_component()` 支持异步过程门面安全调用同步实现，并让同步实现内部的 `run_opencode_task()` 回到所属事件循环；过程私有 `skill_paths` 和 `task_agent_config` 可按任务绑定，不污染全局工作区
 - **变更** 威胁分析入口直接返回原生 `result/value_asset_path/attack_tree_path/high_risk_modules_path`，Agent 仅在上报时收集为透明 artifact bundle，后端按原 JSON 存储，前端直接展示原生价值资产、高风险模块、内部节点和攻击树
 - **变更** 威胁审计不再消费旧的归一化威胁模型，改为直接读取原生攻击树与高风险模块文件，并为每个 `attack_pattern` 建立独立任务；威胁分析配置收敛为唯一的 `enabled`

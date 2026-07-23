@@ -27,12 +27,17 @@ class AgentRuntimePackageTests(unittest.TestCase):
         self.assertIn("deephole_client/main.py", names)
         self.assertIn("requirements-agent.txt", names)
         self.assertIn(
-            "deephole_client/threat_analysis/threat_analysis_harness/threat_analysis.py",
+            "deephole_client/threat_analysis/threat_analysis.py",
             names,
         )
         self.assertIn(
-            "deephole_client/threat_analysis/threat_analysis_harness/"
-            "skills/attack-trees/attack-tree-by-asset/SKILL.md",
+            "deephole_client/threat_analysis/skills/attack-trees/"
+            "attack-tree-by-asset/SKILL.md",
+            names,
+        )
+        self.assertIn("deephole_client/threat_analysis_runner.py", names)
+        self.assertNotIn(
+            "deephole_client/threat_analysis/__main__.py",
             names,
         )
         self.assertIn("ctags-p6.2.20260517.0-x64/ctags.exe", names)
@@ -59,12 +64,17 @@ class AgentRuntimePackageTests(unittest.TestCase):
         self.assertIn("run_agent.bat", names)
         self.assertIn("requirements-agent.txt", names)
         self.assertIn(
-            "deephole_client/threat_analysis/threat_analysis_harness/threat_analysis.py",
+            "deephole_client/threat_analysis/threat_analysis.py",
             names,
         )
         self.assertIn(
-            "deephole_client/threat_analysis/threat_analysis_harness/"
-            "skills/attack-trees/attack-tree-by-asset/SKILL.md",
+            "deephole_client/threat_analysis/skills/attack-trees/"
+            "attack-tree-by-asset/SKILL.md",
+            names,
+        )
+        self.assertIn("deephole_client/threat_analysis_runner.py", names)
+        self.assertNotIn(
+            "deephole_client/threat_analysis/__main__.py",
             names,
         )
         self.assertTrue(

@@ -676,7 +676,8 @@ OpenDeepHole/
 ├── task_agent/            # 可独立安装的任务/模型/Session/Serve 框架
 ├── deephole_client/       # 本地客户端与过程协调器
 │   ├── code_graph_build/  # 独立代码图谱构建过程
-│   ├── threat_analysis/   # 独立威胁分析过程（含原样嵌入的 harness）
+│   ├── threat_analysis/   # 原样平铺的威胁分析 harness
+│   ├── threat_analysis_runner.py # 威胁分析平台异步适配器
 │   ├── static_analysis/   # 独立静态规则分析过程及静态规则
 │   ├── candidate_audit/   # 独立候选点审计过程及审计规则
 │   ├── threat_audit/      # 独立威胁审计过程

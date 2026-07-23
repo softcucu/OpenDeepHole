@@ -16,7 +16,7 @@ from deephole_client.candidate_audit import run_candidate_audit
 from deephole_client.code_graph_build import run_code_graph_build
 from deephole_client.fp_review import run_fp_review
 from deephole_client.static_analysis import run_static_analysis
-from deephole_client.threat_analysis import run_threat_analysis
+from deephole_client.threat_analysis_runner import run_threat_analysis
 from deephole_client.threat_audit import run_threat_audit
 from deephole_client.vulnerability_validation import run_vulnerability_validation
 
@@ -101,7 +101,7 @@ def test_threat_processes_run_with_task_agent_only() -> None:
             }
 
         with patch(
-            "deephole_client.threat_analysis.runner._load_implementation",
+            "deephole_client.threat_analysis_runner._load_implementation",
             return_value=SimpleNamespace(
                 run_threat_analysis=native_threat_analysis,
             ),

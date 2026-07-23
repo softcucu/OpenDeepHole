@@ -13,35 +13,44 @@ from pathlib import Path
 import pytest
 
 
-PROCESS_ENTRIES = {
+FRAMEWORK_PROCESS_ENTRIES = {
     "code_graph_build": "run_code_graph_build",
     "static_analysis": "run_static_analysis",
     "candidate_audit": "run_candidate_audit",
-    "threat_analysis": "run_threat_analysis",
     "threat_audit": "run_threat_audit",
     "fp_review": "run_fp_review",
     "vulnerability_validation": "run_vulnerability_validation",
 }
+PROCESS_NAMES = set(FRAMEWORK_PROCESS_ENTRIES) | {"threat_analysis"}
 
 
-def test_process_packages_export_one_async_kwargs_entry() -> None:
-    for package, entry_name in PROCESS_ENTRIES.items():
+def _assert_async_kwargs_entry(module: object, entry_name: str) -> None:
+    entry = getattr(module, entry_name)
+    signature = inspect.signature(entry)
+
+    assert inspect.iscoroutinefunction(entry)
+    assert len(signature.parameters) == 1
+    parameter = next(iter(signature.parameters.values()))
+    assert parameter.kind is inspect.Parameter.VAR_KEYWORD
+
+
+def test_framework_process_packages_export_one_async_kwargs_entry() -> None:
+    for package, entry_name in FRAMEWORK_PROCESS_ENTRIES.items():
         module = importlib.import_module(f"deephole_client.{package}")
-        entry = getattr(module, entry_name)
-        signature = inspect.signature(entry)
-
-        assert inspect.iscoroutinefunction(entry)
+        _assert_async_kwargs_entry(module, entry_name)
         assert list(module.__all__) == [entry_name]
-        assert len(signature.parameters) == 1
-        parameter = next(iter(signature.parameters.values()))
-        assert parameter.kind is inspect.Parameter.VAR_KEYWORD
+
+
+def test_threat_analysis_uses_an_external_async_adapter() -> None:
+    module = importlib.import_module("deephole_client.threat_analysis_runner")
+
+    _assert_async_kwargs_entry(module, "run_threat_analysis")
 
 
 def test_process_sources_do_not_import_platform_or_sibling_processes() -> None:
     client_root = Path(__file__).resolve().parents[1] / "deephole_client"
-    process_names = set(PROCESS_ENTRIES)
     violations: list[str] = []
-    for package in PROCESS_ENTRIES:
+    for package in PROCESS_NAMES:
         package_root = client_root / package
         for source in package_root.rglob("*.py"):
             tree = ast.parse(
@@ -64,7 +73,7 @@ def test_process_sources_do_not_import_platform_or_sibling_processes() -> None:
                         violations.append(
                             f"{source.relative_to(client_root)}:{node.lineno}:{name}"
                         )
-                    if root in process_names and root != package:
+                    if root in PROCESS_NAMES and root != package:
                         violations.append(
                             f"{source.relative_to(client_root)}:{node.lineno}:{name}"
                         )
@@ -72,12 +81,12 @@ def test_process_sources_do_not_import_platform_or_sibling_processes() -> None:
     assert violations == []
 
 
-def test_each_process_can_be_imported_and_show_cli_help_after_extraction() -> None:
+def test_framework_processes_can_be_imported_and_show_cli_help_after_extraction() -> None:
     repository = Path(__file__).resolve().parents[1]
     source_client = repository / "deephole_client"
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
-        for package, entry_name in PROCESS_ENTRIES.items():
+        for package, entry_name in FRAMEWORK_PROCESS_ENTRIES.items():
             target = root / package
             target.mkdir()
             shutil.copytree(
@@ -123,6 +132,43 @@ def test_each_process_can_be_imported_and_show_cli_help_after_extraction() -> No
                 f"{package}: {help_result.stderr}"
             )
             assert "usage:" in help_result.stdout.lower()
+
+
+def test_native_threat_analysis_can_be_imported_after_extraction() -> None:
+    repository = Path(__file__).resolve().parents[1]
+    source_client = repository / "deephole_client"
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        shutil.copytree(
+            repository / "task_agent",
+            root / "task_agent",
+            ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
+        )
+        shutil.copytree(
+            source_client / "threat_analysis",
+            root / "threat_analysis_harness",
+            ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
+        )
+
+        environment = dict(os.environ)
+        environment["PYTHONPATH"] = str(root)
+        imported = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                (
+                    "import threat_analysis_harness as component; "
+                    "assert callable(component.run_threat_analysis)"
+                ),
+            ],
+            cwd=root,
+            env=environment,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+        assert imported.returncode == 0, imported.stderr
 
 
 def test_static_and_audit_rule_resources_are_physically_separate() -> None:

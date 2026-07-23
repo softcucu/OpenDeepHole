@@ -10,11 +10,12 @@ from unittest.mock import patch
 
 import pytest
 
+import deephole_client.threat_analysis_runner as threat_analysis_runner
 from backend.models import ScanItemStatus, ScanMeta, ScanStatus
 from backend.store.sqlite import SqliteScanStore
 from backend.threat_data import parse_threat_analysis_data
 from deephole_client.process_artifacts import collect_json_artifacts
-from deephole_client.threat_analysis import run_threat_analysis
+from deephole_client.threat_analysis_runner import run_threat_analysis
 from deephole_client.threat_audit.runner import _tasks
 from task_agent import OpenCodeResult, run_opencode_task, run_sync_component
 from task_agent.task_service import get_opencode_execution_context
@@ -67,23 +68,55 @@ def _scan(scan_id: str) -> tuple[ScanStatus, ScanMeta]:
     return scan, meta
 
 
-def test_vendored_harness_contains_native_entry_and_private_skills() -> None:
+def test_flattened_harness_contains_only_native_files_and_private_skills() -> None:
     root = (
         Path(__file__).resolve().parents[1]
         / "deephole_client"
         / "threat_analysis"
-        / "threat_analysis_harness"
+    )
+    expected = {
+        "__init__.py",
+        "artifacts.py",
+        "errors.py",
+        "main.py",
+        "pipeline.py",
+        "schemas.py",
+        "skills/attack-trees/attack-tree-by-asset/SKILL.md",
+        (
+            "skills/attack-trees/attack-tree-by-asset/references/"
+            "attack_mode.json"
+        ),
+        "skills/high-risk-modules/high-risk-module-map/SKILL.md",
+        "skills/high-risk-modules/high-risk-module-merge/SKILL.md",
+        "skills/value-assets/value-asset-map/SKILL.md",
+        "stages/__init__.py",
+        "stages/attack_trees.py",
+        "stages/base.py",
+        "stages/high_risk_modules.py",
+        "stages/value_assets.py",
+        "task_agent_submitter.py",
+        "threat_analysis.py",
+    }
+    actual = {
+        path.relative_to(root).as_posix()
+        for path in root.rglob("*")
+        if path.is_file() and "__pycache__" not in path.parts
+    }
+
+    assert actual == expected
+
+
+def test_adapter_loads_flattened_harness_under_native_package_name() -> None:
+    module = threat_analysis_runner._load_implementation()
+    expected = (
+        Path(__file__).resolve().parents[1]
+        / "deephole_client"
+        / "threat_analysis"
+        / "__init__.py"
     )
 
-    assert (root / "threat_analysis.py").is_file()
-    assert (root / "task_agent_submitter.py").is_file()
-    assert (root / "skills/value-assets/value-asset-map/SKILL.md").is_file()
-    assert (
-        root / "skills/high-risk-modules/high-risk-module-merge/SKILL.md"
-    ).is_file()
-    assert (
-        root / "skills/attack-trees/attack-tree-by-asset/SKILL.md"
-    ).is_file()
+    assert Path(module.__file__).resolve() == expected
+    assert callable(module.run_threat_analysis)
 
 
 def test_async_facade_calls_sync_native_entry_and_preserves_native_result(
@@ -113,7 +146,7 @@ def test_async_facade_calls_sync_native_entry_and_preserves_native_result(
 
     async def scenario() -> dict:
         with patch(
-            "deephole_client.threat_analysis.runner._load_implementation",
+            "deephole_client.threat_analysis_runner._load_implementation",
             return_value=SimpleNamespace(run_threat_analysis=native_entry),
         ):
             return await run_threat_analysis(

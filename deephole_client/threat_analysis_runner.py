@@ -1,4 +1,4 @@
-"""Async framework adapter for the vendored threat-analysis harness."""
+"""Async framework adapter for the flattened native threat-analysis harness."""
 
 from __future__ import annotations
 
@@ -16,7 +16,7 @@ from task_agent import opencode_task_context, run_sync_component
 
 PROCESS_NAME = "threat_analysis"
 _IMPLEMENTATION_PACKAGE = "threat_analysis_harness"
-_IMPLEMENTATION_ROOT = Path(__file__).resolve().parent / _IMPLEMENTATION_PACKAGE
+_IMPLEMENTATION_ROOT = Path(__file__).resolve().parent / "threat_analysis"
 _SKILL_ROOTS = (
     _IMPLEMENTATION_ROOT / "skills" / "value-assets",
     _IMPLEMENTATION_ROOT / "skills" / "high-risk-modules",
@@ -59,7 +59,7 @@ def _directory(value: Any, key: str, *, create: bool = False) -> Path:
 
 
 def _load_implementation() -> ModuleType:
-    """Load the untouched nested package under its original top-level name."""
+    """Load the untouched implementation under its original top-level name."""
     expected_init = (_IMPLEMENTATION_ROOT / "__init__.py").resolve()
     if not expected_init.is_file():
         raise FileNotFoundError(
