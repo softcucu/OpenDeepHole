@@ -1320,7 +1320,6 @@ class _ServeEventState:
         self.tool_calls_emitted: set[str] = set()
         self.tool_call_metadata: dict[str, tuple[str, object]] = {}
         self.tool_results_emitted: set[tuple[str, str]] = set()
-        self.step_events_emitted: set[tuple[str, str]] = set()
         self.session_errors_emitted: set[str] = set()
         self.event_ids_seen: set[str] = set()
         self.last_session_status = ""
@@ -1579,13 +1578,9 @@ class _ServeEventState:
             return
         self.tool_calls_emitted.add(call)
         if _is_skill_tool(name):
-            message = f"SKILL START name={_skill_name(input_value)} id={call}"
+            self.emit("skill", f"name={_skill_name(input_value)}")
         else:
-            message = (
-                f"TOOL START source={_tool_source(name)} name={name or 'unknown'} "
-                f"id={call} input={_json_one_line(input_value or {})}"
-            )
-        self.emit("step", message)
+            self.emit("tool", f"name={name or 'unknown'}")
 
     def emit_tool_result(
         self,
@@ -1612,18 +1607,21 @@ class _ServeEventState:
         if key in self.tool_results_emitted:
             return
         self.tool_results_emitted.add(key)
-        suffix = f" {summary}" if summary else ""
+        if normalized_status == "success":
+            return
+        error = summary or "error=unknown"
+        if not error.startswith("error="):
+            error = f"error={error}"
         if _is_skill_tool(resolved_name):
-            message = (
-                f"SKILL STOP status={normalized_status} "
-                f"name={_skill_name(resolved_input)} id={call}{suffix}"
+            self.emit(
+                "skill",
+                f"ERROR name={_skill_name(resolved_input)} {error}",
             )
         else:
-            message = (
-                f"TOOL STOP status={normalized_status} "
-                f"name={resolved_name or 'unknown'} id={call}{suffix}"
+            self.emit(
+                "tool",
+                f"ERROR name={resolved_name or 'unknown'} {error}",
             )
-        self.emit("step", message)
 
     def handle_tool_part(self, part: dict[str, Any]) -> None:
         state = part.get("state")
@@ -1686,29 +1684,6 @@ class _ServeEventState:
         self.session_errors_emitted.add(summary)
         self.emit("session", f"ERROR error={summary}")
 
-    def emit_step(self, status: str, props: dict[str, Any], *, part_id: object = "") -> None:
-        step_id = str(part_id or props.get("id") or props.get("stepID") or "step")
-        key = (step_id, status)
-        if key in self.step_events_emitted:
-            return
-        self.step_events_emitted.add(key)
-        details: list[str] = []
-        reason = _one_line_preview(props.get("reason") or "")
-        if reason:
-            details.append(f"reason={reason}")
-        if props.get("cost") is not None:
-            details.append(f"cost={props.get('cost')}")
-        error = _error_summary(props.get("error") or "")
-        if error:
-            details.append(f"error={error}")
-        suffix = f" {' '.join(details)}" if details else ""
-        action = {
-            "started": "START",
-            "finished": "STOP",
-            "failed": "FAIL",
-        }.get(status, status.upper())
-        self.emit("step", f"{action} id={step_id}{suffix}")
-
     def handle_part(self, part: object) -> None:
         if not isinstance(part, dict):
             return
@@ -1717,10 +1692,6 @@ class _ServeEventState:
             self.update_part_text(part)
         elif part_type == "tool":
             self.handle_tool_part(part)
-        elif part_type == "step-start":
-            self.emit_step("started", part, part_id=part.get("id"))
-        elif part_type == "step-finish":
-            self.emit_step("finished", part, part_id=part.get("id"))
         elif part_type == "retry":
             self.emit_session_status({
                 "type": "retry",
@@ -1795,15 +1766,6 @@ def _handle_serve_event(event: object, state: _ServeEventState) -> None:
         state.emit_session_status("idle")
     elif event_type == "session.error":
         state.emit_session_error(props.get("error"))
-    elif event_type == "session.next.step.started":
-        event_id = event.get("id") if isinstance(event, dict) else ""
-        state.emit_step("started", props, part_id=event_id)
-    elif event_type == "session.next.step.ended":
-        event_id = event.get("id") if isinstance(event, dict) else ""
-        state.emit_step("finished", props, part_id=event_id)
-    elif event_type == "session.next.step.failed":
-        event_id = event.get("id") if isinstance(event, dict) else ""
-        state.emit_step("failed", props, part_id=event_id)
     elif event_type == "session.next.retried":
         state.emit_session_status({
             "type": "retry",

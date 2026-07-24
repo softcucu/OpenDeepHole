@@ -1167,13 +1167,10 @@ def test_run_prompt_streams_session_events_without_tool_result_body(monkeypatch,
         assert all("\n" not in line for line in output)
         assert "middle output" not in logged
         assert "reasoning" not in logged
-        assert "TOOL START" in logged
-        assert "TOOL STOP" in logged
-        assert "status=success" in logged
-        assert "[opencode][session-1][step]" in logged
-        assert "name=read" in logged
-        assert "src/main.c" in logged
-        assert "text_chars=18" in logged
+        assert output.count("[opencode][session-1][tool] name=read") == 1
+        assert "[opencode][session-1][step]" not in logged
+        assert "src/main.c" not in logged
+        assert "text_chars=18" not in logged
         assert "secret source body" not in logged
         assert "ignore" not in logged
         assert "done" not in logged
@@ -1259,10 +1256,9 @@ def test_run_prompt_streams_sync_session_events(monkeypatch, tmp_path: Path) -> 
         logged = "\n".join(output)
         assert "sync text" not in logged
         assert "sync reasoning" not in logged
-        assert "TOOL START" in logged
-        assert "TOOL STOP" in logged
-        assert "src/win.c" in logged
-        assert "text_chars=21" in logged
+        assert output.count("[opencode][session-1][tool] name=read") == 1
+        assert "src/win.c" not in logged
+        assert "text_chars=21" not in logged
         assert "hidden sync tool body" not in logged
         assert "done" not in logged
 
@@ -1501,10 +1497,11 @@ def test_run_prompt_final_fallback_does_not_log_tool_output_body(
         assert "secret tool title" not in logged
         assert "secret nested tool content" not in logged
         assert "secret final tool body" in lines
-        assert "source=mcp" in logged
-        assert "TOOL START" in logged
-        assert "TOOL STOP" in logged
-        assert "output_chars=22" in logged
+        assert output.count(
+            "[opencode][session-1][tool] "
+            "name=mcp__deephole-code__view_function_code"
+        ) == 1
+        assert "output_chars=22" not in logged
 
     asyncio.run(run())
 
@@ -1804,27 +1801,37 @@ def test_incompatible_final_text_emits_complete_final_snapshot() -> None:
     assert state.final_snapshots_emitted == {("text", "prefix-MISSING-suffix")}
 
 
-def test_legacy_step_events_use_event_identity_for_multiple_steps() -> None:
+def test_generic_step_events_are_not_printed() -> None:
     output: list[str] = []
     state = _ServeEventState("opencode", "session-1", output.append)
 
-    for event_id in ("step-event-1", "step-event-2"):
+    for event_type in (
+        "session.next.step.started",
+        "session.next.step.ended",
+        "session.next.step.failed",
+    ):
         event = {
-            "id": event_id,
-            "type": "session.next.step.started",
+            "id": f"{event_type}-1",
+            "type": event_type,
             "properties": {
                 "sessionID": "session-1",
                 "agent": "build",
                 "model": {"id": "model", "providerID": "provider"},
+                "error": {"message": "internal step failed"},
             },
         }
         _handle_serve_event(event, state)
         _handle_serve_event(event, state)
 
-    step_lines = [line for line in output if "][step] START " in line]
-    assert len(step_lines) == 2
-    assert "id=step-event-1" in step_lines[0]
-    assert "id=step-event-2" in step_lines[1]
+    for part_type in ("step-start", "step-finish"):
+        state.handle_part({
+            "id": f"part-{part_type}",
+            "sessionID": "session-1",
+            "type": part_type,
+            "reason": "stop",
+        })
+
+    assert output == []
 
 
 def test_open_source_tool_parts_and_key_statuses_are_visible_without_tool_body() -> None:
@@ -1925,24 +1932,24 @@ def test_open_source_tool_parts_and_key_statuses_are_visible_without_tool_body()
     }, state)
 
     logged = "\n".join(output)
-    assert logged.count("TOOL START") == 1
-    assert logged.count("TOOL STOP") == 1
-    assert "source=mcp" in logged
-    assert "output_chars=18" in logged
-    assert "duration_ms=40" in logged
+    assert output.count(
+        "[opencode][session-1][tool] "
+        "name=mcp__deephole-code__view_function_code"
+    ) == 1
+    assert "output_chars=18" not in logged
+    assert "duration_ms=40" not in logged
     assert "secret source body" not in logged
     assert "pending call body" not in logged
     assert "secret tool prompt" not in logged
-    assert '"prompt":"<redacted>"' in logged
+    assert '"prompt":"<redacted>"' not in logged
     assert "busy" not in logged
     assert "RETRY attempt=2 next=10 message=rate limited" in logged
     assert "idle" not in logged
-    assert "][step] START " in logged
-    assert "][step] STOP " in logged
+    assert "][step]" not in logged
     assert "][session] ERROR error=provider failed" in logged
 
 
-def test_skill_tool_is_printed_as_step_lifecycle_without_skill_prompt() -> None:
+def test_skill_call_is_single_line_and_failure_adds_error_without_prompt() -> None:
     output: list[str] = []
     state = _ServeEventState(
         "opencode",
@@ -1960,17 +1967,57 @@ def test_skill_tool_is_printed_as_step_lifecycle_without_skill_prompt() -> None:
         call_id="skill-1",
         tool_name="skill",
         input_value={"name": "exploit-validation", "prompt": "secret instructions"},
-        status="success",
-        summary="",
+        status="failed",
+        summary="error=skill unavailable",
+    )
+    state.emit_tool_result(
+        call_id="skill-1",
+        tool_name="skill",
+        input_value={"name": "exploit-validation", "prompt": "secret instructions"},
+        status="failed",
+        summary="error=skill unavailable",
     )
 
     assert output == [
-        "[validation][session-1][step] "
-        "SKILL START name=exploit-validation id=skill-1",
-        "[validation][session-1][step] "
-        "SKILL STOP status=success name=exploit-validation id=skill-1",
+        "[validation][session-1][skill] name=exploit-validation",
+        "[validation][session-1][skill] "
+        "ERROR name=exploit-validation error=skill unavailable",
     ]
     assert "secret instructions" not in "\n".join(output)
+
+
+def test_tool_failure_adds_one_error_without_start_or_stop_lines() -> None:
+    output: list[str] = []
+    state = _ServeEventState("opencode", "session-1", output.append)
+    called = {
+        "type": "session.next.tool.called",
+        "properties": {
+            "sessionID": "session-1",
+            "callID": "tool-1",
+            "tool": "read",
+            "input": {"filePath": "secret.c"},
+        },
+    }
+    failed = {
+        "type": "session.next.tool.failed",
+        "properties": {
+            "sessionID": "session-1",
+            "callID": "tool-1",
+            "error": {"message": "permission denied"},
+        },
+    }
+
+    _handle_serve_event(called, state)
+    _handle_serve_event(called, state)
+    _handle_serve_event(failed, state)
+    _handle_serve_event(failed, state)
+
+    assert output == [
+        "[opencode][session-1][tool] name=read",
+        "[opencode][session-1][tool] "
+        "ERROR name=read error=permission denied",
+    ]
+    assert "secret.c" not in "\n".join(output)
 
 
 def test_no_newline_delta_is_flushed_periodically(monkeypatch) -> None:
@@ -2420,9 +2467,10 @@ def test_snapshot_polling_fills_text_reasoning_and_tool_state_then_pauses_on_rec
         assert "think" not in logged
         assert state.observed_response_text == "hello world\n"
         assert state.observed_reasoning_text == "think\n"
-        assert logged.count("TOOL START") == 1
-        assert logged.count("TOOL STOP") == 1
-        assert "source=mcp" in logged
+        assert output.count(
+            "[opencode][session-1][tool] "
+            "name=mcp__deephole-code__view_function_code"
+        ) == 1
         assert "SECRET TOOL BODY" not in logged
 
     asyncio.run(run())

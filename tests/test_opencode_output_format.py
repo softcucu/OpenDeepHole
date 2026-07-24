@@ -1,5 +1,7 @@
 from datetime import datetime, timezone
 
+import pytest
+
 from task_agent.output_format import (
     format_task_output,
     is_task_output_line,
@@ -8,7 +10,7 @@ from task_agent.output_format import (
 )
 
 
-def test_task_output_header_uses_stage_session_and_three_categories() -> None:
+def test_task_output_header_uses_stage_session_and_supported_categories() -> None:
     assert task_output_stage("vulnerability_validation") == "validation"
     assert task_output_stage("audit") == "audit"
     assert format_task_output("validation", "", "task", "QUEUED\nnow") == (
@@ -17,14 +19,19 @@ def test_task_output_header_uses_stage_session_and_three_categories() -> None:
     assert format_task_output("audit", "ses-1", "session", "START") == (
         "[audit][ses-1][session] START"
     )
-    assert format_task_output("scan", "ses-2", "step", "TOOL START") == (
-        "[scan][ses-2][step] TOOL START"
+    assert format_task_output("scan", "ses-2", "tool", "name=read") == (
+        "[scan][ses-2][tool] name=read"
     )
+    assert format_task_output("scan", "ses-2", "skill", "name=audit") == (
+        "[scan][ses-2][skill] name=audit"
+    )
+    with pytest.raises(ValueError, match="Unsupported Task Agent output category"):
+        format_task_output("scan", "ses-2", "step", "START")
 
 
 def test_existing_task_output_header_is_not_wrapped_by_host_prefix() -> None:
     now = datetime(2026, 7, 10, 12, 34, 56, tzinfo=timezone.utc)
-    line = "[validation][ses-1][step] TOOL START name=read"
+    line = "[validation][ses-1][tool] name=read"
 
     formatted = with_local_timestamp(line, prefix="[model=test]", now=now)
 

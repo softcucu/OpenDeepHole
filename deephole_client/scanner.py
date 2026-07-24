@@ -15,6 +15,7 @@ from backend.models import (
     Vulnerability,
 )
 from task_agent import opencode_task_context
+from task_agent.output_format import is_task_output_line
 
 from .candidate_audit import run_candidate_audit
 from .code_graph_build import run_code_graph_build
@@ -56,6 +57,12 @@ def _resolve_scan_paths(
 def _capability(value: Any, default: str = "high") -> str:
     normalized = str(value or default).strip().lower()
     return "high" if normalized in {"medium", "high"} else "low"
+
+
+def _format_process_console_line(phase: str, message: str) -> str:
+    if is_task_output_line(message):
+        return message
+    return f"[{phase}] {message}"
 
 
 def _event_candidate_index(event: dict[str, Any]) -> int | None:
@@ -291,7 +298,7 @@ async def run_scan(
             scan_id,
             ScanEvent.create(phase, message, candidate_index),
         )
-        print(f"[{phase}] {message}", flush=True)
+        print(_format_process_console_line(phase, message), flush=True)
 
     async def process_output(event: dict[str, Any]) -> None:
         process = str(event.get("process") or "process")

@@ -10,9 +10,9 @@ _LOCAL_TIMESTAMP_RE = re.compile(
     r"^(?P<timestamp>\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\])(?:\s|$)"
 )
 _TASK_OUTPUT_HEADER_RE = re.compile(
-    r"^\[[^\]\r\n]+\]\[[^\]\r\n]+\]\[(?:task|session|step)\](?:\s|$)"
+    r"^\[[^\]\r\n]+\]\[[^\]\r\n]+\]\[(?:task|session|tool|skill)\](?:\s|$)"
 )
-_TASK_OUTPUT_CATEGORIES = frozenset({"task", "session", "step"})
+_TASK_OUTPUT_CATEGORIES = frozenset({"task", "session", "tool", "skill"})
 
 
 def task_output_stage(task_type: object) -> str:

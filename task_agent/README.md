@@ -81,7 +81,7 @@ result = await run_opencode_task(
 
 OpenCode 的原生配置放在 `serve.opencode_config` 下，其中 MCP 配置使用 `serve.opencode_config.mcp`。示例文件同时给出了 `type: remote` 的 HTTP MCP 和 `type: local` 的进程 MCP；两项默认关闭，配置好 URL、请求头或启动命令后再将对应的 `enabled` 改为 `true`。MCP 的 `timeout` 单位为毫秒。
 
-独立运行时，组件按 `[<stage>][<session_id>][task|session|step]` 打印结构化进度并立即刷新。`vulnerability_validation` 的 stage 固定为 `validation`，其它任务使用原始 `task_type`；Session 创建前使用 `pending`。`task` 记录排队、模型选择、Serve 和最终状态，`session` 明确标记当前消息执行的 `START`/`STOP`、重试及错误，`step` 记录工具、SKILL 和模型 step。模型 text、reasoning 及工具返回正文不写入控制台，但最终 text 仍正常返回并参与 JSON 解析。一次消息执行结束只打印 `STOP ... retained=true`，不会删除可续写的 Session。宿主模式仍只使用宿主绑定的输出回调，不会额外重复打印。
+独立运行时，组件按 `[<stage>][<session_id>][task|session|tool|skill]` 打印结构化进度并立即刷新。`vulnerability_validation` 的 stage 固定为 `validation`，其它任务使用原始 `task_type`；Session 创建前使用 `pending`。`task` 记录排队、模型选择、Serve 和最终状态，`session` 明确标记当前消息执行的 `START`/`STOP`、重试及错误。OpenCode 内部 step 不打印；Tool 和 SKILL 调用分别使用 `tool`、`skill`，每次调用只打印一行名称，成功不追加完成行，失败才追加脱敏 `ERROR`。模型 text、reasoning、调用参数及工具返回正文不写入控制台，但最终 text 仍正常返回并参与 JSON 解析。一次消息执行结束只打印 Session 的 `STOP ... retained=true`，不会删除可续写的 Session。宿主模式仍只使用宿主绑定的输出回调，不会额外重复打印。
 
 `serve.timeout` 是一次模型请求的总超时。模型 Provider 无法连接时，OpenCode 自身的 `busy`、`retry` 和 `error` 会出现在上述实时输出中；达到总超时或调用被取消后，组件会 abort 当前 Session 请求并回收请求与事件任务。若模型服务需要代理，请在 `serve.environment` 中同时配置实际环境要求的大小写代理变量和 `NO_PROXY`/`no_proxy`，不要依赖另一个应用进程已经加载的环境。
 

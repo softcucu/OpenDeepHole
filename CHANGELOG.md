@@ -1,5 +1,9 @@
 # 更新日志
 
+## 2026-07-24
+
+- **变更** Task Agent 控制台移除 OpenCode 内部 `step` START/STOP/FAIL 噪音，第三段日志类别改为 `task|session|tool|skill`；Tool/SKILL 调用只在发生时打印一次，成功静默、失败追加脱敏 ERROR，威胁分析不再叠加重复的外层阶段前缀
+
 ## 2026-07-23
 
 - **修复** OpenCode Session 的动态目录权限在 Windows 下同时生成原生反斜杠和正斜杠子路径规则，使威胁分析可读取 `.opendeephole/scans/<scan_id>/threat_analysis` 中的阶段 JSON；全局外部目录默认拒绝、源码只读、仅任务工作目录可写及禁用 `bash` 的边界保持不变

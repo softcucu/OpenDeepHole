@@ -11,6 +11,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from deephole_client.config import AgentConfig
 from deephole_client.scanner import (
     SCAN_MODE_THREAT_ANALYSIS_ONLY,
+    _format_process_console_line,
     _resolve_scan_paths,
     run_scan,
 )
@@ -53,6 +54,21 @@ def _vulnerability() -> dict:
 
 
 class AgentScanPathTests(unittest.IsolatedAsyncioTestCase):
+    def test_structured_task_output_does_not_repeat_process_prefix(self) -> None:
+        line = "[threat_analysis][ses-1][tool] name=read"
+
+        self.assertEqual(
+            _format_process_console_line("threat_analysis", line),
+            line,
+        )
+        self.assertEqual(
+            _format_process_console_line(
+                "threat_analysis",
+                "Threat analysis started",
+            ),
+            "[threat_analysis] Threat analysis started",
+        )
+
     def test_scan_path_must_stay_inside_project(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
