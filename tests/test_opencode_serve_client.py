@@ -1167,9 +1167,13 @@ def test_run_prompt_streams_session_events_without_tool_result_body(monkeypatch,
         assert all("\n" not in line for line in output)
         assert "middle output" not in logged
         assert "reasoning" not in logged
-        assert output.count("[opencode][session-1][tool] name=read") == 1
+        assert (
+            output.count(
+                "[opencode][session-1][tool] name=read path=src/main.c"
+            )
+            == 1
+        )
         assert "[opencode][session-1][step]" not in logged
-        assert "src/main.c" not in logged
         assert "text_chars=18" not in logged
         assert "secret source body" not in logged
         assert "ignore" not in logged
@@ -1256,8 +1260,12 @@ def test_run_prompt_streams_sync_session_events(monkeypatch, tmp_path: Path) -> 
         logged = "\n".join(output)
         assert "sync text" not in logged
         assert "sync reasoning" not in logged
-        assert output.count("[opencode][session-1][tool] name=read") == 1
-        assert "src/win.c" not in logged
+        assert (
+            output.count(
+                "[opencode][session-1][tool] name=read path=src/win.c"
+            )
+            == 1
+        )
         assert "text_chars=21" not in logged
         assert "hidden sync tool body" not in logged
         assert "done" not in logged
@@ -2013,11 +2021,30 @@ def test_tool_failure_adds_one_error_without_start_or_stop_lines() -> None:
     _handle_serve_event(failed, state)
 
     assert output == [
-        "[opencode][session-1][tool] name=read",
+        "[opencode][session-1][tool] name=read path=secret.c",
         "[opencode][session-1][tool] "
         "ERROR name=read error=permission denied",
     ]
-    assert "secret.c" not in "\n".join(output)
+
+
+def test_write_tool_logs_path_without_content() -> None:
+    output: list[str] = []
+    state = _ServeEventState("opencode", "session-1", output.append)
+
+    state.emit_tool_call(
+        call_id="write-1",
+        tool_name="write",
+        input_value={
+            "filePath": "reports/result.json",
+            "content": "private write body",
+        },
+    )
+
+    assert output == [
+        "[opencode][session-1][tool] "
+        "name=write path=reports/result.json",
+    ]
+    assert "private write body" not in "\n".join(output)
 
 
 def test_no_newline_delta_is_flushed_periodically(monkeypatch) -> None:

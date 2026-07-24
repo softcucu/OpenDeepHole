@@ -1228,6 +1228,17 @@ def _skill_name(input_value: object) -> str:
     )
 
 
+def _tool_file_path(tool_name: object, input_value: object) -> str:
+    normalized = str(tool_name or "").strip().casefold().replace("-", "_")
+    if normalized not in {"read", "write"} or not isinstance(input_value, dict):
+        return ""
+    for key in ("filePath", "file_path", "path"):
+        value = input_value.get(key)
+        if isinstance(value, str) and value.strip():
+            return _one_line_preview(value)
+    return ""
+
+
 def _event_session_id(props: dict[str, Any]) -> str:
     session_id = props.get("sessionID")
     if isinstance(session_id, str) and session_id:
@@ -1580,7 +1591,9 @@ class _ServeEventState:
         if _is_skill_tool(name):
             self.emit("skill", f"name={_skill_name(input_value)}")
         else:
-            self.emit("tool", f"name={name or 'unknown'}")
+            path = _tool_file_path(name, input_value)
+            path_note = f" path={path}" if path else ""
+            self.emit("tool", f"name={name or 'unknown'}{path_note}")
 
     def emit_tool_result(
         self,

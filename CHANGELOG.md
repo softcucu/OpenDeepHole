@@ -4,6 +4,7 @@
 
 - **修复** OpenCode 受管配置在 Serve 启动前将 `~/.opendeephole/scans` 加入只读外部目录白名单，并自动迁移缺少该规则的旧配置且保留动态 MCP URL；Session 显式拒绝写 `project_dir`、仅允许写当前 `work_dir`，解决 Windows 威胁分析无法读取阶段 JSON 的问题
 - **变更** Task Agent 控制台移除 OpenCode 内部 `step` START/STOP/FAIL 噪音，第三段日志类别改为 `task|session|tool|skill`；Tool/SKILL 调用只在发生时打印一次，成功静默、失败追加脱敏 ERROR，威胁分析不再叠加重复的外层阶段前缀
+- **优化** Task Agent 的 `read`/`write` 单行工具日志增加 `path=<文件路径>`，继续隐藏写入内容、Shell 命令和其它参数；新 Session 重试与同 Session JSON 纠错明确使用 `[session] RETRY`、`[session] JSON_RETRY`
 
 ## 2026-07-24
 

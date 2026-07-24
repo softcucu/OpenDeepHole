@@ -660,6 +660,7 @@ def test_invalid_json_is_corrected_in_the_same_session(tmp_path: Path) -> None:
     async def run() -> None:
         service = OpenCodeTaskService()
         calls: list[tuple[str, str | None]] = []
+        output: list[str] = []
         responses = ["not json", '{"answer":"wrong type"}', '{"answer":9}']
 
         async def run_prompt(**kwargs):
@@ -680,7 +681,11 @@ def test_invalid_json_is_corrected_in_the_same_session(tmp_path: Path) -> None:
         service._runtime_for_task = AsyncMock(return_value=(_runtime(tmp_path), "provider/model-low", _source()))
         patches = _service_patches(manager)
         with patches[0], patches[1] as acquire_mock, patches[2] as release_mock, patches[3], patches[4], patches[5]:
-            with _task_context(tmp_path):
+            with _task_context(
+                tmp_path,
+                task_metadata={"standalone_console": True},
+                on_output=output.append,
+            ):
                 result = await service.run_task(OpenCodeTaskSpec(
                     task_name="correct json",
                     prompt="initial prompt",
@@ -706,6 +711,21 @@ def test_invalid_json_is_corrected_in_the_same_session(tmp_path: Path) -> None:
         assert calls[0][0].count(schema_text) == 0
         assert all(prompt.count(schema_text) == 1 for prompt, _ in calls[1:])
         assert all("Your previous response" not in prompt for prompt, _ in calls)
+        assert (
+            "[opencode][ses_same][session] "
+            "JSON_RETRY 1/2 reason=invalid_json next_session=same"
+            in output
+        )
+        assert (
+            "[opencode][ses_same][session] "
+            "JSON_RETRY 2/2 reason=invalid_json next_session=same"
+            in output
+        )
+        assert any(
+            line.startswith("[opencode][ses_same][task] FINISHED")
+            and "status=success" in line
+            for line in output
+        )
 
     asyncio.run(run())
 
@@ -765,6 +785,7 @@ def test_json_correction_exhaustion_requeues_with_new_session_and_same_task_id(t
     async def run() -> None:
         service = OpenCodeTaskService()
         calls: list[tuple[str, str | None]] = []
+        output: list[str] = []
         created_sessions = ["ses_first", "ses_first", "ses_final"]
         texts = ["bad", "still bad", '{"answer":11}']
         sources: list[OutputSource] = []
@@ -793,7 +814,12 @@ def test_json_correction_exhaustion_requeues_with_new_session_and_same_task_id(t
         service._runtime_for_task = AsyncMock(side_effect=runtime_for_task)
         patches = _service_patches(manager)
         with patches[0], patches[1] as acquire_mock, patches[2] as release_mock, patches[3], patches[4], patches[5]:
-            with _task_context(tmp_path, on_invocation_metadata=sources.append):
+            with _task_context(
+                tmp_path,
+                task_metadata={"standalone_console": True},
+                on_output=output.append,
+                on_invocation_metadata=sources.append,
+            ):
                 handle = service.submit_task(OpenCodeTaskSpec(
                     task_name="fresh session retry",
                     prompt="initial",
@@ -821,6 +847,21 @@ def test_json_correction_exhaustion_requeues_with_new_session_and_same_task_id(t
         assert first_release["outcome"] is None
         assert final_release["record_completion"] is True
         assert final_release["outcome"] == "success"
+        assert (
+            "[opencode][ses_first][session] "
+            "JSON_RETRY 1/1 reason=invalid_json next_session=same"
+            in output
+        )
+        assert any(
+            line.startswith("[opencode][ses_first][session] RETRY 1/1")
+            and "next_session=new" in line
+            for line in output
+        )
+        assert any(
+            line.startswith("[opencode][ses_final][task] FINISHED")
+            and "status=success" in line
+            for line in output
+        )
 
     asyncio.run(run())
 

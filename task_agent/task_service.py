@@ -378,6 +378,7 @@ class OpenCodeTaskService:
         message: str,
         *,
         session_id: str | None = None,
+        category: str = "task",
     ) -> None:
         if not cls._task_progress_enabled(record):
             return
@@ -387,7 +388,7 @@ class OpenCodeTaskService:
         stage = task_output_stage(record.execution_context.task_metadata.get("task_type"))
         resolved_session_id = record.spec.session_id if session_id is None else session_id
         try:
-            callback(format_task_output(stage, resolved_session_id, "task", message))
+            callback(format_task_output(stage, resolved_session_id, category, message))
         except Exception:
             logger.exception(
                 "Failed to emit progress output for OpenCode task %s",
@@ -734,9 +735,10 @@ class OpenCodeTaskService:
                             )
                             self._emit_task_progress(
                                 record,
-                                f"JSON_CORRECTION {output_attempt + 1}/{spec.output_retry_count} "
-                                "requesting schema-compliant JSON in the same session",
+                                f"JSON_RETRY {output_attempt + 1}/{spec.output_retry_count} "
+                                "reason=invalid_json next_session=same",
                                 session_id=session_id,
+                                category="session",
                             )
                 finally:
                     if lock_key.startswith("new:"):
@@ -858,6 +860,7 @@ class OpenCodeTaskService:
                     f"RETRY {session_attempt}/{fresh_retry_count} "
                     f"reason={retry_reason} next_session=new",
                     session_id=final_session_id or session_id,
+                    category="session",
                 )
                 session_attempt += 1
                 continue

@@ -279,9 +279,9 @@ Task Agent 的进度行统一使用下面三个头字段：
 ```
 
 - `vulnerability_validation` 映射为 stage `validation`；其它任务直接使用 `task_type`。Session 尚未创建时第二段为 `pending`，创建或续写后改为真实 Session ID。
-- 第三段只会是 `task`、`session`、`tool` 或 `skill`：`task` 覆盖排队、模型 Lease、Serve 准备和任务终态；`session` 覆盖当前消息执行的启动、停止、重试、错误及工具发现；`tool`、`skill` 分别表示一次真实工具调用或 SKILL 读取。OpenCode 内部 step 的 START、STOP 和 FAIL 不打印。
-- 每次消息执行都会打印 `session START` 和 `session STOP`。`STOP ... retained=true` 只表示本次消息已结束，Session 本身仍保留并可续写；超时和取消分别标记 `status=timeout`、`status=cancelled`。
-- assistant text 和 reasoning 不打印到控制台，仍在内部聚合并作为最终 `text` 返回或用于 JSON 校验。Tool/SKILL 调用只打印名称，成功不追加完成行；调用失败才在同一类别下追加脱敏 `ERROR`。调用参数和工具返回正文都不打印。
+- 第三段只会是 `task`、`session`、`tool` 或 `skill`：`task` 覆盖排队、模型 Lease、Serve 准备和任务终态；`session` 覆盖当前消息执行的启动、停止、Provider 重试、新 Session `RETRY`、同 Session `JSON_RETRY`、错误及工具发现；`tool`、`skill` 分别表示一次真实工具调用或 SKILL 读取。OpenCode 内部 step 的 START、STOP 和 FAIL 不打印。
+- 每次消息执行都会打印 `session START` 和 `session STOP`。`STOP status=success retained=true` 同时表示本次消息结束且成功，Session 本身仍保留并可续写；超时和取消分别标记 `status=timeout`、`status=cancelled`。
+- assistant text 和 reasoning 不打印到控制台，仍在内部聚合并作为最终 `text` 返回或用于 JSON 校验。Tool/SKILL 调用每次只打印一行，`read`/`write` 额外打印 `path=<文件路径>`，其它 Tool 只打印名称；成功不追加完成行，调用失败才在同一类别下追加脱敏 `ERROR`。写入内容、Shell 命令、其它调用参数和工具返回正文都不打印。
 
 独立模式直接把这些行打印到终端；宿主模式只交给宿主绑定的输出回调。宿主添加本地时间戳时会保留上述三个头字段，不再叠加旧的阶段或模型前缀；扫描器转发结构化 Task Agent 行时也不会重复添加进程阶段前缀。
 
