@@ -15,6 +15,9 @@ from backend.scan_event_log import (
     is_agent_local_task_output,
 )
 from backend.scan_runtime import (
+    AGENT_DISCONNECT_ERROR,
+    AGENT_RECOVERY_IN_PROGRESS,
+    AGENT_RECOVERY_FAILED_PREFIX,
     is_terminal_scan_status,
     terminal_opencode_pool_status,
 )
@@ -3098,6 +3101,10 @@ class SqliteScanStore(ScanTokenCategoriesMixin, ScanSharesMixin, ScanHistoryMixi
                 WHERE scan_id = ?
                   AND status IN ('complete', 'error', 'cancelled')
                   AND execution_revision = COALESCE(?, execution_revision)
+                  AND (? = 1 OR (
+                      status = 'cancelled' AND error_message = ?
+                      AND execution_agent_session_id = ?
+                  ))
                 RETURNING opencode_pool, execution_revision, execution_agent_session_id
                 """,
                 (
@@ -3108,6 +3115,9 @@ class SqliteScanStore(ScanTokenCategoriesMixin, ScanSharesMixin, ScanHistoryMixi
                     claimed_revision,
                     scan_id,
                     expected_revision,
+                    int(claimed_revision is None),
+                    AGENT_RECOVERY_IN_PROGRESS,
+                    agent_session_id,
                 ),
             ).fetchone()
             if row is None:
@@ -5255,11 +5265,12 @@ class SqliteScanStore(ScanTokenCategoriesMixin, ScanSharesMixin, ScanHistoryMixi
                 WHERE {clause}
                   AND (
                       s.status IN ('pending', 'analyzing', 'auditing')
-                      OR (s.status = 'cancelled' AND s.error_message = ?)
+                      OR (s.status = 'cancelled' AND s.error_message IN (?, ?))
+                      OR (s.status = 'error' AND s.error_message LIKE ?)
                   )
                 ORDER BY s.created_at, s.scan_id
                 """,
-                (*params, disconnect_error),
+                (*params, disconnect_error, AGENT_RECOVERY_IN_PROGRESS, AGENT_RECOVERY_FAILED_PREFIX + "%"),
             ).fetchall()
             fp_reviews = self._conn.execute(
                 f"""\
@@ -5270,11 +5281,11 @@ class SqliteScanStore(ScanTokenCategoriesMixin, ScanSharesMixin, ScanHistoryMixi
                 WHERE {clause}
                   AND (
                       job.status IN ('pending', 'running')
-                      OR (job.status = 'error' AND job.error_message = ?)
+                      OR (job.status = 'error' AND (job.error_message = ? OR job.error_message LIKE ?))
                   )
                 ORDER BY job.created_at, job.review_id
                 """,
-                (*params, disconnect_error),
+                (*params, disconnect_error, AGENT_RECOVERY_FAILED_PREFIX + "%"),
             ).fetchall()
             validations = self._conn.execute(
                 f"""\
@@ -5306,6 +5317,7 @@ class SqliteScanStore(ScanTokenCategoriesMixin, ScanSharesMixin, ScanHistoryMixi
         agent_id: str,
         agent_session_id: str,
         error_message: str,
+        expected_revision: int | None = None,
     ) -> int | None:
         with self._lock:
             row = self._conn.execute(
@@ -5317,9 +5329,11 @@ class SqliteScanStore(ScanTokenCategoriesMixin, ScanSharesMixin, ScanHistoryMixi
                 WHERE scan_id = ?
                   AND (
                       status IN ('pending', 'analyzing', 'auditing')
-                      OR (status = 'cancelled' AND error_message = 'Agent 断开连接')
+                      OR (status = 'cancelled' AND error_message IN (?, ?))
+                      OR (status = 'error' AND error_message LIKE ?)
                   )
                   AND COALESCE(execution_agent_session_id, '') = ?
+                  AND execution_revision = COALESCE(?, execution_revision)
                 RETURNING execution_revision
                 """,
                 (
@@ -5327,11 +5341,52 @@ class SqliteScanStore(ScanTokenCategoriesMixin, ScanSharesMixin, ScanHistoryMixi
                     agent_id,
                     agent_session_id,
                     scan_id,
+                    AGENT_DISCONNECT_ERROR,
+                    AGENT_RECOVERY_IN_PROGRESS,
+                    AGENT_RECOVERY_FAILED_PREFIX + "%",
                     previous_session_id,
+                    expected_revision,
                 ),
             ).fetchone()
             self._conn.commit()
         return int(row["execution_revision"]) if row is not None else None
+
+    def fail_scan_recovery(
+        self, scan_id: str, *, agent_session_id: str,
+        execution_revision: int, error_message: str,
+    ) -> bool:
+        """Settle a failed recovery without overwriting a user stop or newer run."""
+        with self._lock:
+            row = self._conn.execute(
+                """UPDATE scans SET status = 'error', error_message = ?, current_candidate = NULL
+                   WHERE scan_id = ? AND execution_agent_session_id = ? AND execution_revision = ?
+                     AND (status IN ('pending', 'error')
+                          OR (status = 'cancelled' AND error_message = ?))
+                   RETURNING opencode_pool""",
+                (error_message, scan_id, agent_session_id, execution_revision, AGENT_RECOVERY_IN_PROGRESS),
+            ).fetchone()
+            if row is not None:
+                self._conn.execute(
+                    "UPDATE scans SET opencode_pool = ? WHERE scan_id = ?",
+                    (self._terminal_scan_pool_json(scan_id, row["opencode_pool"]), scan_id),
+                )
+            self._conn.commit()
+            return row is not None
+
+    def fail_fp_review_recovery(
+        self, review_id: str, *, agent_session_id: str,
+        execution_revision: int, error_message: str,
+    ) -> bool:
+        with self._lock:
+            cursor = self._conn.execute(
+                """UPDATE fp_review_jobs SET status = 'error', error_message = ?,
+                       current_vuln_index = NULL, current_vuln_indices = '[]'
+                   WHERE review_id = ? AND execution_agent_session_id = ? AND execution_revision = ?
+                     AND status IN ('pending', 'running', 'error')""",
+                (error_message, review_id, agent_session_id, execution_revision),
+            )
+            self._conn.commit()
+            return bool(cursor.rowcount)
 
     def adopt_active_execution(
         self,
@@ -5420,12 +5475,13 @@ class SqliteScanStore(ScanTokenCategoriesMixin, ScanSharesMixin, ScanHistoryMixi
                 WHERE review_id = ?
                   AND (
                       status IN ('pending', 'running')
-                      OR (status = 'error' AND error_message = 'Agent 断开连接')
+                      OR (status = 'error' AND (error_message = ? OR error_message LIKE ?))
                   )
                   AND COALESCE(execution_agent_session_id, '') = ?
                 RETURNING execution_revision
                 """,
-                (agent_session_id, review_id, previous_session_id),
+                (agent_session_id, review_id, AGENT_DISCONNECT_ERROR,
+                 AGENT_RECOVERY_FAILED_PREFIX + "%", previous_session_id),
             ).fetchone()
             self._conn.commit()
         return int(row["execution_revision"]) if row is not None else None

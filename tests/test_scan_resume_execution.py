@@ -211,6 +211,141 @@ def test_reconnect_old_or_cancelled_inventory_does_not_suppress_recovery(resume_
     assert resume.await_args.kwargs["claimed_execution_revision"] == 9
 
 
+def test_restart_restores_main_scan_without_being_blocked_by_independent_review(resume_env, monkeypatch):
+    env = resume_env
+    env.store.update_scan_progress("resume-scan", status=ScanItemStatus.AUDITING)
+    env.store.create_fp_review_job("review", "resume-scan", 1, "2026-09-28T00:00:00Z")
+    env.store.begin_fp_review_execution("review", agent_session_id="old-session")
+    env.store.update_fp_review_job("review", status="running")
+    review = AsyncMock(return_value={"status": "running"})
+    monkeypatch.setattr(scan_api, "_start_fp_review", review)
+    asyncio.run(agent_api._recover_missing_agent_work("agent", env.agent, {}, server_url="http://server"))
+    scan, meta = env.store.load_scan("resume-scan")
+    assert scan.status == ScanItemStatus.PENDING
+    assert meta.execution_revision == 9
+    assert not scan.error_message
+    assert env.send.await_count == 1
+    assert env.send.await_args.args[1]["type"] == "resume"
+    review.assert_awaited_once_with("resume-scan", "http://server", raise_on_error=True,
+                                    require_unresolved=True, claimed_execution_revision=2)
+    assert env.store.get_fp_review_job("review").status == "running"
+
+
+def test_recovery_failure_is_reported_and_next_hello_retries(resume_env):
+    from backend.scan_runtime import AGENT_RECOVERY_FAILED_PREFIX
+    env = resume_env
+    env.store.update_scan_progress("resume-scan", status=ScanItemStatus.AUDITING)
+    env.stop.return_value = {"still_active": True, "error": ""}
+    asyncio.run(agent_api._recover_missing_agent_work("agent", env.agent, {}, server_url="http://server"))
+    scan, meta = env.store.load_scan("resume-scan")
+    assert scan.status == "error"
+    assert scan.error_message.startswith(AGENT_RECOVERY_FAILED_PREFIX)
+    assert "旧扫描尚未确认退出" in scan.error_message
+    assert meta.execution_revision == 9
+    env.send.assert_not_awaited()
+    from backend.sse import publish
+    assert any(call.args[1] == "scan_status" and call.args[2]["status"] == "error" for call in publish.call_args_list)
+    env.stop.return_value = {"still_active": False, "error": ""}
+    asyncio.run(agent_api._recover_missing_agent_work("agent", env.agent, {}, server_url="http://server"))
+    scan, meta = env.store.load_scan("resume-scan")
+    assert scan.status == "pending" and meta.execution_revision == 10
+    assert not scan.error_message
+    env.send.assert_awaited_once()
+
+
+def test_recovery_skips_user_cancelled_scan(resume_env):
+    env = resume_env
+    asyncio.run(agent_api._recover_missing_agent_work("agent", env.agent, {}, server_url="http://server"))
+    env.stop.assert_not_awaited()
+    env.send.assert_not_awaited()
+    scan, meta = env.store.load_scan("resume-scan")
+    assert scan.status == "cancelled" and meta.execution_revision == 8
+
+
+@pytest.mark.parametrize("cancel_phase", ["before_load", "during_prepare"])
+def test_user_stop_after_recovery_claim_prevents_dispatch(resume_env, monkeypatch, cancel_phase):
+    env = resume_env
+    env.store.update_scan_progress("resume-scan", status=ScanItemStatus.AUDITING)
+
+    def cancel():
+        env.store.update_scan_progress("resume-scan", status=ScanItemStatus.CANCELLED,
+                                       error_message="用户手动停止")
+
+    if cancel_phase == "before_load":
+        continue_scan = scan_api._continue_scan
+
+        async def stop_before_load(*args, **kwargs):
+            cancel()
+            return await continue_scan(*args, **kwargs)
+
+        monkeypatch.setattr(scan_api, "_continue_scan", stop_before_load)
+    else:
+        async def stop_during_prepare(*args, **kwargs):
+            cancel()
+            return {"still_active": False, "error": ""}
+
+        env.stop.side_effect = stop_during_prepare
+    asyncio.run(agent_api._recover_missing_agent_work("agent", env.agent, {}, server_url="http://server"))
+    scan, meta = env.store.load_scan("resume-scan")
+    assert scan.status == "cancelled" and scan.error_message == "用户手动停止"
+    assert meta.execution_revision == 9
+    env.send.assert_not_awaited()
+    assert not env.store.list_agent_inflight_executions("", "agent")["scans"]
+
+
+def test_main_recovery_does_not_reopen_user_cancelled_review(resume_env, monkeypatch):
+    env = resume_env
+    env.store.update_scan_progress("resume-scan", status=ScanItemStatus.AUDITING)
+    env.store.add_vulnerability("resume-scan", Vulnerability(
+        file="todo.c", line=1, function="f", vuln_type="npd", severity="high",
+        description="confirmed", ai_analysis="confirmed", confirmed=True, ai_verdict="confirmed",
+    ))
+    env.store.create_fp_review_job("review", "resume-scan", 1, "2026-09-28T00:00:00Z")
+    env.store.begin_fp_review_execution("review", agent_session_id="old-session")
+    env.store.update_fp_review_job("review", status="cancelled", error_message="用户手动停止")
+    monkeypatch.setattr(scan_api, "_resolve_scan_agent_id", AsyncMock(return_value="agent"))
+    asyncio.run(agent_api._recover_missing_agent_work("agent", env.agent, {}, server_url="http://server"))
+    assert env.store.load_scan("resume-scan")[0].status == "pending"
+    review = env.store.get_fp_review_job("review")
+    assert review.status == "cancelled" and review.execution_revision == 1
+    env.send.assert_awaited_once()
+    assert env.send.await_args.args[1]["type"] == "resume"
+
+
+@pytest.mark.parametrize("revision,cancel_requested,recovered", [(0, False, True), (1, True, True), (1, False, False)])
+def test_review_inventory_recovery_checks_execution_and_cancellation(
+    resume_env, monkeypatch, revision, cancel_requested, recovered,
+):
+    env = resume_env
+    env.store.create_fp_review_job("review", "resume-scan", 1, "2026-09-28T00:00:00Z")
+    env.store.begin_fp_review_execution("review", agent_session_id="old-session")
+    env.store.update_fp_review_job("review", status="running")
+    start_review = AsyncMock(return_value={"status": "running"})
+    monkeypatch.setattr(scan_api, "_start_fp_review", start_review)
+    asyncio.run(agent_api._recover_missing_agent_work("agent", env.agent, {
+        "active_fp_reviews": [{"scan_id": "resume-scan", "review_id": "review",
+                               "execution_revision": revision, "cancel_requested": cancel_requested}],
+    }, server_url="http://server"))
+    assert start_review.await_count == int(recovered)
+    review = env.store.get_fp_review_job("review")
+    assert review.execution_revision == (2 if recovered else 1)
+    assert review.execution_agent_session_id == env.agent.agent_session_id
+
+
+def test_failed_review_recovery_clears_running_state(resume_env, monkeypatch):
+    from backend.scan_runtime import AGENT_RECOVERY_FAILED_PREFIX
+    env = resume_env
+    env.store.create_fp_review_job("review", "resume-scan", 1, "2026-09-28T00:00:00Z")
+    env.store.begin_fp_review_execution("review", agent_session_id="old-session")
+    env.store.update_fp_review_job("review", status="running")
+    monkeypatch.setattr(scan_api, "_start_fp_review", AsyncMock(side_effect=HTTPException(400, "模型配置不可用")))
+    asyncio.run(agent_api._recover_missing_agent_work("agent", env.agent, {}, server_url="http://server"))
+    review = env.store.get_fp_review_job("review")
+    assert review.status == "error"
+    assert review.error_message == AGENT_RECOVERY_FAILED_PREFIX + "模型配置不可用"
+    assert not scan_api._fp_review_resume_state([], {}, env.store.list_fp_review_states_by_scans(["resume-scan"])["resume-scan"])[0]
+
+
 def test_reconnect_adopts_only_matching_execution_before_publishing(resume_env):
     env = resume_env
     env.store.update_scan_progress("resume-scan", status=ScanItemStatus.PENDING)

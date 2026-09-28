@@ -13,6 +13,21 @@ from typing import Callable
 from backend.models import OpenCodePoolStatus, ScanItemStatus
 
 
+AGENT_DISCONNECT_ERROR = "Agent 断开连接"
+AGENT_RECOVERY_IN_PROGRESS = "Agent 进程已重启，正在自动断点恢复"
+AGENT_RECOVERY_FAILED_PREFIX = "Agent 自动断点恢复失败："
+
+
+def is_agent_recovery_interruption(status: ScanItemStatus | str, error: str | None) -> bool:
+    return (
+        status == ScanItemStatus.CANCELLED
+        and error in {AGENT_DISCONNECT_ERROR, AGENT_RECOVERY_IN_PROGRESS}
+    ) or (
+        status == ScanItemStatus.ERROR
+        and str(error or "").startswith(AGENT_RECOVERY_FAILED_PREFIX)
+    )
+
+
 RUNNING_SCAN_STATUSES = frozenset({
     ScanItemStatus.PENDING,
     ScanItemStatus.ANALYZING,

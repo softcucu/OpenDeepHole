@@ -702,7 +702,10 @@ export default function ScanHistory({ onViewScan, onDownloadAgent, onAgentConfig
                             {st.label}
                           </span>
                           {running && (
-                            <span className="inline-block h-2 w-2 rounded-full bg-blue-400 animate-pulse" />
+                            <span className="inline-flex items-center gap-1 text-xs text-blue-300" title={scan.fp_review_running ? "去误报进行中" : "主扫描进行中"}>
+                              <span className="inline-block h-2 w-2 rounded-full bg-blue-400 animate-pulse" />
+                              {!coreRunning && scan.fp_review_running && "去误报进行中"}
+                            </span>
                           )}
                         </span>
                       </td>

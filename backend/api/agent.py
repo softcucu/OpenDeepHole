@@ -109,6 +109,10 @@ from backend.scan_event_log import (
     is_agent_local_task_output,
 )
 from backend.scan_runtime import (
+    AGENT_DISCONNECT_ERROR,
+    AGENT_RECOVERY_IN_PROGRESS,
+    AGENT_RECOVERY_FAILED_PREFIX,
+    is_agent_recovery_interruption,
     RUNNING_SCAN_STATUSES as _RUNNING_SCAN_STATUSES,
     terminal_opencode_pool_status as _terminal_opencode_pool_status,
 )
@@ -699,7 +703,6 @@ _AGENT_RESPONSE_WAITERS = {
 # In-memory index progress store: scan_id → {status, parsed_files, total_files}
 _scan_index_statuses: dict[str, dict] = {}
 
-AGENT_DISCONNECT_ERROR = "Agent 断开连接"
 _SERVER_RESTART_ERROR = "Process terminated unexpectedly"
 _WEBSOCKET_AGENT_STALE_SECONDS = 120
 _AGENT_DISCONNECT_GRACE_SECONDS = 120
@@ -1139,6 +1142,8 @@ def _schedule_agent_disconnect_cancel(agent_id: str) -> None:
 
 def _is_infrastructure_interruption(scan_status: ScanItemStatus, error_message: str | None) -> bool:
     """Return True for states caused by server/connection loss, not user intent."""
+    if is_agent_recovery_interruption(scan_status, error_message):
+        return True
     if scan_status == ScanItemStatus.CANCELLED:
         return error_message == AGENT_DISCONNECT_ERROR
     if scan_status == ScanItemStatus.ERROR:
@@ -1584,11 +1589,10 @@ async def _recover_missing_agent_work(
         (str(row["scan_id"]),) for row in inflight.get("scans", [])
         if _matching_active_execution(hello.get("active_scans"), row, "scan_id")
     }
-    active_fp = _reported_work_ids(
-        hello.get("active_fp_reviews"),
-        "scan_id",
-        "review_id",
-    )
+    active_fp = {
+        (str(row["scan_id"]), str(row["review_id"])) for row in inflight.get("fp_reviews", [])
+        if _matching_active_execution(hello.get("active_fp_reviews"), row, "scan_id", "review_id")
+    }
     active_validations = _reported_work_ids(
         hello.get("active_validations"),
         "scan_id",
@@ -1635,6 +1639,40 @@ async def _recover_missing_agent_work(
             execution_revision=int(row.get("execution_revision") or 0),
         )
 
+    async def recovery_failed(kind: str, work_id: str, scan_id: str, revision: int, exc: Exception) -> None:
+        detail = str(exc.detail if isinstance(exc, HTTPException) else exc) or type(exc).__name__
+        error = AGENT_RECOVERY_FAILED_PREFIX + detail[:500]
+        changed = await run_store_call(
+            store, "fail_scan_recovery" if kind == "scan" else "fail_fp_review_recovery", work_id,
+            agent_session_id=agent.agent_session_id, execution_revision=revision, error_message=error,
+        )
+        logger.warning(
+            "Agent recovery failed kind=%s id=%s session=%s revision=%s persisted=%s reason=%s",
+            kind, work_id, agent.agent_session_id, revision, changed, detail,
+        )
+        if not changed:
+            return
+        from backend.sse import publish
+
+        if kind == "scan":
+            cached = _running_scans.get(scan_id)
+            if cached is not None and cached.execution_revision == revision:
+                _running_scans.pop(scan_id, None)
+                _scan_owners.pop(scan_id, None)
+            loaded = await run_store_call(store, "load_scan_runtime", scan_id)
+            if loaded is not None:
+                scan = loaded[0]
+                publish(scan_id, "scan_status", {
+                    "execution_revision": scan.execution_revision,
+                    "status": scan.status, "error_message": scan.error_message,
+                    "opencode_pool": scan.opencode_pool.model_dump(mode="json") if scan.opencode_pool else None,
+                })
+        else:
+            publish(scan_id, "fp_review_finish", {
+                "review_id": work_id, "execution_revision": revision,
+                "status": "error", "error_message": error,
+            })
+
     for row in inflight.get("scans", []):
         scan_id = str(row.get("scan_id") or "")
         identity = (scan_id,)
@@ -1655,7 +1693,8 @@ async def _recover_missing_agent_work(
             previous_session_id=previous_session,
             agent_id=agent_id,
             agent_session_id=agent.agent_session_id,
-            error_message="Agent 进程已重启，正在自动断点恢复",
+            error_message=AGENT_RECOVERY_IN_PROGRESS,
+            expected_revision=int(row.get("execution_revision") or 0),
         )
         if revision is None:
             continue
@@ -1684,8 +1723,8 @@ async def _recover_missing_agent_work(
                 agent.agent_session_id,
                 revision,
             )
-        except Exception:
-            logger.exception("Automatic scan recovery failed for %s", scan_id)
+        except Exception as exc:
+            await recovery_failed("scan", scan_id, scan_id, revision, exc)
 
     for row in inflight.get("fp_reviews", []):
         scan_id = str(row.get("scan_id") or "")
@@ -1709,20 +1748,22 @@ async def _recover_missing_agent_work(
         from backend.api.scan import _start_fp_review
 
         try:
-            await _start_fp_review(
+            result = await _start_fp_review(
                 scan_id,
                 server_url,
-                raise_on_error=False,
+                raise_on_error=True,
                 require_unresolved=True,
                 claimed_execution_revision=revision,
             )
+            if result is None:
+                raise RuntimeError("去误报恢复未启动，请再次续扫")
             logger.warning(
                 "Automatically resumed orphaned FP review %s revision=%d",
                 review_id,
                 revision,
             )
-        except Exception:
-            logger.exception("Automatic FP review recovery failed for %s", review_id)
+        except Exception as exc:
+            await recovery_failed("fp_review", review_id, scan_id, revision, exc)
 
     for row in inflight.get("validations", []):
         scan_id = str(row.get("scan_id") or "")

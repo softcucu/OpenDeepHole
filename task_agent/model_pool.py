@@ -189,6 +189,7 @@ class _PlannedTask:
 
 
 _condition = asyncio.Condition()
+_change_waiters: set[asyncio.Event] = set()
 _running_by_model: dict[str, int] = {}
 _global_running = 0
 _last_used: dict[str, float] = {}
@@ -893,22 +894,37 @@ async def wait_for_model_pool_update(
     Returns the current marker. If *timeout* expires before a matching update,
     the returned value is unchanged from *last_updated_at*.
     """
-    async with _condition:
-        if _updated_at_locked(scope_id) != last_updated_at:
-            return _updated_at_locked(scope_id)
-        if timeout is not None and timeout <= 0:
-            return _updated_at_locked(scope_id)
-        try:
-            if timeout is None:
-                await _condition.wait_for(lambda: _updated_at_locked(scope_id) != last_updated_at)
-            else:
-                await asyncio.wait_for(
-                    _condition.wait_for(lambda: _updated_at_locked(scope_id) != last_updated_at),
-                    timeout=timeout,
-                )
-        except asyncio.TimeoutError:
-            pass
-        return _updated_at_locked(scope_id)
+    expires = None if timeout is None else time.monotonic() + max(0.0, timeout)
+    while True:
+        async with _condition:
+            remaining = None if expires is None else max(0.0, expires - time.monotonic())
+            if _updated_at_locked(scope_id) != last_updated_at or remaining == 0:
+                return _updated_at_locked(scope_id)
+            changed = _register_change_waiter_locked()
+        await _wait_for_pool_change(changed, remaining)
+
+
+def _register_change_waiter_locked() -> asyncio.Event:
+    changed = asyncio.Event()
+    _change_waiters.add(changed)
+    return changed
+
+
+def _notify_pool_changed_locked() -> None:
+    for changed in _change_waiters:
+        changed.set()
+
+
+async def _wait_for_pool_change(changed: asyncio.Event, timeout: float | None) -> None:
+    # Python 3.10 wait_for creates a child task. Cancelling that child while
+    # Condition.wait reacquires its lock can orphan the shared pool lock.
+    # Register under the lock (no lost wakeups), but only wait outside it.
+    try:
+        await asyncio.wait_for(changed.wait(), timeout=timeout)
+    except asyncio.TimeoutError:
+        pass
+    finally:
+        _change_waiters.discard(changed)
 
 
 def _remove_pending_request_locked(request: _PendingLeaseRequest) -> bool:
@@ -1003,7 +1019,7 @@ def _fail_pending_request_locked(
             },
         )
     _touch_queue_locked(request.stats_scope_id)
-    _condition.notify_all()
+    _notify_pool_changed_locked()
 
 
 def _fail_no_available_model_locked(request: _PendingLeaseRequest) -> None:
@@ -1044,7 +1060,7 @@ async def register_planned_task(
         if task_key:
             _planned_task_ids_by_key[(scope_id, task_key)] = task_id
         _touch_queue_locked(scope_id)
-        _condition.notify_all()
+        _notify_pool_changed_locked()
         return task_id
 
 
@@ -1057,7 +1073,7 @@ async def clear_planned_task(task_id: str) -> None:
         scope_id = planned.scope_id if planned is not None else ""
         if _remove_planned_task_locked(task_id):
             _touch_queue_locked(scope_id)
-            _condition.notify_all()
+            _notify_pool_changed_locked()
 
 
 async def clear_planned_tasks(scope_id: str, task_types: set[str] | None = None) -> None:
@@ -1074,7 +1090,7 @@ async def clear_planned_tasks(scope_id: str, task_types: set[str] | None = None)
             removed = True
         if removed:
             _touch_queue_locked(scope_id)
-            _condition.notify_all()
+            _notify_pool_changed_locked()
 
 
 def _prune_cancelled_pending_locked() -> None:
@@ -1267,149 +1283,160 @@ async def acquire_model_lease(
     context.setdefault("priority", normalize_priority(priority))
     context.setdefault("revision", max(1, int(revision or 1)))
 
-    while True:
-        notify_queued = False
-        if cancel_event is not None and cancel_event.is_set():
-            if request is not None:
-                async with _condition:
+    try:
+        while True:
+            notify_queued = False
+            if cancel_event is not None and cancel_event.is_set():
+                if request is not None:
+                    async with _condition:
+                        if request.quota_wait_budget is not None:
+                            request.quota_wait_budget.pause(time.monotonic())
+                        _consume_planned_task_locked(request)
+                        if _remove_pending_request_locked(request):
+                            _touch_queue_locked(request.stats_scope_id)
+                            _notify_pool_changed_locked()
+                return None
+            async with _condition:
+                if request is None:
+                    global _pending_sequence
+                    _pending_sequence += 1
+                    queued_at_iso = _now_iso()
+                    request = _PendingLeaseRequest(
+                        request_id=str(task_id or "").strip() or uuid4().hex,
+                        sequence=_pending_sequence,
+                        priority=normalize_priority(priority),
+                        revision=max(1, int(revision or 1)),
+                        cli_config=cli_config,
+                        required_capability=required,
+                        prefer_high=prefer_high,
+                        cancel_event=cancel_event,
+                        stats_scope_id=stats_scope_id,
+                        task_context=dict(context),
+                        queued_at=time.monotonic(),
+                        queued_at_iso=queued_at_iso,
+                        strict_capability=bool(strict_capability),
+                        prefer_lowest_capability=bool(prefer_lowest_capability),
+                        wait_when_unavailable=bool(wait_when_unavailable),
+                        record_completion_on_failure=bool(record_completion_on_failure),
+                        avoid_model_ids=frozenset(
+                            str(model_id).strip()
+                            for model_id in (avoid_model_ids or ())
+                            if str(model_id).strip()
+                        ),
+                        avoid_model_identities=frozenset(
+                            (
+                                str(identity[0]),
+                                bool(identity[1]),
+                                str(identity[2]),
+                                str(identity[3]),
+                            )
+                            for identity in (avoid_model_identities or ())
+                            if isinstance(identity, (tuple, list)) and len(identity) == 4
+                        ),
+                        quota_wait_deadline=(
+                            float(quota_wait_deadline)
+                            if quota_wait_deadline is not None
+                            else None
+                        ),
+                        quota_wait_budget=quota_wait_budget,
+                    )
+                    option, all_options = _choose_available_for_request_locked(request)
+                    if not all_options and not request.wait_when_unavailable:
+                        _fail_no_available_model_locked(request)
+                        raise NoAvailableModelError()
+                    if option is not None and not _pending_requests:
+                        return _grant_lease_locked(request, option, all_options)
+                    _pending_requests.append(request)
+                    _touch_queue_locked(stats_scope_id)
+                    _notify_pool_changed_locked()
+                    notify_queued = True
+                else:
+                    all_options, _, _ = _request_options_locked(request)
+                    if not all_options and not request.wait_when_unavailable:
+                        _fail_no_available_model_locked(request)
+                        raise NoAvailableModelError()
+
+                if notify_queued:
+                    # This request can only grant itself on its next loop, so it is
+                    # safe to notify outside the pool lock before execution starts.
+                    pass
+                else:
+                    blocked_by_quota = _request_blocked_by_quota_circuits_locked(request)
+                    if blocked_by_quota:
+                        now = time.monotonic()
+                        if request.quota_wait_budget is not None:
+                            request.quota_wait_budget.start(now)
+                        budget_expired = bool(
+                            request.quota_wait_budget is not None
+                            and request.quota_wait_budget.remaining(now) <= 0
+                        )
+                        if (
+                            budget_expired
+                            or (
+                                request.quota_wait_deadline is not None
+                                and now >= request.quota_wait_deadline
+                            )
+                            or (
+                                request.quota_wait_deadline is None
+                                and not request.wait_when_unavailable
+                            )
+                        ):
+                            error = ModelQuotaCircuitOpenError(
+                                wait_limit_reached=(
+                                    budget_expired
+                                    or request.quota_wait_deadline is not None
+                                ),
+                            )
+                            _fail_pending_request_locked(
+                                request,
+                                str(error),
+                                failure_kind="quota",
+                            )
+                            raise error
+                        if not request.quota_wait_logged:
+                            remaining = (
+                                request.quota_wait_budget.remaining(now)
+                                if request.quota_wait_budget is not None
+                                else (
+                                    max(0.0, request.quota_wait_deadline - now)
+                                    if request.quota_wait_deadline is not None
+                                    else None
+                                )
+                            )
+                            logger.info(
+                                "Waiting for model Provider quota circuit cooldown task_id=%s "
+                                "remaining_limit_seconds=%s",
+                                request.request_id,
+                                f"{remaining:.1f}" if remaining is not None else "unbounded",
+                            )
+                            request.quota_wait_logged = True
+                    elif request.quota_wait_budget is not None:
+                        request.quota_wait_budget.pause(time.monotonic())
+
+                    next_runnable = _next_runnable_pending_locked()
+                    if next_runnable is not None:
+                        selected, option, all_options = next_runnable
+                        if selected is request:
+                            _remove_pending_request_locked(request)
+                            return _grant_lease_locked(request, option, all_options)
+                    changed = _register_change_waiter_locked()
+            if not notify_queued:
+                await _wait_for_pool_change(changed, 0.2)
+            if notify_queued and on_queued is not None:
+                notified = on_queued()
+                if inspect.isawaitable(notified):
+                    await notified
+    finally:
+        if request is not None:
+            # No pool critical section awaits I/O or another task. Withdrawal
+            # therefore cannot wait behind a cancelled condition waiter.
+            async with _condition:
+                if _remove_pending_request_locked(request):
                     if request.quota_wait_budget is not None:
                         request.quota_wait_budget.pause(time.monotonic())
                     _consume_planned_task_locked(request)
-                    if _remove_pending_request_locked(request):
-                        _touch_queue_locked(request.stats_scope_id)
-                        _condition.notify_all()
-            return None
-        async with _condition:
-            if request is None:
-                global _pending_sequence
-                _pending_sequence += 1
-                queued_at_iso = _now_iso()
-                request = _PendingLeaseRequest(
-                    request_id=str(task_id or "").strip() or uuid4().hex,
-                    sequence=_pending_sequence,
-                    priority=normalize_priority(priority),
-                    revision=max(1, int(revision or 1)),
-                    cli_config=cli_config,
-                    required_capability=required,
-                    prefer_high=prefer_high,
-                    cancel_event=cancel_event,
-                    stats_scope_id=stats_scope_id,
-                    task_context=dict(context),
-                    queued_at=time.monotonic(),
-                    queued_at_iso=queued_at_iso,
-                    strict_capability=bool(strict_capability),
-                    prefer_lowest_capability=bool(prefer_lowest_capability),
-                    wait_when_unavailable=bool(wait_when_unavailable),
-                    record_completion_on_failure=bool(record_completion_on_failure),
-                    avoid_model_ids=frozenset(
-                        str(model_id).strip()
-                        for model_id in (avoid_model_ids or ())
-                        if str(model_id).strip()
-                    ),
-                    avoid_model_identities=frozenset(
-                        (
-                            str(identity[0]),
-                            bool(identity[1]),
-                            str(identity[2]),
-                            str(identity[3]),
-                        )
-                        for identity in (avoid_model_identities or ())
-                        if isinstance(identity, (tuple, list)) and len(identity) == 4
-                    ),
-                    quota_wait_deadline=(
-                        float(quota_wait_deadline)
-                        if quota_wait_deadline is not None
-                        else None
-                    ),
-                    quota_wait_budget=quota_wait_budget,
-                )
-                option, all_options = _choose_available_for_request_locked(request)
-                if not all_options and not request.wait_when_unavailable:
-                    _fail_no_available_model_locked(request)
-                    raise NoAvailableModelError()
-                if option is not None and not _pending_requests:
-                    return _grant_lease_locked(request, option, all_options)
-                _pending_requests.append(request)
-                _touch_queue_locked(stats_scope_id)
-                _condition.notify_all()
-                notify_queued = True
-            else:
-                all_options, _, _ = _request_options_locked(request)
-                if not all_options and not request.wait_when_unavailable:
-                    _fail_no_available_model_locked(request)
-                    raise NoAvailableModelError()
-
-            if notify_queued:
-                # This request can only grant itself on its next loop, so it is
-                # safe to notify outside the pool lock before execution starts.
-                pass
-            else:
-                blocked_by_quota = _request_blocked_by_quota_circuits_locked(request)
-                if blocked_by_quota:
-                    now = time.monotonic()
-                    if request.quota_wait_budget is not None:
-                        request.quota_wait_budget.start(now)
-                    budget_expired = bool(
-                        request.quota_wait_budget is not None
-                        and request.quota_wait_budget.remaining(now) <= 0
-                    )
-                    if (
-                        budget_expired
-                        or (
-                            request.quota_wait_deadline is not None
-                            and now >= request.quota_wait_deadline
-                        )
-                        or (
-                            request.quota_wait_deadline is None
-                            and not request.wait_when_unavailable
-                        )
-                    ):
-                        error = ModelQuotaCircuitOpenError(
-                            wait_limit_reached=(
-                                budget_expired
-                                or request.quota_wait_deadline is not None
-                            ),
-                        )
-                        _fail_pending_request_locked(
-                            request,
-                            str(error),
-                            failure_kind="quota",
-                        )
-                        raise error
-                    if not request.quota_wait_logged:
-                        remaining = (
-                            request.quota_wait_budget.remaining(now)
-                            if request.quota_wait_budget is not None
-                            else (
-                                max(0.0, request.quota_wait_deadline - now)
-                                if request.quota_wait_deadline is not None
-                                else None
-                            )
-                        )
-                        logger.info(
-                            "Waiting for model Provider quota circuit cooldown task_id=%s "
-                            "remaining_limit_seconds=%s",
-                            request.request_id,
-                            f"{remaining:.1f}" if remaining is not None else "unbounded",
-                        )
-                        request.quota_wait_logged = True
-                elif request.quota_wait_budget is not None:
-                    request.quota_wait_budget.pause(time.monotonic())
-
-                next_runnable = _next_runnable_pending_locked()
-                if next_runnable is not None:
-                    selected, option, all_options = next_runnable
-                    if selected is request:
-                        _remove_pending_request_locked(request)
-                        return _grant_lease_locked(request, option, all_options)
-                try:
-                    await asyncio.wait_for(_condition.wait(), timeout=0.2)
-                except asyncio.TimeoutError:
-                    pass
-        if notify_queued and on_queued is not None:
-            notified = on_queued()
-            if inspect.isawaitable(notified):
-                await notified
+                    _touch_queue_locked(request.stats_scope_id)
+                    _notify_pool_changed_locked()
 
 
 async def release_model_lease(
@@ -1420,6 +1447,7 @@ async def release_model_lease(
     quota_retry_after_seconds: float | None = None,
     duration_seconds: float | None = None,
     record_completion: bool = True,
+    context_updates: dict[str, Any] | None = None,
 ) -> None:
     if lease is None:
         return
@@ -1429,6 +1457,8 @@ async def release_model_lease(
         active_task = _active_tasks.get(lease.task_id)
         if active_task is None or active_task.get("lease_started_at") != lease.started_at:
             return
+        if context_updates:
+            _merge_lease_context_locked(active_task, context_updates)
         _global_running = max(0, _global_running - 1)
         current = _running_by_model.get(lease.option.id, 0)
         if current <= 1:
@@ -1505,7 +1535,11 @@ async def release_model_lease(
             _scope_updated_at[lease.stats_scope_id] = item.last_finished_at
         global _global_updated_at
         _global_updated_at = finished_at
-        _condition.notify_all()
+        _notify_pool_changed_locked()
+    logger.info(
+        "OpenCode model lease released task=%s model=%s outcome=%s terminal=%s",
+        lease.task_id, lease.option.id, normalized_outcome or "unknown", record_completion,
+    )
 
 
 async def clear_completed_tasks(scope_id: str) -> None:
@@ -1529,6 +1563,9 @@ async def record_model_token_usage(
         return
     global _global_token_usage, _global_updated_at
     async with _condition:
+        active = _active_tasks.get(lease.task_id)
+        if active is None or active.get("lease_started_at") != lease.started_at:
+            return
         _global_token_usage = merge_token_usages((_global_token_usage, usage))
         if lease.stats_scope_id:
             scoped_usage = merge_token_usages(
@@ -1540,7 +1577,7 @@ async def record_model_token_usage(
         _global_updated_at = updated_at
         if lease.stats_scope_id:
             _scope_updated_at[lease.stats_scope_id] = updated_at
-        _condition.notify_all()
+        _notify_pool_changed_locked()
 
 
 async def update_model_lease_context(lease: ModelLease | None, updates: dict[str, Any]) -> None:
@@ -1551,25 +1588,27 @@ async def update_model_lease_context(lease: ModelLease | None, updates: dict[str
         task = _active_tasks.get(lease.task_id)
         if task is None or task.get("lease_started_at") != lease.started_at:
             return
-        context = task.setdefault("context", {})
-        if not isinstance(context, dict):
-            context = {}
-            task["context"] = context
-        changed = False
-        for key, value in updates.items():
-            if value in (None, ""):
-                continue
-            if context.get(key) != value:
-                context[key] = value
-                changed = True
-        if not changed:
+        if not _merge_lease_context_locked(task, updates):
             return
         updated_at = _now_iso()
         if lease.stats_scope_id:
             _scope_updated_at[lease.stats_scope_id] = updated_at
         global _global_updated_at
         _global_updated_at = updated_at
-        _condition.notify_all()
+        _notify_pool_changed_locked()
+
+
+def _merge_lease_context_locked(task: dict[str, Any], updates: dict[str, Any]) -> bool:
+    context = task.setdefault("context", {})
+    if not isinstance(context, dict):
+        context = {}
+        task["context"] = context
+    changed = False
+    for key, value in updates.items():
+        if value not in (None, "") and context.get(key) != value:
+            context[key] = value
+            changed = True
+    return changed
 
 
 def _completed_count(item: ModelRuntimeStats) -> int:
@@ -1821,7 +1860,7 @@ async def refresh_configured_model_pool(cli_config: Any) -> None:
                 if model_id not in configured_ids and stats[model_id].running <= 0:
                     stats[model_id].last_status = "disabled"
             _scope_updated_at[scope_id] = now
-        _condition.notify_all()
+        _notify_pool_changed_locked()
 
 
 async def notify_model_pool_config_changed() -> None:
@@ -1832,4 +1871,4 @@ async def notify_model_pool_config_changed() -> None:
         _global_updated_at = now
         for scope_id in list(_stats_by_scope):
             _scope_updated_at[scope_id] = now
-        _condition.notify_all()
+        _notify_pool_changed_locked()

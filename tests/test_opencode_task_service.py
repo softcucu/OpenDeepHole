@@ -410,14 +410,21 @@ def _service_patches(
     async def acquire(*_args, **kwargs):
         return _lease(kwargs["task_id"], scope_id=kwargs["stats_scope_id"])
 
+    update_context = AsyncMock()
+
+    async def release(lease, *, context_updates=None, **_kwargs):
+        # The real pool merges final metadata in the same operation as release.
+        if context_updates:
+            await update_context(lease, context_updates)
+
     return (
         patch(
             "task_agent.task_service.get_config",
             return_value=runtime_config or _config(max_retries=max_retries),
         ),
         patch("task_agent.task_service.acquire_model_lease", side_effect=acquire),
-        patch("task_agent.task_service.release_model_lease", new=AsyncMock()),
-        patch("task_agent.task_service.update_model_lease_context", new=AsyncMock()),
+        patch("task_agent.task_service.release_model_lease", new=AsyncMock(side_effect=release)),
+        patch("task_agent.task_service.update_model_lease_context", new=update_context),
         patch("task_agent.task_service.get_serve_manager", return_value=manager),
         patch(
             "task_agent.task_service.get_host_bindings",

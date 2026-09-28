@@ -2224,6 +2224,58 @@ def test_token_tree_timeout_preserves_partial_counts_and_success(monkeypatch, tm
     asyncio.run(run())
 
 
+@pytest.mark.parametrize("callback_mode", ["blocked", "ignores_cancel", "raises"])
+def test_token_callback_failure_preserves_success_and_has_own_budget(monkeypatch, tmp_path, callback_mode):
+    async def run():
+        release = asyncio.Event()
+        entered = asyncio.Event()
+        calls = []
+
+        async def callback(usage):
+            calls.append(usage)
+            entered.set()
+            if callback_mode == "raises":
+                raise OSError("statistics unavailable")
+            while not release.is_set():
+                try:
+                    await release.wait()
+                except asyncio.CancelledError:
+                    if callback_mode != "ignores_cancel":
+                        raise
+
+        class Client(_FakeAsyncClient):
+            message_info = {"id": "current", "role": "assistant", "tokens": {"input": 7, "output": 3}}
+
+        monkeypatch.setattr("task_agent.serve_client.httpx.AsyncClient", Client)
+        monkeypatch.setattr("task_agent.serve_client._SERVE_TOKEN_COLLECTION_TIMEOUT_SECONDS", 0.03)
+        monkeypatch.setattr("task_agent.serve_client._SERVE_EVENT_DRAIN_TIMEOUT_SECONDS", 0.001)
+        manager = OpenCodeServeManager()
+        manager._port = 4096
+        manager._acquire_session = AsyncMock(return_value="reused")
+        manager.ensure_managed_mcp = AsyncMock()
+        failures, output = [], []
+        try:
+            result = await asyncio.wait_for(manager.run_prompt(
+                tool="opencode", executable="opencode", directory=tmp_path,
+                prompt="success", model="provider/model", timeout=1,
+                return_details=True, on_token_usage=callback,
+                on_model_request_failure=failures.append, on_line=output.append,
+            ), 0.6)
+            assert entered.is_set()
+            assert result.text == "done"
+            assert result.token_usage.counters.total_tokens == 10
+            assert result.token_usage.complete is False
+            assert failures == []
+            assert len(calls) == 1  # finally must not redeliver a partial callback
+            assert any("STOP status=success" in line for line in output)
+            assert not any("TIMEOUT" in line for line in output)
+        finally:
+            release.set()
+            await asyncio.sleep(0.01)
+
+    asyncio.run(run())
+
+
 def test_incomplete_continuation_baseline_does_not_recount_old_tokens(monkeypatch, tmp_path):
     async def run():
         old = {"info": {"id": "old", "role": "assistant", "tokens": {"input": 100, "output": 100}}}

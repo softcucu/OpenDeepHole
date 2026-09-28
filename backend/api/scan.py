@@ -94,7 +94,7 @@ from backend.scan_metrics import (
     is_llm_issue,
     latest_fp_review_result_map,
 )
-from backend.scan_runtime import terminal_opencode_pool_status
+from backend.scan_runtime import AGENT_RECOVERY_IN_PROGRESS, terminal_opencode_pool_status
 from backend.store import get_scan_store
 from backend.store.async_ops import run_store_call
 from backend.store.base import DuplicateScanNameError
@@ -2700,6 +2700,12 @@ async def _continue_scan(
         raise HTTPException(status_code=404, detail="Scan not found")
 
     scan, meta = result
+    if claimed_execution_revision is not None and (
+        meta.execution_revision != claimed_execution_revision
+        or scan.status != ScanItemStatus.CANCELLED
+        or scan.error_message != AGENT_RECOVERY_IN_PROGRESS
+    ):
+        raise HTTPException(status_code=409, detail="自动恢复已被停止或轮次已过期")
     if scan.status in {ScanItemStatus.PENDING, ScanItemStatus.ANALYZING, ScanItemStatus.AUDITING}:
         raise HTTPException(status_code=400, detail="Scan is already running")
     # PostgreSQL workers keep process-local scan caches only as an optimization.
@@ -2718,7 +2724,9 @@ async def _continue_scan(
         latest_fp_review_result_map(fp_verdicts.get(scan_id, [])),
         fp_states.get(scan_id, []),
     )
-    if fp_review_running:
+    # Restart recovery owns a fenced scan revision. Independent reviews are
+    # adopted/recovered separately and must not veto restoration of that scan.
+    if fp_review_running and claimed_execution_revision is None:
         raise HTTPException(status_code=400, detail="去误报任务正在运行")
     continue_candidates = _continuable_candidates(scan, processed_keys)
     incomplete_threat_tasks = _incomplete_threat_audit_tasks(scan)
@@ -2861,6 +2869,11 @@ async def _continue_scan(
             detail=f"扫描关联的 Agent「{meta.agent_name or '未知'}」不在线，请先启动该 Agent",
         )
 
+    if (
+        claimed_execution_revision is not None
+        and meta.execution_agent_session_id != agent.agent_session_id
+    ):
+        raise HTTPException(status_code=409, detail="自动恢复 Agent 会话已过期")
     await ensure_agent_accepting_tasks_async(meta.agent_key or agent.agent_key)
     managed_config = await get_scan_agent_config_async(agent, meta.agent_key)
     if not agent_config_has_explicit_model(managed_config):
@@ -3238,7 +3251,7 @@ async def _continue_scan(
             server_url,
             raise_on_error=False,
             require_unresolved=True,
-            allow_cancelled=True,
+            allow_cancelled=claimed_execution_revision is None,
         )
         if fp_resume is None:
             logger.warning(
@@ -4459,6 +4472,8 @@ async def _start_fp_review(
     )
     if fp_job_info is None:
         return _fail(400, "No confirmed vulnerabilities to review")
+    if fp_job_info.get("cancelled"):
+        return _fail(409, "去误报任务已被用户停止")
     confirmed = fp_job_info["confirmed"]
     review_id = str(fp_job_info["review_id"])
     method = str(fp_job_info["method"])

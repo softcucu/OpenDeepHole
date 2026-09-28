@@ -1693,21 +1693,17 @@ class OpenCodeTaskService:
                     ),
                 ))
                 try:
-                    await update_model_lease_context(lease, context_updates)
+                    await release_model_lease(
+                        lease,
+                        outcome=attempt_outcome,
+                        health_outcome=health_outcome,
+                        quota_retry_after_seconds=quota_retry_after_seconds,
+                        duration_seconds=attempt_duration if lease is not None else None,
+                        record_completion=terminal_release,
+                        context_updates=context_updates,
+                    )
                 except Exception:
-                    logger.exception("OpenCode lease metadata update failed task=%s", record.task_id)
-                finally:
-                    try:
-                        await release_model_lease(
-                            lease,
-                            outcome=attempt_outcome,
-                            health_outcome=health_outcome,
-                            quota_retry_after_seconds=quota_retry_after_seconds,
-                            duration_seconds=attempt_duration if lease is not None else None,
-                            record_completion=terminal_release,
-                        )
-                    except Exception:
-                        logger.exception("OpenCode lease finalization failed task=%s outcome=%s", record.task_id, attempt_outcome)
+                    logger.exception("OpenCode lease finalization failed task=%s outcome=%s", record.task_id, attempt_outcome)
 
             if recovery_required:
                 recovery_started_at = time.monotonic()
@@ -2072,22 +2068,22 @@ class OpenCodeTaskService:
                 formatter_failure_reason = formatter_parse.failure_reason
             if formatted is not None:
                 record_formatter_event("success")
-                await update_model_lease_context(formatter_lease, {
-                    "serve_session_id": session_id,
-                    "json_format_session_id": formatter_session_id,
-                    "session_events": copy.deepcopy(session_events),
-                    "token_usage": (
-                        accumulated_usage.as_dict()
-                        if accumulated_usage is not None
-                        else None
-                    ),
-                })
                 await release_model_lease(
                     formatter_lease,
                     outcome="success",
                     health_outcome="success",
                     duration_seconds=max(0.0, time.monotonic() - formatter_started_at),
                     record_completion=True,
+                    context_updates={
+                        "serve_session_id": session_id,
+                        "json_format_session_id": formatter_session_id,
+                        "session_events": copy.deepcopy(session_events),
+                        "token_usage": (
+                            accumulated_usage.as_dict()
+                            if accumulated_usage is not None
+                            else None
+                        ),
+                    },
                 )
                 formatter_lease = None
                 self._emit_task_progress(
@@ -2126,16 +2122,13 @@ class OpenCodeTaskService:
                 session_id=session_id,
                 category="session",
             )
-            await update_model_lease_context(
-                formatter_lease,
-                {"session_events": copy.deepcopy(session_events)},
-            )
             await release_model_lease(
                 formatter_lease,
                 outcome="failure",
                 health_outcome=None,
                 duration_seconds=max(0.0, time.monotonic() - formatter_started_at),
                 record_completion=False,
+                context_updates={"session_events": copy.deepcopy(session_events)},
             )
             formatter_lease = None
         except asyncio.CancelledError:
@@ -2145,9 +2138,13 @@ class OpenCodeTaskService:
                     failure_kind="cancelled",
                     failure_reason="OpenCode task cancelled",
                 )
-                await update_model_lease_context(
+                await release_model_lease(
                     formatter_lease,
-                    {
+                    outcome="cancelled",
+                    health_outcome=None,
+                    duration_seconds=max(0.0, time.monotonic() - formatter_started_at),
+                    record_completion=True,
+                    context_updates={
                         **_session_trace_updates(
                             session_events,
                             failure_kind="cancelled",
@@ -2155,13 +2152,6 @@ class OpenCodeTaskService:
                         ),
                         "serve_session_id": session_id,
                     },
-                )
-                await release_model_lease(
-                    formatter_lease,
-                    outcome="cancelled",
-                    health_outcome=None,
-                    duration_seconds=max(0.0, time.monotonic() - formatter_started_at),
-                    record_completion=True,
                 )
             raise
         except Exception as exc:
@@ -2184,10 +2174,6 @@ class OpenCodeTaskService:
                     failure_kind=formatter_failure_kind,
                     failure_reason=formatter_failure_reason,
                 )
-                await update_model_lease_context(
-                    formatter_lease,
-                    {"session_events": copy.deepcopy(session_events)},
-                )
                 await release_model_lease(
                     formatter_lease,
                     outcome=("timeout" if isinstance(exc, asyncio.TimeoutError) else "failure"),
@@ -2195,6 +2181,7 @@ class OpenCodeTaskService:
                     quota_retry_after_seconds=formatter_quota_retry_after_seconds,
                     duration_seconds=max(0.0, time.monotonic() - formatter_started_at),
                     record_completion=False,
+                    context_updates={"session_events": copy.deepcopy(session_events)},
                 )
             self._emit_task_progress(
                 record,
@@ -2421,16 +2408,6 @@ class OpenCodeTaskService:
                         correction_failure_kind = ""
                         correction_failure_reason = ""
                         record_correction_event("success")
-                        await update_model_lease_context(correction_lease, {
-                            "serve_session_id": session_id,
-                            "session_attempt": session_attempt,
-                            "session_events": copy.deepcopy(session_events),
-                            "token_usage": (
-                                accumulated_usage.as_dict()
-                                if accumulated_usage is not None
-                                else None
-                            ),
-                        })
                         await release_model_lease(
                             correction_lease,
                             outcome="success",
@@ -2440,6 +2417,16 @@ class OpenCodeTaskService:
                                 time.monotonic() - correction_started_at,
                             ),
                             record_completion=True,
+                            context_updates={
+                                "serve_session_id": session_id,
+                                "session_attempt": session_attempt,
+                                "session_events": copy.deepcopy(session_events),
+                                "token_usage": (
+                                    accumulated_usage.as_dict()
+                                    if accumulated_usage is not None
+                                    else None
+                                ),
+                            },
                         )
                         correction_lease = None
                         return _StructuredRecoveryOutcome(
@@ -2500,9 +2487,13 @@ class OpenCodeTaskService:
                     failure_kind="cancelled",
                     failure_reason="OpenCode task cancelled",
                 )
-                await update_model_lease_context(
+                await release_model_lease(
                     correction_lease,
-                    {
+                    outcome="cancelled",
+                    health_outcome=None,
+                    duration_seconds=max(0.0, time.monotonic() - correction_started_at),
+                    record_completion=True,
+                    context_updates={
                         **_session_trace_updates(
                             session_events,
                             failure_kind="cancelled",
@@ -2510,13 +2501,6 @@ class OpenCodeTaskService:
                         ),
                         "serve_session_id": session_id,
                     },
-                )
-                await release_model_lease(
-                    correction_lease,
-                    outcome="cancelled",
-                    health_outcome=None,
-                    duration_seconds=max(0.0, time.monotonic() - correction_started_at),
-                    record_completion=True,
                 )
                 correction_lease = None
             raise
@@ -2562,9 +2546,14 @@ class OpenCodeTaskService:
                     if terminal_failure_kind
                     else ""
                 )
-                await update_model_lease_context(
+                await release_model_lease(
                     correction_lease,
-                    {
+                    outcome=correction_outcome,
+                    health_outcome=correction_model_failure or None,
+                    quota_retry_after_seconds=correction_quota_retry_after_seconds,
+                    duration_seconds=max(0.0, time.monotonic() - correction_started_at),
+                    record_completion=not has_fresh_retry,
+                    context_updates={
                         **_session_trace_updates(
                             session_events,
                             failure_kind=terminal_failure_kind,
@@ -2578,14 +2567,6 @@ class OpenCodeTaskService:
                             else None
                         ),
                     },
-                )
-                await release_model_lease(
-                    correction_lease,
-                    outcome=correction_outcome,
-                    health_outcome=correction_model_failure or None,
-                    quota_retry_after_seconds=correction_quota_retry_after_seconds,
-                    duration_seconds=max(0.0, time.monotonic() - correction_started_at),
-                    record_completion=not has_fresh_retry,
                 )
 
         avoid_identities = (

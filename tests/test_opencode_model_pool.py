@@ -1,4 +1,5 @@
 import asyncio
+import random
 import threading
 from datetime import datetime
 from types import SimpleNamespace
@@ -32,6 +33,7 @@ def _reset_model_pool():
     """Each test runs in its own event loop via asyncio.run(), but the pool's
     Condition binds to the first loop that waits on it — recreate it per test."""
     model_pool_module._condition = asyncio.Condition()
+    model_pool_module._change_waiters.clear()
     model_pool_module._running_by_model.clear()
     model_pool_module._global_running = 0
     model_pool_module._last_used.clear()
@@ -302,6 +304,161 @@ def test_wait_for_model_pool_update_follows_scope_marker() -> None:
 
         assert updated_at
         assert updated_at == model_pool_snapshot("scan-1")["updated_at"]
+
+    asyncio.run(run())
+
+
+def test_repeated_cancellation_of_pool_watchers_keeps_capacity_usable() -> None:
+    """Exercise native Python 3.10 wait_for cancellation, not mocked leases."""
+    async def run():
+        rng = random.Random(7)
+
+        async def watcher(index):
+            for _ in range(300):
+                timeout = 0.001 + rng.random() * 0.001
+                task = asyncio.create_task(wait_for_model_pool_update(str(index), timeout=timeout))
+                loop = asyncio.get_running_loop()
+                cancellations = [loop.call_later(timeout + rng.random() * 0.0005, task.cancel) for _ in range(2)]
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+                finally:
+                    for callback in cancellations:
+                        callback.cancel()
+
+        workers = [asyncio.create_task(watcher(index)) for index in range(16)]
+        try:
+            done, pending = await asyncio.wait(workers, timeout=5)
+            assert not pending, "pool watchers were stranded by cancellation"
+            for task in done:
+                task.result()
+            cfg = SimpleNamespace(models=[{"id": "model", "model": "p/m", "max_concurrency": 1}])
+            lease = await asyncio.wait_for(acquire_model_lease(cfg), 0.5)
+            await asyncio.wait_for(release_model_lease(lease, outcome="success"), 0.5)
+            assert model_pool_snapshot()["global_running"] == 0
+            assert not model_pool_module._change_waiters
+        finally:
+            for task in workers:
+                task.cancel()
+            # Also keep this regression bounded against the old orphan-lock bug.
+            for _ in range(100):
+                if model_pool_module._condition.locked():
+                    model_pool_module._condition.release()
+                await asyncio.sleep(0)
+            await asyncio.gather(*workers, return_exceptions=True)
+
+    asyncio.run(run())
+
+
+def test_cancelled_lease_waiter_is_removed_and_next_task_can_run() -> None:
+    async def run():
+        cfg = SimpleNamespace(models=[{"id": "one", "model": "p/m", "max_concurrency": 1}])
+        first = await acquire_model_lease(cfg)
+        queued = asyncio.Event()
+        waiting = asyncio.create_task(acquire_model_lease(cfg, on_queued=queued.set))
+        await queued.wait()
+        waiting.cancel()
+        await asyncio.gather(waiting, return_exceptions=True)
+        assert model_pool_snapshot()["global_queued"] == 0
+        await release_model_lease(first, outcome="timeout")
+        next_lease = await asyncio.wait_for(acquire_model_lease(cfg), 0.5)
+        await release_model_lease(next_lease, outcome="success")
+        assert model_pool_snapshot()["global_running"] == 0
+        assert not model_pool_module._change_waiters
+    asyncio.run(run())
+
+
+def test_release_commits_final_metadata_and_fences_late_token_usage() -> None:
+    async def run():
+        cfg = SimpleNamespace(models=[{"id": "one", "model": "p/m", "max_concurrency": 1}])
+        first = await acquire_model_lease(cfg, task_id="logical", stats_scope_id="scan")
+        usage = token_usage_from_models({"p/m": TokenCounters(input_tokens=7)})
+        await record_model_token_usage(first, usage)
+        await release_model_lease(first, outcome="timeout", context_updates={"failure_reason": "message timeout", "serve_session_id": "ses-old"})
+        second = await acquire_model_lease(cfg, task_id="logical", stats_scope_id="scan")
+        await record_model_token_usage(first, usage)
+        await release_model_lease(first, outcome="failure", context_updates={"serve_session_id": "late"})
+        snapshot = model_pool_snapshot("scan")
+        assert snapshot["global_running"] == 1
+        assert snapshot["token_usage"]["total_tokens"] == 7
+        assert snapshot["completed_tasks"][0]["serve_session_id"] == "ses-old"
+        assert snapshot["completed_tasks"][0]["failure_reason"] == "message timeout"
+        await release_model_lease(second, outcome="success")
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("first_message_timeout", [False, True])
+def test_real_service_partial_tokens_release_capacity_for_following_tasks(tmp_path, monkeypatch, first_message_timeout):
+    import httpx
+    from unittest.mock import AsyncMock
+    import task_agent.serve_client as serve
+    import task_agent.task_service as service_module
+    from task_agent.task_service import OpenCodeTaskService, OpenCodeTaskSpec, _SessionRuntime, bind_opencode_execution_context
+    from backend.models import OutputSource
+
+    async def run():
+        sessions, output = [], []
+        manager = serve.OpenCodeServeManager()
+        manager._port = 4096
+        manager.ensure_managed_mcp = AsyncMock()
+        manager._register_event_state = AsyncMock()
+
+        async def acquire(*args, **kwargs):
+            manager._active_sessions += 1
+            return "reused"
+
+        async def respond(request):
+            path = request.url.path
+            if request.method == "POST" and path == "/session":
+                session = f"ses-{len(sessions)}"
+                sessions.append(session)
+                return httpx.Response(200, json={"id": session})
+            if request.method == "POST" and path.endswith("/message"):
+                if first_message_timeout and "/ses-0/" in path:
+                    await asyncio.Future()
+                return httpx.Response(200, json={
+                    "info": {"id": "message", "role": "assistant", "tokens": {"input": 7, "output": 3}},
+                    "parts": [{"type": "text", "text": "done"}],
+                })
+            if path.endswith("/children"):
+                await asyncio.Future()
+            return httpx.Response(200, json=[] if path.endswith("/message") else {})
+
+        client = httpx.AsyncClient
+        monkeypatch.setattr(serve.httpx, "AsyncClient", lambda **kwargs: client(transport=httpx.MockTransport(respond), **kwargs))
+        monkeypatch.setattr(serve, "_SERVE_TOKEN_COLLECTION_TIMEOUT_SECONDS", 0.03)
+        monkeypatch.setattr(serve, "_SERVE_EVENT_DRAIN_TIMEOUT_SECONDS", 0.001)
+        manager._acquire_session = acquire
+        cfg = SimpleNamespace(opencode=SimpleNamespace(timeout=1, max_retries=0, models=[{
+            "id": "one", "model": "p/m", "capability": "high", "max_concurrency": 1,
+        }]))
+        monkeypatch.setattr(service_module, "get_config", lambda: cfg)
+        monkeypatch.setattr(service_module, "get_serve_manager", lambda: manager)
+        monkeypatch.setattr(service_module, "get_host_bindings", lambda: SimpleNamespace(writable_roots=lambda: ()))
+        service = OpenCodeTaskService()
+        service._runtime_for_task = AsyncMock(return_value=(
+            _SessionRuntime(directory=tmp_path, tool="opencode", executable="opencode", config_workspace=tmp_path, config_content="{}", env_overrides={}),
+            "p/m", OutputSource(backend="opencode", model="p/m"),
+        ))
+        with bind_opencode_execution_context(
+            project_dir=tmp_path, work_dir=tmp_path / "work", scan_id="scan",
+            task_metadata={"task_type": "vulnerability_mining"}, on_output=output.append,
+        ):
+            handles = [service.submit_task(OpenCodeTaskSpec(task_name=f"task-{i}", prompt="test", directory=tmp_path, attempt=1)) for i in range(3)]
+            results = await asyncio.wait_for(asyncio.gather(*(handle.result() for handle in handles)), 3)
+            await asyncio.gather(*(handle._record.worker for handle in handles))
+        assert [result.status for result in results] == ["success"] * 3
+        assert all(result.token_usage["complete"] is False for result in results)
+        snapshot = model_pool_snapshot("scan")
+        assert snapshot["global_running"] == snapshot["global_queued"] == 0
+        assert snapshot["completed_task_count"] == 3
+        assert snapshot["token_usage"]["total_tokens"] == 30
+        assert manager._active_sessions == 0
+        assert len(sessions) == (4 if first_message_timeout else 3)
+        if first_message_timeout:
+            assert any("TIMEOUT phase=message" in line for line in output)
+        assert all("TIMEOUT phase=token_collection" not in line for line in output)
 
     asyncio.run(run())
 

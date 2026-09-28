@@ -19,7 +19,7 @@ import sys
 import tempfile
 import threading
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
@@ -3447,12 +3447,14 @@ async def _session_tree_token_entries(
     params: dict[str, str],
     headers: dict[str, str],
     fallback_model: str,
+    *,
+    deadline: OperationDeadline | None = None,
 ) -> tuple[dict[tuple[str, str, str], tuple[str, TokenCounters]], bool]:
     entries: dict[tuple[str, str, str], tuple[str, TokenCounters]] = {}
     complete = True
     pending = [root_session_id]
     visited: set[str] = set()
-    deadline = OperationDeadline(_SERVE_TOKEN_COLLECTION_TIMEOUT_SECONDS)
+    deadline = deadline or OperationDeadline(_SERVE_TOKEN_COLLECTION_TIMEOUT_SECONDS)
     while pending:
         current = pending.pop()
         if not current or current in visited:
@@ -6542,16 +6544,22 @@ class OpenCodeServeManager:
 
             async def capture_token_usage(
                 response_message: object = None,
+                *,
+                timeout_seconds: float = _SERVE_TOKEN_COLLECTION_TIMEOUT_SECONDS,
             ) -> OpenCodeTokenUsage:
                 nonlocal captured_token_usage, token_usage_captured
                 if token_usage_captured and captured_token_usage is not None:
                     return captured_token_usage
+                usage_deadline = OperationDeadline(min(
+                    _SERVE_TOKEN_COLLECTION_TIMEOUT_SECONDS, timeout_seconds,
+                ))
                 after, after_complete = await _session_tree_token_entries(
                     client,
                     active_session_id,
                     params,
                     headers,
                     model,
+                    deadline=usage_deadline,
                 )
                 if not token_baseline_complete:
                     # An incomplete continuation baseline cannot distinguish
@@ -6573,16 +6581,33 @@ class OpenCodeServeManager:
                 )
                 token_usage_captured = True
                 if usage_open and on_token_usage is not None:
+                    callback_task = None
                     try:
                         result = on_token_usage(captured_token_usage)
                         if hasattr(result, "__await__"):
-                            await result
+                            callback_task = asyncio.ensure_future(result)
+                            # Allow in-memory accounting even if HTTP collection
+                            # used the budget. Never wait unboundedly for a sink.
+                            await asyncio.sleep(0)
+                            if callback_task.done():
+                                callback_task.result()
+                            else:
+                                await usage_deadline.wait(callback_task, phase="token_callback")
                     except Exception as exc:
+                        captured_token_usage = replace(captured_token_usage, complete=False)
                         logger.warning(
-                            "Failed to publish OpenCode token usage for session %s: %s",
-                            active_session_id,
-                            exc,
+                            "OpenCode token accounting incomplete task=%s session=%s phase=%s error=%s",
+                            task_id, active_session_id, usage_deadline.phase, type(exc).__name__,
                         )
+                    finally:
+                        if callback_task is not None and not callback_task.done():
+                            callback_task.cancel()
+                            retire_task(callback_task)
+                if not after_complete and usage_deadline.remaining() <= 0:
+                    logger.warning(
+                        "OpenCode token collection incomplete task=%s session=%s phase=%s",
+                        task_id, active_session_id, usage_deadline.phase,
+                    )
                 return captured_token_usage
 
             if str(scan_id or "").strip():
@@ -7069,7 +7094,9 @@ class OpenCodeServeManager:
                     _error_summary(assistant_error)
                     or "OpenCode model request failed"
                 )
-            await deadline.wait(capture_token_usage(response_data), phase="token_collection")
+            # Token telemetry cannot turn a completed response into a business
+            # timeout. Use only the remaining call budget and keep partial usage.
+            await capture_token_usage(response_data, timeout_seconds=deadline.remaining())
             lines = _extract_text(response_data)
             response_text = _extract_response_text(response_data)
             if event_state:

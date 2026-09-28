@@ -67,6 +67,78 @@ def assert_review_visible(status):
     assert status.completed_task_count == 1
 
 
+def test_recovery_claims_and_failures_preserve_review_and_reject_old_owner(store):
+    from backend.scan_runtime import AGENT_RECOVERY_IN_PROGRESS, AGENT_RECOVERY_FAILED_PREFIX
+    store.update_scan_agent("scan", "agent", "agent", "stable")
+    store.persist_opencode_pool("scan", pool())
+    revision = store.claim_scan_for_agent_recovery(
+        "scan", previous_session_id="old-agent", agent_id="agent", agent_session_id="new-agent",
+        expected_revision=7, error_message=AGENT_RECOVERY_IN_PROGRESS,
+    )
+    assert revision == 8
+    assert_review_visible(store.get_opencode_pool_status("scan"))
+    assert store.fail_scan_recovery("scan", agent_session_id="new-agent", execution_revision=8,
+                                    error_message=AGENT_RECOVERY_FAILED_PREFIX + "temporary failure")
+    assert_review_visible(store.get_opencode_pool_status("scan"))
+    assert [row["scan_id"] for row in store.list_agent_inflight_executions("stable", "agent")["scans"]] == ["scan"]
+    assert store.claim_scan_for_agent_recovery(
+        "scan", previous_session_id="new-agent", agent_id="agent", agent_session_id="next-agent",
+        expected_revision=8, error_message=AGENT_RECOVERY_IN_PROGRESS,
+    ) == 9
+    assert not store.fail_scan_recovery("scan", agent_session_id="new-agent", execution_revision=8,
+                                       error_message="late failure")
+    store.update_scan_progress("scan", status=ScanItemStatus.CANCELLED, error_message="用户手动停止")
+    assert not store.fail_scan_recovery("scan", agent_session_id="next-agent", execution_revision=9,
+                                       error_message=AGENT_RECOVERY_FAILED_PREFIX + "late failure")
+    assert not store.list_agent_inflight_executions("stable", "agent")["scans"]
+
+
+def test_legacy_interrupted_recovery_is_selected_again(store):
+    from backend.scan_runtime import AGENT_RECOVERY_IN_PROGRESS
+    store.update_scan_agent("scan", "agent", "agent", "stable")
+    store.update_scan_progress("scan", status=ScanItemStatus.CANCELLED, error_message=AGENT_RECOVERY_IN_PROGRESS)
+    rows = store.list_agent_inflight_executions("stable", "agent")["scans"]
+    assert [row["scan_id"] for row in rows] == ["scan"]
+    assert store.claim_scan_for_agent_recovery(
+        "scan", previous_session_id="old-agent", agent_id="agent", agent_session_id="new-agent",
+        expected_revision=6, error_message=AGENT_RECOVERY_IN_PROGRESS,
+    ) is None
+    assert store.claim_scan_for_agent_recovery(
+        "scan", previous_session_id="old-agent", agent_id="agent", agent_session_id="new-agent",
+        expected_revision=7, error_message=AGENT_RECOVERY_IN_PROGRESS,
+    ) == 8
+
+
+def test_reserved_recovery_cannot_resume_wrong_session_or_user_stopped_scan(store):
+    from backend.scan_runtime import AGENT_RECOVERY_IN_PROGRESS
+    revision = store.claim_scan_for_agent_recovery(
+        "scan", previous_session_id="old-agent", agent_id="agent", agent_session_id="new-agent",
+        expected_revision=7, error_message=AGENT_RECOVERY_IN_PROGRESS,
+    )
+    for session in ("stale-agent", "new-agent"):
+        if session == "new-agent":
+            store.update_scan_progress("scan", status=ScanItemStatus.CANCELLED, error_message="用户手动停止")
+        assert store.claim_scan_for_resume(
+            "scan", expected_revision=revision, claimed_revision=revision,
+            agent_id="agent", agent_session_id=session, processed_candidates=0, progress=0,
+        ) is None
+    scan, meta = store.load_scan("scan")
+    assert scan.status == "cancelled" and scan.error_message == "用户手动停止"
+    assert meta.execution_revision == revision
+
+
+def test_failed_review_recovery_stays_retryable_and_does_not_override_user_stop(store):
+    from backend.scan_runtime import AGENT_RECOVERY_FAILED_PREFIX
+    store.update_scan_agent("scan", "agent", "agent", "stable")
+    assert store.fail_fp_review_recovery("review", agent_session_id="review-agent", execution_revision=1,
+                                         error_message=AGENT_RECOVERY_FAILED_PREFIX + "offline")
+    assert [row["review_id"] for row in store.list_agent_inflight_executions("stable", "agent")["fp_reviews"]] == ["review"]
+    assert store.claim_fp_review_for_agent_recovery("review", previous_session_id="review-agent", agent_session_id="new-agent") == 2
+    assert not store.fail_fp_review_recovery("review", agent_session_id="review-agent", execution_revision=1, error_message="late")
+    store.update_fp_review_job("review", status="cancelled", error_message="用户手动停止")
+    assert not store.fail_fp_review_recovery("review", agent_session_id="new-agent", execution_revision=2, error_message="late")
+
+
 @pytest.mark.parametrize("terminal", [ScanItemStatus.COMPLETE, ScanItemStatus.ERROR, ScanItemStatus.CANCELLED])
 def test_terminal_scan_preserves_only_current_review_on_write_and_read(store, terminal):
     store.persist_opencode_pool("scan", pool())

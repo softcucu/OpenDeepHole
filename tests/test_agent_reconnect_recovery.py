@@ -314,7 +314,7 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
             start_review.assert_awaited_once_with(
                 "scan-1",
                 "http://server",
-                raise_on_error=False,
+                raise_on_error=True,
                 require_unresolved=True,
                 claimed_execution_revision=2,
             )

@@ -604,7 +604,20 @@ class ScanStoreBase(ABC):
         agent_id: str,
         agent_session_id: str,
         error_message: str,
+        expected_revision: int | None = None,
     ) -> int | None:
+        raise NotImplementedError
+
+    def fail_scan_recovery(
+        self, scan_id: str, *, agent_session_id: str,
+        execution_revision: int, error_message: str,
+    ) -> bool:
+        raise NotImplementedError
+
+    def fail_fp_review_recovery(
+        self, review_id: str, *, agent_session_id: str,
+        execution_revision: int, error_message: str,
+    ) -> bool:
         raise NotImplementedError
 
     def claim_fp_review_for_agent_recovery(
